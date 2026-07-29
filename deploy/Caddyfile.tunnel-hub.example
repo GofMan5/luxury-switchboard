@@ -1,0 +1,8 @@
+# Place this exact route inside the luxuryprivate.duckdns.org site, before
+# its existing application fallback. Keep that fallback otherwise unchanged.
+handle_path /model-tunnel/<48-hex-slug>/* {
+    forward_auth http://172.20.0.1:18080 {
+        uri /authorize/tunnel_a1b2c3d4
+    }
+    reverse_proxy 172.20.0.1:20000
+}

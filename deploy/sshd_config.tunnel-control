@@ -1,0 +1,12 @@
+# Append to sshd_config. Validate with `sshd -t` before reload.
+Match User tunnel-control
+    AuthorizedKeysFile /etc/tunnel-hub/authorized_keys
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PermitTTY no
+    DisableForwarding yes
+    X11Forwarding no
+    PermitTunnel no
+    PermitUserRC no
+    MaxSessions 1

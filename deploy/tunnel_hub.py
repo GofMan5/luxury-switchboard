@@ -257,8 +257,9 @@ class GateHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        path = self.path.partition("?")[0]
         match = re.fullmatch(
-            r"/authorize/([a-z0-9][a-z0-9_-]{0,47})", self.path, re.ASCII
+            r"/authorize/([a-z0-9][a-z0-9_-]{0,47})", path, re.ASCII
         )
         allowed = bool(match) and _is_running(self.server.state_path, match.group(1))
         body = b"" if allowed else UNAVAILABLE

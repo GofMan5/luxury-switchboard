@@ -68,6 +68,7 @@ class TunnelHubTests(unittest.TestCase):
         serialized = json.dumps(listed).lower()
         for private in (
             "owner",
+            "owned_by",
             "id",
             "slug",
             "url",
@@ -147,15 +148,16 @@ class TunnelHubTests(unittest.TestCase):
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            def status():
+            def status(query=""):
                 connection = http.client.HTTPConnection(*server.server_address, timeout=2)
-                connection.request("GET", f"/authorize/{self.SELF_ID}")
+                connection.request("GET", f"/authorize/{self.SELF_ID}{query}")
                 response = connection.getresponse()
                 result = (response.status, response.read())
                 connection.close()
                 return result
 
             self.assertEqual(status(), (204, b""))
+            self.assertEqual(status("?cachebust=1"), (204, b""))
             self.response("v1 pause 7 0")
             self.assertEqual(status(), (503, hub.UNAVAILABLE))
             self.response("v1 resume 8 0")

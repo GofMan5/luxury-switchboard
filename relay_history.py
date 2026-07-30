@@ -86,6 +86,11 @@ def default_history_path() -> Path:
     return root / "ProviderSwitchboard" / "history.db"
 
 
+def default_tunnel_history_path() -> Path:
+    root = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    return root / "ProviderSwitchboard" / "tunnel_history.db"
+
+
 class HistoryStore:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path else default_history_path()
@@ -318,3 +323,103 @@ class HistoryStore:
                     self._connection.close()
                 except sqlite3.Error:
                     pass
+
+
+class TunnelHistoryStore:
+    """Separate persistent public-tunnel metadata; never stores payloads or secrets."""
+
+    def __init__(self, path: str | Path | None = None):
+        self.path = Path(path) if path else default_tunnel_history_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._closed = False
+        self._connection = sqlite3.connect(
+            self.path, timeout=5, check_same_thread=False, isolation_level=None
+        )
+        self._connection.row_factory = sqlite3.Row
+        try:
+            self._connection.executescript(
+                """
+                PRAGMA journal_mode=WAL;
+                PRAGMA synchronous=NORMAL;
+                PRAGMA busy_timeout=5000;
+                CREATE TABLE IF NOT EXISTS tunnel_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status INTEGER,
+                    state TEXT NOT NULL,
+                    latency_ms REAL NOT NULL,
+                    request_bytes INTEGER NOT NULL,
+                    response_bytes INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS tunnel_history_timestamp
+                    ON tunnel_history(timestamp DESC);
+                CREATE INDEX IF NOT EXISTS tunnel_history_client_timestamp
+                    ON tunnel_history(client_ip, timestamp DESC);
+                """
+            )
+        except BaseException:
+            self._closed = True
+            self._connection.close()
+            raise
+
+    def record(self, event: dict) -> bool:
+        values = (
+            float(event.get("timestamp", time.time())),
+            str(event.get("ip", ""))[:45],
+            str(event.get("method", ""))[:16],
+            str(event.get("path", ""))[:160],
+            str(event.get("model", ""))[:128],
+            event.get("status") if type(event.get("status")) is int else None,
+            "success" if event.get("state") == "success" else "error",
+            max(0.0, float(event.get("latency_ms", 0))),
+            max(0, int(event.get("request_bytes", 0))),
+            max(0, int(event.get("response_bytes", 0))),
+        )
+        with self._lock:
+            if self._closed:
+                return False
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO tunnel_history (
+                        timestamp, client_ip, method, path, model, status, state,
+                        latency_ms, request_bytes, response_bytes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+            except sqlite3.Error:
+                return False
+            return True
+
+    def recent(self, limit: int = 256) -> list[dict]:
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("Tunnel history limit must be between 1 and 1000")
+        with self._lock:
+            if self._closed:
+                return []
+            rows = self._connection.execute(
+                "SELECT * FROM tunnel_history ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            event = dict(row)
+            event["ip"] = event["client_ip"]
+            result.append(event)
+        return result
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._connection.close()
+            except sqlite3.Error:
+                pass

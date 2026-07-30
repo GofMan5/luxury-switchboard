@@ -34,6 +34,19 @@ class _ProbeUpstream(BaseHTTPRequestHandler):
                 f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n"
             ).encode()
             content_type = "text/event-stream"
+        elif probe == "private-fields-sse":
+            event = {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "error": None,
+                    "output": [],
+                    "OWNED_BY": "owner-private",
+                    "provider": PRIVATE_MARKER,
+                },
+            }
+            body = f"data: {json.dumps(event)}\n\n".encode()
+            content_type = "text/event-stream"
         else:
             response = {"model": MODEL}
             if "metadata" in payload:
@@ -48,6 +61,17 @@ class _ProbeUpstream(BaseHTTPRequestHandler):
                         "routing_hint": PRIVATE_MARKER,
                     }
                 ]
+            elif probe == "private-fields":
+                response.update(
+                    {
+                        "OWNED_BY": "owner-private",
+                        "provider": PRIVATE_MARKER,
+                        "upstream": "https://private.invalid/v1",
+                        "organization": "private-org",
+                        "system_fingerprint": "private-fingerprint",
+                        "output": [{"text": "safe", "owned_by": "nested-owner"}],
+                    }
+                )
             else:
                 output = payload.get("candidate")
                 if payload.get("transform") == "percent4":
@@ -67,6 +91,9 @@ class _ProbeUpstream(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
+        if probe in {"private-fields", "private-fields-sse"}:
+            self.send_header("X-Owned-By", "owner-private")
+            self.send_header("X-Provider", PRIVATE_MARKER)
         self.end_headers()
         self.wfile.write(body)
 
@@ -118,7 +145,13 @@ class TunnelPrivacyRegressionTest(unittest.TestCase):
         response = connection.getresponse()
         result = (
             response.status,
-            tuple(sorted(name.casefold() for name, _value in response.getheaders())),
+            tuple(
+                sorted(
+                    f"{name.casefold()}: "
+                    + ("" if name.casefold() == "content-length" else value)
+                    for name, value in response.getheaders()
+                )
+            ),
             response.read(),
         )
         connection.close()
@@ -156,6 +189,24 @@ class TunnelPrivacyRegressionTest(unittest.TestCase):
                     PRIVATE_MARKER.casefold(), ("\n".join(headers)).casefold()
                 )
                 self.assertNotIn(PRIVATE_MARKER.encode(), body)
+
+    def test_owned_by_provider_fields_and_headers_never_cross_boundary(self) -> None:
+        for probe, stream in (("private-fields", False), ("private-fields-sse", True)):
+            with self.subTest(probe=probe):
+                status, headers, body = self.request({"probe": probe, "stream": stream})
+                self.assertEqual(status, 200)
+                wire = "\n".join(headers).encode() + body
+                for marker in (
+                    b"owned_by",
+                    b"owner-private",
+                    b"provider",
+                    b"upstream",
+                    b"private.invalid",
+                    b"private-org",
+                    b"private-fingerprint",
+                    PRIVATE_MARKER.encode(),
+                ):
+                    self.assertNotIn(marker.lower(), wire.lower())
 
     def test_echoed_request_metadata_is_removed_without_a_marker_oracle(self) -> None:
         observations = []

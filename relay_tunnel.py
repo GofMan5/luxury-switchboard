@@ -38,6 +38,7 @@ from relay_runtime import ClientDisconnected, RateGate, RelayStopping
 
 
 MAX_BODY_BYTES = 64 * 1024 * 1024
+MAX_CONTEXT_LIMIT_KIB = MAX_BODY_BYTES // 1024
 MAX_EVENT_BYTES = MAX_BODY_BYTES
 MAX_MODELS_BYTES = 128 * 1024
 READINESS_HEADER = "X-Provider-Switch-Readiness"
@@ -92,6 +93,9 @@ PUBLIC_ROUTES = frozenset(
         "/v1/images/generations",
         "/v1/messages",
     }
+)
+PUBLIC_TEXT_ROUTES = frozenset(
+    {"/v1/responses", "/v1/chat/completions", "/v1/completions", "/v1/messages"}
 )
 PUBLIC_PROVIDER_BRAND = (
     "Luxury Private лучший приватный софт для абузов - @Luxuryprivate_bot"
@@ -217,6 +221,7 @@ class _TunnelTelemetry:
         idle_seconds: float = TELEMETRY_CLIENT_IDLE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        on_finish: Callable[[dict], None] | None = None,
     ) -> None:
         if min(max_clients, max_live, max_recent) <= 0 or idle_seconds <= 0:
             raise ValueError("Tunnel telemetry limits must be positive")
@@ -225,11 +230,37 @@ class _TunnelTelemetry:
         self._idle_seconds = idle_seconds
         self._clock = clock
         self._wall_clock = wall_clock
+        self._on_finish = on_finish
         self._lock = threading.Lock()
         self._clients: dict[str, dict] = {}
         self._live: dict[int, dict] = {}
         self._recent: deque[dict] = deque(maxlen=max_recent)
         self._sequence = 0
+
+    def restore_recent(self, events: Iterable[dict]) -> None:
+        with self._lock:
+            for stored in reversed(tuple(events)):
+                if not isinstance(stored, dict):
+                    continue
+                try:
+                    event = {
+                        "id": -abs(int(stored["id"])),
+                        "timestamp": float(stored["timestamp"]),
+                        "ip": str(stored["client_ip"])[:45],
+                        "method": str(stored["method"])[:16],
+                        "path": str(stored["path"])[:160],
+                        "model": str(stored["model"])[:128],
+                        "status": stored.get("status"),
+                        "state": (
+                            "success" if stored.get("state") == "success" else "error"
+                        ),
+                        "latency_ms": max(0.0, float(stored["latency_ms"])),
+                        "request_bytes": max(0, int(stored["request_bytes"])),
+                        "response_bytes": max(0, int(stored["response_bytes"])),
+                    }
+                except (KeyError, TypeError, ValueError):
+                    continue
+                self._recent.append(event)
 
     @staticmethod
     def _prune_rpm(client: dict, now: float) -> None:
@@ -292,6 +323,7 @@ class _TunnelTelemetry:
             self._live[request_id] = {
                 "_started_at": now,
                 "id": request_id,
+                "timestamp": self._wall_clock(),
                 "ip": client_ip,
                 "method": method,
                 "path": path,
@@ -337,6 +369,7 @@ class _TunnelTelemetry:
     ) -> None:
         if ticket is None:
             return
+        completed = None
         with self._lock:
             if ticket.finished:
                 return
@@ -359,6 +392,12 @@ class _TunnelTelemetry:
                     response_bytes=max(0, int(response_bytes)),
                 )
                 self._recent.append(event)
+                completed = dict(event)
+        if completed is not None and self._on_finish is not None:
+            try:
+                self._on_finish(completed)
+            except Exception:
+                pass
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -492,6 +531,18 @@ def _close_kill_job(process) -> None:
 def _rpm(value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("Tunnel RPM must be a non-negative integer")
+    return value
+
+
+def validate_context_limit_kib(value: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= MAX_CONTEXT_LIMIT_KIB
+    ):
+        raise ValueError(
+            f"Tunnel context limit must be between 0 and {MAX_CONTEXT_LIMIT_KIB} KiB"
+        )
     return value
 
 
@@ -1134,6 +1185,218 @@ def _brand_public_request(path: str, value: dict) -> dict:
     return branded
 
 
+def _provider_identity_probe(path: str, value: dict) -> bool:
+    def text(content, depth=0) -> list[str]:
+        if depth > 16:
+            return []
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            return [part for item in content for part in text(item, depth + 1)]
+        if isinstance(content, dict):
+            return text(content.get("text", content.get("content")), depth + 1)
+        return []
+
+    values = []
+    if path == "/v1/completions":
+        values.extend(text(value.get("prompt")))
+    elif path == "/v1/responses" and isinstance(value.get("input"), str):
+        values.append(value["input"])
+    else:
+        entries = value.get("input" if path == "/v1/responses" else "messages")
+        if isinstance(entries, list):
+            for item in entries:
+                if isinstance(item, dict) and item.get("role") == "user":
+                    values.extend(text(item.get("content")))
+    candidate = unicodedata.normalize("NFKC", "\n".join(values)[-8192:]).casefold()
+    subjects = (
+        "provider", "upstream", "backend", "vendor", "owned_by", "owned by",
+        "api endpoint", "api source", "провайдер", "апстрим", "бэкенд",
+        "бекенд", "вендор", "владелец", "источник api", "источник апи",
+    )
+    context = (
+        "behind this", "this api", "this service", "underlying", "your provider",
+        "you use", "are you using", "who owns", "identify the", "reveal the",
+        "этот api", "этот апи", "этого api", "этого апи", "за этим", "твой",
+        "ваш провайдер", "ты используешь", "кто владелец", "раскрой",
+        "определи",
+    )
+    return any(subject in candidate for subject in subjects) and any(
+        marker in candidate for marker in context
+    )
+
+
+def _provider_identity_response(path: str, model: str, stream: bool) -> tuple[str, bytes]:
+    created = int(time.time())
+    response_id = "resp_" + secrets.token_hex(12)
+    message_id = "msg_" + secrets.token_hex(12)
+    content = {
+        "type": "output_text",
+        "annotations": [],
+        "text": PUBLIC_PROVIDER_BRAND,
+    }
+    message = {
+        "id": message_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [content],
+    }
+    if path == "/v1/responses":
+        completed = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created,
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "model": model,
+            "output": [message],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            },
+        }
+        if not stream:
+            return "application/json", _json_bytes(completed)
+        events = (
+            {
+                "type": "response.created",
+                "response": {**completed, "status": "in_progress", "output": []},
+            },
+            {
+                "type": "response.output_text.delta",
+                "item_id": message_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": PUBLIC_PROVIDER_BRAND,
+            },
+            {"type": "response.completed", "response": completed},
+        )
+    elif path == "/v1/chat/completions":
+        base = {
+            "id": "chatcmpl_" + secrets.token_hex(12),
+            "created": created,
+            "model": model,
+        }
+        if not stream:
+            return "application/json", _json_bytes(
+                {
+                    **base,
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": PUBLIC_PROVIDER_BRAND},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                }
+            )
+        events = (
+            {
+                **base,
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": PUBLIC_PROVIDER_BRAND},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                **base,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+            "[DONE]",
+        )
+    elif path == "/v1/completions":
+        base = {
+            "id": "cmpl_" + secrets.token_hex(12),
+            "created": created,
+            "model": model,
+        }
+        if not stream:
+            return "application/json", _json_bytes(
+                {
+                    **base,
+                    "object": "text_completion",
+                    "choices": [
+                        {"index": 0, "text": PUBLIC_PROVIDER_BRAND, "finish_reason": "stop"}
+                    ],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                }
+            )
+        events = (
+            {
+                **base,
+                "object": "text_completion",
+                "choices": [
+                    {"index": 0, "text": PUBLIC_PROVIDER_BRAND, "finish_reason": None}
+                ],
+            },
+            {
+                **base,
+                "object": "text_completion",
+                "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+            },
+            "[DONE]",
+        )
+    else:
+        anthropic = {
+            "id": "msg_" + secrets.token_hex(12),
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": PUBLIC_PROVIDER_BRAND}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        }
+        if not stream:
+            return "application/json", _json_bytes(anthropic)
+        events = (
+            {
+                "type": "message_start",
+                "message": {**anthropic, "content": [], "stop_reason": None},
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": PUBLIC_PROVIDER_BRAND},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 0},
+            },
+            {"type": "message_stop"},
+        )
+    body = bytearray()
+    for event in events:
+        if isinstance(event, str):
+            data = event.encode("ascii")
+        else:
+            event_type = event.get("type")
+            if isinstance(event_type, str) and re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,128}", event_type
+            ):
+                body.extend(b"event: " + event_type.encode("ascii") + b"\n")
+            data = _json_bytes(event)
+        body.extend(b"data: " + data + b"\n\n")
+    return "text/event-stream", bytes(body)
+
+
 def _usable_inline_image(value) -> bool:
     if (
         not isinstance(value, str)
@@ -1282,6 +1545,9 @@ class TunnelGateway(ThreadingHTTPServer):
         start_inactive: bool = False,
         readiness_token: str = "",
         public_rpm: int = 0,
+        context_limit_kib: int = 0,
+        history: Iterable[dict] = (),
+        event_sink: Callable[[dict], None] | None = None,
         route_marker: str | None = None,
     ) -> None:
         host, port = relay_address
@@ -1298,8 +1564,10 @@ class TunnelGateway(ThreadingHTTPServer):
         self._active = not start_inactive
         self._readiness_token = _token(readiness_token) if readiness_token else ""
         self._public_rpm = _rpm(public_rpm)
+        self._context_limit_kib = validate_context_limit_kib(context_limit_kib)
         self._rate_limits = _ClientRateLimits(self._public_rpm)
-        self._telemetry = _TunnelTelemetry()
+        self._telemetry = _TunnelTelemetry(on_finish=event_sink)
+        self._telemetry.restore_recent(history)
         self._worker_slots = threading.BoundedSemaphore(MAX_TUNNEL_WORKERS)
         self._stopping = threading.Event()
         self._token = _token(token)
@@ -1373,6 +1641,7 @@ class TunnelGateway(ThreadingHTTPServer):
         sensitive_markers=_UNSET,
         secret_markers=_UNSET,
         public_rpm=_UNSET,
+        context_limit_kib=_UNSET,
         route_marker=_UNSET,
     ) -> None:
         with self._policy_lock:
@@ -1383,6 +1652,7 @@ class TunnelGateway(ThreadingHTTPServer):
                     sensitive_markers,
                     secret_markers,
                     public_rpm,
+                    context_limit_kib,
                     route_marker,
                 )
 
@@ -1393,6 +1663,7 @@ class TunnelGateway(ThreadingHTTPServer):
         sensitive_markers,
         secret_markers,
         public_rpm,
+        context_limit_kib,
         route_marker,
     ) -> None:
         next_token = self._token if token is _UNSET else _token(token)
@@ -1418,6 +1689,11 @@ class TunnelGateway(ThreadingHTTPServer):
         )
         next_public_rpm = (
             self._public_rpm if public_rpm is _UNSET else _rpm(public_rpm)
+        )
+        next_context_limit_kib = (
+            self._context_limit_kib
+            if context_limit_kib is _UNSET
+            else validate_context_limit_kib(context_limit_kib)
         )
         next_history = _marker_union(
             self._marker_history,
@@ -1449,6 +1725,7 @@ class TunnelGateway(ThreadingHTTPServer):
         self._markers = next_markers
         self._content_markers = next_content_markers
         self._public_rpm = next_public_rpm
+        self._context_limit_kib = next_context_limit_kib
         self._rate_limits.configure(next_public_rpm)
 
     def activate(
@@ -1459,6 +1736,7 @@ class TunnelGateway(ThreadingHTTPServer):
         sensitive_markers=_UNSET,
         secret_markers=_UNSET,
         public_rpm=_UNSET,
+        context_limit_kib=_UNSET,
         route_marker=_UNSET,
     ) -> None:
         with self._policy_lock:
@@ -1469,6 +1747,7 @@ class TunnelGateway(ThreadingHTTPServer):
                     sensitive_markers,
                     secret_markers,
                     public_rpm,
+                    context_limit_kib,
                     route_marker,
                 )
                 if not self._allowed_models:
@@ -1481,6 +1760,11 @@ class TunnelGateway(ThreadingHTTPServer):
 
     def rate_snapshot(self) -> dict[str, int]:
         return self._rate_limits.snapshot()
+
+    def request_body_limit(self, path: str) -> int:
+        with self._lock:
+            limit = self._context_limit_kib
+        return limit * 1024 if limit and path in PUBLIC_TEXT_ROUTES else MAX_BODY_BYTES
 
     def telemetry_snapshot(self) -> dict:
         return self._telemetry.snapshot()
@@ -1639,10 +1923,14 @@ class TunnelHandler(BaseHTTPRequestHandler):
             for candidate in candidates
         )
 
-    def _canonical_path(self) -> str | None:
-        if not self.path.startswith("/") or "?" in self.path or "#" in self.path:
+    def _canonical_path(self, *, allow_query: bool = False) -> str | None:
+        if (
+            not self.path.startswith("/")
+            or "#" in self.path
+            or (not allow_query and "?" in self.path)
+        ):
             return None
-        return self.path if self.path.isascii() else None
+        return self.path.partition("?")[0] if self.path.isascii() else None
 
     def _client_ip(self) -> str | None:
         values = self.headers.get_all(CLIENT_IP_HEADER, [])
@@ -1682,7 +1970,7 @@ class TunnelHandler(BaseHTTPRequestHandler):
         ):
             if not self._authorized(token):
                 error = (401, "Unauthorized")
-            elif self._canonical_path() != "/v1/models":
+            elif self._canonical_path(allow_query=True) != "/v1/models":
                 error = (404, "Not found")
             elif not route_allowed:
                 error = (403, "Request rejected")
@@ -1701,10 +1989,10 @@ class TunnelHandler(BaseHTTPRequestHandler):
         elif self._commit(200, "application/json", len(body)):
             self._write_committed(body)
 
-    def _body_length(self) -> BodyFraming:
+    def _body_length(self, max_bytes: int) -> BodyFraming:
         if self.headers.get_all("Content-Encoding"):
             raise InvalidBodyFraming
-        return body_framing(self.headers, MAX_BODY_BYTES)
+        return body_framing(self.headers, max_bytes)
 
     def _content_type(self, path: str) -> tuple[str, str]:
         content_types = self.headers.get_all("Content-Type", [])
@@ -1729,9 +2017,9 @@ class TunnelHandler(BaseHTTPRequestHandler):
             raise InvalidBodyFraming
         return content_type, kind
 
-    def _body(self, framing: BodyFraming) -> bytes:
+    def _body(self, framing: BodyFraming, max_bytes: int) -> bytes:
         try:
-            return read_body(self.rfile, framing, MAX_BODY_BYTES)
+            return read_body(self.rfile, framing, max_bytes)
         except OSError as error:
             raise InvalidBodyFraming from error
 
@@ -1794,8 +2082,9 @@ class TunnelHandler(BaseHTTPRequestHandler):
             self._finish_telemetry(500, 0)
 
     def _handle_post(self, path: str, client_ip: str) -> None:
+        max_bytes = self.gateway.request_body_limit(path)
         try:
-            framing = self._body_length()
+            framing = self._body_length(max_bytes)
             content_type, content_kind = self._content_type(path)
         except BodyTooLarge:
             self._error(413, "Request too large")
@@ -1812,19 +2101,16 @@ class TunnelHandler(BaseHTTPRequestHandler):
             self._error(503, "Request unavailable")
             return
         try:
-            body = self._body(framing)
+            body = self._body(framing, max_bytes)
             self.gateway.telemetry_request(self._telemetry_ticket, len(body))
+            identity_probe = False
             if content_kind == "application/json":
                 payload = _load_json(body)
                 if not isinstance(payload, dict):
                     raise InvalidBodyFraming
                 requested_model = payload.get("model")
-                if path in {
-                    "/v1/responses",
-                    "/v1/chat/completions",
-                    "/v1/completions",
-                    "/v1/messages",
-                }:
+                if path in PUBLIC_TEXT_ROUTES:
+                    identity_probe = _provider_identity_probe(path, payload)
                     payload = _brand_public_request(path, payload)
                     body = _json_bytes(payload)
                     if len(body) > MAX_BODY_BYTES:
@@ -1853,6 +2139,12 @@ class TunnelHandler(BaseHTTPRequestHandler):
             self._error(*rejection)
             return
         self.gateway.telemetry_dispatch(self._telemetry_ticket, requested_model)
+        if identity_probe:
+            public_type, response_body = _provider_identity_response(
+                path, requested_model, payload.get("stream") is True
+            )
+            self._respond(200, public_type, response_body)
+            return
         self._forward(path, body, policy_payload, requested_model, content_type)
 
     def _unsupported(self) -> None:
@@ -2674,6 +2966,9 @@ class TunnelController:
         startup_timeout: float = 20.0,
         policy_lock=None,
         public_rpm: int = 0,
+        context_limit_kib: int = 0,
+        history_loader: Callable[[], Iterable[dict]] | None = None,
+        event_sink: Callable[[dict], None] | None = None,
         publisher_profile: str = DEFAULT_PUBLISHER_PROFILE,
         readiness_delay: float = READINESS_INITIAL_DELAY,
         route_marker: str | None = None,
@@ -2701,6 +2996,9 @@ class TunnelController:
         self._startup_timeout = max(1.0, float(startup_timeout))
         self._readiness_delay = max(0.0, float(readiness_delay))
         self._public_rpm = _rpm(public_rpm)
+        self._context_limit_kib = validate_context_limit_kib(context_limit_kib)
+        self._history_loader = history_loader
+        self._event_sink = event_sink
         parse_publisher_profile(publisher_profile)
         self._publisher_profile = publisher_profile
         self._lock = threading.Lock()
@@ -2720,6 +3018,7 @@ class TunnelController:
         sensitive_markers=_UNSET,
         secret_markers=_UNSET,
         public_rpm=_UNSET,
+        context_limit_kib=_UNSET,
         publisher_profile=_UNSET,
         route_marker=_UNSET,
     ) -> None:
@@ -2750,6 +3049,11 @@ class TunnelController:
                     self._public_rpm
                     if public_rpm is _UNSET
                     else _rpm(public_rpm)
+                )
+                next_context_limit_kib = (
+                    self._context_limit_kib
+                    if context_limit_kib is _UNSET
+                    else validate_context_limit_kib(context_limit_kib)
                 )
                 next_publisher_profile = (
                     self._publisher_profile
@@ -2785,6 +3089,7 @@ class TunnelController:
                         sensitive_markers=next_history,
                         secret_markers=next_secret_history,
                         public_rpm=next_public_rpm,
+                        context_limit_kib=next_context_limit_kib,
                         route_marker=next_route_marker,
                     )
                 self._token = next_token
@@ -2796,6 +3101,7 @@ class TunnelController:
                 self._marker_history = next_history
                 self._secret_marker_history = next_secret_history
                 self._public_rpm = next_public_rpm
+                self._context_limit_kib = next_context_limit_kib
                 self._publisher_profile = next_publisher_profile
 
     def _snapshot_locked(self) -> dict:
@@ -2810,6 +3116,7 @@ class TunnelController:
             "state": self._state,
             "url": self._url,
             "allowed_count": len(self._allowed_models),
+            "context_limit_kib": self._context_limit_kib,
             "error": self._error,
             **rates,
             **telemetry,
@@ -2864,6 +3171,7 @@ class TunnelController:
                     self._public_rpm,
                     self._publisher_profile,
                     self._route_marker,
+                    self._context_limit_kib,
                 )
                 gateway.configure(
                     token=policy[0],
@@ -2871,6 +3179,7 @@ class TunnelController:
                     sensitive_markers=policy[2],
                     secret_markers=policy[3],
                     public_rpm=policy[5],
+                    context_limit_kib=policy[8],
                     route_marker=policy[7],
                 )
                 return policy
@@ -2894,6 +3203,7 @@ class TunnelController:
                     self._public_rpm,
                     self._publisher_profile,
                     self._route_marker,
+                    self._context_limit_kib,
                 )
                 if policy != expected_policy:
                     return None
@@ -2905,6 +3215,7 @@ class TunnelController:
                     sensitive_markers=self._marker_history,
                     secret_markers=self._secret_marker_history,
                     public_rpm=self._public_rpm,
+                    context_limit_kib=self._context_limit_kib,
                     route_marker=self._route_marker,
                 )
                 self._gateway = gateway
@@ -2941,6 +3252,7 @@ class TunnelController:
                     markers = self._marker_history
                     secret_markers = self._secret_marker_history
                     public_rpm = self._public_rpm
+                    context_limit_kib = self._context_limit_kib
                     publisher_profile = self._publisher_profile
                     route_marker = self._route_marker
                     remote_port, _slug = parse_publisher_profile(publisher_profile)
@@ -2958,6 +3270,10 @@ class TunnelController:
             except OSError:
                 return self._start_failed("Tunnel host trust could not be prepared")
             readiness_token = secrets.token_urlsafe(32)
+            try:
+                history = tuple(self._history_loader()) if self._history_loader else ()
+            except Exception:
+                history = ()
             gateway = TunnelGateway(
                 self.relay_address,
                 token,
@@ -2969,6 +3285,9 @@ class TunnelController:
                 start_inactive=True,
                 readiness_token=readiness_token,
                 public_rpm=public_rpm,
+                context_limit_kib=context_limit_kib,
+                history=history,
+                event_sink=self._event_sink,
                 route_marker=route_marker,
             )
             gateway_thread = threading.Thread(

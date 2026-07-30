@@ -12,6 +12,7 @@ from relay_ui import (
     RelayApp,
     TunnelClientsTable,
     _operation_error,
+    _tunnel_clients,
     _tunnel_error,
 )
 
@@ -94,6 +95,7 @@ class _KeyUIServer(_UIServer):
             {"id": "key-b", "label": "Key 3", "rpm": 120, "pinned": False},
         ]
         self.moves: list[tuple[str, str, int]] = []
+        self.updates: list[tuple[str, str, int, str | None]] = []
         self.resets: list[tuple[str, str]] = []
 
     def providers(self):
@@ -138,6 +140,11 @@ class _KeyUIServer(_UIServer):
         self.keys[index], self.keys[target] = self.keys[target], self.keys[index]
         self.moves.append((provider_id, fingerprint, direction))
 
+    def update_provider_key(self, provider_id, fingerprint, rpm, proxy_url=None):
+        row = next(row for row in self.keys if row["id"] == fingerprint)
+        row["rpm"] = rpm
+        self.updates.append((provider_id, fingerprint, rpm, proxy_url))
+
     def reset_provider_key_cooldown(self, provider_id, fingerprint):
         row = next(row for row in self.keys if row["id"] == fingerprint)
         row["cooldown_ms"] = 0
@@ -152,6 +159,7 @@ class _TunnelUIServer(_UIServer):
         self.provider_changes: list[str] = []
         self.allowed = ("model-a",)
         self.rpm = 30
+        self.context_kib = 0
         self.state = "stopped"
         self.tunnel_url = ""
         self.shared_available = True
@@ -338,11 +346,43 @@ class _TunnelUIServer(_UIServer):
         self.rpm = rpm
         return rpm
 
+    def tunnel_context_limit_kib(self):
+        return self.context_kib
+
+    def set_tunnel_context_limit_kib(self, limit):
+        self.context_kib = limit
+        return limit
+
     def tunnel_publisher_profile(self):
         return ""
 
 
 class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
+    def test_persisted_tunnel_events_restore_as_offline_client_logs(self):
+        clients = _tunnel_clients(
+            {
+                "clients": (),
+                "live": (),
+                "recent": (
+                    {
+                        "ip": "203.0.113.77",
+                        "timestamp": 1,
+                        "method": "POST",
+                        "path": "/v1/responses",
+                        "model": "public-model",
+                        "status": 200,
+                        "state": "success",
+                        "latency_ms": 12,
+                        "request_bytes": 34,
+                        "response_bytes": 56,
+                    },
+                ),
+            }
+        )
+        self.assertEqual(len(clients), 1)
+        self.assertEqual((clients[0]["ip"], clients[0]["state"]), ("203.0.113.77", "offline"))
+        self.assertEqual(clients[0]["events"][0]["Model"], "public-model")
+
     def test_tunnel_error_only_allows_curated_messages(self):
         message = "Tunnel publisher profile is already active"
         self.assertEqual(_tunnel_error(message), message)
@@ -447,13 +487,20 @@ class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
                     table = app.query_one("#keys-table", DataTable)
                     table.move_cursor(row=0, column=0, animate=False)
                     await pilot.pause()
+                    self.assertFalse(
+                        app.query_one("#update-key-settings", Button).disabled
+                    )
                     for button_id in (
-                        "#update-key-settings",
                         "#remove-key",
                         "#move-key-up",
                         "#move-key-down",
                     ):
                         self.assertTrue(app.query_one(button_id, Button).disabled)
+                    app.query_one("#key-rpm-input").value = "47"
+                    await pilot.click("#update-key-settings")
+                    await pilot.pause()
+                    self.assertEqual(server.keys[0]["rpm"], 47)
+                    self.assertEqual(server.updates, [("echo", "env", 47, None)])
                     self.assertFalse(
                         app.query_one("#reset-key-cooldown", Button).disabled
                     )
@@ -823,6 +870,8 @@ class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
                             "#tunnel-all-models",
                             "#tunnel-rpm-input",
                             "#tunnel-save-rpm",
+                            "#tunnel-context-input",
+                            "#tunnel-save-context",
                         )
                     ]
                     self.assertTrue(
@@ -835,7 +884,7 @@ class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(
                         len({control.region.y for control in action_controls}),
-                        {"tiny": 5, "narrow": 2, "wide": 1}[layout],
+                        {"tiny": 6, "narrow": 2, "wide": 1}[layout],
                     )
                     for index, control in enumerate(action_controls):
                         for other in action_controls[index + 1 :]:

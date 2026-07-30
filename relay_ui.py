@@ -7,6 +7,7 @@ running ``RelayServer``.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
@@ -412,6 +413,27 @@ def _tunnel_clients(source: Any) -> list[dict[str, Any]] | None:
         event_ip = _tunnel_ip(event.get("ip"))
         if event_ip:
             events_by_ip.setdefault(event_ip, []).append(event)
+
+    listed_ips = {
+        _tunnel_ip(raw.get("ip"))
+        for _identity, raw in client_items
+        if isinstance(raw, Mapping)
+    }
+    for client_ip, events in events_by_ip.items():
+        if client_ip in listed_ips:
+            continue
+        latest = max((_number(event.get("timestamp")) for event in events), default=0)
+        client_items.append(
+            (
+                f"history:{client_ip}",
+                {
+                    "ip": client_ip,
+                    "idle_ms": max(0.0, (time.time() - latest) * 1000),
+                    "connected": 0,
+                    "active": 0,
+                },
+            )
+        )
 
     clients: dict[str, dict[str, Any]] = {}
     for fallback_identity, raw in client_items:
@@ -1216,12 +1238,12 @@ class RelayApp(App):
     }}
     #tunnel-scroll {{ height: 1fr; }}
     #tunnel-actions {{
-        grid-size: 10 1;
-        grid-columns: 9 9 18 12 16 14 1fr 14 16 12;
+        grid-size: 12 1;
+        grid-columns: 9 9 18 12 16 14 1fr 14 16 12 16 14;
         grid-gutter: 0 1;
     }}
     #tunnel-actions Button, #tunnel-provider-select,
-    #tunnel-rpm-input {{ width: 1fr; min-width: 0; margin: 0; }}
+    #tunnel-rpm-input, #tunnel-context-input {{ width: 1fr; min-width: 0; margin: 0; }}
     #tunnel-all-models.tunnel-all-selected {{
         border: solid #777d86;
         background: #292d32;
@@ -1319,16 +1341,16 @@ class RelayApp(App):
     Screen.compact #tunnel-actions {{ margin-top: 0; }}
     Screen.tunnel-narrow #tunnel-actions {{
         height: 7;
-        grid-size: 5 2;
-        grid-columns: 1fr 1fr 1fr 1fr 1fr;
+        grid-size: 6 2;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr 1fr;
         grid-rows: 3 3;
         grid-gutter: 1 1;
     }}
     Screen.tunnel-tiny #tunnel-actions {{
-        height: 15;
-        grid-size: 2 5;
+        height: 18;
+        grid-size: 2 6;
         grid-columns: 1fr 1fr;
-        grid-rows: 3 3 3 3 3;
+        grid-rows: 3 3 3 3 3 3;
     }}
     Screen.tunnel-tiny #tunnel-profile {{
         height: 7;
@@ -1477,9 +1499,9 @@ class RelayApp(App):
                     with Grid(id="tunnel-actions"):
                         yield Button("Start", id="tunnel-start")
                         yield Button("Stop", id="tunnel-stop")
-                        yield Button("Refresh models", id="tunnel-refresh-models")
+                        yield Button("Models", id="tunnel-refresh-models")
                         yield Button("Copy URL", id="tunnel-copy-url")
-                        yield Button("Copy API key", id="tunnel-copy-key")
+                        yield Button("Copy key", id="tunnel-copy-key")
                         yield Button("Rotate key", id="tunnel-rotate-key")
                         provider_select = Select(
                             [],
@@ -1503,6 +1525,17 @@ class RelayApp(App):
                         rpm_input.border_subtitle = "0 = unlimited"
                         yield rpm_input
                         yield Button("Save RPM", disabled=True, id="tunnel-save-rpm")
+                        context_input = Input(
+                            value="0",
+                            type="integer",
+                            restrict=r"\d*",
+                            disabled=True,
+                            id="tunnel-context-input",
+                        )
+                        context_input.border_title = "Context KiB"
+                        context_input.border_subtitle = "request bytes · 0 = unlimited"
+                        yield context_input
+                        yield Button("Save limit", disabled=True, id="tunnel-save-context")
                     with Grid(id="tunnel-profile"):
                         profile_input = Input(
                             password=True,
@@ -1658,6 +1691,8 @@ class RelayApp(App):
             active_label.append(" · settings not saved", style=PALETTE["error"])
         if snapshot.get("history_error"):
             active_label.append(" · history not recording", style=PALETTE["error"])
+        if snapshot.get("tunnel_history_error"):
+            active_label.append(" · tunnel history not recording", style=PALETTE["error"])
         active_widget.update(active_label)
         self._update_dashboard(snapshot, active)
         self._update_activity(snapshot)
@@ -2269,6 +2304,51 @@ class RelayApp(App):
         rpm_input.value = str(rpm)
         self.notify(
             "Per-IP RPM: unlimited" if rpm == 0 else "Per-IP RPM saved",
+            timeout=2,
+            markup=False,
+        )
+
+    def _load_tunnel_context_limit(self) -> None:
+        context_input = self.query_one("#tunnel-context-input", Input)
+        save = self.query_one("#tunnel-save-context", Button)
+        try:
+            limit = int(self.server.tunnel_context_limit_kib())
+            if limit < 0:
+                raise ValueError
+        except Exception:
+            context_input.disabled = save.disabled = True
+            return
+        context_input.value = str(limit)
+        context_input.disabled = save.disabled = False
+
+    def _save_tunnel_context_limit(self) -> None:
+        context_input = self.query_one("#tunnel-context-input", Input)
+        try:
+            limit = int(context_input.value or "0")
+            if limit < 0:
+                raise ValueError
+        except ValueError:
+            self.notify(
+                "Context limit must be 0 or greater",
+                severity="error",
+                timeout=3,
+                markup=False,
+            )
+            context_input.focus()
+            return
+        try:
+            self.server.set_tunnel_context_limit_kib(limit)
+        except Exception:
+            self.notify(
+                "Unable to save context limit",
+                severity="error",
+                timeout=3,
+                markup=False,
+            )
+            return
+        context_input.value = str(limit)
+        self.notify(
+            "Context: unlimited" if limit == 0 else "Context limit saved",
             timeout=2,
             markup=False,
         )
@@ -2923,8 +3003,8 @@ class RelayApp(App):
         selected = self._keys.get(self._selected_key_id or "")
         pinned = bool(_value(selected, "pinned", False)) if selected else False
         self.query_one("#add-key", Button).disabled = not self._selected_provider_id
-        for button_id in ("#update-key-settings", "#remove-key"):
-            self.query_one(button_id, Button).disabled = selected is None or pinned
+        self.query_one("#update-key-settings", Button).disabled = selected is None
+        self.query_one("#remove-key", Button).disabled = selected is None or pinned
         self.query_one("#move-key-up", Button).disabled = (
             selected is None or pinned or not bool(_value(selected, "can_move_up", False))
         )
@@ -2981,6 +3061,7 @@ class RelayApp(App):
             self.query_one("#active-provider", Static).update("Private model tunnel")
             self._load_tunnel_provider()
             self._load_tunnel_rpm()
+            self._load_tunnel_context_limit()
             self._load_tunnel_profile()
             self._refresh_tunnel()
             self._refresh_tunnel_clients()
@@ -3114,6 +3195,8 @@ class RelayApp(App):
             self._run_tunnel_operation("rotate")
         elif button_id == "tunnel-save-rpm":
             self._save_tunnel_rpm()
+        elif button_id == "tunnel-save-context":
+            self._save_tunnel_context_limit()
         elif button_id == "tunnel-save-profile":
             self._save_tunnel_profile()
         elif button_id == "shared-tunnel-refresh":

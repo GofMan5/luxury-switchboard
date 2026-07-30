@@ -31,7 +31,7 @@ from relay_framing import (
     parse_multipart,
     read_body,
 )
-from relay_history import HistoryStore
+from relay_history import HistoryStore, TunnelHistoryStore
 from relay_image_compat import (
     MAX_IMAGE_RESPONSE_BYTES,
     InvalidImageRequest,
@@ -47,6 +47,7 @@ from relay_tunnel import (
     TunnelController,
     _load_json,
     parse_publisher_profile,
+    validate_context_limit_kib,
 )
 from relay_runtime import (
     ClientDisconnected,
@@ -62,7 +63,8 @@ from relay_runtime import (
 LISTEN = ("127.0.0.1", 8798)
 UPSTREAM_TIMEOUT = 300
 STREAM_HEADER_TIMEOUT = 45
-STREAM_IDLE_TIMEOUT = 300
+STREAM_IDLE_TIMEOUT = 180
+STREAM_HEARTBEAT_INTERVAL = 15
 SELECT_SOCKET_LIMIT = 512
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_INSPECT_BYTES = 4 * 1024 * 1024
@@ -254,7 +256,7 @@ def _tunnel_catalog_models(value) -> tuple[str, ...]:
 def _tunnel_settings(
     saved: dict | None,
     default_provider_id: str,
-) -> tuple[tuple[str, ...], str, int, str, str]:
+) -> tuple[tuple[str, ...], str, int, int, str, str]:
     raw = saved.get("tunnel", {}) if saved else {}
     if not isinstance(raw, dict):
         raise ValueError("Saved tunnel settings are invalid")
@@ -276,6 +278,12 @@ def _tunnel_settings(
         or rpm_per_ip < 0
     ):
         raise ValueError("Saved tunnel settings are invalid")
+    try:
+        context_limit_kib = validate_context_limit_kib(
+            raw.get("context_limit_kib", 0)
+        )
+    except ValueError as error:
+        raise ValueError("Saved tunnel settings are invalid") from error
     publisher_profile = raw.get(
         "publisher_profile", DEFAULT_PUBLISHER_PROFILE
     )
@@ -290,6 +298,7 @@ def _tunnel_settings(
         _tunnel_models(raw.get("allowed_models", ())),
         token,
         rpm_per_ip,
+        context_limit_kib,
         publisher_profile,
         provider_id,
     )
@@ -925,6 +934,7 @@ def buffered_response(
     expected_length: int | None,
     required_terminal: str = "",
     max_bytes: int = MAX_BUFFERED_RESPONSE_BYTES,
+    check_cancelled=None,
 ):
     content_encoding = response.getheader("Content-Encoding")
     if (
@@ -949,12 +959,19 @@ def buffered_response(
     )
     total = 0
     try:
-        while chunk := response.read1(64 * 1024):
+        while True:
+            if check_cancelled is not None:
+                check_cancelled()
+            chunk = response.read1(64 * 1024)
+            if not chunk:
+                break
             if len(chunk) > max_bytes - total:
                 raise http.client.HTTPException("Provider response is too large")
             consumed = inspector.feed(chunk) if inspector is not None else len(chunk)
             spool.write(chunk[:consumed])
             total += consumed
+            if check_cancelled is not None:
+                check_cancelled()
             if inspector is not None and inspector.terminal_event:
                 break
         if (
@@ -1131,6 +1148,13 @@ class RelayHandler(BaseHTTPRequestHandler):
         cancel_event = getattr(self, "_local_cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
             return True
+        heartbeat_at = getattr(self, "_sse_heartbeat_at", None)
+        if heartbeat_at is not None and time.monotonic() >= heartbeat_at:
+            try:
+                self._write_client(b": keep-alive\n\n")
+            except ClientDisconnected:
+                return True
+            self._sse_heartbeat_at = time.monotonic() + STREAM_HEARTBEAT_INTERVAL
         try:
             readable, _, _ = select.select([self.connection], [], [], 0)
             return bool(readable and self.connection.recv(1, socket.MSG_PEEK) == b"")
@@ -1323,6 +1347,27 @@ class RelayHandler(BaseHTTPRequestHandler):
                         fallback_body = candidate
                 except (TypeError, ValueError):
                     pass
+                finally:
+                    fallback_payload = None
+            payload = None
+            if required_terminal:
+                with self.server._config_lock:
+                    if self._client_disconnected():
+                        raise ClientDisconnected
+                    self.server.register_response_client(
+                        self.connection, self._local_cancel_event
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self._finish_client_headers()
+                self.close_connection = True
+                self._response_status = 200
+                self._sse_heartbeat_at = (
+                    time.monotonic() + STREAM_HEARTBEAT_INTERVAL
+                )
+                committed = True
             fallback_active = False
             response_rewritten = False
             rewritten_content_type = ""
@@ -1351,6 +1396,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                         timeout=(
                             STREAM_HEADER_TIMEOUT
                             if stream and not fallback_active
+                            else STREAM_IDLE_TIMEOUT
+                            if required_terminal
                             else UPSTREAM_TIMEOUT
                         ),
                     )
@@ -1387,10 +1434,12 @@ class RelayHandler(BaseHTTPRequestHandler):
                         body=body,
                         headers=headers,
                     )
+                    self._check_cancelled()
                     upstream_sock = connection.sock
                     self.server.register_upstream_socket(connection, upstream_sock)
                     generation_started_at = time.monotonic()
                     response = connection.getresponse()
+                    self._check_cancelled()
                     response_content_type = response.getheader("Content-Type") or ""
                     response_stream = (
                         stream and not fallback_active
@@ -1402,7 +1451,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                     )
                     if upstream_sock is not None:
                         upstream_sock.settimeout(
-                            STREAM_IDLE_TIMEOUT if response_stream else UPSTREAM_TIMEOUT
+                            STREAM_IDLE_TIMEOUT
+                            if response_stream or required_terminal
+                            else UPSTREAM_TIMEOUT
                         )
                     if response.status < 400:
                         attempt_terminal = required_terminal if response_stream else ""
@@ -1437,6 +1488,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                                         if image_bridge
                                         else MAX_BUFFERED_RESPONSE_BYTES
                                     ),
+                                    self._check_cancelled,
                                 )
                             except (OSError, http.client.HTTPException) as error:
                                 if image_bridge:
@@ -1557,6 +1609,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                 )
                 if not shared_retry:
                     self._wait_retry(delay)
+            if required_terminal:
+                self._sse_heartbeat_at = None
             if self._client_disconnected():
                 raise ClientDisconnected
             self._response_status = response.status
@@ -1574,40 +1628,43 @@ class RelayHandler(BaseHTTPRequestHandler):
                 cache_extended,
                 generation_started_at,
             )
-            blocked = HOP_HEADERS | {
-                name.strip().lower()
-                for name in (response.getheader("Connection") or "").split(",")
-                if name.strip()
-            }
-            with self.server._config_lock:
-                if self._client_disconnected():
-                    raise ClientDisconnected
-                self.server.register_response_client(
-                    self.connection, self._local_cancel_event
-                )
-            self.send_response(response.status)
-            for name, value in response.getheaders():
-                lowered = name.lower()
-                if (
-                    lowered not in blocked
-                    and lowered != "content-length"
-                    and not (
-                        response_rewritten and lowered in REWRITTEN_RESPONSE_HEADERS
+            if not committed:
+                blocked = HOP_HEADERS | {
+                    name.strip().lower()
+                    for name in (response.getheader("Connection") or "").split(",")
+                    if name.strip()
+                }
+                with self.server._config_lock:
+                    if self._client_disconnected():
+                        raise ClientDisconnected
+                    self.server.register_response_client(
+                        self.connection, self._local_cancel_event
                     )
-                ):
-                    self.send_header(name, value)
-            if response_rewritten:
-                self.send_header("Content-Type", rewritten_content_type)
-            if expected_length is not None:
-                self.send_header("Content-Length", str(expected_length))
-            elif self.command == "HEAD":
-                declared_length = response.getheader("Content-Length")
-                if declared_length and declared_length.isdecimal():
-                    self.send_header("Content-Length", declared_length)
-            self.send_header("Connection", "close")
-            self._finish_client_headers()
-            self.close_connection = True
-            committed = True
+                self.send_response(response.status)
+                for name, value in response.getheaders():
+                    lowered = name.lower()
+                    if (
+                        lowered not in blocked
+                        and lowered != "content-length"
+                        and not (
+                            response_rewritten and lowered in REWRITTEN_RESPONSE_HEADERS
+                        )
+                    ):
+                        self.send_header(name, value)
+                if response_rewritten:
+                    self.send_header("Content-Type", rewritten_content_type)
+                if expected_length is not None:
+                    self.send_header("Content-Length", str(expected_length))
+                elif self.command == "HEAD":
+                    declared_length = response.getheader("Content-Length")
+                    if declared_length and declared_length.isdecimal():
+                        self.send_header("Content-Length", declared_length)
+                self.send_header("Connection", "close")
+                self._finish_client_headers()
+                self.close_connection = True
+                committed = True
+            else:
+                expected_length = None
             inspector = ResponseInspector(response_content_type)
             if self.command != "HEAD" and response.status not in {204, 304}:
                 source = buffered_body if buffered_body is not None else response
@@ -1793,6 +1850,7 @@ class RelayServer(ThreadingHTTPServer):
         self._config_store = ConfigStore(config_path) if config and registry is None else None
         self.config_error = ""
         self.history_error = ""
+        self.tunnel_history_error = ""
         key = environment_api_key() if echo_api_key is None else echo_api_key
         self._environment_key = normalize_api_key(key)
         saved = None
@@ -1814,6 +1872,7 @@ class RelayServer(ThreadingHTTPServer):
                 self._tunnel_allowed_models,
                 saved_tunnel_token,
                 self._tunnel_rpm_per_ip,
+                self._tunnel_context_limit_kib,
                 self._tunnel_publisher_profile,
                 self._tunnel_provider_id,
             ) = _tunnel_settings(saved, self.registry.active().id)
@@ -1826,9 +1885,22 @@ class RelayServer(ThreadingHTTPServer):
             raise
         self._tunnel_token = saved_tunnel_token or secrets.token_urlsafe(32)
         self.history = None
+        self.tunnel_history = None
         self.tunnel = None
         super().__init__(*args, **kwargs)
         try:
+            if history is True:
+                try:
+                    self.history = HistoryStore()
+                except (OSError, sqlite3.Error):
+                    # History is useful telemetry, never a reason for the relay to fail.
+                    self.history_error = "History unavailable"
+                try:
+                    self.tunnel_history = TunnelHistoryStore()
+                except (OSError, sqlite3.Error):
+                    self.tunnel_history_error = "Tunnel history unavailable"
+            else:
+                self.history = history or None
             self.tunnel = TunnelController(
                 (LISTEN[0], self.server_port),
                 self._tunnel_token,
@@ -1838,20 +1910,18 @@ class RelayServer(ThreadingHTTPServer):
                 route_guard=self._tunnel_route_safe,
                 policy_lock=self._config_lock,
                 public_rpm=self._tunnel_rpm_per_ip,
+                context_limit_kib=self._tunnel_context_limit_kib,
+                history_loader=(
+                    lambda: self.tunnel_history.recent(256)
+                    if self.tunnel_history is not None
+                    else ()
+                ),
+                event_sink=self.record_tunnel_event,
                 publisher_profile=self._tunnel_publisher_profile,
                 route_marker=self._tunnel_route_marker,
             )
             if saved is not None and self._config_store is not None:
                 self._config_store.save(self._config_value())
-            if history is True:
-                try:
-                    self.history = HistoryStore()
-                except (OSError, sqlite3.Error):
-                    # History is useful telemetry, never a reason for the relay to fail.
-                    self.history = None
-                    self.history_error = "History unavailable"
-            else:
-                self.history = history or None
             recent = getattr(self.history, "recent", None)
             if recent is not None:
                 try:
@@ -1867,6 +1937,10 @@ class RelayServer(ThreadingHTTPServer):
         except BaseException:
             if self.tunnel is not None:
                 self.tunnel.stop()
+            if self.history:
+                self.history.close()
+            if self.tunnel_history:
+                self.tunnel_history.close()
             self.registry.close()
             super().server_close()
             raise
@@ -1877,6 +1951,7 @@ class RelayServer(ThreadingHTTPServer):
             "allowed_models": list(self._tunnel_allowed_models),
             "access_token": self._tunnel_token,
             "rpm_per_ip": self._tunnel_rpm_per_ip,
+            "context_limit_kib": self._tunnel_context_limit_kib,
             "publisher_profile": self._tunnel_publisher_profile,
             "provider_id": self._tunnel_provider_id,
         }
@@ -1975,6 +2050,7 @@ class RelayServer(ThreadingHTTPServer):
                 sensitive_markers=self._tunnel_sensitive_markers(),
                 secret_markers=self._tunnel_secret_markers(),
                 public_rpm=self._tunnel_rpm_per_ip,
+                context_limit_kib=self._tunnel_context_limit_kib,
                 publisher_profile=self._tunnel_publisher_profile,
                 route_marker=self._tunnel_route_marker,
             )
@@ -2257,12 +2333,13 @@ class RelayServer(ThreadingHTTPServer):
             return result
 
     def update_provider_key(self, provider_id, fingerprint, rpm, proxy_url=None):
-        if (
+        environment_key = (
             provider_id == "echo"
             and self._environment_key
             and fingerprint == key_fingerprint(self._environment_key)
-        ):
-            raise ValueError("FREEMODEL_API_KEY is fixed at 30 RPM and Direct")
+        )
+        if environment_key and proxy_url not in {None, ""}:
+            raise ValueError("FREEMODEL_API_KEY must use Direct")
         with self._config_lock:
             result = self.registry.update_key(
                 provider_id, fingerprint, rpm, proxy_url
@@ -2350,6 +2427,18 @@ class RelayServer(ThreadingHTTPServer):
     def tunnel_snapshot(self) -> dict:
         snapshot = self.tunnel.snapshot()
         snapshot["route_available"] = self._tunnel_route_safe()
+        if "recent" not in snapshot:
+            try:
+                recent = (
+                    tuple(self.tunnel_history.recent(256))
+                    if self.tunnel_history is not None
+                    else ()
+                )
+            except (OSError, TypeError, ValueError, sqlite3.Error):
+                recent = ()
+                self.tunnel_history_error = "Tunnel history read failed"
+            snapshot.update(clients=(), live=(), recent=recent)
+        snapshot["history_error"] = self.tunnel_history_error
         return snapshot
 
     def shared_tunnels(self) -> dict:
@@ -2656,6 +2745,18 @@ class RelayServer(ThreadingHTTPServer):
             self._persist()
             return rpm
 
+    def tunnel_context_limit_kib(self) -> int:
+        with self._config_lock:
+            return self._tunnel_context_limit_kib
+
+    def set_tunnel_context_limit_kib(self, limit: int) -> int:
+        limit = validate_context_limit_kib(limit)
+        with self._config_lock:
+            self.tunnel.configure(context_limit_kib=limit)
+            self._tunnel_context_limit_kib = limit
+            self._persist()
+            return limit
+
     def tunnel_publisher_profile(self) -> str:
         with self._config_lock:
             return self._tunnel_publisher_profile
@@ -2815,6 +2916,7 @@ class RelayServer(ThreadingHTTPServer):
             providers=providers,
             config_error=self.config_error,
             history_error=self.history_error,
+            tunnel_history_error=self.tunnel_history_error,
         )
         return snapshot
 
@@ -2825,6 +2927,16 @@ class RelayServer(ThreadingHTTPServer):
             except (OSError, sqlite3.Error):
                 stored = False
             self.history_error = "" if stored is not False else "History write failed"
+
+    def record_tunnel_event(self, event: dict) -> None:
+        if self.tunnel_history:
+            try:
+                stored = self.tunnel_history.record(event)
+            except (OSError, TypeError, ValueError, sqlite3.Error):
+                stored = False
+            self.tunnel_history_error = (
+                "" if stored is not False else "Tunnel history write failed"
+            )
 
     def history_stats(self, period: str):
         return self.history.stats(period) if self.history else {}
@@ -2854,3 +2966,5 @@ class RelayServer(ThreadingHTTPServer):
         super().server_close()
         if self.history:
             self.history.close()
+        if self.tunnel_history:
+            self.tunnel_history.close()

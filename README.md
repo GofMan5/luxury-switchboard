@@ -32,7 +32,7 @@ Stop-Process -Id $relay.Id
 - `Dashboard` — live-запросы, модель, фактический/effective RPM, очередь, retries, context, tok/s, токены и latency. Цветной статус: зелёный — готово, синий — выполняется, жёлтый — очередь/retry, красный — ошибка, серый — отменено. Двойной клик или `Enter` по строке открывает безопасные детали с финальным HTTP-статусом (`200 OK`, `403 Forbidden`, `504 Gateway Timeout` и т. п.). Последние 100 завершённых запросов восстанавливаются из SQLite после перезапуска.
 - `Providers` — выбор, добавление, редактирование и удаление провайдеров; список моделей; несколько ключей в порядке приоритета. `Higher`/`Lower` меняют приоритет сразу и сохраняют его; системный Env Lite закреплён первым.
 - `Stats` — явные кнопки `24h`, `48h`, `72h`, `All` и агрегаты без хранения prompt/response body.
-- `Tunnel` — запуск управляемого SSH-туннеля к VPS в один клик, allowlist публичных моделей, конечная проверка доступности выбранных или всех моделей, копирование URL/ключа и ротация ключа.
+- `Tunnel` — запуск управляемого SSH-туннеля к VPS в один клик, allowlist публичных моделей, per-IP RPM, точный лимит размера текстового контекста в KiB, конечная проверка моделей, копирование URL/ключа и ротация ключа.
 - `Shared` — синхронизированный список общих туннелей, где собственный подписан `Ваш коннект`; pause/resume/stop работают по ревизии без передачи внутренних ID.
 
 Для ключа задаются RPM и необязательный HTTP proxy вида `http://user:pass@host:port`. Пустой proxy у нового ключа означает прямое подключение. Для выбранного ключа пустое поле сохраняет текущий proxy, слово `direct` отключает его. Credentials замаскированы и не попадают в таблицы, историю или метрики.
@@ -47,7 +47,9 @@ Stop-Process -Id $relay.Id
 
 Выданный publisher profile имеет строгий формат `v1.<port>.<48 lowercase hex>`. Из него одновременно выводятся reverse-port и персональный адрес `https://luxuryprivate.duckdns.org/model-tunnel/<slug>/v1`, поэтому чужой slug нельзя подставить к своему порту. Profile хранится в DPAPI-конфиге и меняется только при остановленном туннеле.
 
-Во вкладке `Tunnel` нужно обновить каталог, выбрать модели и нажать `Start`. `Online` и копирование адреса доступны только после authenticated HTTPS readiness-запроса к собственному synthetic `/v1/models`. При смене активного провайдера туннель безопасно останавливается, а allowlist очищается, чтобы модели предыдущего маршрута не попали в новый. Если текущая конфигурация временно непригодна для публикации, TUI показывает `Paused`, а не ложный `Online`. Per-IP RPM применяется отдельной FIFO-очередью для каждого адреса; `0` означает unlimited, а превышение лимита не отдаёт клиенту `429`.
+Во вкладке `Tunnel` нужно обновить каталог, выбрать модели и нажать `Start`. `Online` и копирование адреса доступны только после authenticated HTTPS readiness-запроса к собственному synthetic `/v1/models`. При смене активного провайдера туннель безопасно останавливается, а allowlist очищается, чтобы модели предыдущего маршрута не попали в новый. Если текущая конфигурация временно непригодна для публикации, TUI показывает `Paused`, а не ложный `Online`. Per-IP RPM применяется отдельной FIFO-очередью для каждого адреса; `0` означает unlimited, а превышение лимита не отдаёт клиенту `429`. `Context KiB` ограничивает точный размер public request body только для текстовых API до очереди/upstream; `0` отключает пользовательский лимит, сохраняя жёсткий системный предел 64 MiB.
+
+Public tunnel пишет отдельную безопасную историю в `%LOCALAPPDATA%\ProviderSwitchboard\tunnel_history.db`: IP, method/path/model, status, latency и bytes. Prompt/response, headers, provider/upstream, owner/`OWNED_BY`, API/proxy/SSH credentials туда не записываются; сохранённые события восстанавливаются в Tunnel clients после перезапуска.
 
 `Test selected` и `Test all` выполняют короткую реальную генерацию с жёстким таймаутом 10 секунд и показывают локальные состояния `Testing`, `Available`, `Unavailable` или `Timeout`; ответы, ключи и данные провайдера не сохраняются и не публикуются.
 
@@ -59,17 +61,18 @@ Publisher identity, publisher profile и публичный API key — разн
 
 Публичная граница не является passthrough/reverse proxy:
 
-- `GET /v1/models` всегда synthetic и содержит только выбранные model ID, без запроса к upstream;
-- inference принимается только через exact `POST /v1/responses`, `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/images/generations` и `/v1/images/edits`; image edits принимают JSON references и `multipart/form-data`, остальные methods, paths, query и trailing slash отклоняются;
-- model должна точно входить в allowlist; входной public key никогда не передаётся дальше, а provider/upstream, внутренние ключи и proxy не попадают в ответ;
+- `GET /v1/models` всегда synthetic и содержит только выбранные model ID, без запроса к upstream; необязательный query игнорируется и не меняет каталог;
+- inference принимается только через exact `POST /v1/responses`, `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/images/generations` и `/v1/images/edits`; image edits принимают JSON references и `multipart/form-data`, остальные methods, paths, inference-query и trailing slash отклоняются;
+- model должна точно входить в allowlist; входной public key никогда не передаётся дальше, а provider/upstream, `OWNED_BY`, внутренние owner/ID, ключи и proxy не попадают в headers, JSON или SSE;
+- явный вопрос о provider/backend/source/owner на текстовом API получает локально синтезированную фирменную строку без обращения к upstream;
 - active provider с `passthrough` auth публиковать запрещено: туннель fail-closed отклонит запрос;
-- JSON и весь SSE-ответ целиком буферизуются и проверяются до public commit; unsafe/malformed данные не проходят. Локальное реле на `8798` не коммитит `/v1/responses` до `response.completed` и бесшовно повторяет оборванную попытку; non-stream ответы проверяются до commit, а публичный Tunnel отдаёт SSE только после полной проверки ради fail-closed анонимности.
+- JSON и весь SSE-ответ целиком буферизуются и проверяются до public commit; unsafe/malformed данные не проходят. Локальное реле на `8798` сразу подтверждает SSE и посылает нейтральные keep-alive, но не отдаёт model data до `response.completed`, поэтому оборванная попытка бесшовно повторяется; non-stream ответы проверяются до commit, а публичный Tunnel отдаёт SSE только после полной проверки ради fail-closed анонимности.
 
 Выбранные model ID и содержимое запроса/ответа являются полезной нагрузкой публичного API и проходят через VPS, который терминирует TLS. Скрываются и не передаются именно настроенные provider name/id/URL, внутренние ключи и proxy credentials.
 
 ## Lite → Pro
 
-`FREEMODEL_API_KEY` становится первым Lite-ключом EchoGate: `30 RPM`, прямой IP. Общий Pro-ключ добавляется вторым через `Providers`, обычно с `120 RPM` и proxy. Планировщик сначала использует Lite, затем Pro, затем держит запросы в бессрочной FIFO-очереди.
+`FREEMODEL_API_KEY` становится первым Lite-ключом EchoGate: по умолчанию `30 RPM`, прямой IP. RPM редактируется и сохраняется без копирования самого env-ключа в конфиг; позиция Primary и прямой IP остаются закреплены. Общий Pro-ключ добавляется вторым через `Providers`, обычно с `120 RPM` и proxy. Планировщик сначала использует Lite, затем Pro, затем держит запросы в бессрочной FIFO-очереди.
 
 Если Lite отвечает `404` с точным сообщением `Model '<model>' is not available on your plan`, только эта модель на этом ключе пропускается 5 минут. После паузы следующий запрос снова пробует Lite. Остальные модели продолжают использовать Lite. Все upstream `4xx/5xx`, transport errors и timeouts повторяются до успеха или остановки клиента/реле; `429` и `504` до клиента не коммитятся. Ошибка конкретного запроса (`400/404/409/413/422`) не замораживает ключ и не ставит в очередь другие модели.
 

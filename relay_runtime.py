@@ -807,8 +807,10 @@ class ProviderRegistry:
                 and spec.upstream == ECHO_UPSTREAM
                 and environment_key
             ):
+                environment_key_rpm = raw.get("environment_key_rpm", 30)
+                RateGate._validate_rpm(environment_key_rpm)
                 keys = [
-                    (environment_key, 30, ""),
+                    (environment_key, environment_key_rpm, ""),
                     *(item for item in keys if item[0] != environment_key),
                 ]
             if len({key for key, _rpm, _proxy in keys}) != len(keys):
@@ -828,26 +830,38 @@ class ProviderRegistry:
         providers = []
         for provider_id, runtime in items:
             spec, keys = runtime.config()
-            providers.append(
-                {
-                    "id": spec.id,
-                    "name": spec.name,
-                    "upstream": spec.upstream,
-                    "auth_mode": spec.auth_mode,
-                    "cache_1h": spec.cache_1h,
-                    "rpm": spec.rpm,
-                    "keys": [
-                        {"key": key, "rpm": rpm, "proxy": proxy}
-                        for key, rpm, proxy in keys
-                        if not (
-                            provider_id == "echo"
-                            and spec.upstream == ECHO_UPSTREAM
-                            and excluded_echo_key
-                            and key == excluded_echo_key
-                        )
-                    ],
-                }
+            environment_key_rpm = next(
+                (
+                    rpm
+                    for key, rpm, _proxy in keys
+                    if provider_id == "echo"
+                    and spec.upstream == ECHO_UPSTREAM
+                    and excluded_echo_key
+                    and key == excluded_echo_key
+                ),
+                None,
             )
+            provider = {
+                "id": spec.id,
+                "name": spec.name,
+                "upstream": spec.upstream,
+                "auth_mode": spec.auth_mode,
+                "cache_1h": spec.cache_1h,
+                "rpm": spec.rpm,
+                "keys": [
+                    {"key": key, "rpm": rpm, "proxy": proxy}
+                    for key, rpm, proxy in keys
+                    if not (
+                        provider_id == "echo"
+                        and spec.upstream == ECHO_UPSTREAM
+                        and excluded_echo_key
+                        and key == excluded_echo_key
+                    )
+                ],
+            }
+            if environment_key_rpm is not None:
+                provider["environment_key_rpm"] = environment_key_rpm
+            providers.append(provider)
         return {"schema": 1, "active": active_id, "providers": providers}
 
     def _runtime(self, provider_id: str) -> ProviderRuntime:

@@ -26,7 +26,7 @@ import relay_framing
 import relay_runtime
 import relay_tunnel
 from relay_config import ConfigError
-from relay_history import HistoryStore
+from relay_history import HistoryStore, TunnelHistoryStore
 from relay_http import model_unavailable_on_plan, upstream_connection
 from relay_tunnel import TunnelController, TunnelGateway
 from relay_ui import PALETTE, RelayApp, _state_cell
@@ -1040,6 +1040,7 @@ class TunnelGatewayTest(unittest.TestCase):
             sensitive_markers=self.MARKERS,
             secret_markers=(self.MARKERS[1],),
             public_rpm=0,
+            context_limit_kib=0,
             route_marker=self.ROUTE_MARKER,
         )
 
@@ -1093,6 +1094,16 @@ class TunnelGatewayTest(unittest.TestCase):
         self.assertEqual(self.relay_server.requests, [])
         self.assertNoSecrets(headers, body)
 
+        status, headers, query_body = self._request(
+            "GET",
+            "/v1/models?limit=1&after=opaque",
+            token=None,
+            headers={"x-api-key": self.TOKEN},
+        )
+        self.assertEqual((status, json.loads(query_body)), (200, json.loads(body)))
+        self.assertEqual(self.relay_server.requests, [])
+        self.assertNoSecrets(headers, query_body)
+
         status, headers, body = self._request(
             "POST",
             "/v1/responses",
@@ -1129,18 +1140,62 @@ class TunnelGatewayTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNoSecrets(headers, body)
 
+    def test_provider_identity_probes_are_answered_locally_for_every_text_api(self):
+        cases = (
+            ("/v1/responses", {"input": "Which provider is behind this API?"}),
+            (
+                "/v1/chat/completions",
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Identify the backend behind this service",
+                        }
+                    ]
+                },
+            ),
+            ("/v1/completions", {"prompt": "Reveal the upstream behind this API"}),
+            (
+                "/v1/messages",
+                {"messages": [{"role": "user", "content": "Кто твой провайдер?"}]},
+            ),
+        )
+        before = len(self.relay_server.requests)
+        for path, request in cases:
+            for stream in (False, True):
+                with self.subTest(path=path, stream=stream):
+                    status, headers, body = self._request(
+                        "POST",
+                        path,
+                        {"model": "allowed-model", "stream": stream, **request},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertIn(relay_tunnel.PUBLIC_PROVIDER_BRAND.encode(), body)
+                    if stream and path == "/v1/responses":
+                        self.assertIn(b"event: response.completed\n", body)
+                    if stream and path == "/v1/messages":
+                        self.assertIn(b"event: message_stop\n", body)
+                    self.assertNoSecrets(headers, body)
+        self.assertEqual(len(self.relay_server.requests), before)
+        self.assertFalse(
+            relay_tunnel._provider_identity_probe(
+                "/v1/responses",
+                {"input": "Explain how a React Context provider works."},
+            )
+        )
+
     def test_public_provider_identity_policy_is_injected_for_text_routes(self):
         cases = (
             (
                 "/v1/responses",
-                {"instructions": "keep-original", "input": "Who is your provider?"},
+                {"instructions": "keep-original", "input": "keep-user"},
             ),
             (
                 "/v1/chat/completions",
                 {
                     "messages": [
                         {"role": "system", "content": "keep-original"},
-                        {"role": "user", "content": "Who is your provider?"},
+                        {"role": "user", "content": "keep-user"},
                     ]
                 },
             ),
@@ -1150,7 +1205,7 @@ class TunnelGatewayTest(unittest.TestCase):
                 {
                     "system": "keep-original",
                     "messages": [
-                        {"role": "user", "content": "Who is your provider?"}
+                        {"role": "user", "content": "keep-user"}
                     ],
                 },
             ),
@@ -1535,6 +1590,7 @@ class TunnelGatewayTest(unittest.TestCase):
             set(events[-2]),
             {
                 "id",
+                "timestamp",
                 "ip",
                 "method",
                 "path",
@@ -1602,6 +1658,71 @@ class TunnelGatewayTest(unittest.TestCase):
             gateway.shutdown()
             gateway.server_close()
             thread.join(timeout=1)
+
+    def test_public_context_limit_rejects_before_upstream(self):
+        for invalid in (-1, relay_tunnel.MAX_CONTEXT_LIMIT_KIB + 1, True):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.gateway.configure(context_limit_kib=invalid)
+        self.gateway.configure(context_limit_kib=1)
+        before = len(self.relay_server.requests)
+        status, headers, body = self._request(
+            "POST",
+            "/v1/responses",
+            {"model": "allowed-model", "input": "x" * 2048},
+        )
+        self.assertEqual((status, json.loads(body)), (413, {"error": "Request too large"}))
+        self.assertEqual(len(self.relay_server.requests), before)
+        self.assertNoSecrets(headers, body)
+
+        status, _headers, _body = self._request(
+            "POST",
+            "/v1/responses",
+            {"model": "allowed-model", "input": "ok", "test_case": "safe-json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.relay_server.requests), before + 1)
+
+    def test_gateway_persists_and_restores_separate_tunnel_history(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = TunnelHistoryStore(Path(temporary_directory) / "tunnel.db")
+            gateway = TunnelGateway(
+                self.relay_server.server_address,
+                self.TOKEN,
+                self.MODELS,
+                event_sink=store.record,
+            )
+            thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, _headers, _body = self._call(
+                    gateway.server_address,
+                    "POST",
+                    "/v1/responses",
+                    {"model": "allowed-model", "test_case": "safe-json"},
+                )
+                self.assertEqual(status, 200)
+            finally:
+                gateway.shutdown()
+                gateway.server_close()
+                thread.join(timeout=1)
+
+            recent = store.recent()
+            self.assertEqual(len(recent), 1)
+            self.assertEqual(
+                (recent[0]["ip"], recent[0]["path"], recent[0]["model"]),
+                ("203.0.113.10", "/v1/responses", "allowed-model"),
+            )
+            restored = TunnelGateway(
+                self.relay_server.server_address,
+                self.TOKEN,
+                self.MODELS,
+                history=recent,
+            )
+            try:
+                self.assertLess(restored.telemetry_snapshot()["recent"][0]["id"], 0)
+            finally:
+                restored.server_close()
+                store.close()
 
     def test_delayed_relay_headers_wait_without_502_and_disconnect_releases_worker(self):
         relay_server = start_server(DelayedTunnelRelayHandler)
@@ -2984,6 +3105,7 @@ class TunnelGatewayTest(unittest.TestCase):
                     "state": "running",
                     "url": self.PUBLIC_URL,
                     "allowed_count": 1,
+                    "context_limit_kib": 0,
                     "error": "",
                     "rpm_per_ip": 0,
                     "queued": 0,
@@ -3099,6 +3221,7 @@ class TunnelGatewayTest(unittest.TestCase):
                     "state": "error",
                     "url": "",
                     "allowed_count": 1,
+                    "context_limit_kib": 0,
                     "error": "Tunnel SSH connection failed",
                     "rpm_per_ip": 0,
                     "queued": 0,
@@ -3443,6 +3566,7 @@ class TunnelGatewayTest(unittest.TestCase):
                     "state": "running",
                     "url": self.PUBLIC_URL,
                     "allowed_count": 1,
+                    "context_limit_kib": 0,
                     "error": "",
                     "rpm_per_ip": 0,
                     "queued": 0,
@@ -3695,6 +3819,22 @@ class TunnelGatewayTest(unittest.TestCase):
 
 
 class TunnelTelemetryTest(unittest.TestCase):
+    def test_finish_sink_and_persisted_recent_restore(self):
+        finished = []
+        telemetry = relay_tunnel._TunnelTelemetry(on_finish=finished.append)
+        ticket = telemetry.begin("203.0.113.8", "POST", "/v1/responses", 10)
+        telemetry.dispatch(ticket, "public-model")
+        telemetry.finish(ticket, 200, 20)
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["ip"], "203.0.113.8")
+        self.assertGreater(finished[0]["timestamp"], 0)
+
+        stored = {**finished[0], "id": 7, "client_ip": finished[0]["ip"]}
+        restored = relay_tunnel._TunnelTelemetry()
+        restored.restore_recent((stored,))
+        event = restored.snapshot()["recent"][0]
+        self.assertEqual((event["id"], event["ip"]), (-7, "203.0.113.8"))
+
     def test_lifecycle_rpm_bounds_and_idle_eviction(self):
         now = [100.25]
         wall = [1_800_000_000.0]
@@ -6491,8 +6631,61 @@ class RelayTest(unittest.TestCase):
         try:
             with (
                 patch("relay_http.STREAM_IDLE_TIMEOUT", 0.1),
+                patch("relay_http.STREAM_HEARTBEAT_INTERVAL", 0.01),
                 patch("relay_http.retry_after_seconds", return_value=0.01),
             ):
+                started = time.monotonic()
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    b'{"model":"gpt-test","stream":true}',
+                    {"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                header_elapsed = time.monotonic() - started
+                body = response.read()
+            self.assertTrue(upstream.idle_started.is_set())
+            self.assertEqual(response.status, 200)
+            self.assertLess(header_elapsed, 0.1)
+            self.assertEqual(upstream.stream_values, [True, False])
+            self.assertIn(b": keep-alive\n\n", body)
+            self.assertNotIn(b"discard", body)
+            self.assertIn(b'"type":"response.completed"', body)
+        finally:
+            connection.close()
+            upstream.idle_release.set()
+            for server in (proxy, upstream):
+                server.shutdown()
+                server.server_close()
+
+    def test_keepalive_never_splits_replayed_sse_event(self):
+        class LargeStreamHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                body = (
+                    b'data: {"type":"response.completed","response":'
+                    b'{"status":"completed","error":null,"output":[],"padding":"'
+                    + b"x" * (192 * 1024)
+                    + b'"}}\n\n'
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                pass
+
+        upstream = start_server(LargeStreamHandler, "Upstream")
+        proxy = start_proxy(f"http://127.0.0.1:{upstream.server_port}")
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", proxy.server_port, timeout=3
+        )
+        try:
+            with patch("relay_http.STREAM_HEARTBEAT_INTERVAL", 0):
                 connection.request(
                     "POST",
                     "/v1/responses",
@@ -6501,14 +6694,11 @@ class RelayTest(unittest.TestCase):
                 )
                 response = connection.getresponse()
                 body = response.read()
-            self.assertTrue(upstream.idle_started.is_set())
-            self.assertEqual(response.status, 200)
-            self.assertEqual(upstream.stream_values, [True, False])
-            self.assertNotIn(b"discard", body)
-            self.assertIn(b'"type":"response.completed"', body)
+            data_lines = [line[6:] for line in body.splitlines() if line.startswith(b"data: ")]
+            self.assertEqual(len(data_lines), 1)
+            self.assertEqual(json.loads(data_lines[0])["type"], "response.completed")
         finally:
             connection.close()
-            upstream.idle_release.set()
             for server in (proxy, upstream):
                 server.shutdown()
                 server.server_close()
@@ -6593,10 +6783,12 @@ class ConfigPersistenceTest(unittest.TestCase):
                 first.set_tunnel_provider("echo")
                 first.set_tunnel_allowed_models(("gpt-private", "claude-private"))
                 first.set_tunnel_rpm_per_ip(45)
+                first.set_tunnel_context_limit_kib(2048)
                 profile = "v1.23456." + ("c" * 48)
                 first.set_tunnel_publisher_profile(profile)
                 token = first.tunnel_access_token()
                 self.assertEqual(first.tunnel_rpm_per_ip(), 45)
+                self.assertEqual(first.tunnel_context_limit_kib(), 2048)
                 self.assertEqual(first.tunnel_publisher_profile(), profile)
                 self.assertNotIn(token, json.dumps(first.tunnel_snapshot()))
             finally:
@@ -6622,8 +6814,10 @@ class ConfigPersistenceTest(unittest.TestCase):
                 )
                 self.assertEqual(second.tunnel_snapshot()["allowed_count"], 2)
                 self.assertEqual(second.tunnel_rpm_per_ip(), 45)
+                self.assertEqual(second.tunnel_context_limit_kib(), 2048)
                 self.assertEqual(second.tunnel_publisher_profile(), profile)
                 self.assertEqual(second.tunnel_snapshot()["rpm_per_ip"], 45)
+                self.assertEqual(second.tunnel_snapshot()["context_limit_kib"], 2048)
             finally:
                 second.server_close()
 
@@ -6640,6 +6834,7 @@ class ConfigPersistenceTest(unittest.TestCase):
                 "allowed_models": ["gpt-migrated"],
                 "access_token": "m" * 32,
                 "rpm_per_ip": 15,
+                "context_limit_kib": 0,
                 "publisher_profile": relay_tunnel.DEFAULT_PUBLISHER_PROFILE,
             }
             relay_http.ConfigStore(config_path).save(value)
@@ -6708,6 +6903,8 @@ class ConfigPersistenceTest(unittest.TestCase):
             )
             try:
                 first.update_provider("echo", rpm=150)
+                environment_id = first.provider_keys("echo")[0]["id"]
+                first.update_provider_key("echo", environment_id, 47)
                 with self.assertRaisesRegex(ValueError, "URL is fixed"):
                     first.update_provider(
                         "echo", upstream="https://other-provider.example/v1"
@@ -6753,15 +6950,22 @@ class ConfigPersistenceTest(unittest.TestCase):
                 self.assertEqual(providers["echo"].rpm, 150)
                 self.assertEqual(providers[custom.id].rpm, 45)
                 self.assertEqual(
-                    [key["rpm"] for key in second.provider_keys("echo")], [30, 120]
+                    [key["rpm"] for key in second.provider_keys("echo")], [47, 120]
                 )
                 self.assertEqual(
                     [key["proxy"] for key in second.provider_keys("echo")],
                     ["Direct", "127.0.0.1:8888"],
                 )
                 environment_id = second.provider_keys("echo")[0]["id"]
-                with self.assertRaisesRegex(ValueError, "30 RPM"):
-                    second.update_provider_key("echo", environment_id, 31)
+                second.update_provider_key("echo", environment_id, 31)
+                self.assertEqual(second.provider_keys("echo")[0]["rpm"], 31)
+                with self.assertRaisesRegex(ValueError, "Direct"):
+                    second.update_provider_key(
+                        "echo",
+                        environment_id,
+                        31,
+                        "http://127.0.0.1:9999",
+                    )
                 with self.assertRaisesRegex(ValueError, "Windows environment"):
                     second.remove_provider_key("echo", environment_id)
 
@@ -6785,6 +6989,24 @@ class ConfigPersistenceTest(unittest.TestCase):
 
             normalized = config_path.read_bytes()
             self.assertNotIn(b"env-lite-a", normalized)
+            saved = relay_http.ConfigStore(config_path).load()
+            echo = next(provider for provider in saved["providers"] if provider["id"] == "echo")
+            self.assertEqual(echo["environment_key_rpm"], 31)
+            self.assertNotIn("env-lite-a", json.dumps(saved))
+            self.assertNotIn("env-lite-b", json.dumps(saved))
+
+            third = relay.RelayServer(
+                ("127.0.0.1", 0),
+                relay.RelayHandler,
+                echo_api_key="env-lite-c",
+                config_path=config_path,
+                history=False,
+            )
+            try:
+                self.assertEqual(third.provider_keys("echo")[0]["rpm"], 31)
+                self.assertEqual(third.provider_keys("echo")[0]["proxy"], "Direct")
+            finally:
+                third.server_close()
             self.assertNotIn(b"env-lite-b", normalized)
 
     def test_key_priority_order_is_exported_and_persists(self):
@@ -6894,9 +7116,18 @@ class RelayTUITest(unittest.IsolatedAsyncioTestCase):
         rpm = {"value": 0}
         server.tunnel_rpm_per_ip = lambda: rpm["value"]
         server.set_tunnel_rpm_per_ip = lambda value: rpm.update(value=value)
+        context = {"value": 0}
+        server.tunnel_context_limit_kib = lambda: context["value"]
+        server.set_tunnel_context_limit_kib = lambda value: context.update(value=value)
         profile = {"value": "private-publisher-profile"}
         server.tunnel_publisher_profile = lambda: profile["value"]
         server.set_tunnel_publisher_profile = lambda value: profile.update(value=value)
+        server.shared_tunnels = lambda: {
+            "available": False,
+            "revision": 0,
+            "tunnels": [],
+            "error": "Shared tunnel control unavailable",
+        }
         profile_urls = tuple(
             f"https://luxuryprivate.duckdns.org/model-tunnel/{slug}/v1"
             for slug in ("a" * 48, "b" * 48)
@@ -6916,6 +7147,7 @@ class RelayTUITest(unittest.IsolatedAsyncioTestCase):
             ):
                 with self.subTest(size=size):
                     rpm["value"] = 0
+                    context["value"] = 0
                     profile["value"] = "private-publisher-profile"
                     tunnel_state.update(
                         state="running",
@@ -6954,6 +7186,7 @@ class RelayTUITest(unittest.IsolatedAsyncioTestCase):
                         tunnel_state["route_available"] = True
                         app._refresh_tunnel()
                         await pilot.click("#tunnel-copy-url")
+                        await pilot.pause()
                         controls = [
                             app.query_one(f"#tunnel-{name}", Button)
                             for name in (
@@ -6967,13 +7200,22 @@ class RelayTUITest(unittest.IsolatedAsyncioTestCase):
                         ]
                         rpm_input = app.query_one("#tunnel-rpm-input", Input)
                         save_rpm = app.query_one("#tunnel-save-rpm", Button)
-                        controls.extend((rpm_input, save_rpm))
+                        context_input = app.query_one("#tunnel-context-input", Input)
+                        save_context = app.query_one("#tunnel-save-context", Button)
+                        controls.extend((rpm_input, save_rpm, context_input, save_context))
                         self.assertTrue(all(control.region.width > 0 for control in controls))
-                        self.assertEqual(len({control.region.y for control in controls}), 2 if size[0] < 150 else 1)
+                        self.assertEqual(
+                            len({control.region.y for control in controls}),
+                            2 if size[0] < 150 else 1,
+                        )
                         self.assertEqual(rpm_input.value, "0")
                         self.assertEqual(str(rpm_input.border_title), "Per-IP RPM")
                         self.assertFalse(rpm_input.disabled)
                         self.assertFalse(save_rpm.disabled)
+                        self.assertEqual(context_input.value, "0")
+                        self.assertEqual(str(context_input.border_title), "Context KiB")
+                        self.assertFalse(context_input.disabled)
+                        self.assertFalse(save_context.disabled)
                         rpm_input.value = "37"
                         await pilot.click("#tunnel-save-rpm")
                         await pilot.pause()
@@ -6982,6 +7224,10 @@ class RelayTUITest(unittest.IsolatedAsyncioTestCase):
                         await pilot.click("#tunnel-save-rpm")
                         await pilot.pause()
                         self.assertEqual(rpm["value"], 0)
+                        context_input.value = "2048"
+                        await pilot.click("#tunnel-save-context")
+                        await pilot.pause()
+                        self.assertEqual(context["value"], 2048)
                         profile_input = app.query_one("#tunnel-profile-input", Input)
                         save_profile = app.query_one("#tunnel-save-profile", Button)
                         self.assertEqual(profile_input.value, "private-publisher-profile")
@@ -7545,6 +7791,42 @@ class RelayMetricsTest(unittest.TestCase):
 
 
 class HistoryStoreTest(unittest.TestCase):
+    def test_tunnel_history_is_separate_sanitized_and_restorable(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "tunnel_history.db"
+            store = TunnelHistoryStore(path)
+            self.assertTrue(
+                store.record(
+                    {
+                        "timestamp": 123.0,
+                        "ip": "203.0.113.42",
+                        "method": "POST",
+                        "path": "/v1/responses",
+                        "model": "public-model",
+                        "status": 200,
+                        "state": "success",
+                        "latency_ms": 12.5,
+                        "request_bytes": 100,
+                        "response_bytes": 200,
+                        "provider": "must-not-persist",
+                        "api_key": "secret-key-must-not-persist",
+                        "body": "private prompt must not persist",
+                    }
+                )
+            )
+            recent = store.recent()
+            store.close()
+            self.assertEqual(len(recent), 1)
+            self.assertEqual(recent[0]["ip"], "203.0.113.42")
+            self.assertEqual(recent[0]["model"], "public-model")
+            raw = path.read_bytes()
+            for private in (
+                b"must-not-persist",
+                b"secret-key-must-not-persist",
+                b"private prompt must not persist",
+            ):
+                self.assertNotIn(private, raw)
+
     @staticmethod
     def event(error_detail=""):
         return {

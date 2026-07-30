@@ -1259,8 +1259,8 @@ class RelayApp(App):
     #tunnel-profile-input, #tunnel-save-profile {{ width: 1fr; min-width: 0; margin: 0; }}
     #tunnel-model-tests {{
         height: 3;
-        grid-size: 3 1;
-        grid-columns: 17 12 1fr;
+        grid-size: 4 1;
+        grid-columns: 17 12 18 1fr;
         grid-gutter: 0 1;
     }}
     #tunnel-model-tests Button {{ width: 1fr; min-width: 0; margin: 0; }}
@@ -1401,6 +1401,7 @@ class RelayApp(App):
         self._tunnel_models_loading = False
         self._tunnel_models_loaded = False
         self._tunnel_models: list[str] = []
+        self._model_route_scope = "tunnel"
         self._tunnel_model_probe_states: dict[str, str] = {}
         self._tunnel_model_probe_busy = False
         self._tunnel_model_probe_generation = 0
@@ -1505,13 +1506,13 @@ class RelayApp(App):
                         yield Button("Rotate key", id="tunnel-rotate-key")
                         provider_select = Select(
                             [],
-                            prompt="Tunnel provider",
+                            prompt="Model provider",
                             allow_blank=True,
                             compact=True,
                             disabled=True,
                             id="tunnel-provider-select",
                         )
-                        provider_select.border_title = "Tunnel provider"
+                        provider_select.border_title = "Model provider"
                         yield provider_select
                         yield Button("All models", disabled=True, id="tunnel-all-models")
                         rpm_input = Input(
@@ -1549,6 +1550,7 @@ class RelayApp(App):
                     with Grid(id="tunnel-model-tests"):
                         yield Button("Test selected", disabled=True, id="tunnel-test-selected")
                         yield Button("Test all", disabled=True, id="tunnel-test-all")
+                        yield Button("Target: Tunnel", id="model-route-scope")
                         yield Static("Models are not tested", id="tunnel-model-test-status")
                     models = SelectionList(id="tunnel-models")
                     models.border_title = "Available models · open tab to load"
@@ -1834,7 +1836,7 @@ class RelayApp(App):
         )
         provider_locked = self._tunnel_profile_locked(state)
         self.query_one("#tunnel-provider-select", Select).disabled = (
-            provider_locked or not self._tunnel_provider_available
+            self._tunnel_busy or not self._tunnel_provider_available
         )
         profile_disabled = (
             provider_locked or not self._tunnel_profile_available
@@ -2171,6 +2173,61 @@ class RelayApp(App):
         if changed and self.query_one("#main-tabs", TabbedContent).active == "tunnel":
             self._load_tunnel_models()
 
+    def _provider_routed_models(self, provider_id: str) -> tuple[str, ...]:
+        getter_name = (
+            "relay_model_routes"
+            if self._model_route_scope == "relay"
+            else "tunnel_model_routes"
+        )
+        getter = getattr(self.server, getter_name, None)
+        if callable(getter):
+            return tuple(
+                str(_value(route, "model", "")).strip()
+                for route in getter()
+                if str(_value(route, "provider_id", "")) == provider_id
+                and str(_value(route, "model", "")).strip()
+            )
+        if self._model_route_scope == "tunnel":
+            return tuple(
+                model
+                for model in (
+                    str(item).strip() for item in self.server.tunnel_allowed_models()
+                )
+                if model
+            )
+        return ()
+
+    def _save_routed_models(self, models) -> tuple[str, ...]:
+        setter_name = (
+            "set_relay_allowed_models"
+            if self._model_route_scope == "relay"
+            else "set_tunnel_allowed_models"
+        )
+        setter = getattr(self.server, setter_name, None)
+        if not callable(setter):
+            raise RuntimeError("Model routing is unavailable")
+        saved = setter(tuple(models))
+        source = models if saved is None else saved
+        return tuple(
+            model for model in (str(item).strip() for item in source) if model
+        )
+
+    def _toggle_model_route_scope(self) -> None:
+        if not callable(getattr(self.server, "set_relay_allowed_models", None)):
+            return
+        self._model_route_scope = (
+            "tunnel" if self._model_route_scope == "relay" else "relay"
+        )
+        allowed = self._provider_routed_models(self._tunnel_provider_id or "")
+        self._apply_tunnel_models(
+            self._tunnel_models_generation,
+            self._tunnel_provider_id or "",
+            list(self._tunnel_models),
+            allowed,
+            False,
+            False,
+        )
+
     def _select_all_tunnel_models(self) -> None:
         if self._tunnel_models_loading:
             self._tunnel_select_all_requested = True
@@ -2190,11 +2247,7 @@ class RelayApp(App):
             current_provider = getattr(self.server, "tunnel_provider_id", None)
             if callable(current_provider) and str(current_provider()) != provider_id:
                 return
-            saved = self.server.set_tunnel_allowed_models(allowed)
-            source = allowed if saved is None else saved
-            allowed = tuple(
-                model for model in (str(item).strip() for item in source) if model
-            )
+            allowed = self._save_routed_models(allowed)
         except Exception:
             self._apply_tunnel_models(
                 self._tunnel_models_generation,
@@ -2236,10 +2289,7 @@ class RelayApp(App):
                 fetch = getattr(self.server, "fetch_tunnel_models", None)
                 raw_models = fetch() if callable(fetch) else self.server.fetch_models(provider_id)
                 models = ModelsScreen._model_names(raw_models)
-                allowed_source = self.server.tunnel_allowed_models()
-                allowed = tuple(
-                    model for model in (str(item).strip() for item in allowed_source) if model
-                )
+                allowed = self._provider_routed_models(provider_id)
             except Exception:
                 self.app.call_from_thread(
                     self._apply_tunnel_models,
@@ -2410,11 +2460,7 @@ class RelayApp(App):
                 current_provider = getattr(self.server, "tunnel_provider_id", None)
                 if callable(current_provider) and str(current_provider()) != provider_id:
                     return
-                saved = self.server.set_tunnel_allowed_models(tuple(models))
-                source = models if saved is None else saved
-                allowed = tuple(
-                    model for model in (str(item).strip() for item in source) if model
-                )
+                allowed = self._save_routed_models(models)
             except Exception:
                 failed = True
         self._tunnel_models_loading = False
@@ -2449,7 +2495,10 @@ class RelayApp(App):
         model_list.border_title = (
             "No models reported"
             if not self._tunnel_models
-            else f"{len(selected)} of {len(self._tunnel_models)} models exposed"
+            else (
+                f"{len(selected)} of {len(self._tunnel_models)} routed to "
+                + ("Local relay" if self._model_route_scope == "relay" else "Tunnel")
+            )
         )
         self._update_all_models_control()
         self._refresh_tunnel_model_probes()
@@ -2469,6 +2518,16 @@ class RelayApp(App):
         button.set_class(all_selected, "tunnel-all-selected")
         button.disabled = (
             self._tunnel_models_loading or not self._tunnel_provider_id
+        )
+        try:
+            scope = self.query_one("#model-route-scope", Button)
+        except NoMatches:
+            return
+        scope.label = (
+            "Target: Relay" if self._model_route_scope == "relay" else "Target: Tunnel"
+        )
+        scope.disabled = not callable(
+            getattr(self.server, "set_relay_allowed_models", None)
         )
 
     def _invalidate_tunnel_model_probes(self) -> None:
@@ -3083,7 +3142,7 @@ class RelayApp(App):
     ) -> None:
         selected = tuple(str(model) for model in event.selection_list.selected)
         try:
-            self.server.set_tunnel_allowed_models(selected)
+            self._save_routed_models(selected)
         except Exception:
             self.notify(
                 "Unable to save model access",
@@ -3095,7 +3154,8 @@ class RelayApp(App):
             self._load_tunnel_models()
             return
         event.selection_list.border_title = (
-            f"{len(selected)} of {event.selection_list.option_count} models exposed"
+            f"{len(selected)} of {event.selection_list.option_count} routed to "
+            + ("Local relay" if self._model_route_scope == "relay" else "Tunnel")
         )
         self._update_all_models_control()
         self._update_tunnel_model_probe_controls()
@@ -3131,7 +3191,7 @@ class RelayApp(App):
         self._load_tunnel_models()
         self._refresh_tunnel()
         name = str(_value(self._providers[self._tunnel_provider_id], "name", provider_id))
-        self.notify(f"Tunnel provider: {name}", timeout=2, markup=False)
+        self.notify(f"Model provider: {name}", timeout=2, markup=False)
 
     def _set_stats_period(self, period: str) -> None:
         if period not in {value for _, value in PERIODS}:
@@ -3187,6 +3247,8 @@ class RelayApp(App):
             self._test_tunnel_models(all_models=False)
         elif button_id == "tunnel-test-all":
             self._test_tunnel_models(all_models=True)
+        elif button_id == "model-route-scope":
+            self._toggle_model_route_scope()
         elif button_id == "tunnel-copy-url":
             self._copy_tunnel_value(False)
         elif button_id == "tunnel-copy-key":

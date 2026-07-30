@@ -158,6 +158,8 @@ class _TunnelUIServer(_UIServer):
         self.provider_id = "echo"
         self.provider_changes: list[str] = []
         self.allowed = ("model-a",)
+        self.tunnel_routes = {"model-a": "echo"}
+        self.relay_routes: dict[str, str] = {}
         self.rpm = 30
         self.context_kib = 0
         self.state = "stopped"
@@ -173,6 +175,7 @@ class _TunnelUIServer(_UIServer):
         self.fetch_started = threading.Event()
         self.fetch_release = threading.Event()
         self.allowed_writes: list[tuple[str, tuple[str, ...]]] = []
+        self.relay_writes: list[tuple[str, tuple[str, ...]]] = []
         self.probe_calls: list[str] = []
         self.probe_states: dict[str, str] = {}
         self.probe_results: dict[str, str] = {}
@@ -252,12 +255,9 @@ class _TunnelUIServer(_UIServer):
         return self.provider_id
 
     def set_tunnel_provider(self, provider_id):
-        if self.state == "running":
-            raise ValueError("Stop tunnel before changing provider")
         if provider_id not in self.catalogs:
             raise ValueError("Unknown provider")
         self.provider_id = provider_id
-        self.allowed = ()
         with self.probe_lock:
             self.probe_states.clear()
         self.provider_changes.append(provider_id)
@@ -274,10 +274,44 @@ class _TunnelUIServer(_UIServer):
     def tunnel_allowed_models(self):
         return self.allowed
 
+    def tunnel_model_routes(self):
+        if tuple(self.tunnel_routes) != tuple(self.allowed):
+            self.tunnel_routes = {
+                model: self.provider_id for model in self.allowed
+            }
+        return tuple(
+            {"model": model, "provider_id": provider_id}
+            for model, provider_id in self.tunnel_routes.items()
+        )
+
     def set_tunnel_allowed_models(self, models):
-        self.allowed = tuple(models)
-        self.allowed_writes.append((self.provider_id, self.allowed))
-        return self.allowed
+        self.tunnel_routes = {
+            model: provider_id
+            for model, provider_id in self.tunnel_routes.items()
+            if provider_id != self.provider_id
+        }
+        selected = tuple(models)
+        self.tunnel_routes.update((model, self.provider_id) for model in selected)
+        self.allowed = tuple(self.tunnel_routes)
+        self.allowed_writes.append((self.provider_id, selected))
+        return selected
+
+    def relay_model_routes(self):
+        return tuple(
+            {"model": model, "provider_id": provider_id}
+            for model, provider_id in self.relay_routes.items()
+        )
+
+    def set_relay_allowed_models(self, models):
+        self.relay_routes = {
+            model: provider_id
+            for model, provider_id in self.relay_routes.items()
+            if provider_id != self.provider_id
+        }
+        selected = tuple(models)
+        self.relay_routes.update((model, self.provider_id) for model in selected)
+        self.relay_writes.append((self.provider_id, selected))
+        return selected
 
     def _shared_snapshot(self):
         return {
@@ -827,7 +861,7 @@ class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#tunnel-client-close")
             server.state = "running"
             app._refresh_tunnel()
-            self.assertTrue(provider.disabled)
+            self.assertFalse(provider.disabled)
 
     async def test_tunnel_provider_model_controls_fit_supported_sizes(self):
         for size, layout in (
@@ -925,6 +959,7 @@ class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
                     test_controls = [
                         app.query_one("#tunnel-test-selected", Button),
                         app.query_one("#tunnel-test-all", Button),
+                        app.query_one("#model-route-scope", Button),
                         app.query_one("#tunnel-model-test-status", Static),
                     ]
                     self.assertTrue(
@@ -957,6 +992,81 @@ class RelayUILayoutTest(unittest.IsolatedAsyncioTestCase):
                             app.query_one("#tunnel-clients", TunnelClientsTable).region.height,
                             8,
                         )
+
+    async def test_model_routes_are_independent_per_provider_and_target(self):
+        server = _TunnelUIServer()
+        app = RelayApp(server)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app.query_one("#main-tabs").active = "tunnel"
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if app._tunnel_models_loaded:
+                    break
+            scope = app.query_one("#model-route-scope", Button)
+            self.assertEqual(str(scope.label), "Target: Tunnel")
+            self.assertEqual(
+                app.query_one("#tunnel-provider-select", Select).border_title,
+                "Model provider",
+            )
+
+            await pilot.click("#tunnel-all-models")
+            await pilot.pause()
+            self.assertEqual(
+                server.tunnel_routes,
+                {"model-a": "echo", "model-b": "echo"},
+            )
+
+            await pilot.click("#model-route-scope")
+            await pilot.pause()
+            self.assertEqual(str(scope.label), "Target: Relay")
+            self.assertEqual(
+                tuple(app.query_one("#tunnel-models", SelectionList).selected), ()
+            )
+            await pilot.click("#tunnel-all-models")
+            await pilot.pause()
+            self.assertEqual(
+                server.relay_routes,
+                {"model-a": "echo", "model-b": "echo"},
+            )
+
+            provider = app.query_one("#tunnel-provider-select", Select)
+            provider.value = "local"
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if app._tunnel_models_loaded and app._tunnel_provider_id == "local":
+                    break
+            await pilot.click("#tunnel-all-models")
+            await pilot.pause()
+            self.assertEqual(
+                server.relay_routes,
+                {
+                    "model-a": "echo",
+                    "model-b": "echo",
+                    "local-a": "local",
+                    "local-b": "local",
+                    "local-c": "local",
+                },
+            )
+
+            await pilot.click("#model-route-scope")
+            await pilot.pause()
+            self.assertEqual(str(scope.label), "Target: Tunnel")
+            await pilot.click("#tunnel-all-models")
+            await pilot.pause()
+            self.assertEqual(
+                server.tunnel_routes,
+                {
+                    "model-a": "echo",
+                    "model-b": "echo",
+                    "local-a": "local",
+                    "local-b": "local",
+                    "local-c": "local",
+                },
+            )
+
+            server.state = "running"
+            app._refresh_tunnel()
+            self.assertFalse(provider.disabled)
 
     async def test_external_tunnel_provider_change_clears_stale_blocked_catalog(self):
         server = _TunnelUIServer()

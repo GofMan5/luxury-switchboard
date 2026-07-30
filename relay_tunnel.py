@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import hmac
 import http.client
 import ipaddress
@@ -43,6 +44,7 @@ MAX_EVENT_BYTES = MAX_BODY_BYTES
 MAX_MODELS_BYTES = 128 * 1024
 READINESS_HEADER = "X-Provider-Switch-Readiness"
 CLIENT_IP_HEADER = "X-Tunnel-Client-IP"
+TUNNEL_MODEL_HEADER = "X-Provider-Switch-Tunnel-Model"
 SSH_HOST = "81.90.28.122"
 SSH_DESTINATION = f"model-tunnel@{SSH_HOST}"
 CONTROL_SSH_DESTINATION = f"tunnel-control@{SSH_HOST}"
@@ -556,6 +558,10 @@ def parse_publisher_profile(value: str) -> tuple[int, str]:
 def publisher_url(value: str) -> str:
     _port, slug = parse_publisher_profile(value)
     return f"{PUBLISHER_URL_PREFIX}/{slug}/v1"
+
+
+def model_route_token(model: str) -> str:
+    return hashlib.sha256(model.encode("utf-8")).hexdigest()
 
 
 class _ClientRateLimits:
@@ -2209,6 +2215,7 @@ class TunnelHandler(BaseHTTPRequestHandler):
                 self._error(*rejection)
                 return
             headers["X-Provider-Switch-Tunnel"] = route_marker
+            headers[TUNNEL_MODEL_HEADER] = model_route_token(requested_model)
             connection.request("POST", path, body=body, headers=headers)
             response, relay_socket, rejection = self._wait_for_relay_headers(
                 connection,

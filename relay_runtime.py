@@ -1063,7 +1063,7 @@ class RelayMetrics:
             request_id = self._request_sequence
             self._live[request_id] = {
                 "_request_id": request_id,
-                "_started_at": time.monotonic(),
+                "_started_at": now,
                 "timestamp": time.time(),
                 "time": time.strftime("%H:%M:%S"),
                 "provider_id": provider_id,
@@ -1109,6 +1109,21 @@ class RelayMetrics:
                     cache_1h=cache_extended,
                     _queued_at=time.monotonic(),
                 )
+
+    def route(self, request_id: int, provider_id: str, provider: str) -> None:
+        with self._lock:
+            event = self._live.get(request_id)
+            if not event or event["provider_id"] == provider_id:
+                return
+            old_times = self._provider_request_times.get(event["provider_id"])
+            started = event.get("_started_at")
+            if old_times is not None and started is not None:
+                try:
+                    old_times.remove(started)
+                except ValueError:
+                    pass
+            self._provider_request_times.setdefault(provider_id, deque()).append(started)
+            event.update(provider_id=provider_id, provider=provider)
 
     def dispatch(self, request_id: int, provider_id: str, queue_ms: float) -> None:
         """Mark a queued request as sent upstream before response headers arrive."""

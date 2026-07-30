@@ -42,10 +42,12 @@ from relay_image_compat import (
 from relay_tunnel import (
     CONTROL_SELF_NAME,
     DEFAULT_PUBLISHER_PROFILE,
+    TUNNEL_MODEL_HEADER,
     InvalidJson,
     SharedTunnelControl,
     TunnelController,
     _load_json,
+    model_route_token,
     parse_publisher_profile,
     validate_context_limit_kib,
 )
@@ -253,10 +255,36 @@ def _tunnel_catalog_models(value) -> tuple[str, ...]:
     return _tunnel_models(models)
 
 
+def _tunnel_routes(value, models, default_provider_id: str) -> dict[str, str]:
+    if value is None:
+        return {model: default_provider_id for model in models}
+    if not isinstance(value, dict) or len(value) > MAX_TUNNEL_MODELS:
+        raise ValueError("Saved tunnel settings are invalid")
+    selected = _tunnel_models(tuple(value))
+    ordered = tuple(model for model in models if model in value) + tuple(
+        model for model in selected if model not in models
+    )
+    routes = {}
+    for model in ordered:
+        provider_id = value[model]
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id
+            or len(provider_id) > 64
+            or any(
+                not (character.isalnum() or character in "-_")
+                for character in provider_id
+            )
+        ):
+            raise ValueError("Saved tunnel settings are invalid")
+        routes[model] = provider_id
+    return routes
+
+
 def _tunnel_settings(
     saved: dict | None,
     default_provider_id: str,
-) -> tuple[tuple[str, ...], str, int, int, str, str]:
+) -> tuple[tuple[str, ...], dict[str, str], str, int, int, str, str]:
     raw = saved.get("tunnel", {}) if saved else {}
     if not isinstance(raw, dict):
         raise ValueError("Saved tunnel settings are invalid")
@@ -294,8 +322,13 @@ def _tunnel_settings(
     provider_id = raw.get("provider_id", default_provider_id)
     if not isinstance(provider_id, str) or not provider_id:
         raise ValueError("Saved tunnel settings are invalid")
+    allowed_models = _tunnel_models(raw.get("allowed_models", ()))
+    model_routes = _tunnel_routes(
+        raw.get("model_routes"), allowed_models, provider_id
+    )
     return (
-        _tunnel_models(raw.get("allowed_models", ())),
+        tuple(model_routes),
+        model_routes,
         token,
         rpm_per_ip,
         context_limit_kib,
@@ -1189,6 +1222,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         }
         blocked.add("content-length")
         blocked.add(TUNNEL_REQUEST_HEADER.lower())
+        blocked.add(TUNNEL_MODEL_HEADER.lower())
         blocked.add("x-openai-actor-authorization")
         headers = {
             name: value
@@ -1239,7 +1273,8 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def _relay(self) -> None:
         route = self.server._acquire_request_route(
-            self.headers.get_all(TUNNEL_REQUEST_HEADER, [])
+            self.headers.get_all(TUNNEL_REQUEST_HEADER, []),
+            self.headers.get_all(TUNNEL_MODEL_HEADER, []),
         )
         if route is None:
             self._request_id = 0
@@ -1302,6 +1337,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 )
             request_target = self.path
             image_bridge = False
+            routed_model = payload.get("model") if isinstance(payload, dict) else None
             if is_json:
                 try:
                     prepared_image = prepare_image_request(
@@ -1314,6 +1350,26 @@ class RelayHandler(BaseHTTPRequestHandler):
                     request_target, body, payload = prepared_image
                     image_bridge = True
             model = request_model(payload)
+            if tunnel_request:
+                route_token = self.headers.get(TUNNEL_MODEL_HEADER, "")
+                if (
+                    not isinstance(routed_model, str)
+                    or not secrets.compare_digest(
+                        model_route_token(routed_model).encode(), route_token.encode()
+                    )
+                ):
+                    self._error(403, "Request rejected")
+                    return
+            elif isinstance(routed_model, str):
+                routed_lease = self.server.acquire_local_model_route(
+                    spec.id, routed_model
+                )
+                if routed_lease is not None:
+                    lease.release()
+                    lease = routed_lease
+                    spec = lease.spec
+                    upstream = spec.parsed_upstream
+                    self.server.metrics.route(request_id, spec.id, spec.name)
             stream = bool(payload and payload.get("stream") is True)
             uses_images = request_uses_images(payload, self.path)
             if spec.cache_1h and payload is not None:
@@ -1868,17 +1924,26 @@ class RelayServer(ThreadingHTTPServer):
         else:
             self.registry = ProviderRegistry.defaults(key, echo_rpm or 0)
         try:
+            self._relay_model_routes = _tunnel_routes(
+                saved.get("model_routes", {}) if saved else {},
+                _tunnel_models(saved.get("model_route_order", ())) if saved else (),
+                self.registry.active().id,
+            )
             (
                 self._tunnel_allowed_models,
+                self._tunnel_model_routes,
                 saved_tunnel_token,
                 self._tunnel_rpm_per_ip,
                 self._tunnel_context_limit_kib,
                 self._tunnel_publisher_profile,
                 self._tunnel_provider_id,
             ) = _tunnel_settings(saved, self.registry.active().id)
-            if self._tunnel_provider_id not in {
-                provider.id for provider in self.registry.list()
-            }:
+            provider_ids = {provider.id for provider in self.registry.list()}
+            if (
+                self._tunnel_provider_id not in provider_ids
+                or not set(self._tunnel_model_routes.values()) <= provider_ids
+                or not set(self._relay_model_routes.values()) <= provider_ids
+            ):
                 raise ValueError("Saved tunnel settings are invalid")
         except BaseException:
             self.registry.close()
@@ -1947,8 +2012,11 @@ class RelayServer(ThreadingHTTPServer):
 
     def _config_value(self) -> dict:
         value = self.registry.export_config(self._environment_key)
+        value["model_routes"] = dict(self._relay_model_routes)
+        value["model_route_order"] = list(self._relay_model_routes)
         value["tunnel"] = {
             "allowed_models": list(self._tunnel_allowed_models),
+            "model_routes": dict(self._tunnel_model_routes),
             "access_token": self._tunnel_token,
             "rpm_per_ip": self._tunnel_rpm_per_ip,
             "context_limit_kib": self._tunnel_context_limit_kib,
@@ -2022,16 +2090,14 @@ class RelayServer(ThreadingHTTPServer):
 
     def _tunnel_route_safe(self) -> bool:
         try:
-            return (
-                not self.stopping.is_set()
-                and next(
-                    provider
-                    for provider in self.registry.list()
-                    if provider.id == self._tunnel_provider_id
-                ).auth_mode
-                != "passthrough"
+            providers = {provider.id: provider for provider in self.registry.list()}
+            routed = set(self._tunnel_model_routes.values())
+            return bool(routed) and not self.stopping.is_set() and all(
+                provider_id in providers
+                and providers[provider_id].auth_mode != "passthrough"
+                for provider_id in routed
             )
-        except (KeyError, RuntimeError, StopIteration):
+        except (KeyError, RuntimeError):
             return False
 
     def _invalidate_tunnel_model_probes_locked(self) -> None:
@@ -2055,7 +2121,7 @@ class RelayServer(ThreadingHTTPServer):
                 route_marker=self._tunnel_route_marker,
             )
 
-    def _acquire_request_route(self, marker_values):
+    def _acquire_request_route(self, marker_values, model_values):
         with self._config_lock:
             if not marker_values:
                 return (
@@ -2072,7 +2138,35 @@ class RelayServer(ThreadingHTTPServer):
                 )
             ):
                 return None
-            return self.registry.acquire(self._tunnel_provider_id), True, None
+            if (
+                len(model_values) != 1
+                or not isinstance(model_values[0], str)
+                or len(model_values[0]) != 64
+                or any(character not in "0123456789abcdef" for character in model_values[0])
+            ):
+                return None
+            provider_id = next(
+                (
+                    provider_id
+                    for model, provider_id in self._tunnel_model_routes.items()
+                    if secrets.compare_digest(
+                        model_route_token(model).encode(), model_values[0].encode()
+                    )
+                ),
+                None,
+            )
+            return (
+                (self.registry.acquire(provider_id), True, None)
+                if provider_id is not None
+                else None
+            )
+
+    def acquire_local_model_route(self, current_provider_id: str, model: str):
+        with self._config_lock:
+            provider_id = self._relay_model_routes.get(model)
+            if provider_id is None or provider_id == current_provider_id:
+                return None
+            return self.registry.acquire(provider_id)
 
     def _persist(self) -> None:
         if self._config_store is None:
@@ -2263,22 +2357,34 @@ class RelayServer(ThreadingHTTPServer):
             if previous is None:
                 raise KeyError("Provider not found")
             provider = self.registry.update(provider_id, **values)
-            if provider_id == active_id and (
+            if (
+                provider_id == active_id
+                or provider_id in self._relay_model_routes.values()
+            ) and (
                 previous.upstream != provider.upstream
                 or previous.auth_mode != provider.auth_mode
                 or "api_keys" in values
             ):
                 cancel_event = self._rotate_local_requests_locked()
-            route_changed = provider_id == self._tunnel_provider_id and (
+            route_changed = provider_id in self._tunnel_model_routes.values() and (
+                previous.upstream != provider.upstream
+                or previous.auth_mode != provider.auth_mode
+            )
+            if route_changed:
+                self._tunnel_model_routes = {
+                    model: routed_provider
+                    for model, routed_provider in self._tunnel_model_routes.items()
+                    if routed_provider != provider_id
+                }
+                self._tunnel_allowed_models = tuple(self._tunnel_model_routes)
+                self._tunnel_route_marker = secrets.token_urlsafe(32)
+                stop_tunnel = True
+            if provider_id == self._tunnel_provider_id and (
                 previous.upstream != provider.upstream
                 or previous.auth_mode != provider.auth_mode
                 or "api_keys" in values
-            )
-            if route_changed:
-                self._tunnel_allowed_models = ()
-                self._tunnel_route_marker = secrets.token_urlsafe(32)
+            ):
                 self._clear_tunnel_model_probes_locked()
-                stop_tunnel = True
             self._sync_tunnel_security()
             if cancel_event is None:
                 self._persist()
@@ -2291,16 +2397,31 @@ class RelayServer(ThreadingHTTPServer):
         cancel_event = None
         with self._config_lock:
             previous_active_id = self.registry.active().id
-            pinned = provider_id == self._tunnel_provider_id
-            if pinned and self.tunnel.snapshot()["state"] not in {"stopped", "error"}:
+            catalog_provider = provider_id == self._tunnel_provider_id
+            local_routed_provider = provider_id in self._relay_model_routes.values()
+            routed_provider = provider_id in self._tunnel_model_routes.values()
+            if (catalog_provider or routed_provider) and self.tunnel.snapshot()[
+                "state"
+            ] not in {"stopped", "error"}:
                 raise RuntimeError("Stop the tunnel before deleting its provider")
             provider = self.registry.delete(provider_id)
-            if provider.id != previous_active_id:
+            self._relay_model_routes = {
+                model: routed
+                for model, routed in self._relay_model_routes.items()
+                if routed != provider_id
+            }
+            if provider.id != previous_active_id or local_routed_provider:
                 cancel_event = self._rotate_local_requests_locked()
-            if pinned:
-                self._tunnel_provider_id = self.registry.active().id
+            if routed_provider:
+                self._tunnel_model_routes = {
+                    model: routed
+                    for model, routed in self._tunnel_model_routes.items()
+                    if routed != provider_id
+                }
+                self._tunnel_allowed_models = tuple(self._tunnel_model_routes)
                 self._tunnel_route_marker = secrets.token_urlsafe(32)
-                self._tunnel_allowed_models = ()
+            if catalog_provider:
+                self._tunnel_provider_id = self.registry.active().id
                 self._clear_tunnel_model_probes_locked()
             self._sync_tunnel_security()
             if cancel_event is None:
@@ -2453,6 +2574,48 @@ class RelayServer(ThreadingHTTPServer):
         with self._config_lock:
             return self._tunnel_allowed_models
 
+    def relay_model_routes(self) -> tuple[dict[str, str], ...]:
+        with self._config_lock:
+            return tuple(
+                {"model": model, "provider_id": provider_id}
+                for model, provider_id in self._relay_model_routes.items()
+            )
+
+    def set_relay_allowed_models(self, models) -> tuple[str, ...]:
+        selected = _tunnel_models(models)
+        cancel_event = None
+        with self._config_lock:
+            provider_id = self._tunnel_provider_id
+            if self._tunnel_model_catalog and not set(selected) <= set(
+                self._tunnel_model_catalog
+            ):
+                raise ValueError("Relay model is not in the current catalog")
+            routes = {
+                model: routed_provider
+                for model, routed_provider in self._relay_model_routes.items()
+                if routed_provider != provider_id
+            }
+            routes.update((model, provider_id) for model in selected)
+            if routes != self._relay_model_routes:
+                self._relay_model_routes = routes
+                cancel_event = self._rotate_local_requests_locked()
+            else:
+                self._persist()
+            saved = tuple(
+                model
+                for model, routed_provider in self._relay_model_routes.items()
+                if routed_provider == provider_id
+            )
+        self._finish_local_route_change(cancel_event)
+        return saved
+
+    def tunnel_model_routes(self) -> tuple[dict[str, str], ...]:
+        with self._config_lock:
+            return tuple(
+                {"model": model, "provider_id": provider_id}
+                for model, provider_id in self._tunnel_model_routes.items()
+            )
+
     def tunnel_provider_id(self) -> str:
         with self._config_lock:
             return self._tunnel_provider_id
@@ -2465,13 +2628,8 @@ class RelayServer(ThreadingHTTPServer):
                 raise KeyError("Provider not found")
             if provider_id == self._tunnel_provider_id:
                 return provider_id
-            if self.tunnel.snapshot()["state"] not in {"stopped", "error"}:
-                raise RuntimeError("Stop the tunnel before changing its provider")
             self._tunnel_provider_id = provider_id
-            self._tunnel_route_marker = secrets.token_urlsafe(32)
-            self._tunnel_allowed_models = ()
             self._clear_tunnel_model_probes_locked()
-            self._sync_tunnel_security()
             self._persist()
             return provider_id
 
@@ -2772,10 +2930,27 @@ class RelayServer(ThreadingHTTPServer):
     def set_tunnel_allowed_models(self, models) -> tuple[str, ...]:
         selected = _tunnel_models(models)
         with self._config_lock:
-            self._tunnel_allowed_models = selected
+            provider_id = self._tunnel_provider_id
+            if self._tunnel_model_catalog and not set(selected) <= set(
+                self._tunnel_model_catalog
+            ):
+                raise ValueError("Tunnel model is not in the current catalog")
+            self._tunnel_model_routes = {
+                model: routed_provider
+                for model, routed_provider in self._tunnel_model_routes.items()
+                if routed_provider != provider_id
+            }
+            self._tunnel_model_routes.update(
+                (model, provider_id) for model in selected
+            )
+            self._tunnel_allowed_models = tuple(self._tunnel_model_routes)
             self._sync_tunnel_security()
             self._persist()
-            return self._tunnel_allowed_models
+            return tuple(
+                model
+                for model, routed_provider in self._tunnel_model_routes.items()
+                if routed_provider == provider_id
+            )
 
     def tunnel_access_token(self) -> str:
         with self._config_lock:

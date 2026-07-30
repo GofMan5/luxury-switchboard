@@ -1108,12 +1108,19 @@ class TunnelGatewayTest(unittest.TestCase):
             "POST",
             "/v1/responses",
             {"model": "allowed-model", "test_case": "safe-json"},
-            headers={"X-Provider-Switch-Tunnel": "attacker"},
+            headers={
+                "X-Provider-Switch-Tunnel": "attacker",
+                relay_tunnel.TUNNEL_MODEL_HEADER: "0" * 64,
+            },
         )
         self.assertEqual(status, 200)
         request = self.relay_server.requests[-1]
         self.assertEqual(
             request["headers"].get("x-provider-switch-tunnel"), self.ROUTE_MARKER
+        )
+        self.assertEqual(
+            request["headers"].get(relay_tunnel.TUNNEL_MODEL_HEADER.casefold()),
+            relay_tunnel.model_route_token("allowed-model"),
         )
         self.assertNotIn("authorization", request["headers"])
         self.assertNotIn("x-api-key", request["headers"])
@@ -3933,6 +3940,187 @@ class TunnelTelemetryTest(unittest.TestCase):
 
 
 class RelayTest(unittest.TestCase):
+    def test_local_and_tunnel_models_route_to_different_providers(self):
+        class RoutedUpstreamHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                payload = json.loads(body)
+                self.server.requests.append(
+                    {
+                        "model": payload.get("model"),
+                        "authorization": self.headers.get("Authorization"),
+                        "private_route": self.headers.get(
+                            relay_tunnel.TUNNEL_MODEL_HEADER
+                        ),
+                    }
+                )
+                response = json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "status": "completed",
+                            "error": None,
+                            "incomplete_details": None,
+                            "output": [],
+                            "model": payload.get("model"),
+                        },
+                    },
+                    separators=(",", ":"),
+                ).encode()
+                response = b"data: " + response + b"\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(response)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, _format, *_args):
+                pass
+
+        gpt = start_server(RoutedUpstreamHandler, "GPT")
+        claude = start_server(RoutedUpstreamHandler, "Claude")
+        gpt.requests = []
+        claude.requests = []
+        gpt_spec = relay.ProviderRegistry.make_spec(
+            "GPT Provider",
+            f"http://127.0.0.1:{gpt.server_port}/v1",
+            auth_mode="bearer",
+            provider_id="gpt-provider",
+        )
+        claude_spec = relay.ProviderRegistry.make_spec(
+            "Claude Provider",
+            f"http://127.0.0.1:{claude.server_port}/v1",
+            auth_mode="bearer",
+            provider_id="claude-provider",
+        )
+        registry = relay.ProviderRegistry(
+            (
+                (gpt_spec, (("gpt-key", 0, ""),)),
+                (claude_spec, (("claude-key", 0, ""),)),
+            )
+        )
+        proxy = start_server(
+            relay.RelayHandler,
+            server_class=relay.RelayServer,
+            registry=registry,
+            history=False,
+        )
+        token = "public-route-token-" + "x" * 32
+        gateway = None
+
+        def post(address, model, headers=None):
+            body = json.dumps(
+                {"model": model, "input": "route", "stream": True},
+                separators=(",", ":"),
+            ).encode()
+            connection = http.client.HTTPConnection(*address, timeout=3)
+            connection.request(
+                "POST",
+                "/v1/responses",
+                body,
+                {"Content-Type": "application/json", **(headers or {})},
+            )
+            response = connection.getresponse()
+            result = response.status, response.read()
+            connection.close()
+            return result
+
+        try:
+            proxy.set_tunnel_provider("gpt-provider")
+            first_local_generation = proxy._local_cancel_event
+            proxy.set_relay_allowed_models(("gpt-5.6-sol",))
+            self.assertTrue(first_local_generation.is_set())
+            second_local_generation = proxy._local_cancel_event
+            proxy.set_tunnel_allowed_models(("gpt-5.6-sol",))
+            self.assertIs(proxy._local_cancel_event, second_local_generation)
+            proxy.set_tunnel_provider("claude-provider")
+            proxy.set_relay_allowed_models(("claude-opus-5[1m]",))
+            self.assertTrue(second_local_generation.is_set())
+            proxy.set_tunnel_allowed_models(("claude-opus-5[1m]",))
+
+            self.assertEqual(post(proxy.server_address, "gpt-5.6-sol")[0], 200)
+            self.assertEqual(post(proxy.server_address, "claude-opus-5[1m]")[0], 200)
+            spoof = relay_tunnel.model_route_token("claude-opus-5[1m]")
+            self.assertEqual(
+                post(
+                    proxy.server_address,
+                    "unassigned-model",
+                    {relay_tunnel.TUNNEL_MODEL_HEADER: spoof},
+                )[0],
+                200,
+            )
+
+            gateway = TunnelGateway(
+                proxy.server_address,
+                token,
+                proxy.tunnel_allowed_models(),
+                sensitive_markers=proxy._tunnel_sensitive_markers(),
+                secret_markers=proxy._tunnel_secret_markers(),
+                route_guard=proxy._tunnel_route_safe,
+                route_marker=proxy._tunnel_route_marker,
+            )
+            threading.Thread(target=gateway.serve_forever, daemon=True).start()
+            public_headers = {
+                "Authorization": f"Bearer {token}",
+                relay_tunnel.CLIENT_IP_HEADER: "203.0.113.120",
+            }
+            self.assertEqual(
+                post(gateway.server_address, "gpt-5.6-sol", public_headers)[0], 200
+            )
+            self.assertEqual(
+                post(
+                    gateway.server_address,
+                    "claude-opus-5[1m]",
+                    public_headers,
+                )[0],
+                200,
+            )
+
+            self.assertEqual(
+                [request["model"] for request in gpt.requests],
+                ["gpt-5.6-sol", "unassigned-model", "gpt-5.6-sol"],
+            )
+            self.assertEqual(
+                [request["model"] for request in claude.requests],
+                ["claude-opus-5[1m]", "claude-opus-5[1m]"],
+            )
+            self.assertTrue(
+                all(request["private_route"] is None for request in gpt.requests + claude.requests)
+            )
+            self.assertEqual(gpt.requests[0]["authorization"], "Bearer gpt-key")
+            self.assertEqual(
+                claude.requests[0]["authorization"], "Bearer claude-key"
+            )
+            self.assertEqual(
+                {route["model"]: route["provider_id"] for route in proxy.relay_model_routes()},
+                {
+                    "gpt-5.6-sol": "gpt-provider",
+                    "claude-opus-5[1m]": "claude-provider",
+                },
+            )
+            deadline = time.monotonic() + 1
+            while proxy.metrics.snapshot()["active"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            claude_events = [
+                event
+                for event in proxy.metrics.snapshot()["recent"]
+                if event["model"] == "claude-opus-5[1m]"
+            ]
+            self.assertTrue(claude_events)
+            self.assertTrue(
+                all(event["provider_id"] == "claude-provider" for event in claude_events)
+            )
+        finally:
+            if gateway is not None:
+                gateway.shutdown()
+                gateway.server_close()
+            for server in (proxy, gpt, claude):
+                server.shutdown()
+                server.server_close()
+
     def test_tunnel_provider_pin_is_independent_and_internal_route_is_unforgeable(self):
         local = start_server(UpstreamHandler, "Local")
         echo = start_server(UpstreamHandler, "EchoGate")
@@ -3963,7 +4151,7 @@ class RelayTest(unittest.TestCase):
             original_marker = proxy._tunnel_route_marker
             self.assertEqual(proxy.set_tunnel_provider("echo"), "echo")
             marker = proxy._tunnel_route_marker
-            self.assertNotEqual(marker, original_marker)
+            self.assertEqual(marker, original_marker)
             self.assertEqual(proxy.tunnel_provider_id(), "echo")
             self.assertEqual(proxy.tunnel_allowed_models(), ())
             proxy.set_tunnel_allowed_models(("allowed-model",))
@@ -3998,6 +4186,16 @@ class RelayTest(unittest.TestCase):
             status, _headers, body = post(
                 {relay_http.TUNNEL_REQUEST_HEADER: marker}
             )
+            self.assertEqual((status, json.loads(body)), (403, {"error": "Request rejected"}))
+
+            status, _headers, body = post(
+                {
+                    relay_http.TUNNEL_REQUEST_HEADER: marker,
+                    relay_tunnel.TUNNEL_MODEL_HEADER: relay_tunnel.model_route_token(
+                        "allowed-model"
+                    ),
+                }
+            )
             self.assertEqual(status, 201)
             self.assertEqual(json.loads(body)["provider"], "EchoGate")
 
@@ -4010,6 +4208,10 @@ class RelayTest(unittest.TestCase):
             connection.putheader("Content-Length", str(len(body)))
             connection.putheader(relay_http.TUNNEL_REQUEST_HEADER, marker)
             connection.putheader(relay_http.TUNNEL_REQUEST_HEADER, marker)
+            connection.putheader(
+                relay_tunnel.TUNNEL_MODEL_HEADER,
+                relay_tunnel.model_route_token("allowed-model"),
+            )
             connection.endheaders(body)
             response = connection.getresponse()
             duplicate_body = response.read()
@@ -4078,18 +4280,20 @@ class RelayTest(unittest.TestCase):
             with patch.object(
                 proxy.tunnel, "snapshot", return_value={"state": "running"}
             ):
-                with self.assertRaisesRegex(RuntimeError, "Stop the tunnel"):
-                    proxy.set_tunnel_provider("local")
-            self.assertEqual(proxy.tunnel_provider_id(), "echo")
+                self.assertEqual(proxy.set_tunnel_provider("local"), "local")
+            self.assertEqual(proxy.tunnel_provider_id(), "local")
             self.assertEqual(proxy._tunnel_route_marker, marker)
-
-            proxy.set_tunnel_provider("local")
-            self.assertNotEqual(proxy._tunnel_route_marker, marker)
-            self.assertEqual(proxy.tunnel_allowed_models(), ())
+            self.assertEqual(proxy.tunnel_allowed_models(), ("allowed-model",))
             status, _headers, body = post(
-                {relay_http.TUNNEL_REQUEST_HEADER: marker}
+                {
+                    relay_http.TUNNEL_REQUEST_HEADER: marker,
+                    relay_tunnel.TUNNEL_MODEL_HEADER: relay_tunnel.model_route_token(
+                        "allowed-model"
+                    ),
+                }
             )
-            self.assertEqual((status, json.loads(body)), (403, {"error": "Request rejected"}))
+            self.assertEqual(status, 201)
+            self.assertEqual(json.loads(body)["provider"], "EchoGate")
         finally:
             for server in (proxy, local, echo):
                 server.shutdown()
@@ -4432,7 +4636,7 @@ class RelayTest(unittest.TestCase):
                 old_marker = proxy._tunnel_route_marker
                 proxy.update_provider("echo", auth_mode="bearer")
                 self.assertEqual(proxy.tunnel_provider_id(), "echo")
-                self.assertNotEqual(proxy._tunnel_route_marker, old_marker)
+                self.assertEqual(proxy._tunnel_route_marker, old_marker)
                 self.assertEqual(proxy.tunnel_model_probes(), ())
                 release.set()
                 worker.join(timeout=1)
@@ -4497,17 +4701,15 @@ class RelayTest(unittest.TestCase):
             self.assertEqual(stop_saw_empty_policy, [True])
             stop.assert_called_once_with()
             self.assertEqual(lease.spec.auth_mode, "auto")
-            self.assertIsNone(proxy._acquire_request_route([old_marker]))
-
-            route, tunnel_request, cancel_event = proxy._acquire_request_route(
-                [proxy._tunnel_route_marker]
+            route_token = relay_tunnel.model_route_token("allowed-model")
+            self.assertIsNone(
+                proxy._acquire_request_route([old_marker], [route_token])
             )
-            try:
-                self.assertTrue(tunnel_request)
-                self.assertIsNone(cancel_event)
-                self.assertEqual(route.spec.auth_mode, "passthrough")
-            finally:
-                route.release()
+            self.assertIsNone(
+                proxy._acquire_request_route(
+                    [proxy._tunnel_route_marker], [route_token]
+                )
+            )
         finally:
             if lease is not None:
                 lease.release()
@@ -5543,13 +5745,18 @@ class RelayTest(unittest.TestCase):
 
         def post(path, result, headers=None, response_started=None):
             try:
+                body = (
+                    b'{"model":"pinned-model"}'
+                    if headers and "X-Provider-Switch-Tunnel" in headers
+                    else b"{}"
+                )
                 connection = http.client.HTTPConnection(
                     "127.0.0.1", proxy.server_port, timeout=3
                 )
                 connection.request(
                     "POST",
                     path,
-                    b"{}",
+                    body,
                     {"Content-Type": "application/json", **(headers or {})},
                 )
                 response = connection.getresponse()
@@ -5565,6 +5772,7 @@ class RelayTest(unittest.TestCase):
 
         try:
             proxy.set_tunnel_provider("echo")
+            proxy.set_tunnel_allowed_models(("pinned-model",))
             same_event = proxy._local_cancel_event
             proxy.select("local")
             self.assertIs(proxy._local_cancel_event, same_event)
@@ -5578,7 +5786,12 @@ class RelayTest(unittest.TestCase):
                 args=(
                     "/pinned-hang",
                     pinned_result,
-                    {"X-Provider-Switch-Tunnel": proxy._tunnel_route_marker},
+                    {
+                        "X-Provider-Switch-Tunnel": proxy._tunnel_route_marker,
+                        relay_tunnel.TUNNEL_MODEL_HEADER: relay_tunnel.model_route_token(
+                            "pinned-model"
+                        ),
+                    },
                 ),
                 daemon=True,
             )
@@ -5820,6 +6033,7 @@ class RelayTest(unittest.TestCase):
         stopped = False
         try:
             proxy.set_tunnel_provider("echo")
+            proxy.set_tunnel_allowed_models(("flood",))
             connection.connect()
             connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
             body = b'{"model":"flood","stream":true}'
@@ -5857,6 +6071,9 @@ class RelayTest(unittest.TestCase):
                 {
                     "Content-Type": "application/json",
                     "X-Provider-Switch-Tunnel": proxy._tunnel_route_marker,
+                    relay_tunnel.TUNNEL_MODEL_HEADER: relay_tunnel.model_route_token(
+                        "flood"
+                    ),
                 },
             )
             self.assertEqual(pinned_connection.getresponse().status, 200)
@@ -6781,7 +6998,12 @@ class ConfigPersistenceTest(unittest.TestCase):
             )
             try:
                 first.set_tunnel_provider("echo")
-                first.set_tunnel_allowed_models(("gpt-private", "claude-private"))
+                first.set_tunnel_allowed_models(("gpt-private",))
+                first.set_relay_allowed_models(("gpt-private",))
+                first.set_tunnel_provider("local")
+                first.set_tunnel_allowed_models(("claude-private",))
+                first.set_relay_allowed_models(("claude-private",))
+                first.set_tunnel_provider("echo")
                 first.set_tunnel_rpm_per_ip(45)
                 first.set_tunnel_context_limit_kib(2048)
                 profile = "v1.23456." + ("c" * 48)
@@ -6811,6 +7033,20 @@ class ConfigPersistenceTest(unittest.TestCase):
                 self.assertEqual(
                     second.tunnel_allowed_models(),
                     ("gpt-private", "claude-private"),
+                )
+                self.assertEqual(
+                    second.tunnel_model_routes(),
+                    (
+                        {"model": "gpt-private", "provider_id": "echo"},
+                        {"model": "claude-private", "provider_id": "local"},
+                    ),
+                )
+                self.assertEqual(
+                    second.relay_model_routes(),
+                    (
+                        {"model": "gpt-private", "provider_id": "echo"},
+                        {"model": "claude-private", "provider_id": "local"},
+                    ),
                 )
                 self.assertEqual(second.tunnel_snapshot()["allowed_count"], 2)
                 self.assertEqual(second.tunnel_rpm_per_ip(), 45)

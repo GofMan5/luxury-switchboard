@@ -255,8 +255,6 @@ class GateServer(ThreadingHTTPServer):
 
 class GateHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "tunnel-gate"
-    sys_version = ""
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         match = re.fullmatch(
@@ -264,10 +262,13 @@ class GateHandler(BaseHTTPRequestHandler):
         )
         allowed = bool(match) and _is_running(self.server.state_path, match.group(1))
         body = b"" if allowed else UNAVAILABLE
-        self.send_response(204 if allowed else 503)
+        self.send_response_only(204 if allowed else 503)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
         if body:
             self.wfile.write(body)
 

@@ -2,7 +2,7 @@ import json
 import subprocess
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import relay_tunnel
 import relay_http
@@ -25,6 +25,21 @@ def response(state="running", revision=3):
         ).encode()
         + b"\n"
     )
+
+
+def parsed_response(state="running", revision=3):
+    return relay_tunnel._parse_control_snapshot(response(state, revision))
+
+
+def response_without_self(revision=3):
+    return {
+        "available": True,
+        "revision": revision,
+        "tunnels": [
+            {"position": 0, "name": "Tunnel 1", "state": "running"}
+        ],
+        "error": "",
+    }
 
 
 class SharedTunnelControlTest(unittest.TestCase):
@@ -89,13 +104,154 @@ class SharedTunnelControlTest(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs["shell"])
 
     def test_missing_key_fails_closed_without_breaking_ui_poll(self):
-        with patch.object(relay_tunnel, "_find_control_identity", return_value=None):
+        with (
+            patch.object(relay_tunnel, "_find_control_identity", return_value=None),
+            patch.object(relay_tunnel.time, "sleep"),
+        ):
             control = relay_tunnel.SharedTunnelControl()
             self.assertEqual(control.snapshot()["available"], False)
             with self.assertRaises(RuntimeError):
                 control.control(0, 3, "stop")
         with self.assertRaises(ValueError):
             relay_tunnel.SharedTunnelControl().control(-1, 3, "stop")
+
+    def test_snapshot_retries_transport_and_missing_self_without_flicker(self):
+        for first in (RuntimeError("transient"), response_without_self()):
+            with self.subTest(first=type(first).__name__):
+                control = relay_tunnel.SharedTunnelControl()
+                with (
+                    patch.object(
+                        control,
+                        "_request",
+                        side_effect=(first, parsed_response()),
+                    ) as request,
+                    patch.object(relay_tunnel.time, "sleep") as sleep,
+                ):
+                    snapshot = control.snapshot()
+                self.assertTrue(snapshot["available"])
+                self.assertEqual(snapshot["tunnels"][0]["name"], "Ваш коннект")
+                self.assertEqual(request.call_count, 2)
+                sleep.assert_called_once_with(relay_tunnel.CONTROL_RETRY_DELAY)
+
+    def test_snapshot_last_good_is_bounded_and_never_used_for_reconcile(self):
+        control = relay_tunnel.SharedTunnelControl()
+        with (
+            patch.object(control, "_request", return_value=parsed_response()),
+            patch.object(relay_tunnel.time, "monotonic", return_value=100.0),
+        ):
+            self.assertNotIn("stale", control.snapshot())
+
+        with (
+            patch.object(control, "_request", side_effect=RuntimeError("offline")),
+            patch.object(relay_tunnel.time, "sleep"),
+            patch.object(
+                relay_tunnel.time,
+                "monotonic",
+                return_value=(
+                    100.0
+                    + relay_tunnel.CONTROL_TIMEOUT
+                    * relay_tunnel.CONTROL_SNAPSHOT_ATTEMPTS
+                    + relay_tunnel.CONTROL_RETRY_DELAY
+                    + 2.0
+                ),
+            ),
+        ):
+            stale = control.snapshot()
+        self.assertTrue(stale["available"])
+        self.assertIs(stale["stale"], True)
+
+        with (
+            patch.object(control, "_request", side_effect=RuntimeError("offline")),
+            patch.object(relay_tunnel.time, "sleep"),
+            patch.object(
+                relay_tunnel.time,
+                "monotonic",
+                return_value=100.0 + relay_tunnel.CONTROL_LAST_GOOD_SECONDS + 0.01,
+            ),
+        ):
+            self.assertFalse(control.snapshot()["available"])
+
+    def test_mutation_transport_ambiguity_reconciles_without_replaying_action(self):
+        control = relay_tunnel.SharedTunnelControl()
+        control._remember(parsed_response("running", 3))
+        with (
+            patch.object(
+                control,
+                "_request",
+                side_effect=(RuntimeError("response lost"), parsed_response("paused", 4)),
+            ) as request,
+            patch.object(relay_tunnel.time, "sleep"),
+        ):
+            result = control.control(0, 3, "pause")
+        self.assertEqual(result["tunnels"][0]["state"], "paused")
+        self.assertEqual(
+            [call.args for call in request.call_args_list],
+            [("pause", "3", "0"), ("list",)],
+        )
+
+        control._remember(parsed_response("running", 4))
+        with (
+            patch.object(
+                control,
+                "_request",
+                side_effect=(RuntimeError("response lost"), parsed_response("running", 4)),
+            ) as request,
+            patch.object(relay_tunnel.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, relay_tunnel.CONTROL_ERROR):
+                control.control(0, 4, "pause")
+        self.assertEqual(
+            [call.args for call in request.call_args_list],
+            [("pause", "4", "0"), ("list",)],
+        )
+
+    def test_ensure_self_running_resumes_stopped_desired_state(self):
+        control = relay_tunnel.SharedTunnelControl()
+        with patch.object(
+            control,
+            "_request",
+            side_effect=(
+                parsed_response("stopped", 8),
+                parsed_response("running", 9),
+            ),
+        ) as request:
+            result = control.ensure_self_running()
+        self.assertEqual(result["tunnels"][0]["state"], "running")
+        self.assertEqual(
+            [call.args for call in request.call_args_list],
+            [("list",), ("resume", "8", "0")],
+        )
+
+    def test_local_start_reconciles_shared_desired_state_before_ssh(self):
+        server = relay_http.RelayServer(
+            ("127.0.0.1", 0),
+            relay_http.RelayHandler,
+            echo_api_key="",
+            config=False,
+            history=False,
+        )
+        order = []
+        try:
+            server.select("echo")
+            server.set_tunnel_provider("echo")
+            server.set_tunnel_allowed_models(("allowed-model",))
+
+            def ensure():
+                order.append("resume")
+                return parsed_response("running", 9)
+
+            def start():
+                order.append("start")
+                return server.tunnel.snapshot()
+
+            server._shared_tunnel_control = SimpleNamespace(
+                ensure_self_running=ensure
+            )
+            with patch.object(server.tunnel, "start", side_effect=start):
+                server.start_tunnel()
+            self.assertEqual(order, ["resume", "start"])
+        finally:
+            server.server_close()
 
 
 class SharedTunnelUITest(unittest.IsolatedAsyncioTestCase):

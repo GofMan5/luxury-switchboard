@@ -36,7 +36,9 @@ class _ProbeUpstream(BaseHTTPRequestHandler):
             content_type = "text/event-stream"
         else:
             response = {"model": MODEL}
-            if probe == "unsolicited":
+            if "metadata" in payload:
+                response["metadata"] = payload["metadata"]
+            elif probe == "unsolicited":
                 response["routing_hint"] = PRIVATE_MARKER
             elif probe == "nested-json":
                 response["output"] = [
@@ -154,6 +156,18 @@ class TunnelPrivacyRegressionTest(unittest.TestCase):
                     PRIVATE_MARKER.casefold(), ("\n".join(headers)).casefold()
                 )
                 self.assertNotIn(PRIVATE_MARKER.encode(), body)
+
+    def test_echoed_request_metadata_is_removed_without_a_marker_oracle(self) -> None:
+        observations = []
+        for candidate in (PRIVATE_MARKER, "OtherGate"):
+            status, headers, body = self.request(
+                {"metadata": {"probe": candidate}}
+            )
+            payload = json.loads(body)
+            self.assertEqual((status, payload), (200, {"model": MODEL}))
+            self.assertNotIn(PRIVATE_MARKER.encode(), body)
+            observations.append((status, headers, payload))
+        self.assertEqual(observations[0], observations[1])
 
     def test_arbitrary_model_transforms_are_not_a_provider_oracle(self) -> None:
         pairs = (

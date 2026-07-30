@@ -13,6 +13,7 @@ import select
 import socket
 import sqlite3
 import ssl
+import tempfile
 import threading
 import time
 import unicodedata
@@ -22,11 +23,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
 from relay_config import ConfigError, ConfigStore
+from relay_framing import (
+    BodyTooLarge,
+    InvalidBodyFraming,
+    body_framing,
+    media_type,
+    parse_multipart,
+    read_body,
+)
 from relay_history import HistoryStore
+from relay_image_compat import (
+    MAX_IMAGE_RESPONSE_BYTES,
+    InvalidImageRequest,
+    InvalidImageResponse,
+    images_response,
+    prepare_image_request,
+)
 from relay_tunnel import (
+    CONTROL_SELF_NAME,
     DEFAULT_PUBLISHER_PROFILE,
+    InvalidJson,
     SharedTunnelControl,
     TunnelController,
+    _load_json,
     parse_publisher_profile,
 )
 from relay_runtime import (
@@ -42,12 +61,31 @@ from relay_runtime import (
 
 LISTEN = ("127.0.0.1", 8798)
 UPSTREAM_TIMEOUT = 300
+STREAM_HEADER_TIMEOUT = 45
+SELECT_SOCKET_LIMIT = 512
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_INSPECT_BYTES = 4 * 1024 * 1024
 MAX_ERROR_BYTES = 64 * 1024
 ERROR_BODY_TIMEOUT = 2.0
+RESPONSE_SPOOL_BYTES = 2 * 1024 * 1024
+MAX_BUFFERED_RESPONSE_BYTES = 256 * 1024 * 1024
+MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024
 TUNNEL_REQUEST_HEADER = "X-Provider-Switch-Tunnel"
 MAX_TUNNEL_MODELS = 256
+TUNNEL_MODEL_PROBE_TIMEOUT = 10.0
+MAX_TUNNEL_MODEL_PROBES = 4
+TUNNEL_MODEL_PROBE_STATES = frozenset(
+    {"testing", "available", "unavailable", "timeout"}
+)
+SSE_TERMINAL_EVENTS = frozenset(
+    {
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "image_generation.completed",
+        "image_edit.completed",
+    }
+)
 HOP_HEADERS = {
     "connection",
     "expect",
@@ -60,6 +98,33 @@ HOP_HEADERS = {
     "trailer",
     "transfer-encoding",
     "upgrade",
+}
+REWRITTEN_RESPONSE_HEADERS = {
+    "accept-ranges",
+    "content-encoding",
+    "content-digest",
+    "content-location",
+    "content-md5",
+    "content-range",
+    "content-type",
+    "digest",
+    "etag",
+    "last-modified",
+    "repr-digest",
+    "signature",
+    "signature-input",
+    "vary",
+}
+REWRITTEN_REQUEST_HEADERS = {
+    "accept",
+    "content-digest",
+    "content-encoding",
+    "content-md5",
+    "content-type",
+    "digest",
+    "repr-digest",
+    "signature",
+    "signature-input",
 }
 TLS_CONTEXT = ssl.create_default_context()
 _GENERIC_HOST_LABELS = frozenset(
@@ -165,9 +230,30 @@ def _tunnel_models(values) -> tuple[str, ...]:
     return tuple(models)
 
 
+def _tunnel_catalog_models(value) -> tuple[str, ...]:
+    if isinstance(value, dict):
+        value = value.get("data", value.get("models", ()))
+    if isinstance(value, (str, bytes)) or value is None:
+        value = (value,) if isinstance(value, str) else ()
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValueError("Provider returned an invalid model catalog")
+    models = []
+    for item in value:
+        if isinstance(item, str):
+            model = item
+        elif isinstance(item, dict):
+            model = item.get("id") or item.get("name") or ""
+        else:
+            model = getattr(item, "id", None) or getattr(item, "name", "")
+        if model:
+            models.append(model)
+    return _tunnel_models(models)
+
+
 def _tunnel_settings(
     saved: dict | None,
-) -> tuple[tuple[str, ...], str, int, str]:
+    default_provider_id: str,
+) -> tuple[tuple[str, ...], str, int, str, str]:
     raw = saved.get("tunnel", {}) if saved else {}
     if not isinstance(raw, dict):
         raise ValueError("Saved tunnel settings are invalid")
@@ -196,11 +282,15 @@ def _tunnel_settings(
         parse_publisher_profile(publisher_profile)
     except ValueError as error:
         raise ValueError("Saved tunnel settings are invalid") from error
+    provider_id = raw.get("provider_id", default_provider_id)
+    if not isinstance(provider_id, str) or not provider_id:
+        raise ValueError("Saved tunnel settings are invalid")
     return (
         _tunnel_models(raw.get("allowed_models", ())),
         token,
         rpm_per_ip,
         publisher_profile,
+        provider_id,
     )
 
 
@@ -227,6 +317,49 @@ def request_model(payload) -> str:
         return "—"
     model = "".join(character for character in model if character.isprintable()).strip()
     return model[:64] or "—"
+
+
+def request_uses_images(payload, request_target: str) -> bool:
+    if urlsplit(request_target).path.startswith("/v1/images/"):
+        return True
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if value.get("type") in {"image_generation", "input_image"}:
+                return True
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
+
+
+def multipart_routing_payload(content_type: str, body: bytes) -> dict | None:
+    try:
+        form = parse_multipart(content_type, body)
+    except InvalidBodyFraming:
+        return None
+    models = form.values("model")
+    streams = form.values("stream")
+    if len(models) != 1 or len(streams) > 1:
+        return None
+    model = models[0]
+    if (
+        model != model.strip()
+        or not model
+        or len(model) > 256
+        or not model.isprintable()
+    ):
+        return None
+    payload = {"model": model}
+    if streams:
+        if streams[0] != streams[0].strip():
+            return None
+        stream = streams[0]
+        if stream not in {"true", "false"}:
+            return None
+        payload["stream"] = stream == "true"
+    return payload
 
 
 def model_unavailable_on_plan(status: int, body: bytes, model: str) -> bool:
@@ -323,6 +456,124 @@ def upstream_connection(upstream, target: str, proxy_url: str = "", timeout=UPST
     return connection, absolute_target, headers
 
 
+def install_cancelable_connect(connection, register_socket, check_cancelled) -> None:
+    def create_connection(
+        address,
+        timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+        source_address=None,
+    ):
+        resolved = []
+        errors = []
+        done = threading.Event()
+
+        for family in (socket.AF_INET, socket.AF_INET6):
+            try:
+                socket.inet_pton(family, address[0])
+            except OSError:
+                continue
+            socket_address = (
+                (address[0], address[1])
+                if family == socket.AF_INET
+                else (address[0], address[1], 0, 0)
+            )
+            resolved.append((family, socket.SOCK_STREAM, 0, "", socket_address))
+            done.set()
+            break
+
+        def resolve():
+            try:
+                resolved.extend(
+                    socket.getaddrinfo(address[0], address[1], 0, socket.SOCK_STREAM)
+                )
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                done.set()
+
+        if not done.is_set():
+            # ponytail: one daemon per in-flight DNS lookup; add single-flight
+            # only if configured resolvers measurably create thread pressure.
+            threading.Thread(target=resolve, name="relay-dns", daemon=True).start()
+        while not done.wait(0.05):
+            check_cancelled()
+        check_cancelled()
+        if errors:
+            raise errors[0]
+        if not resolved:
+            raise OSError("Provider address could not be resolved")
+
+        last_error = None
+        for family, sock_type, protocol, _canonname, socket_address in resolved:
+            check_cancelled()
+            sock = socket.socket(family, sock_type, protocol)
+            try:
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                connection.sock = sock
+                register_socket(connection, sock)
+                sock.connect(socket_address)
+                check_cancelled()
+                return sock
+            except OSError as error:
+                last_error = error
+                if connection.sock is sock:
+                    connection.sock = None
+                sock.close()
+                check_cancelled()
+            except BaseException:
+                if connection.sock is sock:
+                    connection.sock = None
+                sock.close()
+                raise
+        raise last_error or OSError("Provider connection failed")
+
+    connection._create_connection = create_connection
+    if isinstance(connection, http.client.HTTPSConnection):
+        def connect_https():
+            http.client.HTTPConnection.connect(connection)
+            check_cancelled()
+            server_hostname = connection._tunnel_host or connection.host
+            ssl_sock = connection._context.wrap_socket(
+                connection.sock,
+                server_hostname=server_hostname,
+                do_handshake_on_connect=False,
+            )
+            connection.sock = ssl_sock
+            register_socket(connection, ssl_sock)
+            check_cancelled()
+            try:
+                ssl_sock.do_handshake()
+            except (OSError, AttributeError) as error:
+                try:
+                    check_cancelled()
+                except (ClientDisconnected, RelayStopping) as cancelled:
+                    raise cancelled from error
+                raise OSError("TLS handshake failed") from error
+            check_cancelled()
+
+        connection.connect = connect_https
+
+
+def _abort_socket(sock) -> None:
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            socket.close(sock.detach())
+        except OSError:
+            pass
+
+
+def _abort_upstream(connection, sock=None) -> None:
+    sock = sock if sock is not None else getattr(connection, "sock", None)
+    _abort_socket(sock)
+    connection.close()
+
+
 def echo_cache_for_one_hour(body: bytes, payload=None) -> bytes:
     payload = payload if isinstance(payload, dict) else json_object(body)
     if payload is None:
@@ -366,7 +617,7 @@ def echo_cache_for_one_hour(body: bytes, payload=None) -> bytes:
             cache_control["ttl"] = "1h"
             changed = True
     return (
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if changed
         else body
     )
@@ -387,7 +638,7 @@ def retry_after_seconds(value: str | None, retry_number: int) -> float:
 
 
 def key_wide_failure(status: int | None) -> bool:
-    return status is None or status in {401, 403, 429} or status >= 500
+    return status == 429
 
 
 def _positive_int(value) -> int:
@@ -397,21 +648,60 @@ def _positive_int(value) -> int:
 class ResponseInspector:
     """Extract token usage without persisting response content."""
 
-    def __init__(self, content_type: str):
+    def __init__(
+        self,
+        content_type: str,
+        max_sse_event_bytes: int = MAX_INSPECT_BYTES,
+    ):
         self._sse = "text/event-stream" in content_type.lower()
         self._json = "json" in content_type.lower()
+        self._max_sse_event_bytes = max_sse_event_bytes
         self._buffer = bytearray()
+        self._discard_sse_line = False
+        self._sse_data = bytearray()
+        self._discard_sse_event = False
         self._usage = TokenUsage()
         self._terminal_at: float | None = None
+        self._terminal_event = ""
 
-    def feed(self, chunk: bytes) -> None:
+    def feed(self, chunk: bytes) -> int:
         if not self._sse and not self._json:
-            return
-        if len(self._buffer) >= MAX_INSPECT_BYTES:
-            return
-        self._buffer.extend(chunk[: MAX_INSPECT_BYTES - len(self._buffer)])
+            return len(chunk)
         if self._sse:
-            self._consume_sse_lines()
+            return self._feed_sse(chunk)
+        self._buffer.extend(chunk[: MAX_INSPECT_BYTES - len(self._buffer)])
+        return len(chunk)
+
+    def _feed_sse(self, chunk: bytes) -> int:
+        offset = 0
+        while offset < len(chunk):
+            if self._discard_sse_line:
+                newline = chunk.find(b"\n", offset)
+                if newline < 0:
+                    return len(chunk)
+                self._discard_sse_line = False
+                offset = newline + 1
+                continue
+
+            newline = chunk.find(b"\n", offset)
+            end = len(chunk) if newline < 0 else newline + 1
+            fragment = chunk[offset:end]
+            available = self._max_sse_event_bytes - len(self._buffer)
+            if len(fragment) > available:
+                self._buffer.clear()
+                self._discard_sse_event = True
+                if newline < 0:
+                    self._discard_sse_line = True
+                    return len(chunk)
+                offset = end
+                continue
+            self._buffer.extend(fragment)
+            if newline < 0:
+                return len(chunk)
+            if self._consume_sse_lines():
+                return end
+            offset = end
+        return len(chunk)
 
     @property
     def usage(self) -> TokenUsage:
@@ -421,28 +711,68 @@ class ResponseInspector:
     def terminal_at(self) -> float | None:
         return self._terminal_at
 
-    def _consume_sse_lines(self, final: bool = False) -> None:
+    @property
+    def terminal_event(self) -> str:
+        return self._terminal_event
+
+    def _record_terminal(self, event_type: str) -> bool:
+        terminal = isinstance(event_type, str) and event_type in SSE_TERMINAL_EVENTS
+        if terminal and not self._terminal_event:
+            self._terminal_event = event_type
+            if self._sse and self._terminal_at is None:
+                self._terminal_at = time.monotonic()
+        return terminal
+
+    def _consume_sse_lines(self, final: bool = False) -> bool:
         while True:
             index = self._buffer.find(b"\n")
             if index < 0:
                 if final and self._buffer:
                     line, self._buffer = bytes(self._buffer), bytearray()
                 else:
-                    return
+                    return False
             else:
                 line = bytes(self._buffer[:index])
                 del self._buffer[: index + 1]
             line = line.rstrip(b"\r")
-            if not line.startswith(b"data:"):
+            if not line:
+                if self._finish_sse_event():
+                    return True
                 continue
-            data = line[5:].strip()
-            if not data or data == b"[DONE]":
+            if self._discard_sse_event or not line.startswith(b"data:"):
                 continue
-            try:
-                payload = json.loads(data)
-            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+            data = line[5:]
+            if data.startswith(b" "):
+                data = data[1:]
+            extra = len(data) + bool(self._sse_data)
+            if extra > self._max_sse_event_bytes - len(self._sse_data):
+                self._sse_data.clear()
+                self._discard_sse_event = True
                 continue
-            self._merge_payload(payload)
+            if self._sse_data:
+                self._sse_data.extend(b"\n")
+            self._sse_data.extend(data)
+            if final and index < 0:
+                return self._finish_sse_event()
+
+    def _finish_sse_event(self) -> bool:
+        if self._discard_sse_event:
+            self._sse_data.clear()
+            self._discard_sse_event = False
+            return False
+        if not self._sse_data:
+            return False
+        data = bytes(self._sse_data)
+        self._sse_data.clear()
+        if data == b"[DONE]":
+            return False
+        try:
+            payload = _load_json(data)
+        except InvalidJson:
+            return False
+        terminal_before = self._terminal_event
+        self._merge_payload(payload)
+        return not terminal_before and bool(self._terminal_event)
 
     def _merge_payload(self, payload) -> None:
         if not isinstance(payload, dict):
@@ -510,16 +840,16 @@ class ResponseInspector:
                 total_tokens=total_tokens,
                 context_tokens=context_tokens,
             )
+        event_type = payload.get("type")
+        if event_type == "response.completed" and not completed_response(
+            payload.get("response")
+        ):
+            event_type = "response.incomplete"
+        self._record_terminal(event_type)
         if (
-            merged_usage
-            and self._sse
-            and payload.get("type")
-            in {
-                "message_delta",
-                "response.completed",
-                "response.failed",
-                "response.incomplete",
-            }
+            self._sse
+            and merged_usage
+            and event_type == "message_delta"
             and self._terminal_at is None
         ):
             self._terminal_at = time.monotonic()
@@ -527,6 +857,7 @@ class ResponseInspector:
     def finish(self) -> TokenUsage:
         if self._sse:
             self._consume_sse_lines(final=True)
+            self._finish_sse_event()
         elif self._json and self._buffer:
             try:
                 self._merge_payload(json.loads(self._buffer))
@@ -567,11 +898,169 @@ def network_error_detail(error: Exception) -> str:
         return "Provider reset the connection"
     if isinstance(error, ssl.SSLError):
         return "Provider TLS handshake failed"
-    if isinstance(error, http.client.IncompleteRead):
+    if isinstance(error, (IncompleteSSE, http.client.IncompleteRead)):
         return "Provider closed the response early"
     if isinstance(error, http.client.HTTPException):
         return "Provider returned an invalid HTTP response"
     return "Provider connection failed"
+
+
+class IncompleteSSE(http.client.HTTPException):
+    pass
+
+
+def completed_response(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("error") is None
+        and value.get("status") == "completed"
+        and value.get("incomplete_details") is None
+        and isinstance(value.get("output"), list)
+    )
+
+
+def buffered_response(
+    response,
+    expected_length: int | None,
+    required_terminal: str = "",
+    max_bytes: int = MAX_BUFFERED_RESPONSE_BYTES,
+):
+    content_encoding = response.getheader("Content-Encoding")
+    if (
+        required_terminal
+        and content_encoding
+        and content_encoding.strip().casefold() != "identity"
+    ):
+        raise http.client.HTTPException("Encoded event stream")
+    if (
+        expected_length is not None
+        and expected_length > max_bytes
+    ):
+        raise http.client.HTTPException("Provider response is too large")
+    spool = tempfile.SpooledTemporaryFile(max_size=RESPONSE_SPOOL_BYTES, mode="w+b")
+    inspector = (
+        ResponseInspector(
+            response.getheader("Content-Type") or "",
+            MAX_SSE_EVENT_BYTES,
+        )
+        if required_terminal
+        else None
+    )
+    total = 0
+    try:
+        while chunk := response.read1(64 * 1024):
+            if len(chunk) > max_bytes - total:
+                raise http.client.HTTPException("Provider response is too large")
+            consumed = inspector.feed(chunk) if inspector is not None else len(chunk)
+            spool.write(chunk[:consumed])
+            total += consumed
+            if inspector is not None and inspector.terminal_event:
+                break
+        if (
+            expected_length is not None
+            and total != expected_length
+            and (inspector is None or inspector.terminal_event != required_terminal)
+        ):
+            if required_terminal:
+                raise IncompleteSSE("Provider closed the event stream early")
+            raise http.client.IncompleteRead(b"", expected_length - total)
+        if inspector is not None:
+            inspector.finish()
+        if inspector is not None and inspector.terminal_event != required_terminal:
+            raise IncompleteSSE("Provider omitted response.completed")
+        spool.seek(0)
+        return spool, total
+    except BaseException as error:
+        spool.close()
+        if required_terminal and isinstance(
+            error, (OSError, http.client.IncompleteRead)
+        ):
+            raise IncompleteSSE("Provider closed the event stream early") from error
+        raise
+
+
+def completed_sse_response(source):
+    try:
+        raw = source.read(MAX_BUFFERED_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_BUFFERED_RESPONSE_BYTES:
+            raise http.client.HTTPException("Provider response is too large")
+        value = _load_json(raw)
+    except InvalidJson as error:
+        raise http.client.HTTPException("Invalid non-stream response") from error
+    finally:
+        source.close()
+    if not completed_response(value):
+        raise http.client.HTTPException("Incomplete non-stream response")
+    body = (
+        b"data: "
+        + json.dumps(
+            {"type": "response.completed", "response": value},
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        + b"\n\n"
+    )
+    if len(body) > MAX_BUFFERED_RESPONSE_BYTES:
+        raise http.client.HTTPException("Provider response is too large")
+    spool = tempfile.SpooledTemporaryFile(max_size=RESPONSE_SPOOL_BYTES, mode="w+b")
+    spool.write(body)
+    spool.seek(0)
+    return spool, len(body)
+
+
+class _RequestBodyReader:
+    def __init__(self, stream, sock, check_cancelled):
+        self._stream = stream
+        self._sock = sock
+        self._check_cancelled = check_cancelled
+        self._buffer = bytearray()
+        self._eof = False
+
+    def _fill(self) -> bool:
+        while not self._eof:
+            self._check_cancelled()
+            try:
+                chunk = self._stream.read1(64 * 1024)
+            except (BlockingIOError, InterruptedError):
+                chunk = None
+            if chunk:
+                self._buffer.extend(chunk)
+                return True
+            self._check_cancelled()
+            try:
+                readable, _, _ = select.select([self._sock], [], [], 0.25)
+            except (OSError, ValueError):
+                readable = (self._sock,)
+            if not readable:
+                continue
+            try:
+                if self._sock.recv(1, socket.MSG_PEEK) == b"":
+                    self._eof = True
+            except BlockingIOError:
+                continue
+        return False
+
+    def read(self, size: int) -> bytes:
+        self._check_cancelled()
+        while len(self._buffer) < size and self._fill():
+            pass
+        result = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return result
+
+    def readline(self, limit: int) -> bytes:
+        self._check_cancelled()
+        while True:
+            newline = self._buffer.find(b"\n", 0, limit)
+            if newline >= 0:
+                end = newline + 1
+                break
+            if len(self._buffer) >= limit or not self._fill():
+                end = min(limit, len(self._buffer))
+                break
+        result = bytes(self._buffer[:end])
+        del self._buffer[:end]
+        return result
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -580,31 +1069,46 @@ class RelayHandler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def _body(self):
-        if self.headers.get("Transfer-Encoding"):
-            self._error(501, "Chunked request bodies are not supported")
-            return False, None
-        lengths = self.headers.get_all("Content-Length", [])
-        if not lengths:
-            return True, None
-        if len(set(lengths)) != 1:
-            self._error(400, "Conflicting Content-Length headers")
-            return False, None
         try:
-            length = int(lengths[0])
-        except ValueError:
-            self._error(400, "Invalid Content-Length")
-            return False, None
-        if length < 0:
-            self._error(400, "Invalid Content-Length")
-            return False, None
-        if length > MAX_REQUEST_BYTES:
+            framing = body_framing(self.headers, MAX_REQUEST_BYTES)
+            previous_timeout = self.connection.gettimeout()
+
+            def check_cancelled():
+                if self.server.stopping.is_set():
+                    raise RelayStopping
+                cancel_event = getattr(self, "_local_cancel_event", None)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ClientDisconnected
+
+            self.connection.setblocking(False)
+            try:
+                body = read_body(
+                    _RequestBodyReader(
+                        self.rfile,
+                        self.connection,
+                        check_cancelled,
+                    ),
+                    framing,
+                    MAX_REQUEST_BYTES,
+                )
+            finally:
+                self.connection.settimeout(previous_timeout)
+        except BodyTooLarge:
             self._error(413, "Request body is too large")
             return False, None
-        try:
-            body = self.rfile.read(length)
+        except InvalidBodyFraming:
+            if self.server.stopping.is_set():
+                raise RelayStopping
+            cancel_event = getattr(self, "_local_cancel_event", None)
+            if cancel_event is not None and cancel_event.is_set():
+                raise ClientDisconnected
+            self._error(400, "Invalid request framing")
+            return False, None
         except OSError as error:
+            if self.server.stopping.is_set():
+                raise RelayStopping from error
             raise ClientDisconnected from error
-        return len(body) == length, body
+        return True, body
 
     def _finish_client_headers(self) -> None:
         try:
@@ -623,23 +1127,34 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.server.metrics.progress(self._request_id, self._response_bytes)
 
     def _client_disconnected(self) -> bool:
+        cancel_event = getattr(self, "_local_cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return True
         try:
             readable, _, _ = select.select([self.connection], [], [], 0)
             return bool(readable and self.connection.recv(1, socket.MSG_PEEK) == b"")
         except (OSError, ValueError):
             return True
 
+    def _check_cancelled(self) -> None:
+        if self.server.stopping.is_set():
+            raise RelayStopping
+        if self._client_disconnected():
+            raise ClientDisconnected
+
     def _wait_retry(self, delay: float) -> None:
         deadline = time.monotonic() + delay
         while True:
-            if self.server.stopping.is_set():
-                raise RelayStopping
-            if self._client_disconnected():
-                raise ClientDisconnected
+            self._check_cancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            self.server.stopping.wait(min(0.25, remaining))
+            waiter = getattr(self, "_local_cancel_event", None)
+            waiter = waiter if waiter is not None else self.server.stopping
+            if waiter.wait(min(0.25, remaining)):
+                if self.server.stopping.is_set():
+                    raise RelayStopping
+                raise ClientDisconnected
 
     def _request_headers(self, spec, target: str, configured_key: str | None) -> dict:
         blocked = HOP_HEADERS | {
@@ -649,6 +1164,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         }
         blocked.add("content-length")
         blocked.add(TUNNEL_REQUEST_HEADER.lower())
+        blocked.add("x-openai-actor-authorization")
         headers = {
             name: value
             for name, value in self.headers.items()
@@ -697,7 +1213,17 @@ class RelayHandler(BaseHTTPRequestHandler):
         return headers
 
     def _relay(self) -> None:
-        lease = self.server.registry.acquire_active()
+        route = self.server._acquire_request_route(
+            self.headers.get_all(TUNNEL_REQUEST_HEADER, [])
+        )
+        if route is None:
+            self._request_id = 0
+            self._response_status = None
+            self._response_bytes = 0
+            self._error_detail = ""
+            self._error(403, "Request rejected")
+            return
+        lease, tunnel_request, self._local_cancel_event = route
         spec = lease.spec
         upstream = spec.parsed_upstream
         started = time.monotonic()
@@ -719,14 +1245,12 @@ class RelayHandler(BaseHTTPRequestHandler):
         retries = retries_429 = 0
         queue_ms = 0.0
         connection = None
+        buffered_body = None
         committed = False
         usage = TokenUsage()
         generation_started_at = started
         try:
-            if (
-                self.headers.get(TUNNEL_REQUEST_HEADER) == "1"
-                and spec.auth_mode == "passthrough"
-            ):
+            if tunnel_request and spec.auth_mode == "passthrough":
                 self._error(503, "Tunnel route is unavailable")
                 return
             ok, body = self._body()
@@ -735,13 +1259,38 @@ class RelayHandler(BaseHTTPRequestHandler):
             if not ok:
                 cancelled = self._response_status is None
                 return
-            is_json = (
-                body
-                and "json" in self.headers.get("Content-Type", "").lower()
-                and not self.headers.get("Content-Encoding")
-            )
+            request_content_type = self.headers.get("Content-Type", "")
+            request_media_type = media_type(request_content_type)
+            is_json = bool(body) and (
+                request_media_type == "application/json"
+                or request_media_type.endswith("+json")
+            ) and not self.headers.get("Content-Encoding")
             payload = json_object(body) if is_json else None
+            if (
+                payload is None
+                and body
+                and not self.headers.get("Content-Encoding")
+                and request_media_type == "multipart/form-data"
+            ):
+                payload = multipart_routing_payload(
+                    request_content_type, body
+                )
+            request_target = self.path
+            image_bridge = False
+            if is_json:
+                try:
+                    prepared_image = prepare_image_request(
+                        self.command, self.path, payload
+                    )
+                except InvalidImageRequest as error:
+                    self._error(400, "Invalid image generation request", str(error))
+                    return
+                if prepared_image is not None:
+                    request_target, body, payload = prepared_image
+                    image_bridge = True
             model = request_model(payload)
+            stream = bool(payload and payload.get("stream") is True)
+            uses_images = request_uses_images(payload, self.path)
             if spec.cache_1h and payload is not None:
                 rewritten = echo_cache_for_one_hour(body, payload)
                 cache_extended = rewritten is not body
@@ -749,23 +1298,87 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.server.metrics.request(
                 request_id, model, request_bytes, cache_extended
             )
-            target = upstream_target(upstream, self.path)
+            target = upstream_target(upstream, request_target)
+            required_terminal = (
+                "response.completed"
+                if stream
+                and self.command == "POST"
+                and urlsplit(self.path).path.rstrip("/") == "/v1/responses"
+                else ""
+            )
+            fallback_body = None
+            if required_terminal and is_json:
+                try:
+                    fallback_payload = _load_json(body)
+                    if not isinstance(fallback_payload, dict):
+                        raise InvalidJson("Invalid request")
+                    fallback_payload["stream"] = False
+                    candidate = json.dumps(
+                        fallback_payload,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                    if len(candidate) <= MAX_REQUEST_BYTES:
+                        fallback_body = candidate
+                except (TypeError, ValueError):
+                    pass
+            fallback_active = False
+            response_rewritten = False
+            rewritten_content_type = ""
+            response_content_type = ""
+            response_expected_length = None
+            response_stream = stream
+            buffered_length = 0
             while True:
                 attempt, waited = lease.runtime.acquire_attempt(
                     self._client_disconnected, model
                 )
-                queue_ms += waited
+                if retries == 0:
+                    queue_ms += waited
+                self.server.metrics.dispatch(request_id, spec.id, queue_ms)
                 response = None
                 retry_status = None
                 retry_header = None
                 block_model = False
                 balance_error = False
+                activate_fallback = False
                 try:
                     connection, attempt_target, proxy_headers = upstream_connection(
-                        upstream, target, attempt.proxy_url
+                        upstream,
+                        target,
+                        attempt.proxy_url,
+                        timeout=(
+                            STREAM_HEADER_TIMEOUT
+                            if stream and not fallback_active
+                            else UPSTREAM_TIMEOUT
+                        ),
                     )
-                    self.server.register_upstream(connection)
+                    self.server.register_upstream(
+                        connection, self.connection, self._local_cancel_event
+                    )
+                    install_cancelable_connect(
+                        connection,
+                        self.server.register_upstream_socket,
+                        self._check_cancelled,
+                    )
                     headers = self._request_headers(spec, target, attempt.api_key)
+                    if required_terminal or image_bridge:
+                        headers = {
+                            name: value
+                            for name, value in headers.items()
+                            if name.casefold() != "accept-encoding"
+                        }
+                        headers["Accept-Encoding"] = "identity"
+                    if fallback_active or image_bridge:
+                        headers = {
+                            name: value
+                            for name, value in headers.items()
+                            if name.casefold() not in REWRITTEN_REQUEST_HEADERS
+                        }
+                        headers["Accept"] = (
+                            "text/event-stream" if image_bridge else "application/json"
+                        )
+                        headers["Content-Type"] = "application/json; charset=utf-8"
                     headers.update(proxy_headers)
                     connection.request(
                         self.command,
@@ -773,9 +1386,87 @@ class RelayHandler(BaseHTTPRequestHandler):
                         body=body,
                         headers=headers,
                     )
+                    upstream_sock = connection.sock
+                    self.server.register_upstream_socket(connection, upstream_sock)
                     generation_started_at = time.monotonic()
                     response = connection.getresponse()
+                    response_content_type = response.getheader("Content-Type") or ""
+                    response_stream = (
+                        stream and not fallback_active
+                    ) or "text/event-stream" in response_content_type.casefold()
+                    response_expected_length = (
+                        response.length
+                        if self.command != "HEAD" and response.status not in {204, 304}
+                        else None
+                    )
+                    if upstream_sock is not None:
+                        # Streaming responses may legitimately stay silent while the
+                        # model reasons. Client disconnect and relay shutdown are
+                        # still enforced by the upstream monitor.
+                        upstream_sock.settimeout(
+                            None if response_stream else UPSTREAM_TIMEOUT
+                        )
                     if response.status < 400:
+                        attempt_terminal = required_terminal if response_stream else ""
+                        if image_bridge:
+                            encoding = response.getheader("Content-Encoding")
+                            if encoding and encoding.strip().casefold() != "identity":
+                                raise InvalidImageResponse(
+                                    "Image generation returned an encoded response"
+                                )
+                        if image_bridge and response.status in {204, 304}:
+                            raise InvalidImageResponse(
+                                "Image generation omitted the response body"
+                            )
+                        if required_terminal and response.status in {204, 304}:
+                            raise IncompleteSSE("Provider omitted the response body")
+                        if attempt_terminal and media_type(response_content_type) != (
+                            "text/event-stream"
+                        ):
+                            raise IncompleteSSE("Provider returned a non-SSE response")
+                        if (
+                            (image_bridge or not response_stream or attempt_terminal)
+                            and self.command != "HEAD"
+                            and response.status not in {204, 304}
+                        ):
+                            try:
+                                buffered_body, buffered_length = buffered_response(
+                                    response,
+                                    response_expected_length,
+                                    "" if image_bridge else attempt_terminal,
+                                    (
+                                        MAX_IMAGE_RESPONSE_BYTES
+                                        if image_bridge
+                                        else MAX_BUFFERED_RESPONSE_BYTES
+                                    ),
+                                )
+                            except (OSError, http.client.HTTPException) as error:
+                                if image_bridge:
+                                    raise InvalidImageResponse(
+                                        "Image generation response is incomplete or too large"
+                                    ) from error
+                                raise
+                            if image_bridge:
+                                adapted = images_response(buffered_body.read())
+                                buffered_body.close()
+                                buffered_body = tempfile.SpooledTemporaryFile(
+                                    max_size=RESPONSE_SPOOL_BYTES, mode="w+b"
+                                )
+                                buffered_body.write(adapted)
+                                buffered_body.seek(0)
+                                buffered_length = len(adapted)
+                                response_content_type = "application/json"
+                                response_rewritten = True
+                                rewritten_content_type = "application/json"
+                            if fallback_active and not response_stream:
+                                buffered_body, buffered_length = completed_sse_response(
+                                    buffered_body
+                                )
+                                response_content_type = "text/event-stream"
+                                response_rewritten = True
+                                rewritten_content_type = (
+                                    "text/event-stream; charset=utf-8"
+                                )
                         break
                     retry_status = response.status
                     retry_header = response.getheader("Retry-After")
@@ -793,12 +1484,47 @@ class RelayHandler(BaseHTTPRequestHandler):
                         if balance_error
                         else http_error_detail(response.status)
                     )
+                    if (
+                        uses_images
+                        and 400 <= retry_status < 500
+                        and retry_status not in {401, 403, 408, 429}
+                        and not balance_error
+                        and not block_model
+                    ):
+                        failed = True
+                        self._response_status = retry_status
+                        response_latency = (time.monotonic() - started) * 1000
+                        self.server.metrics.response(
+                            request_id,
+                            spec.id,
+                            retry_status,
+                            response_latency,
+                            cache_extended,
+                            generation_started_at,
+                        )
+                        self._error(retry_status, retry_detail)
+                        return
                 except (OSError, http.client.HTTPException) as error:
                     retry_detail = network_error_detail(error)
+                    activate_fallback = (
+                        fallback_body is not None
+                        and not fallback_active
+                        and isinstance(error, IncompleteSSE)
+                    )
+                    if activate_fallback:
+                        body = fallback_body
+                        fallback_active = True
+
+                if self.server.stopping.is_set():
+                    raise RelayStopping
+                if self._client_disconnected():
+                    raise ClientDisconnected
 
                 retries += 1
                 retries_429 += int(retry_status == 429)
-                delay = retry_after_seconds(retry_header, retries)
+                delay = 0 if activate_fallback else retry_after_seconds(
+                    retry_header, retries
+                )
                 if response is not None:
                     response.close()
                 if connection is not None:
@@ -833,12 +1559,14 @@ class RelayHandler(BaseHTTPRequestHandler):
                 )
                 if not shared_retry:
                     self._wait_retry(delay)
+            if self._client_disconnected():
+                raise ClientDisconnected
             self._response_status = response.status
             response_latency = (time.monotonic() - started) * 1000
             expected_length = (
-                response.length
-                if self.command != "HEAD" and response.status not in {204, 304}
-                else None
+                buffered_length
+                if buffered_body is not None
+                else response_expected_length
             )
             self.server.metrics.response(
                 request_id,
@@ -848,15 +1576,30 @@ class RelayHandler(BaseHTTPRequestHandler):
                 cache_extended,
                 generation_started_at,
             )
-            self.send_response(response.status)
             blocked = HOP_HEADERS | {
                 name.strip().lower()
                 for name in (response.getheader("Connection") or "").split(",")
                 if name.strip()
             }
+            with self.server._config_lock:
+                if self._client_disconnected():
+                    raise ClientDisconnected
+                self.server.register_response_client(
+                    self.connection, self._local_cancel_event
+                )
+            self.send_response(response.status)
             for name, value in response.getheaders():
-                if name.lower() not in blocked and name.lower() != "content-length":
+                lowered = name.lower()
+                if (
+                    lowered not in blocked
+                    and lowered != "content-length"
+                    and not (
+                        response_rewritten and lowered in REWRITTEN_RESPONSE_HEADERS
+                    )
+                ):
                     self.send_header(name, value)
+            if response_rewritten:
+                self.send_header("Content-Type", rewritten_content_type)
             if expected_length is not None:
                 self.send_header("Content-Length", str(expected_length))
             elif self.command == "HEAD":
@@ -867,9 +1610,13 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._finish_client_headers()
             self.close_connection = True
             committed = True
-            inspector = ResponseInspector(response.getheader("Content-Type") or "")
+            inspector = ResponseInspector(response_content_type)
             if self.command != "HEAD" and response.status not in {204, 304}:
-                while chunk := response.read1(64 * 1024):
+                source = buffered_body if buffered_body is not None else response
+                read_chunk = source.read if buffered_body is not None else source.read1
+                while chunk := read_chunk(64 * 1024):
+                    if self._client_disconnected():
+                        raise ClientDisconnected
                     inspector.feed(chunk)
                     usage = inspector.usage
                     self.server.metrics.tokens(
@@ -883,26 +1630,80 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.server.metrics.tokens(request_id, usage, inspector.terminal_at)
             if response.status >= 400 and not self._error_detail:
                 self._error_detail = http_error_detail(response.status)
-        except (ClientDisconnected, RelayStopping):
-            cancelled = True
-            self.close_connection = True
-            self._error_detail = "Client disconnected" if not self.server.stopping.is_set() else "Relay stopped"
-        except (OSError, http.client.HTTPException) as error:
+        except InvalidImageResponse as error:
             failed = True
-            self._error_detail = network_error_detail(error)
+            self._error_detail = str(error)
             self.server.metrics.set_detail(request_id, self._error_detail)
             if not committed:
-                status = 504 if isinstance(error, (TimeoutError, socket.timeout)) else 502
                 try:
-                    self._error(status, f"{spec.name} is unavailable", self._error_detail)
+                    self._error(502, "Image generation failed", self._error_detail)
                 except ClientDisconnected:
                     cancelled = True
                     self.close_connection = True
+        except (ClientDisconnected, RelayStopping):
+            cancelled = True
+            self.close_connection = True
+            switched = (
+                self._local_cancel_event is not None
+                and self._local_cancel_event.is_set()
+            )
+            self._error_detail = (
+                "Provider switched"
+                if switched
+                else "Relay stopped"
+                if self.server.stopping.is_set()
+                else "Client disconnected"
+            )
+            if switched and not committed:
+                try:
+                    self._error(503, "Request cancelled", self._error_detail)
+                except ClientDisconnected:
+                    pass
+        except (OSError, http.client.HTTPException) as error:
+            switched = (
+                self._local_cancel_event is not None
+                and self._local_cancel_event.is_set()
+            )
+            if switched or self.server.stopping.is_set() or self._client_disconnected():
+                switched = (
+                    self._local_cancel_event is not None
+                    and self._local_cancel_event.is_set()
+                )
+                cancelled = True
+                self.close_connection = True
+                self._error_detail = (
+                    "Provider switched"
+                    if switched
+                    else "Relay stopped"
+                    if self.server.stopping.is_set()
+                    else "Client disconnected"
+                )
+                if switched and not committed:
+                    try:
+                        self._error(503, "Request cancelled", self._error_detail)
+                    except ClientDisconnected:
+                        pass
+            else:
+                failed = True
+                self._error_detail = network_error_detail(error)
+                self.server.metrics.set_detail(request_id, self._error_detail)
+                if not committed:
+                    status = 504 if isinstance(error, (TimeoutError, socket.timeout)) else 502
+                    try:
+                        self._error(status, f"{spec.name} is unavailable", self._error_detail)
+                    except ClientDisconnected:
+                        cancelled = True
+                        self.close_connection = True
         finally:
             try:
+                if buffered_body is not None:
+                    buffered_body.close()
                 if connection is not None:
                     self.server.unregister_upstream(connection)
                     connection.close()
+                self.server.unregister_response_client(
+                    self.connection, self._local_cancel_event
+                )
             finally:
                 elapsed = (
                     response_latency
@@ -950,8 +1751,18 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 
 class RelayServer(ThreadingHTTPServer):
+    allow_reuse_address = os.name != "nt"
     request_queue_size = 128
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        if os.name == "nt":
+            self.socket.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_EXCLUSIVEADDRUSE,
+                1,
+            )
+        super().server_bind()
 
     def __init__(
         self,
@@ -967,8 +1778,19 @@ class RelayServer(ThreadingHTTPServer):
         self.metrics = RelayMetrics()
         self.stopping = threading.Event()
         self._upstream_lock = threading.Lock()
-        self._upstreams = set()
+        self._upstreams = {}
+        self._response_client_lock = threading.Lock()
+        self._response_clients = {}
+        self._local_cancel_event = threading.Event()
+        self._client_monitor = None
         self._config_lock = threading.RLock()
+        self._tunnel_route_marker = secrets.token_urlsafe(32)
+        self._tunnel_model_catalog: tuple[str, ...] = ()
+        self._tunnel_model_probes: dict[str, str] = {}
+        self._tunnel_model_generation = 0
+        self._tunnel_model_probe_slots = threading.BoundedSemaphore(
+            MAX_TUNNEL_MODEL_PROBES
+        )
         self._shared_tunnel_control = SharedTunnelControl()
         self._config_store = ConfigStore(config_path) if config and registry is None else None
         self.config_error = ""
@@ -995,7 +1817,12 @@ class RelayServer(ThreadingHTTPServer):
                 saved_tunnel_token,
                 self._tunnel_rpm_per_ip,
                 self._tunnel_publisher_profile,
-            ) = _tunnel_settings(saved)
+                self._tunnel_provider_id,
+            ) = _tunnel_settings(saved, self.registry.active().id)
+            if self._tunnel_provider_id not in {
+                provider.id for provider in self.registry.list()
+            }:
+                raise ValueError("Saved tunnel settings are invalid")
         except BaseException:
             self.registry.close()
             raise
@@ -1014,6 +1841,7 @@ class RelayServer(ThreadingHTTPServer):
                 policy_lock=self._config_lock,
                 public_rpm=self._tunnel_rpm_per_ip,
                 publisher_profile=self._tunnel_publisher_profile,
+                route_marker=self._tunnel_route_marker,
             )
             if saved is not None and self._config_store is not None:
                 self._config_store.save(self._config_value())
@@ -1032,6 +1860,12 @@ class RelayServer(ThreadingHTTPServer):
                     self.metrics.restore_recent(recent("all", 100))
                 except (KeyError, OSError, TypeError, ValueError, sqlite3.Error):
                     self.history_error = "History read failed"
+            self._client_monitor = threading.Thread(
+                target=self._monitor_client_disconnects,
+                name="relay-client-monitor",
+                daemon=True,
+            )
+            self._client_monitor.start()
         except BaseException:
             if self.tunnel is not None:
                 self.tunnel.stop()
@@ -1046,11 +1880,16 @@ class RelayServer(ThreadingHTTPServer):
             "access_token": self._tunnel_token,
             "rpm_per_ip": self._tunnel_rpm_per_ip,
             "publisher_profile": self._tunnel_publisher_profile,
+            "provider_id": self._tunnel_provider_id,
         }
         return value
 
     def _tunnel_sensitive_markers(self) -> tuple[str, ...]:
-        markers = {self._tunnel_token, self._environment_key}
+        markers = {
+            self._tunnel_token,
+            self._tunnel_route_marker,
+            self._environment_key,
+        }
         for provider in self.registry.export_config().get("providers", ()):
             if provider.get("auth_mode") == "passthrough":
                 continue
@@ -1083,7 +1922,11 @@ class RelayServer(ThreadingHTTPServer):
         )
 
     def _tunnel_secret_markers(self) -> tuple[str, ...]:
-        markers = {self._tunnel_token, self._environment_key}
+        markers = {
+            self._tunnel_token,
+            self._tunnel_route_marker,
+            self._environment_key,
+        }
         for provider in self.registry.export_config().get("providers", ()):
             if provider.get("auth_mode") == "passthrough":
                 continue
@@ -1108,10 +1951,23 @@ class RelayServer(ThreadingHTTPServer):
         try:
             return (
                 not self.stopping.is_set()
-                and self.registry.active().auth_mode != "passthrough"
+                and next(
+                    provider
+                    for provider in self.registry.list()
+                    if provider.id == self._tunnel_provider_id
+                ).auth_mode
+                != "passthrough"
             )
-        except (KeyError, RuntimeError):
+        except (KeyError, RuntimeError, StopIteration):
             return False
+
+    def _invalidate_tunnel_model_probes_locked(self) -> None:
+        self._tunnel_model_generation += 1
+        self._tunnel_model_probes.clear()
+
+    def _clear_tunnel_model_probes_locked(self) -> None:
+        self._tunnel_model_catalog = ()
+        self._invalidate_tunnel_model_probes_locked()
 
     def _sync_tunnel_security(self) -> None:
         if self.tunnel is not None:
@@ -1122,7 +1978,27 @@ class RelayServer(ThreadingHTTPServer):
                 secret_markers=self._tunnel_secret_markers(),
                 public_rpm=self._tunnel_rpm_per_ip,
                 publisher_profile=self._tunnel_publisher_profile,
+                route_marker=self._tunnel_route_marker,
             )
+
+    def _acquire_request_route(self, marker_values):
+        with self._config_lock:
+            if not marker_values:
+                return (
+                    self.registry.acquire_active(),
+                    False,
+                    self._local_cancel_event,
+                )
+            if (
+                len(marker_values) != 1
+                or not isinstance(marker_values[0], str)
+                or not marker_values[0].isascii()
+                or not secrets.compare_digest(
+                    marker_values[0].encode(), self._tunnel_route_marker.encode()
+                )
+            ):
+                return None
+            return self.registry.acquire(self._tunnel_provider_id), True, None
 
     def _persist(self) -> None:
         if self._config_store is None:
@@ -1134,33 +2010,126 @@ class RelayServer(ThreadingHTTPServer):
         else:
             self.config_error = ""
 
-    def register_upstream(self, connection) -> None:
+    def register_upstream(self, connection, client=None, cancel_event=None) -> None:
         with self._upstream_lock:
             if self.stopping.is_set():
                 connection.close()
                 raise RelayStopping
-            self._upstreams.add(connection)
+            if cancel_event is not None and cancel_event.is_set():
+                connection.close()
+                raise ClientDisconnected
+            self._upstreams[connection] = (client, None, cancel_event)
+
+    def register_response_client(self, client, cancel_event) -> None:
+        with self._response_client_lock:
+            if self.stopping.is_set():
+                raise RelayStopping
+            if cancel_event is not None and cancel_event.is_set():
+                raise ClientDisconnected
+            self._response_clients[client] = cancel_event
+
+    def unregister_response_client(self, client, cancel_event) -> None:
+        with self._response_client_lock:
+            if (
+                client in self._response_clients
+                and self._response_clients[client] is cancel_event
+            ):
+                self._response_clients.pop(client, None)
+
+    def _abort_response_clients(self, cancel_event=None) -> None:
+        with self._response_client_lock:
+            clients = tuple(
+                client
+                for client, event in self._response_clients.items()
+                if cancel_event is None or event is cancel_event
+            )
+            for client in clients:
+                self._response_clients.pop(client, None)
+        for client in clients:
+            _abort_socket(client)
+
+    def register_upstream_socket(self, connection, sock) -> None:
+        with self._upstream_lock:
+            current = self._upstreams.get(connection)
+            if current is not None:
+                self._upstreams[connection] = (current[0], sock, current[2])
+                return
+        _abort_upstream(connection, sock)
+        if self.stopping.is_set():
+            raise RelayStopping
+        raise ClientDisconnected
 
     def unregister_upstream(self, connection) -> None:
         with self._upstream_lock:
-            self._upstreams.discard(connection)
+            self._upstreams.pop(connection, None)
 
-    def _abort_upstreams(self) -> None:
+    def _monitor_client_disconnects(self) -> None:
+        while not self.stopping.is_set():
+            with self._upstream_lock:
+                watched = {
+                    client: connection
+                    for connection, (client, _sock, _cancel) in self._upstreams.items()
+                    if client is not None
+                }
+            if not watched:
+                self.stopping.wait(0.1)
+                continue
+            clients = tuple(watched)
+            readable = []
+            for offset in range(0, len(clients), SELECT_SOCKET_LIMIT):
+                try:
+                    ready, _, _ = select.select(
+                        clients[offset : offset + SELECT_SOCKET_LIMIT], [], [], 0
+                    )
+                except (OSError, ValueError):
+                    continue
+                readable.extend(ready)
+            for client in readable:
+                try:
+                    disconnected = client.recv(1, socket.MSG_PEEK) == b""
+                except (OSError, ValueError):
+                    disconnected = True
+                if not disconnected:
+                    continue
+                connection = watched[client]
+                with self._upstream_lock:
+                    current = self._upstreams.get(connection)
+                    if current is None or current[0] is not client:
+                        continue
+                    self._upstreams.pop(connection, None)
+                _abort_upstream(connection, current[1])
+            self.stopping.wait(0.1)
+
+    def _abort_upstreams(self, cancel_event=None) -> None:
         with self._upstream_lock:
-            connections = tuple(self._upstreams)
-            self._upstreams.clear()
-        for connection in connections:
-            sock = getattr(connection, "sock", None)
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    socket.close(sock.detach())
-                except OSError:
-                    pass
-            connection.close()
+            connections = tuple(
+                (connection, state)
+                for connection, state in self._upstreams.items()
+                if cancel_event is None or state[2] is cancel_event
+            )
+            for connection, _state in connections:
+                self._upstreams.pop(connection, None)
+        for connection, (_client, sock, _cancel) in connections:
+            _abort_upstream(connection, sock)
+
+    def _rotate_local_requests_locked(self):
+        cancel_event = self._local_cancel_event
+        cancel_event.set()
+        self._local_cancel_event = threading.Event()
+        return cancel_event
+
+    def _abort_local_requests(self, cancel_event) -> None:
+        self._abort_response_clients(cancel_event)
+        self._abort_upstreams(cancel_event)
+
+    def _finish_local_route_change(self, cancel_event) -> None:
+        if cancel_event is None:
+            return
+        try:
+            self._abort_local_requests(cancel_event)
+        finally:
+            with self._config_lock:
+                self._persist()
 
     def providers(self):
         rates = self.metrics.provider_actual_rpm()
@@ -1174,29 +2143,27 @@ class RelayServer(ThreadingHTTPServer):
         return active.name, urlsplit(active.upstream)
 
     def select(self, provider):
+        cancel_event = None
         with self._config_lock:
             previous_id = self.registry.active().id
             selected = self.registry.select(provider)
-            changed = selected.id != previous_id
-            if changed:
-                self._tunnel_allowed_models = ()
-                self._sync_tunnel_security()
-            self._persist()
-        if changed:
-            self.tunnel.stop()
+            if selected.id != previous_id:
+                cancel_event = self._rotate_local_requests_locked()
+            else:
+                self._persist()
+        self._finish_local_route_change(cancel_event)
         return selected.name, urlsplit(selected.upstream)
 
     def toggle(self):
+        cancel_event = None
         with self._config_lock:
             previous_id = self.registry.active().id
             selected = self.registry.toggle()
-            changed = selected.id != previous_id
-            if changed:
-                self._tunnel_allowed_models = ()
-                self._sync_tunnel_security()
-            self._persist()
-        if changed:
-            self.tunnel.stop()
+            if selected.id != previous_id:
+                cancel_event = self._rotate_local_requests_locked()
+            else:
+                self._persist()
+        self._finish_local_route_change(cancel_event)
         return selected.name, urlsplit(selected.upstream)
 
     def add_provider(self, **values):
@@ -1207,22 +2174,71 @@ class RelayServer(ThreadingHTTPServer):
             return provider
 
     def update_provider(self, provider_id, **values):
+        stop_tunnel = False
+        cancel_event = None
         with self._config_lock:
+            active_id = self.registry.active().id
+            previous = next(
+                (
+                    provider
+                    for provider in self.registry.list()
+                    if provider.id == provider_id
+                ),
+                None,
+            )
+            if previous is None:
+                raise KeyError("Provider not found")
             provider = self.registry.update(provider_id, **values)
+            if provider_id == active_id and (
+                previous.upstream != provider.upstream
+                or previous.auth_mode != provider.auth_mode
+                or "api_keys" in values
+            ):
+                cancel_event = self._rotate_local_requests_locked()
+            route_changed = provider_id == self._tunnel_provider_id and (
+                previous.upstream != provider.upstream
+                or previous.auth_mode != provider.auth_mode
+                or "api_keys" in values
+            )
+            if route_changed:
+                self._tunnel_allowed_models = ()
+                self._tunnel_route_marker = secrets.token_urlsafe(32)
+                self._clear_tunnel_model_probes_locked()
+                stop_tunnel = True
             self._sync_tunnel_security()
-            self._persist()
-            return provider
+            if cancel_event is None:
+                self._persist()
+        self._finish_local_route_change(cancel_event)
+        if stop_tunnel:
+            self.tunnel.stop()
+        return provider
 
     def delete_provider(self, provider_id):
+        cancel_event = None
         with self._config_lock:
+            previous_active_id = self.registry.active().id
+            pinned = provider_id == self._tunnel_provider_id
+            if pinned and self.tunnel.snapshot()["state"] not in {"stopped", "error"}:
+                raise RuntimeError("Stop the tunnel before deleting its provider")
             provider = self.registry.delete(provider_id)
+            if provider.id != previous_active_id:
+                cancel_event = self._rotate_local_requests_locked()
+            if pinned:
+                self._tunnel_provider_id = self.registry.active().id
+                self._tunnel_route_marker = secrets.token_urlsafe(32)
+                self._tunnel_allowed_models = ()
+                self._clear_tunnel_model_probes_locked()
             self._sync_tunnel_security()
-            self._persist()
-            return provider
+            if cancel_event is None:
+                self._persist()
+        self._finish_local_route_change(cancel_event)
+        return provider
 
     def add_provider_key(self, provider_id, api_key, rpm=0, proxy_url=""):
         with self._config_lock:
             fingerprint = self.registry.add_key(provider_id, api_key, rpm, proxy_url)
+            if provider_id == self._tunnel_provider_id:
+                self._invalidate_tunnel_model_probes_locked()
             self._sync_tunnel_security()
             self._persist()
             return fingerprint
@@ -1236,6 +2252,8 @@ class RelayServer(ThreadingHTTPServer):
             raise ValueError("FREEMODEL_API_KEY is managed by Windows environment")
         with self._config_lock:
             result = self.registry.remove_key(provider_id, fingerprint)
+            if provider_id == self._tunnel_provider_id:
+                self._invalidate_tunnel_model_probes_locked()
             self._sync_tunnel_security()
             self._persist()
             return result
@@ -1251,6 +2269,8 @@ class RelayServer(ThreadingHTTPServer):
             result = self.registry.update_key(
                 provider_id, fingerprint, rpm, proxy_url
             )
+            if provider_id == self._tunnel_provider_id:
+                self._invalidate_tunnel_model_probes_locked()
             self._sync_tunnel_security()
             self._persist()
             return result
@@ -1346,6 +2366,285 @@ class RelayServer(ThreadingHTTPServer):
         with self._config_lock:
             return self._tunnel_allowed_models
 
+    def tunnel_provider_id(self) -> str:
+        with self._config_lock:
+            return self._tunnel_provider_id
+
+    def set_tunnel_provider(self, provider_id: str) -> str:
+        with self._config_lock:
+            if provider_id not in {
+                provider.id for provider in self.registry.list()
+            }:
+                raise KeyError("Provider not found")
+            if provider_id == self._tunnel_provider_id:
+                return provider_id
+            if self.tunnel.snapshot()["state"] not in {"stopped", "error"}:
+                raise RuntimeError("Stop the tunnel before changing its provider")
+            self._tunnel_provider_id = provider_id
+            self._tunnel_route_marker = secrets.token_urlsafe(32)
+            self._tunnel_allowed_models = ()
+            self._clear_tunnel_model_probes_locked()
+            self._sync_tunnel_security()
+            self._persist()
+            return provider_id
+
+    def fetch_tunnel_models(self):
+        with self._config_lock:
+            provider_id = self._tunnel_provider_id
+            route_marker = self._tunnel_route_marker
+            model_generation = self._tunnel_model_generation
+        result = self.fetch_models(provider_id)
+        catalog = _tunnel_catalog_models(result)
+        with self._config_lock:
+            if (
+                provider_id != self._tunnel_provider_id
+                or model_generation != self._tunnel_model_generation
+                or not secrets.compare_digest(
+                    route_marker.encode(), self._tunnel_route_marker.encode()
+                )
+            ):
+                raise RuntimeError("Tunnel model catalog is stale")
+            self._tunnel_model_catalog = catalog
+            self._tunnel_model_probes = {
+                model: state
+                for model, state in self._tunnel_model_probes.items()
+                if model in catalog and state in TUNNEL_MODEL_PROBE_STATES
+            }
+        return result
+
+    def tunnel_model_probes(self) -> tuple[dict[str, str], ...]:
+        with self._config_lock:
+            return tuple(
+                {"model": model, "state": self._tunnel_model_probes[model]}
+                for model in self._tunnel_model_catalog
+                if model in self._tunnel_model_probes
+            )
+
+    def probe_tunnel_model(self, model: str) -> dict[str, str]:
+        model = _tunnel_models((model,))[0]
+        with self._config_lock:
+            if model not in self._tunnel_model_catalog:
+                raise ValueError("Tunnel model is not in the current catalog")
+            if self._tunnel_model_probes.get(model) == "testing":
+                return {"model": model, "state": "testing"}
+            provider_id = self._tunnel_provider_id
+            route_marker = self._tunnel_route_marker
+            model_generation = self._tunnel_model_generation
+            if not self._tunnel_model_probe_slots.acquire(blocking=False):
+                self._tunnel_model_probes[model] = "timeout"
+                return {"model": model, "state": "timeout"}
+            self._tunnel_model_probes[model] = "testing"
+
+        deadline = time.monotonic() + TUNNEL_MODEL_PROBE_TIMEOUT
+        cancelled = threading.Event()
+        completed = threading.Event()
+        holder_lock = threading.Lock()
+        holder = [None]
+        outcome = ["unavailable"]
+
+        def run_probe() -> None:
+            try:
+                try:
+                    outcome[0] = self._probe_tunnel_model_once(
+                        provider_id,
+                        model,
+                        deadline,
+                        cancelled,
+                        holder_lock,
+                        holder,
+                    )
+                except Exception:
+                    outcome[0] = "unavailable"
+            finally:
+                self._tunnel_model_probe_slots.release()
+                completed.set()
+
+        worker = threading.Thread(
+            target=run_probe,
+            name="tunnel-model-probe",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except BaseException:
+            self._tunnel_model_probe_slots.release()
+            state = "unavailable"
+        else:
+            completed.wait(max(0.0, deadline - time.monotonic()))
+            if completed.is_set():
+                state = outcome[0]
+            else:
+                cancelled.set()
+                with holder_lock:
+                    connection = holder[0]
+                if connection is not None:
+                    self.unregister_upstream(connection)
+                    _abort_upstream(connection, getattr(connection, "sock", None))
+                # Let the cancelled worker release its bounded probe slot before
+                # the UI schedules the next model; otherwise one timeout can
+                # cascade into immediate false timeouts for the remaining list.
+                completed.wait(0.25)
+                state = "timeout"
+
+        with self._config_lock:
+            current = (
+                provider_id == self._tunnel_provider_id
+                and model_generation == self._tunnel_model_generation
+                and secrets.compare_digest(
+                    route_marker.encode(), self._tunnel_route_marker.encode()
+                )
+                and model in self._tunnel_model_catalog
+            )
+            if current:
+                self._tunnel_model_probes[model] = state
+                return {"model": model, "state": state}
+            return {"model": model, "state": "unavailable"}
+
+    def _probe_tunnel_model_once(
+        self,
+        provider_id: str,
+        model: str,
+        deadline: float,
+        cancelled: threading.Event,
+        holder_lock: threading.Lock,
+        holder: list,
+    ) -> str:
+        def remaining() -> float:
+            value = deadline - time.monotonic()
+            if value <= 0 or cancelled.is_set():
+                raise TimeoutError
+            return value
+
+        lease = self.registry.acquire(provider_id)
+        connection = response = None
+        registered = False
+        try:
+            spec = lease.spec
+            if spec.auth_mode == "passthrough":
+                return "unavailable"
+            attempt, _waited = lease.runtime.acquire_attempt(
+                lambda: (
+                    cancelled.is_set()
+                    or self.stopping.is_set()
+                    or time.monotonic() >= deadline
+                ),
+                model,
+            )
+            body = json.dumps(
+                {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Reply OK"}],
+                    "max_tokens": 1,
+                    "stream": False,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            upstream = spec.parsed_upstream
+            target = upstream_target(upstream, "/v1/chat/completions")
+            connection, request_target, proxy_headers = upstream_connection(
+                upstream,
+                target,
+                attempt.proxy_url,
+                timeout=remaining(),
+            )
+            self.register_upstream(connection)
+            registered = True
+            install_cancelable_connect(
+                connection,
+                self.register_upstream_socket,
+                remaining,
+            )
+            with holder_lock:
+                holder[0] = connection
+            remaining()
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Accept-Encoding": "identity",
+                "Connection": "close",
+                **proxy_headers,
+            }
+            if attempt.api_key:
+                if spec.auth_mode == "x-api-key":
+                    headers["x-api-key"] = attempt.api_key
+                else:
+                    headers["Authorization"] = f"Bearer {attempt.api_key}"
+            connection.request("POST", request_target, body=body, headers=headers)
+            upstream_socket = connection.sock
+            self.register_upstream_socket(connection, upstream_socket)
+            if upstream_socket is not None:
+                upstream_socket.settimeout(remaining())
+            response = connection.getresponse()
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining())
+            response_body = response.read(MAX_ERROR_BYTES + 1)
+            if response.status >= 400:
+                balance_error = balance_exhausted(response.status, response_body)
+                block_model = model_unavailable_on_plan(
+                    response.status, response_body, model
+                )
+                if balance_error or block_model:
+                    balance_deferred = balance_error and lease.runtime.defer_balance(
+                        attempt, rate_limited=False
+                    )
+                    if not balance_deferred:
+                        lease.runtime.defer_attempt(
+                            attempt,
+                            0,
+                            rate_limited=False,
+                            block_model=block_model,
+                            model=model,
+                        )
+                    with holder_lock:
+                        if holder[0] is connection:
+                            holder[0] = None
+                    response.close()
+                    response = None
+                    if registered:
+                        self.unregister_upstream(connection)
+                        registered = False
+                    connection.close()
+                    connection = None
+                    return self._probe_tunnel_model_once(
+                        provider_id,
+                        model,
+                        deadline,
+                        cancelled,
+                        holder_lock,
+                        holder,
+                    )
+            payload = (
+                json_object(response_body)
+                if response.status == 200 and len(response_body) <= MAX_ERROR_BYTES
+                else None
+            )
+            choices = payload.get("choices") if payload is not None else None
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            valid_completion = isinstance(choice, dict) and (
+                isinstance(choice.get("message"), dict)
+                or isinstance(choice.get("text"), str)
+            )
+            return "available" if valid_completion else "unavailable"
+        except (socket.timeout, TimeoutError):
+            return "timeout"
+        except (ClientDisconnected, RelayStopping, OSError, http.client.HTTPException):
+            return (
+                "timeout"
+                if cancelled.is_set() or time.monotonic() >= deadline
+                else "unavailable"
+            )
+        finally:
+            with holder_lock:
+                if holder[0] is connection:
+                    holder[0] = None
+            if response is not None:
+                response.close()
+            if connection is not None:
+                if registered:
+                    self.unregister_upstream(connection)
+                connection.close()
+            lease.release()
+
     def tunnel_rpm_per_ip(self) -> int:
         with self._config_lock:
             return self._tunnel_rpm_per_ip
@@ -1396,9 +2695,19 @@ class RelayServer(ThreadingHTTPServer):
             if not self._tunnel_allowed_models:
                 raise ValueError("Select at least one tunnel model")
             if not self._tunnel_route_safe():
-                raise ValueError("The active provider cannot be shared through a tunnel")
+                raise ValueError("The selected provider cannot be shared through a tunnel")
             self._sync_tunnel_security()
             self._persist()
+        try:
+            shared = self._shared_tunnel_control.ensure_self_running()
+        except RuntimeError as error:
+            raise ValueError("Shared tunnel state could not be resumed") from error
+        if shared.get("available") is True and not any(
+            tunnel.get("name") == CONTROL_SELF_NAME
+            and tunnel.get("state") == "running"
+            for tunnel in shared.get("tunnels", ())
+        ):
+            raise ValueError("Shared tunnel state could not be resumed")
         self.tunnel.start()
         return self.tunnel_snapshot()
 
@@ -1407,6 +2716,15 @@ class RelayServer(ThreadingHTTPServer):
         return self.tunnel_snapshot()
 
     def fetch_models(self, provider_id):
+        with self._config_lock:
+            cancel_event = self._local_cancel_event
+
+        def check_cancelled():
+            if self.stopping.is_set():
+                raise RelayStopping
+            if cancel_event.is_set():
+                raise ClientDisconnected
+
         lease = self.registry.acquire(provider_id)
         try:
             spec = lease.spec
@@ -1415,7 +2733,7 @@ class RelayServer(ThreadingHTTPServer):
             retries = 0
             while True:
                 attempt, _waited = lease.runtime.acquire_attempt(
-                    self.stopping.is_set, ""
+                    lambda: self.stopping.is_set() or cancel_event.is_set(), ""
                 )
                 connection = response = None
                 retry_status = None
@@ -1424,7 +2742,14 @@ class RelayServer(ThreadingHTTPServer):
                     connection, request_target, proxy_headers = upstream_connection(
                         upstream, target, attempt.proxy_url, timeout=15
                     )
-                    self.register_upstream(connection)
+                    self.register_upstream(
+                        connection, cancel_event=cancel_event
+                    )
+                    install_cancelable_connect(
+                        connection,
+                        self.register_upstream_socket,
+                        check_cancelled,
+                    )
                     headers = {}
                     if attempt.api_key and spec.auth_mode != "passthrough":
                         name = (
@@ -1439,6 +2764,7 @@ class RelayServer(ThreadingHTTPServer):
                         )
                     headers.update(proxy_headers)
                     connection.request("GET", request_target, headers=headers)
+                    self.register_upstream_socket(connection, connection.sock)
                     response = connection.getresponse()
                     if response.status < 400:
                         body = response.read(MAX_INSPECT_BYTES + 1)
@@ -1447,11 +2773,12 @@ class RelayServer(ThreadingHTTPServer):
                         payload = json.loads(body)
                         if not isinstance(payload, (dict, list)):
                             raise ValueError("Provider returned an invalid model catalog")
+                        check_cancelled()
                         return payload
                     retry_status = response.status
                     retry_header = response.getheader("Retry-After")
                 except (OSError, http.client.HTTPException):
-                    pass
+                    check_cancelled()
                 finally:
                     if response is not None:
                         response.close()
@@ -1466,8 +2793,13 @@ class RelayServer(ThreadingHTTPServer):
                         delay,
                         rate_limited=retry_status == 429,
                     )
-                elif self.stopping.wait(delay):
-                    raise RelayStopping
+                else:
+                    deadline = time.monotonic() + delay
+                    while time.monotonic() < deadline:
+                        check_cancelled()
+                        self.stopping.wait(
+                            min(0.25, deadline - time.monotonic())
+                        )
         finally:
             lease.release()
 
@@ -1507,18 +2839,20 @@ class RelayServer(ThreadingHTTPServer):
 
     def shutdown(self) -> None:
         self.stopping.set()
+        self.registry.close()
+        self._abort_response_clients()
+        self._abort_upstreams()
         if self.tunnel is not None:
             self.tunnel.stop()
-        self.registry.close()
-        self._abort_upstreams()
         super().shutdown()
 
     def server_close(self) -> None:
         self.stopping.set()
+        self.registry.close()
+        self._abort_response_clients()
+        self._abort_upstreams()
         if self.tunnel is not None:
             self.tunnel.stop()
-        self.registry.close()
-        self._abort_upstreams()
         super().server_close()
         if self.history:
             self.history.close()

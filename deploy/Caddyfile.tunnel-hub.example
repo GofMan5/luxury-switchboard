@@ -1,8 +1,36 @@
 # Place this exact route inside the luxuryprivate.duckdns.org site, before
 # its existing application fallback. Keep that fallback otherwise unchanged.
 handle_path /model-tunnel/<48-hex-slug>/* {
-    forward_auth http://172.20.0.1:18080 {
-        uri /authorize/tunnel_a1b2c3d4
+    route {
+        header {
+            -Server
+            -Date
+            Cache-Control "no-store"
+            Strict-Transport-Security "max-age=31536000"
+        }
+        forward_auth http://172.20.0.1:18080 {
+            uri /authorize/tunnel_a1b2c3d4
+        }
+        reverse_proxy 172.20.0.1:20000 {
+            # Never trust a client-supplied forwarding header. The gateway uses
+            # this Caddy-derived address for per-client RPM and local telemetry.
+            header_up X-Tunnel-Client-IP {http.request.remote.host}
+        }
     }
-    reverse_proxy 172.20.0.1:20000
+}
+
+# Caddy transport failures skip the normal handler chain, so sanitize them in
+# the site error route as well. Keep this inside the same site block.
+handle_errors {
+    @tunnel expression `{http.request.orig_uri.path}.startsWith('/model-tunnel/')`
+    route @tunnel {
+        header {
+            -Server
+            -Date
+            Cache-Control "no-store"
+            Strict-Transport-Security "max-age=31536000"
+            Content-Type "application/json"
+        }
+        respond `{"error":{"message":"Tunnel unavailable","type":"tunnel_error"}}` {http.error.status_code}
+    }
 }

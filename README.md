@@ -10,6 +10,7 @@
 ```powershell
 python -m pip install -r requirements.txt
 python main.py
+python main.py --start-tunnel
 ```
 
 Реле слушает только `127.0.0.1`. Режимы без TUI:
@@ -31,7 +32,7 @@ Stop-Process -Id $relay.Id
 - `Dashboard` — live-запросы, модель, фактический/effective RPM, очередь, retries, context, tok/s, токены и latency. Цветной статус: зелёный — готово, синий — выполняется, жёлтый — очередь/retry, красный — ошибка, серый — отменено. Двойной клик или `Enter` по строке открывает безопасные детали с финальным HTTP-статусом (`200 OK`, `403 Forbidden`, `504 Gateway Timeout` и т. п.). Последние 100 завершённых запросов восстанавливаются из SQLite после перезапуска.
 - `Providers` — выбор, добавление, редактирование и удаление провайдеров; список моделей; несколько ключей в порядке приоритета. `Higher`/`Lower` меняют приоритет сразу и сохраняют его; системный Env Lite закреплён первым.
 - `Stats` — явные кнопки `24h`, `48h`, `72h`, `All` и агрегаты без хранения prompt/response body.
-- `Tunnel` — запуск управляемого SSH-туннеля к VPS в один клик, allowlist публичных моделей, копирование URL/ключа и ротация ключа.
+- `Tunnel` — запуск управляемого SSH-туннеля к VPS в один клик, allowlist публичных моделей, конечная проверка доступности выбранных или всех моделей, копирование URL/ключа и ротация ключа.
 - `Shared` — синхронизированный список общих туннелей, где собственный подписан `Ваш коннект`; pause/resume/stop работают по ревизии без передачи внутренних ID.
 
 Для ключа задаются RPM и необязательный HTTP proxy вида `http://user:pass@host:port`. Пустой proxy у нового ключа означает прямое подключение. Для выбранного ключа пустое поле сохраняет текущий proxy, слово `direct` отключает его. Credentials замаскированы и не попадают в таблицы, историю или метрики.
@@ -48,6 +49,8 @@ Stop-Process -Id $relay.Id
 
 Во вкладке `Tunnel` нужно обновить каталог, выбрать модели и нажать `Start`. `Online` и копирование адреса доступны только после authenticated HTTPS readiness-запроса к собственному synthetic `/v1/models`. При смене активного провайдера туннель безопасно останавливается, а allowlist очищается, чтобы модели предыдущего маршрута не попали в новый. Если текущая конфигурация временно непригодна для публикации, TUI показывает `Paused`, а не ложный `Online`. Per-IP RPM применяется отдельной FIFO-очередью для каждого адреса; `0` означает unlimited, а превышение лимита не отдаёт клиенту `429`.
 
+`Test selected` и `Test all` выполняют короткую реальную генерацию с жёстким таймаутом 10 секунд и показывают локальные состояния `Testing`, `Available`, `Unavailable` или `Timeout`; ответы, ключи и данные провайдера не сохраняются и не публикуются.
+
 Смена активного провайдера останавливает публичный туннель и очищает его allowlist: это не даёт случайно оставить старый каталог моделей у нового upstream. После переключения достаточно снова открыть `Tunnel`, выбрать актуальные модели и нажать `Start`.
 
 Publisher identity, publisher profile и публичный API key — разные сущности. Публичный ключ генерируется локально, принимается как `Authorization: Bearer` или `x-api-key`; `Rotate key` сразу отзывает предыдущий. Ни он, ни publisher-ключ не передаются провайдеру.
@@ -57,10 +60,10 @@ Publisher identity, publisher profile и публичный API key — разн
 Публичная граница не является passthrough/reverse proxy:
 
 - `GET /v1/models` всегда synthetic и содержит только выбранные model ID, без запроса к upstream;
-- inference принимается только через exact `POST /v1/responses`, `/v1/chat/completions`, `/v1/completions` и `/v1/messages`; остальные methods, paths, query и trailing slash отклоняются;
+- inference принимается только через exact `POST /v1/responses`, `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/images/generations` и `/v1/images/edits`; image edits принимают JSON references и `multipart/form-data`, остальные methods, paths, query и trailing slash отклоняются;
 - model должна точно входить в allowlist; входной public key никогда не передаётся дальше, а provider/upstream, внутренние ключи и proxy не попадают в ответ;
 - active provider с `passthrough` auth публиковать запрещено: туннель fail-closed отклонит запрос;
-- JSON и весь SSE-ответ целиком буферизуются и проверяются до public commit; unsafe/malformed данные не проходят. Локальное реле на `8798` остаётся streaming; публичный Tunnel отдаёт SSE только после полной проверки ради fail-closed анонимности.
+- JSON и весь SSE-ответ целиком буферизуются и проверяются до public commit; unsafe/malformed данные не проходят. Локальное реле на `8798` не коммитит `/v1/responses` до `response.completed` и бесшовно повторяет оборванную попытку; non-stream ответы проверяются до commit, а публичный Tunnel отдаёт SSE только после полной проверки ради fail-closed анонимности.
 
 Выбранные model ID и содержимое запроса/ответа являются полезной нагрузкой публичного API и проходят через VPS, который терминирует TLS. Скрываются и не передаются именно настроенные provider name/id/URL, внутренние ключи и proxy credentials.
 

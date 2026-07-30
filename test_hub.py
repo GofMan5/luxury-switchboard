@@ -136,6 +136,12 @@ class TunnelHubTests(unittest.TestCase):
         self.assertTrue(all(response["ok"] for response in responses))
         self.assertGreater(state["revision"], 7)
 
+    def test_resume_moves_stopped_tunnel_back_to_running_desired_state(self):
+        stopped = self.response("v1 stop 7 0")
+        self.assertEqual((stopped["revision"], stopped["tunnels"][0]["state"]), (8, "stopped"))
+        resumed = self.response("v1 resume 8 0")
+        self.assertEqual((resumed["revision"], resumed["tunnels"][0]["state"]), (9, "running"))
+
     def test_gate_observes_changes_immediately_and_fails_closed(self):
         server = hub.GateServer(("127.0.0.1", 0), self.state_path)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -161,6 +167,27 @@ class TunnelHubTests(unittest.TestCase):
                 '[{"id":"tunnel_a1b2c3d4","owner":"owner-1","state":[]}]}'
             )
             self.assertEqual(status(), (503, hub.UNAVAILABLE))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
+    def test_gate_headers_do_not_fingerprint_the_control_service(self):
+        server = hub.GateServer(("127.0.0.1", 0), self.state_path)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            connection.request("GET", f"/authorize/{self.SELF_ID}")
+            response = connection.getresponse()
+            headers = {name.casefold(): value for name, value in response.getheaders()}
+            response.read()
+            connection.close()
+            self.assertEqual(response.status, 204)
+            self.assertEqual(headers["cache-control"], "no-store")
+            self.assertEqual(headers["content-type"], "application/json")
+            self.assertNotIn("server", headers)
+            self.assertNotIn("date", headers)
         finally:
             server.shutdown()
             server.server_close()
@@ -241,7 +268,19 @@ class TunnelHubTests(unittest.TestCase):
 
     def test_deployment_templates_keep_control_separate_and_gate_before_proxy(self):
         caddy = (ROOT / "deploy" / "Caddyfile.tunnel-hub.example").read_text()
+        self.assertLess(caddy.index("route {"), caddy.index("header {"))
+        self.assertLess(caddy.index("header {"), caddy.index("forward_auth"))
         self.assertLess(caddy.index("forward_auth"), caddy.index("reverse_proxy"))
+        self.assertIn(
+            "header_up X-Tunnel-Client-IP {http.request.remote.host}", caddy
+        )
+        self.assertIn("-Server", caddy)
+        self.assertIn("-Date", caddy)
+        self.assertIn('Cache-Control "no-store"', caddy)
+        self.assertIn('Strict-Transport-Security "max-age=31536000"', caddy)
+        self.assertIn("handle_errors {", caddy)
+        self.assertIn("http.request.orig_uri.path", caddy)
+        self.assertIn('"type":"tunnel_error"', caddy)
         sshd = (ROOT / "deploy" / "sshd_config.tunnel-control").read_text()
         self.assertIn("DisableForwarding yes", sshd)
         keys = (ROOT / "deploy" / "authorized_keys.tunnel-control.example").read_text()

@@ -31,8 +31,8 @@ stores no URL, slug, port, provider, model, API key, or proxy.
    `tunnel_hub.py` as root-owned mode 0755.
 2. Install the service and initialize `/var/lib/tunnel-hub/tunnels.json` from
    the example as `tunnel-control:tunnel-control`, mode 0640.
-3. Install root-owned `/etc/tunnel-hub/authorized_keys`, mode 0640, and the
-   sshd Match block. Run `sshd -t` before reloading sshd.
+3. Install `/etc/tunnel-hub/authorized_keys` as `root:tunnel-control`, mode
+   0640, and the sshd Match block. Run `sshd -t` before reloading sshd.
 4. Add one forward-auth stanza to each existing exact Caddy route. Its ID must
    match the registry; keep the current reverse-proxy block unchanged. Run
    `caddy validate` before reloading Caddy.

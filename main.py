@@ -55,6 +55,11 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--plain", action="store_true", help="use the text console")
     modes.add_argument("--headless", action="store_true", help="run without a UI")
+    parser.add_argument(
+        "--start-tunnel",
+        action="store_true",
+        help="start the saved public tunnel before opening the UI",
+    )
     parser.add_argument("--port", type=int, default=LISTEN[1], help="loopback port")
     parser.add_argument(
         "--provider", default=None, help="override the saved initial provider id"
@@ -111,6 +116,11 @@ def main():
         daemon=True,
     )
     server_thread.start()
+    if args.start_tunnel:
+        try:
+            server.start_tunnel()
+        except Exception:
+            print("Public tunnel could not be started; open Tunnel and retry.")
     try:
         if plain:
             print(f"Relay: http://{listen[0]}:{listen[1]}/v1")

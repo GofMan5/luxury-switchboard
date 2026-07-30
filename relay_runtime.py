@@ -293,13 +293,19 @@ class KeyAttempt:
         return self._slot.proxy_url if self._slot else ""
 
 
+@dataclass(slots=True, eq=False)
+class _KeyWaiter:
+    model: str
+    slot: _KeySlot | None = None
+
+
 class KeyPool:
-    """Priority key scheduler with per-key RPM and one interruptible FIFO queue."""
+    """Priority key scheduler with per-key RPM and work-conserving FIFO."""
 
     def __init__(self, api_keys=()):
         self._condition = threading.Condition()
         self._slots: list[_KeySlot] = []
-        self._waiters: deque[object] = deque()
+        self._waiters: deque[_KeyWaiter] = deque()
         self._closed = False
         self.replace(api_keys)
 
@@ -333,7 +339,7 @@ class KeyPool:
 
     def acquire(self, cancelled, model: str = "") -> tuple[KeyAttempt, float]:
         started = time.monotonic()
-        ticket = object()
+        ticket = _KeyWaiter(model)
         with self._condition:
             if self._closed:
                 raise RelayStopping
@@ -346,43 +352,57 @@ class KeyPool:
                         raise RelayStopping
                     if cancelled():
                         raise ClientDisconnected
+                    if ticket.slot is not None:
+                        return KeyAttempt(ticket.slot), (time.monotonic() - started) * 1000
                     if not self._slots:
-                        self._waiters.popleft()
+                        self._waiters.remove(ticket)
                         return KeyAttempt(None), (time.monotonic() - started) * 1000
                     now = time.monotonic()
-                    if self._waiters[0] is ticket:
-                        wall_now = time.time()
-                        eligible_slots = []
-                        for slot in self._slots:
-                            while slot.starts and slot.starts[0] <= now - 60:
-                                slot.starts.popleft()
-                            for blocked_model, until in tuple(slot.blocked_models.items()):
-                                if until <= now:
-                                    slot.blocked_models.pop(blocked_model, None)
-                            blocked_until = slot.blocked_models.get(model, 0.0)
-                            if slot.balance_cooldown_until <= wall_now:
-                                slot.balance_cooldown_until = 0.0
-                            eligible_at = max(
-                                slot.next_slot,
-                                slot.cooldown_until,
-                                blocked_until,
-                                now
-                                + max(0.0, slot.balance_cooldown_until - wall_now),
-                            )
-                            eligible_slots.append((slot, eligible_at))
-                        for slot, eligible_at in eligible_slots:
-                            if now < eligible_at:
-                                continue
-                            self._waiters.popleft()
-                            slot.next_slot = now + (60 / slot.rpm if slot.rpm else 0)
-                            slot.starts.append(now)
-                            self._condition.notify_all()
-                            return KeyAttempt(slot), (now - started) * 1000
-                        eligible_at = min(value for _slot, value in eligible_slots)
-                        delay = max(0.01, eligible_at - now)
-                    else:
-                        delay = 0.25
-                    self._condition.wait(timeout=min(0.25, delay))
+                    wall_now = time.time()
+                    for slot in self._slots:
+                        while slot.starts and slot.starts[0] <= now - 60:
+                            slot.starts.popleft()
+                        for blocked_model, until in tuple(slot.blocked_models.items()):
+                            if until <= now:
+                                slot.blocked_models.pop(blocked_model, None)
+                        if slot.balance_cooldown_until <= wall_now:
+                            slot.balance_cooldown_until = 0.0
+
+                    def eligible_at(slot, requested_model):
+                        return max(
+                            slot.next_slot,
+                            slot.cooldown_until,
+                            slot.blocked_models.get(requested_model, 0.0),
+                            now
+                            + max(0.0, slot.balance_cooldown_until - wall_now),
+                        )
+
+                    first_ready = next(
+                        (
+                            (waiter, slot)
+                            for waiter in self._waiters
+                            for slot in self._slots
+                            if now >= eligible_at(slot, waiter.model)
+                        ),
+                        None,
+                    )
+                    if first_ready is not None:
+                        waiter, slot = first_ready
+                        self._waiters.remove(waiter)
+                        slot.next_slot = now + (60 / slot.rpm if slot.rpm else 0)
+                        slot.starts.append(now)
+                        waiter.slot = slot
+                        self._condition.notify_all()
+                        continue
+
+                    eligible = min(
+                        eligible_at(slot, waiter.model)
+                        for waiter in self._waiters
+                        for slot in self._slots
+                    )
+                    self._condition.wait(
+                        timeout=min(0.25, max(0.01, eligible - now))
+                    )
             finally:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
@@ -1073,7 +1093,21 @@ class RelayMetrics:
                     bytes_in=bytes_in,
                     state="queued",
                     cache_1h=cache_extended,
+                    _queued_at=time.monotonic(),
                 )
+
+    def dispatch(self, request_id: int, provider_id: str, queue_ms: float) -> None:
+        """Mark a queued request as sent upstream before response headers arrive."""
+        with self._lock:
+            event = self._live.get(request_id)
+            if event:
+                event.pop("_queued_at", None)
+                event["queue_ms"] = queue_ms
+                if not event["retries"]:
+                    event.update(status=None, state="active", error_detail="")
+            current = self._provider_status.get(provider_id)
+            if current is None or request_id >= current.get("_request_id", 0):
+                self._provider_status[provider_id] = dict(event or {})
 
     def response(
         self,
@@ -1187,8 +1221,13 @@ class RelayMetrics:
         error_detail: str = "",
         response_observed: bool = False,
     ) -> dict:
+        synthetic_cancel = (
+            cancelled
+            and status == 503
+            and error_detail == "Provider switched"
+        )
         is_error = failed or (status is None and not cancelled) or (
-            status is not None and status >= 400
+            status is not None and status >= 400 and not synthetic_cancel
         )
         state = "error" if is_error else "cancelled" if cancelled else "ok"
         with self._lock:
@@ -1263,6 +1302,9 @@ class RelayMetrics:
             for event in self._live.values():
                 visible = dict(event)
                 visible["latency_ms"] = (now - visible.pop("_started_at")) * 1000
+                queued_at = visible.pop("_queued_at", None)
+                if queued_at is not None:
+                    visible["queue_ms"] = (now - queued_at) * 1000
                 visible.pop("_generation_started_at", None)
                 visible.pop("_usage_final_at", None)
                 live.append(visible)

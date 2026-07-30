@@ -6447,6 +6447,72 @@ class RelayTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_stream_body_idle_timeout_retries_without_committing_partial_sse(self):
+        class IdleStreamHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                request = json.loads(
+                    self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                )
+                self.server.stream_values.append(request.get("stream"))
+                if len(self.server.stream_values) == 1:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(
+                        b'data: {"type":"response.output_text.delta",'
+                        b'"delta":"discard"}\n\n'
+                    )
+                    self.wfile.flush()
+                    self.server.idle_started.set()
+                    self.server.idle_release.wait(5)
+                    return
+                body = b'{"status":"completed","error":null,"output":[]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                pass
+
+        upstream = start_server(IdleStreamHandler, "Upstream")
+        upstream.stream_values = []
+        upstream.idle_started = threading.Event()
+        upstream.idle_release = threading.Event()
+        proxy = start_proxy(f"http://127.0.0.1:{upstream.server_port}")
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", proxy.server_port, timeout=3
+        )
+        try:
+            with (
+                patch("relay_http.STREAM_IDLE_TIMEOUT", 0.1),
+                patch("relay_http.retry_after_seconds", return_value=0.01),
+            ):
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    b'{"model":"gpt-test","stream":true}',
+                    {"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                body = response.read()
+            self.assertTrue(upstream.idle_started.is_set())
+            self.assertEqual(response.status, 200)
+            self.assertEqual(upstream.stream_values, [True, False])
+            self.assertNotIn(b"discard", body)
+            self.assertIn(b'"type":"response.completed"', body)
+        finally:
+            connection.close()
+            upstream.idle_release.set()
+            for server in (proxy, upstream):
+                server.shutdown()
+                server.server_close()
+
 
     def test_reset_key_cooldown_preserves_rpm_window_and_retry_telemetry(self):
         spec = relay.ProviderRegistry.make_spec(

@@ -62,6 +62,7 @@ from relay_runtime import (
 LISTEN = ("127.0.0.1", 8798)
 UPSTREAM_TIMEOUT = 300
 STREAM_HEADER_TIMEOUT = 45
+STREAM_IDLE_TIMEOUT = 300
 SELECT_SOCKET_LIMIT = 512
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_INSPECT_BYTES = 4 * 1024 * 1024
@@ -1400,11 +1401,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                         else None
                     )
                     if upstream_sock is not None:
-                        # Streaming responses may legitimately stay silent while the
-                        # model reasons. Client disconnect and relay shutdown are
-                        # still enforced by the upstream monitor.
                         upstream_sock.settimeout(
-                            None if response_stream else UPSTREAM_TIMEOUT
+                            STREAM_IDLE_TIMEOUT if response_stream else UPSTREAM_TIMEOUT
                         )
                     if response.status < 400:
                         attempt_terminal = required_terminal if response_stream else ""

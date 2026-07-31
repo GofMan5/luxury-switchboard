@@ -50,7 +50,14 @@ export class TunnelModel {
     }
   }
 
-  reveal() { return this.#port.reveal() }
+  async reveal() {
+    try {
+      return await this.#port.reveal()
+    } catch {
+      this.#set({ ...this.#state, error: 'Tunnel access key is unavailable' })
+      return ''
+    }
+  }
   dispose() { this.#unsubscribe?.(); this.#listeners.clear() }
 
   async #mutate(operation: () => Promise<TunnelSnapshot>) {

@@ -130,6 +130,20 @@ func TestDeleteReservesKeyPoolBeforePersistenceAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesCatalogBeforeMutatingKeyPool(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	catalog, _ := NewCatalog([]domain.Provider{local}, local.ID)
+	repository := &memoryProviderRepository{state: SavedState{Providers: []domain.Provider{local, local}, ActiveID: local.ID}}
+	keys := &fakeKeyPool{rates: map[string]int{"local": 77}, count: make(map[string]int)}
+	manager, _ := NewManager(catalog, repository, keys)
+	if err := manager.Load(context.Background()); err == nil {
+		t.Fatal("duplicate persisted providers were accepted")
+	}
+	if keys.rates["local"] != 77 {
+		t.Fatalf("invalid persisted catalog mutated key admission: %+v", keys.rates)
+	}
+}
+
 func providerFixture(t *testing.T, id string, builtin bool) domain.Provider {
 	t.Helper()
 	provider, err := domain.New(domain.Params{

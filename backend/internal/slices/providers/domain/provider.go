@@ -6,12 +6,15 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type AuthMode string
 type Dialect string
 
 const (
+	MaxRPM = 1_000_000
+
 	AuthPassthrough AuthMode = "passthrough"
 	AuthAuto        AuthMode = "auto"
 	AuthBearer      AuthMode = "bearer"
@@ -54,11 +57,19 @@ type Params struct {
 func New(params Params) (Provider, error) {
 	params.ID = strings.TrimSpace(params.ID)
 	params.Name = strings.TrimSpace(params.Name)
-	if params.ID == "" || params.Name == "" {
+	params.BaseURL = strings.TrimSpace(params.BaseURL)
+	if !validText(params.ID, 64) || !validText(params.Name, 80) {
 		return Provider{}, errors.New("provider id and name are required")
 	}
+	if len(params.BaseURL) > 2*1024 {
+		return Provider{}, errors.New("provider URL is too long")
+	}
 	parsed, err := url.Parse(params.BaseURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if err != nil || parsed.Host == "" {
+		return Provider{}, errors.New("provider URL must be absolute HTTP(S)")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return Provider{}, errors.New("provider URL must be absolute HTTP(S)")
 	}
 	if parsed.User != nil || parsed.Fragment != "" {
@@ -86,8 +97,11 @@ func New(params Params) (Provider, error) {
 	if params.AuthMode == AuthCustom && !validAuthHeader(params.AuthHeader) {
 		return Provider{}, errors.New("invalid custom auth header")
 	}
-	if params.RPM < 0 {
-		return Provider{}, errors.New("provider RPM must not be negative")
+	if params.RPM < 0 || params.RPM > MaxRPM {
+		return Provider{}, errors.New("provider RPM is out of range")
+	}
+	if params.CacheTTL != 0 && params.CacheTTL != time.Hour {
+		return Provider{}, errors.New("provider cache TTL is unsupported")
 	}
 	return Provider{
 		ID:         params.ID,
@@ -102,6 +116,18 @@ func New(params Params) (Provider, error) {
 		Enabled:    params.Enabled,
 		Builtin:    params.Builtin,
 	}, nil
+}
+
+func validText(value string, limit int) bool {
+	if value == "" || utf8.RuneCountInString(value) > limit {
+		return false
+	}
+	for _, character := range value {
+		if character < 32 || character == 127 {
+			return false
+		}
+	}
+	return true
 }
 
 type PublicProvider struct {

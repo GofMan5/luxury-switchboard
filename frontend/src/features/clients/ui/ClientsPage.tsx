@@ -21,7 +21,7 @@ export default function ClientsPage() {
         </Button>
       </header>
 
-      {state.error ? <div className={styles.error}>{state.error}</div> : null}
+      {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
 
       <div className={styles.metrics}>
         <Metric label="Connected clients" value={state.clients.length} />

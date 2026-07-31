@@ -15,11 +15,14 @@ import (
 
 const defaultCapacity = 2_000
 
+var serviceSequence atomic.Uint64
+
 type Service struct {
 	mu        sync.RWMutex
 	requests  map[string]domain.Request
 	order     []string
 	capacity  int
+	namespace string
 	sequence  atomic.Uint64
 	now       func() time.Time
 	listeners []func(domain.Request)
@@ -30,15 +33,16 @@ func NewService(capacity int) *Service {
 		capacity = defaultCapacity
 	}
 	return &Service{
-		requests: make(map[string]domain.Request),
-		capacity: capacity,
-		now:      time.Now,
+		requests:  make(map[string]domain.Request),
+		capacity:  capacity,
+		namespace: fmt.Sprintf("req_%016x_%x", uint64(time.Now().UnixNano()), serviceSequence.Add(1)),
+		now:       time.Now,
 	}
 }
 
 func (service *Service) Start(value domain.Start) string {
 	now := service.now().UTC()
-	id := fmt.Sprintf("req_%016x", service.sequence.Add(1))
+	id := fmt.Sprintf("%s_%016x", service.namespace, service.sequence.Add(1))
 	request := domain.Request{
 		ID: id, StartedAt: now, UpdatedAt: now, State: domain.StateActive,
 		Model: clean(value.Model, 128), ProviderID: clean(value.ProviderID, 64),

@@ -37,7 +37,7 @@ type Gateway struct {
 }
 
 func NewGateway(config domain.Config, routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity) (*Gateway, error) {
-	if len(config.Token) < 32 || routes == nil || markers == nil || relay == nil || config.RPMPerIP < 0 || config.RPMPerIP > maxTunnelRPM || config.ContextLimitKiB < 0 {
+	if len(config.Token) < 32 || len(config.Token) > 512 || routes == nil || markers == nil || relay == nil || config.RPMPerIP < 0 || config.RPMPerIP > maxTunnelRPM || config.ContextLimitKiB < 0 || config.ContextLimitKiB > 2*1024*1024 {
 		return nil, errors.New("invalid tunnel gateway settings")
 	}
 	return &Gateway{config: config, routes: routes, markers: markers, relay: relay, limiter: newIPLimiter(), activity: activity}, nil

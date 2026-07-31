@@ -25,7 +25,7 @@ export default function StatisticsPage() {
           <Button disabled={state.phase === 'loading'} onClick={() => void model.load(state.period)}><RefreshCw size={15} />Refresh</Button>
         </div>
       </header>
-      {state.error ? <div className={styles.error}>{state.error}</div> : null}
+      {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
       <div className={styles.metrics}>
         <Metric label="Requests" value={formatInteger(stats?.requests)} detail={`${formatInteger(stats?.completed)} completed · ${formatInteger(stats?.failed)} failed`} />
         <Metric label="p95 latency" value={formatDuration(stats?.p95Ms ?? 0)} detail={`${formatInteger(stats?.cancelled)} cancelled`} />

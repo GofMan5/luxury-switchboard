@@ -134,7 +134,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const parsedRPM = Number(rpm)
-    if (!label.trim() || !Number.isInteger(parsedRPM) || parsedRPM < 0 || (mode === 'add' && !secret.trim())) {
+    if (!label.trim() || !Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000 || (mode === 'add' && !secret.trim())) {
       setError('Enter a label, a non-negative RPM, and the key secret.')
       return
     }
@@ -160,9 +160,9 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
         <header><div><h2>{mode === 'add' ? 'Add API key' : 'Edit API key'}</h2><p>The secret is encrypted locally and never shown again.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Label</span><input value={label} maxLength={80} autoFocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
-          <label><span>Requests per minute</span><input type="number" min="0" step="1" value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited.</small></label>
-          {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Environment key material stays managed by the local account; RPM can still be changed.</div>}
-          {!keyValue?.pinned ? <div className={styles.proxyField}><span>Proxy</span>{mode === 'edit' ? <label className={styles.check}><input type="checkbox" checked={replaceProxy} onChange={(event) => setReplaceProxy(event.currentTarget.checked)} />Replace current proxy setting</label> : null}<input aria-label="Proxy URL" type="password" disabled={!replaceProxy} value={proxyUrl} placeholder="Optional http(s) or socks5 URL" autoComplete="new-password" onChange={(event) => setProxyURL(event.currentTarget.value)} /><small>Leave empty to use the native IP.</small></div> : null}
+          <label><span>Requests per minute</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited.</small></label>
+          {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} maxLength={8192} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Environment key material stays managed by the local account; RPM can still be changed.</div>}
+          {!keyValue?.pinned ? <div className={styles.proxyField}><span>Proxy</span>{mode === 'edit' ? <label className={styles.check}><input type="checkbox" checked={replaceProxy} onChange={(event) => setReplaceProxy(event.currentTarget.checked)} />Replace current proxy setting</label> : null}<input aria-label="Proxy URL" type="password" disabled={!replaceProxy} value={proxyUrl} maxLength={8192} placeholder="Optional http(s) or socks5 URL" autoComplete="new-password" onChange={(event) => setProxyURL(event.currentTarget.value)} /><small>Leave empty to use the native IP.</small></div> : null}
           {error ? <p className={styles.formError} role="alert">{error}</p> : null}
         </div>
         <footer><Button type="button" disabled={pending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save key'}</Button></footer>

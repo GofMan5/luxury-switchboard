@@ -191,12 +191,38 @@ func TestAutoAuthUsesAnthropicHeaderOnlyForMessages(t *testing.T) {
 	}
 }
 
+func TestAutoAuthRecognizesMessagesBelowProviderBasePath(t *testing.T) {
+	seen := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seen <- request.Header.Clone()
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL + "/gateway")
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "auto"}},
+		Credentials: &credentialSource{values: []string{"configured-key"}},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/messages", strings.NewReader(`{"model":"claude-test"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	headers := <-seen
+	if headers.Get("x-api-key") != "configured-key" || headers.Get("Authorization") != "" {
+		t.Fatalf("nested Anthropic route used the wrong auth: %v", headers)
+	}
+}
+
 func TestRateLimitRotatesCredentialWithoutLeaking429(t *testing.T) {
 	var attempts int
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		attempts++
 		if request.Header.Get("Authorization") == "Bearer first-key" {
-			writer.Header().Set("Retry-After", "0.001")
+			writer.Header().Set("Retry-After", "30")
 			writer.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
@@ -212,9 +238,13 @@ func TestRateLimitRotatesCredentialWithoutLeaking429(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
+	started := time.Now()
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated || attempts != 2 {
 		t.Fatalf("rate limit was exposed or not retried: status=%d attempts=%d", response.Code, attempts)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("eligible fallback key was delayed by Retry-After: %s", elapsed)
 	}
 	if len(credentials.outcomes) != 2 || credentials.outcomes[0].Kind != relayapp.AttemptRateLimited || credentials.outcomes[1].Kind != relayapp.AttemptSuccess {
 		t.Fatalf("unexpected outcomes: %+v", credentials.outcomes)
@@ -600,5 +630,18 @@ func TestJoinPathDoesNotDuplicateVersionPrefix(t *testing.T) {
 	}
 	if value := joinPath("/gateway", "/v1/models"); value != "/gateway/v1/models" {
 		t.Fatalf("unexpected path %q", value)
+	}
+}
+
+func TestBuildUpstreamRequestPreservesProviderAndClientQuery(t *testing.T) {
+	base, _ := url.Parse("https://provider.example/gateway?api-version=2026-08-01")
+	incoming := httptest.NewRequest(http.MethodGet, "http://relay/v1/models?preview=true", nil)
+	request, err := buildUpstreamRequest(context.Background(), incoming, nil, relayapp.Route{BaseURL: base, AuthMode: "passthrough"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := request.URL.Query()
+	if query.Get("api-version") != "2026-08-01" || query.Get("preview") != "true" {
+		t.Fatalf("provider or request query was lost: %s", request.URL.RawQuery)
 	}
 }

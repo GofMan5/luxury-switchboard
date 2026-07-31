@@ -125,7 +125,7 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const parsedRPM = Number(rpm)
-    if (!name.trim() || !baseUrl.trim() || !modelsPath.startsWith('/') || (authMode === 'custom' && !authHeader.trim()) || !Number.isInteger(parsedRPM) || parsedRPM < 0 || (active && !enabled)) {
+    if (!name.trim() || !baseUrl.trim() || !modelsPath.startsWith('/') || (authMode === 'custom' && !authHeader.trim()) || !Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000 || (active && !enabled)) {
       setError(active && !enabled ? 'Switch away from the provider before disabling it.' : 'Enter a name, an absolute endpoint and a non-negative RPM.')
       return
     }
@@ -139,12 +139,12 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
         <header><div><h2>{mode === 'add' ? 'Add provider' : `Edit ${provider?.name}`}</h2><p>Remote endpoints require HTTPS; loopback HTTP is allowed.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Display name</span><input value={name} maxLength={80} autoFocus onChange={(event) => setName(event.currentTarget.value)} /></label>
-          <label><span>Base URL</span><input type="url" value={baseUrl} placeholder="https://provider.example/v1" onChange={(event) => setBaseURL(event.currentTarget.value)} /></label>
+          <label><span>Base URL</span><input type="url" value={baseUrl} maxLength={2048} required placeholder="https://provider.example/v1" onChange={(event) => setBaseURL(event.currentTarget.value)} /></label>
           <label><span>API dialect</span><select value={dialect} onChange={(event) => setDialect(event.currentTarget.value as Provider['dialect'])}><option value="auto">Auto-detect from request</option><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic compatible</option></select></label>
-          <label><span>Models discovery path</span><input value={modelsPath} placeholder="/v1/models" onChange={(event) => setModelsPath(event.currentTarget.value)} /></label>
+          <label><span>Models discovery path</span><input value={modelsPath} maxLength={160} required placeholder="/v1/models" onChange={(event) => setModelsPath(event.currentTarget.value)} /></label>
           <label><span>Authentication</span><select value={authMode} onChange={(event) => setAuthMode(event.currentTarget.value as Provider['authMode'])}><option value="auto">Auto by API dialect</option><option value="bearer">Bearer token</option><option value="x-api-key">x-api-key</option><option value="custom">Custom header</option><option value="passthrough">Pass through client auth</option></select></label>
-          {authMode === 'custom' ? <label><span>Custom auth header</span><input value={authHeader} placeholder="api-key" onChange={(event) => setAuthHeader(event.currentTarget.value)} /><small>Header name only. The value comes from the encrypted key pool.</small></label> : null}
-          <label><span>Provider RPM</span><input type="number" min="0" step="1" value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited. Per-key RPM still applies.</small></label>
+          {authMode === 'custom' ? <label><span>Custom auth header</span><input value={authHeader} maxLength={64} required placeholder="api-key" onChange={(event) => setAuthHeader(event.currentTarget.value)} /><small>Header name only. The value comes from the encrypted key pool.</small></label> : null}
+          <label><span>Provider RPM</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited. Per-key RPM still applies.</small></label>
           <label className={styles.check}><input type="checkbox" checked={cache1h} onChange={(event) => setCache1H(event.currentTarget.checked)} />Extend existing ephemeral cache controls to 1 hour</label>
           <label className={styles.check}><input type="checkbox" checked={enabled} disabled={active} onChange={(event) => setEnabled(event.currentTarget.checked)} />Provider enabled</label>
           {error ? <p className={styles.formError} role="alert">{error}</p> : null}

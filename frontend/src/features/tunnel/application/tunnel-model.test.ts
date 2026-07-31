@@ -9,12 +9,13 @@ const online: TunnelSnapshot = { ...stopped, state: 'online', address: 'http://1
 class FakeTunnelPort implements TunnelPort {
   listener: ((snapshot: TunnelSnapshot) => void) | null = null
   getPromise: Promise<TunnelSnapshot> = Promise.resolve(stopped)
+  revealFails = false
   async get() { return this.getPromise }
   async configure() { return stopped }
   async start() { return online }
   async stop() { return stopped }
   async rotate() { return 'token' }
-  async reveal() { return 'token' }
+  async reveal() { if (this.revealFails) throw new Error('injected'); return 'token' }
   subscribe(listener: (snapshot: TunnelSnapshot) => void) { this.listener = listener; return () => { this.listener = null } }
 }
 
@@ -30,5 +31,13 @@ describe('TunnelModel', () => {
     await connecting
     expect(model.snapshot().snapshot).toMatchObject({ state: 'online' })
     model.dispose()
+  })
+
+  it('turns a reveal failure into visible state instead of an unhandled rejection', async () => {
+    const port = new FakeTunnelPort()
+    port.revealFails = true
+    const model = new TunnelModel(port)
+    expect(await model.reveal()).toBe('')
+    expect(model.snapshot().error).toBe('Tunnel access key is unavailable')
   })
 })

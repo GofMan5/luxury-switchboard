@@ -44,6 +44,9 @@ func (manager *Manager) Load(ctx context.Context) error {
 	if len(state.Providers) == 0 {
 		return nil
 	}
+	if _, err := NewCatalog(state.Providers, state.ActiveID); err != nil {
+		return err
+	}
 	for _, provider := range state.Providers {
 		if err := manager.keys.EnsureProvider(provider.ID, provider.RPM); err != nil {
 			return err

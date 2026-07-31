@@ -119,6 +119,28 @@ func TestJSONResponseRewritesModelAndRedactsProviderMarkers(t *testing.T) {
 	}
 }
 
+func TestSanitizerDropsPrivateFieldsAcrossNamingStyles(t *testing.T) {
+	clean, err := sanitizeJSON(map[string]any{
+		"providerId": "private", "provider-name": "private", "upstreamUrl": "https://private.invalid",
+		"systemFingerprint": "private", "internal.metadata": "private", "modelId": "private-model", "output": "safe",
+	}, "public-model", newMarkerRedactor(nil, "Luxury Private"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object := clean.(map[string]any)
+	for _, key := range []string{"providerId", "provider-name", "upstreamUrl", "systemFingerprint", "internal.metadata"} {
+		if _, exists := object[key]; exists {
+			t.Fatalf("private field %q survived sanitization: %+v", key, object)
+		}
+	}
+	if object["output"] != "safe" {
+		t.Fatalf("safe output was changed: %+v", object)
+	}
+	if object["modelId"] != "public-model" {
+		t.Fatalf("alternate model field was not rewritten: %+v", object)
+	}
+}
+
 func TestSSEFailureIsNeutralAndSuccessfulStreamIsCanonical(t *testing.T) {
 	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: 200, Headers: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: []byte("id: provider-id\ndata: {\"type\":\"response.failed\",\"error\":{\"message\":\"SecretProvider\"}}\n\n")}}
 	gateway := gatewayForTest(t, dispatcher)

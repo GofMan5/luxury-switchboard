@@ -57,11 +57,36 @@ func (gateway *Gateway) Test(ctx context.Context, provider domain.Provider, mode
 	}
 	result.Status = response.Status
 	if response.Status >= 200 && response.Status < 300 {
+		if failedResponse(response.Body) {
+			result.State = "unavailable"
+			result.ErrorCode = "request_rejected"
+			return result
+		}
 		result.State = "available"
 		return result
 	}
 	result.State = "unavailable"
 	result.ErrorCode = statusCode(response.Status)
+	return result
+}
+
+func failedResponse(body []byte) bool {
+	var payload map[string]any
+	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
+		return false
+	}
+	for _, candidate := range []map[string]any{payload, mapValue(payload["response"])} {
+		status, _ := candidate["status"].(string)
+		eventType, _ := candidate["type"].(string)
+		if status == "failed" || status == "cancelled" || eventType == "error" || eventType == "response.failed" || candidate["error"] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func mapValue(value any) map[string]any {
+	result, _ := value.(map[string]any)
 	return result
 }
 

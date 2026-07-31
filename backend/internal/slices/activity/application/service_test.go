@@ -51,3 +51,11 @@ func TestFinishDoesNotAddCachedOrReasoningTwice(t *testing.T) {
 		t.Fatalf("token usage was inflated: %+v", request)
 	}
 }
+
+func TestRequestIDsDoNotCollideAcrossServiceRestarts(t *testing.T) {
+	first := NewService(10).Start(domain.Start{})
+	second := NewService(10).Start(domain.Start{})
+	if first == second {
+		t.Fatalf("request id was reused across service instances: %s", first)
+	}
+}

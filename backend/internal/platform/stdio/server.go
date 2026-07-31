@@ -184,7 +184,7 @@ func (server *Server) cancelRequest(request Request) {
 	var payload struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(request.Payload, &payload); err != nil || payload.ID == "" {
+	if err := DecodePayload(request.Payload, &payload); err != nil || !requestIDPattern.MatchString(payload.ID) {
 		_ = server.write(Failure(request, "invalid_payload", "Cancellation id is required"))
 		return
 	}

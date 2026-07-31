@@ -2,6 +2,7 @@ import type { PropsWithChildren } from 'react'
 import { PanelLeftClose, Square } from 'lucide-react'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
+import { useSettings } from '../features/settings/ui/useSettings'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
 import { navigation, type AppRoute } from './navigation'
@@ -15,10 +16,12 @@ interface AppShellProps extends PropsWithChildren {
 export function AppShell({ route, onNavigate, children }: AppShellProps) {
   const { model: relay, state: relayState } = useRelay()
   const { state: providersState } = useProviders()
+  const { state: settingsState } = useSettings()
   const activeProvider = providersState.catalog.providers.find(
     (provider) => provider.id === providersState.catalog.activeId,
   )
   const live = relayState.snapshot.state === 'live'
+  const configuredPort = settingsState.settings?.listenerPort || relayState.snapshot.port
 
   return (
     <div className={styles.shell}>
@@ -60,7 +63,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <strong>{live ? 'Live' : relayState.snapshot.state === 'starting' ? 'Starting' : 'Stopped'}</strong>
             <span className={styles.divider} aria-hidden="true" />
             <span className={styles.address}>
-              {relayState.snapshot.address || '127.0.0.1:8798'}
+              {relayState.snapshot.address || (configuredPort ? `127.0.0.1:${configuredPort}` : 'Loopback listener')}
             </span>
             <span className={styles.divider} aria-hidden="true" />
             <span className={styles.route}>Active route: {activeProvider?.name ?? '—'}</span>

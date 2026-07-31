@@ -27,17 +27,17 @@ beforeAll(async () => {
 const provider = { id: 'local', name: 'Local', baseUrl: 'http://127.0.0.1:8799', authMode: 'passthrough', authHeader: '', dialect: 'auto', modelsPath: '/v1/models', rpm: 0, cacheTtl: '0s', enabled: true, keyConfigured: false, keyCount: 0, builtin: true }
 const settings = { listenerPort: 8798, maxRequestMiB: 64, headerTimeoutSeconds: 45, streamIdleSeconds: 60, retryBaseMilliseconds: 500, retryMaxSeconds: 30, permanentAttempts: 2, maxQueued: 10_000, activityCapacity: 2_000, historyRetentionDays: 30, tunnelRetentionHours: 72 }
 
-function fakeSession(): ControlPlaneSession {
+function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://127.0.0.1:8798', port: 8798 }, settingsSnapshot = settings): ControlPlaneSession {
   return {
     async start() {},
     async stop() {},
     async call<T>(method: string): Promise<T> {
       const responses: Record<string, unknown> = {
-        'relay.status': { state: 'live', address: 'http://127.0.0.1:8798', port: 8798 },
+        'relay.status': relaySnapshot,
         'providers.list': { activeId: 'local', providers: [provider] },
         'activity.list': { requests: [] },
         'activity.summary': { requests: 0, active: 0, queued: 0, successRate: 0, p95Ms: 0, rpm: 0 },
-        'settings.get': settings,
+        'settings.get': settingsSnapshot,
         'tunnel.get': { state: 'stopped', port: 8797, address: '', rpmPerIp: 0, contextLimitKiB: 0, brandResponse: 'Luxury Private', publisherProfile: '', tokenConfigured: true },
         'clients.list': { clients: [] },
         'shared.list': { available: false, revision: 0, tunnels: [], error: 'Unavailable' },
@@ -84,5 +84,12 @@ describe('App navigation', () => {
       ['Shared Control', 'Shared Control'],
       ['Settings', 'Settings'],
     ])
+  })
+
+  it('shows the configured listener instead of a hardcoded stopped address', async () => {
+    createSession.mockResolvedValue(fakeSession({ state: 'stopped', address: '', port: 0 }, { ...settings, listenerPort: 19001 }))
+    const view = render(<App />)
+    expect(await screen.findByText('127.0.0.1:19001')).toBeTruthy()
+    view.unmount()
   })
 })

@@ -13,4 +13,9 @@ describe('decodeIncomingFrame', () => {
       'invalid protocol frame',
     )
   })
+
+  it('rejects malformed failures and negative event sequences', () => {
+    expect(() => decodeIncomingFrame('{"v":1,"type":"result","id":"x","ok":false}')).toThrow('invalid protocol frame')
+    expect(() => decodeIncomingFrame('{"v":1,"type":"event","topic":"x","seq":-1}')).toThrow('invalid protocol frame')
+  })
 })

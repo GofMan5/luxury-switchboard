@@ -15,7 +15,7 @@ func Register(server *platform.Server, service *application.Service, history app
 		var query struct {
 			Limit int `json:"limit"`
 		}
-		if len(payload) > 0 && json.Unmarshal(payload, &query) != nil {
+		if platform.DecodePayload(payload, &query) != nil {
 			return nil, platform.MethodError{Code: "invalid_payload", Message: "Invalid activity query"}
 		}
 		if query.Limit == 0 {

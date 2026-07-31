@@ -16,10 +16,13 @@ const (
 	maxTrackedClients = 10_000
 )
 
+var serviceSequence atomic.Uint64
+
 type Service struct {
 	mu        sync.RWMutex
 	clients   map[string]*clientState
 	requests  map[string]domain.Start
+	namespace string
 	sequence  atomic.Uint64
 	now       func() time.Time
 	listeners []func()
@@ -32,7 +35,11 @@ type clientState struct {
 }
 
 func NewService(history History) *Service {
-	return &Service{clients: make(map[string]*clientState), requests: make(map[string]domain.Start), now: time.Now, history: history}
+	return &Service{
+		clients: make(map[string]*clientState), requests: make(map[string]domain.Start),
+		namespace: fmt.Sprintf("tun_%016x_%x", uint64(time.Now().UnixNano()), serviceSequence.Add(1)),
+		now:       time.Now, history: history,
+	}
 }
 func (service *Service) Queue(ip string, delta int) {
 	if ip == "" || delta == 0 {
@@ -54,7 +61,7 @@ func (service *Service) Queue(ip string, delta int) {
 }
 func (service *Service) Begin(start domain.Start) string {
 	now := service.now().UTC()
-	id := fmt.Sprintf("tun_%016x", service.sequence.Add(1))
+	id := fmt.Sprintf("%s_%016x", service.namespace, service.sequence.Add(1))
 	service.mu.Lock()
 	state := service.ensure(start.IP)
 	state.client.Active++

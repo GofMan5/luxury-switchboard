@@ -3,6 +3,8 @@ package application
 import (
 	"testing"
 	"time"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/domain"
 )
 
 func TestQueueStateIsVisibleAndReleased(t *testing.T) {
@@ -30,5 +32,13 @@ func TestIdleClientIsEvictedWithoutDroppingActiveClient(t *testing.T) {
 	clients := service.List()
 	if len(clients) != 1 || clients[0].IP != "active" || clients[0].Queued != 1 {
 		t.Fatalf("idle eviction removed live state or kept stale state: %+v", clients)
+	}
+}
+
+func TestTunnelEventIDsDoNotCollideAcrossServiceRestarts(t *testing.T) {
+	first := NewService(nil).Begin(domain.Start{IP: "203.0.113.1"})
+	second := NewService(nil).Begin(domain.Start{IP: "203.0.113.1"})
+	if first == second {
+		t.Fatalf("tunnel event id was reused across service instances: %s", first)
 	}
 }

@@ -504,10 +504,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
-			server.observeRetry(activityID, attempt, status, delay)
-			if err := waitRetry(ctx, delay); err != nil {
-				return nil, err
-			}
+			// The scheduler already holds this key until Retry-After. Reacquire
+			// immediately so another eligible key can take over without a global wait.
+			server.observeRetry(activityID, attempt, status, 0)
 			continue
 		}
 
@@ -662,7 +661,7 @@ func (server *Server) requestContext(client context.Context) (context.Context, c
 func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, credential string) (*http.Request, error) {
 	target := *route.BaseURL
 	target.Path = joinPath(target.Path, incoming.URL.Path)
-	target.RawQuery = incoming.URL.RawQuery
+	target.RawQuery = joinQuery(target.RawQuery, incoming.URL.RawQuery)
 	request, err := http.NewRequestWithContext(ctx, incoming.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -673,7 +672,7 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		request.Header.Del("Authorization")
 		request.Header.Del("x-api-key")
 		path := strings.TrimRight(request.URL.Path, "/")
-		anthropic := path == "/v1/messages" || strings.HasPrefix(path, "/v1/messages/") || request.Header.Get("Anthropic-Version") != ""
+		anthropic := path == "/v1/messages" || strings.HasSuffix(path, "/v1/messages") || strings.Contains(path, "/v1/messages/") || request.Header.Get("Anthropic-Version") != ""
 		if credential != "" && anthropic {
 			request.Header.Set("x-api-key", credential)
 		} else if credential != "" {
@@ -1074,6 +1073,16 @@ func joinPath(base, request string) string {
 		return request
 	}
 	return base + "/" + strings.TrimLeft(request, "/")
+}
+
+func joinQuery(base, request string) string {
+	if base == "" {
+		return request
+	}
+	if request == "" {
+		return base
+	}
+	return base + "&" + request
 }
 
 func finishLease(lease relayapp.CredentialLease, outcome relayapp.AttemptOutcome) {

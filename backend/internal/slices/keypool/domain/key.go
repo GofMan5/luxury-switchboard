@@ -6,7 +6,10 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
+
+const MaxRPM = 1_000_000
 
 type Credential struct {
 	value string
@@ -48,7 +51,9 @@ type Params struct {
 func NewKey(params Params) (Key, error) {
 	providerID := strings.TrimSpace(params.ProviderID)
 	label := strings.TrimSpace(params.Label)
-	if providerID == "" || label == "" || len(label) > 80 || params.RPM < 0 {
+	if providerID == "" || len(providerID) > 64 || label == "" || utf8.RuneCountInString(label) > 80 ||
+		params.Priority < 0 || params.Priority > MaxRPM || params.RPM < 0 || params.RPM > MaxRPM ||
+		strings.ContainsAny(providerID+label, "\r\n\x00") {
 		return Key{}, errors.New("invalid key settings")
 	}
 	credential, err := NewCredential(params.Secret)
@@ -58,11 +63,18 @@ func NewKey(params Params) (Key, error) {
 	digest := sha256.Sum256([]byte(providerID + "\x00" + credential.Reveal()))
 	proxyURL := strings.TrimSpace(params.ProxyURL)
 	if proxyURL != "" {
-		parsed, err := url.Parse(proxyURL)
-		if err != nil || parsed.Host == "" || parsed.Fragment != "" ||
-			(parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5" && parsed.Scheme != "socks5h") {
+		if len(proxyURL) > 8*1024 {
 			return Key{}, errors.New("invalid proxy URL")
 		}
+		parsed, err := url.Parse(proxyURL)
+		if err != nil || parsed.Host == "" || parsed.Fragment != "" {
+			return Key{}, errors.New("invalid proxy URL")
+		}
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		if parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5" && parsed.Scheme != "socks5h" {
+			return Key{}, errors.New("invalid proxy URL")
+		}
+		proxyURL = parsed.String()
 	}
 	return Key{
 		ID:         "key_" + hex.EncodeToString(digest[:8]),

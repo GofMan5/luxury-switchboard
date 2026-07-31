@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
@@ -57,7 +58,7 @@ func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth 
 			if privateField(key) {
 				continue
 			}
-			if strings.EqualFold(key, "model") {
+			if modelField(key) {
 				clean[key] = publicModel
 				continue
 			}
@@ -86,13 +87,27 @@ func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth 
 }
 
 func privateField(key string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
+	normalized := normalizeField(key)
 	switch normalized {
-	case "owned_by", "provider", "provider_id", "provider_name", "upstream", "upstream_url", "backend", "backend_id", "vendor", "api_key", "authorization", "proxy", "proxy_url", "routing_hint", "internal", "debug",
-		"system_fingerprint", "service_tier", "endpoint", "host", "region", "deployment", "cluster", "node", "account", "organization", "trace", "trace_id", "server":
+	case "ownedby", "provider", "providerid", "providername", "upstream", "upstreamurl", "backend", "backendid", "vendor", "apikey", "authorization", "proxy", "proxyurl", "routinghint", "internal", "debug",
+		"systemfingerprint", "servicetier", "endpoint", "host", "region", "deployment", "cluster", "node", "account", "organization", "trace", "traceid", "server":
 		return true
 	}
-	return strings.HasPrefix(normalized, "provider_") || strings.HasPrefix(normalized, "upstream_")
+	return strings.HasPrefix(normalized, "provider") || strings.HasPrefix(normalized, "upstream") || strings.HasPrefix(normalized, "internal") || strings.HasPrefix(normalized, "debug")
+}
+
+func modelField(key string) bool {
+	normalized := normalizeField(key)
+	return normalized == "model" || normalized == "modelid" || normalized == "modelname"
+}
+
+func normalizeField(key string) string {
+	return strings.Map(func(character rune) rune {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			return unicode.ToLower(character)
+		}
+		return -1
+	}, key)
 }
 
 func failedValue(value any) bool {

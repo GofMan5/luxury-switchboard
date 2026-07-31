@@ -15,6 +15,7 @@ export class ClientsModel {
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #timer: ReturnType<typeof setTimeout> | undefined
+  #generation = 0
 
   constructor(port: ClientsPort) {
     this.#port = port
@@ -36,28 +37,31 @@ export class ClientsModel {
   }
 
   async refresh() {
+    const generation = ++this.#generation
     try {
       const selectedIp = this.#state.selectedIp
       const [clients, events] = await Promise.all([
         this.#port.list(),
         selectedIp ? this.#port.events(selectedIp) : Promise.resolve(this.#state.events),
       ])
-      this.#set({ ...this.#state, phase: 'ready', clients, events, error: '' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', clients, events, error: '' })
     } catch {
-      this.#set({ ...this.#state, phase: 'error', error: 'Tunnel clients are unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Tunnel clients are unavailable' })
     }
   }
 
   async select(ip: string) {
+    const generation = ++this.#generation
     try {
       const events = await this.#port.events(ip)
-      this.#set({ ...this.#state, selectedIp: ip, events, error: '' })
+      if (generation === this.#generation) this.#set({ ...this.#state, selectedIp: ip, events, error: '' })
     } catch {
-      this.#set({ ...this.#state, error: 'Client events are unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, error: 'Client events are unavailable' })
     }
   }
 
   close() {
+    this.#generation++
     this.#set({ ...this.#state, selectedIp: '', events: [] })
   }
 

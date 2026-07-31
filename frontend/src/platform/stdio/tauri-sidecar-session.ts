@@ -11,6 +11,8 @@ import {
 import type { ControlPlaneSession, EventListener } from './session'
 
 const CALL_TIMEOUT_MS = 30_000
+const SHUTDOWN_CALL_TIMEOUT_MS = 2_000
+const SHUTDOWN_EXIT_TIMEOUT_MS = 10_000
 const TUNNEL_START_TIMEOUT_MS = 60_000
 const MODEL_TEST_TIMEOUT_MS = 15 * 60_000
 
@@ -30,6 +32,7 @@ export class TauriSidecarSession implements ControlPlaneSession {
   #unlisten: UnlistenFn[] = []
   #restartTimer: number | undefined
   #connectedOnce = false
+  #disconnectWaiters = new Set<() => void>()
 
   start(): Promise<void> {
     if (this.#started) return Promise.resolve()
@@ -108,6 +111,11 @@ export class TauriSidecarSession implements ControlPlaneSession {
     this.#restartTimer = undefined
     if (this.#starting) {
       try { await this.#starting } catch { /* the failed start is cleaned below */ }
+    }
+    if (this.#started) {
+      const disconnected = this.#waitForDisconnect(SHUTDOWN_EXIT_TIMEOUT_MS)
+      try { await this.call('system.shutdown') } catch { /* hard-stop fallback remains below */ }
+      await disconnected
     }
     this.#started = false
     this.#rejectPending(new ControlPlaneError('disconnected', 'Sidecar stopped'))
@@ -188,6 +196,7 @@ export class TauriSidecarSession implements ControlPlaneSession {
   #disconnect(): void {
     this.#started = false
     this.#rejectPending(new ControlPlaneError('disconnected', 'Sidecar disconnected'))
+    for (const resolve of [...this.#disconnectWaiters]) resolve()
     if (!this.#stopping) this.#scheduleRestart()
   }
 
@@ -198,6 +207,19 @@ export class TauriSidecarSession implements ControlPlaneSession {
       if (this.#stopping) return
       void this.start().catch(() => this.#scheduleRestart())
     }, 1_000)
+  }
+
+  #waitForDisconnect(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let timer = 0
+      const done = () => {
+        window.clearTimeout(timer)
+        this.#disconnectWaiters.delete(done)
+        resolve()
+      }
+      this.#disconnectWaiters.add(done)
+      timer = window.setTimeout(done, timeoutMs)
+    })
   }
 
   #rejectPending(error: Error): void {
@@ -216,5 +238,6 @@ function requestID(): string {
 function commandTimeout(method: string): number {
   if (method === 'models.test') return MODEL_TEST_TIMEOUT_MS
   if (method === 'tunnel.start') return TUNNEL_START_TIMEOUT_MS
+  if (method === 'system.shutdown') return SHUTDOWN_CALL_TIMEOUT_MS
   return CALL_TIMEOUT_MS
 }

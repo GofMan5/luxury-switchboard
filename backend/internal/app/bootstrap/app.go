@@ -204,23 +204,29 @@ func (app *App) Run(ctx context.Context) error {
 		app.logger.Printf("relay start failed")
 	}
 	err := app.protocol.Serve(ctx)
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	if app.tunnel != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = app.tunnel.Stop(stopCtx)
+		cancel()
 	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if stopErr := app.relay.Stop(stopCtx); stopErr != nil {
 		app.logger.Printf("relay shutdown was not clean")
 	}
+	cancel()
 	if app.history != nil {
-		if historyErr := app.history.Close(stopCtx); historyErr != nil {
+		historyCtx, cancelHistory := context.WithTimeout(context.Background(), 5*time.Second)
+		if historyErr := app.history.Close(historyCtx); historyErr != nil {
 			app.logger.Printf("request history did not close cleanly")
 		}
+		cancelHistory()
 	}
 	if app.tunnelHistory != nil {
-		if historyErr := app.tunnelHistory.Close(stopCtx); historyErr != nil {
+		historyCtx, cancelHistory := context.WithTimeout(context.Background(), 5*time.Second)
+		if historyErr := app.tunnelHistory.Close(historyCtx); historyErr != nil {
 			app.logger.Printf("tunnel history did not close cleanly")
 		}
+		cancelHistory()
 	}
 	return err
 }
@@ -243,7 +249,7 @@ func defaultProviders() ([]providerdomain.Provider, string, error) {
 		return nil, "", err
 	}
 	active := os.Getenv("SWITCHBOARD_PROVIDER")
-	if active == "" {
+	if active != "local" && active != "echo" {
 		active = "local"
 	}
 	return []providerdomain.Provider{local, echo}, active, nil

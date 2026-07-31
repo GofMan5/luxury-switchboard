@@ -12,9 +12,13 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            sidecar::stop_on_exit(app);
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            if sidecar::begin_graceful_exit(app) {
+                api.prevent_exit();
+            }
         }
+        tauri::RunEvent::Exit => sidecar::stop_on_exit(app),
+        _ => {}
     });
 }

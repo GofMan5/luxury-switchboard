@@ -1217,8 +1217,14 @@ func removeUsageHeaders(header http.Header) {
 
 func retryDelay(attempt int, response *http.Response, config Config) time.Duration {
 	if response != nil {
-		if seconds, err := strconv.ParseFloat(response.Header.Get("Retry-After"), 64); err == nil && seconds > 0 && !math.IsInf(seconds, 0) && !math.IsNaN(seconds) {
+		retryAfter := strings.TrimSpace(response.Header.Get("Retry-After"))
+		if seconds, err := strconv.ParseFloat(retryAfter, 64); err == nil && seconds > 0 && !math.IsInf(seconds, 0) && !math.IsNaN(seconds) {
 			return min(time.Duration(seconds*float64(time.Second)), config.RetryMax)
+		}
+		if when, err := http.ParseTime(retryAfter); err == nil {
+			if delay := time.Until(when); delay > 0 {
+				return min(delay, config.RetryMax)
+			}
 		}
 	}
 	multiplier := time.Duration(1 << min(attempt, 10))

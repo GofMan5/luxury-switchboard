@@ -60,10 +60,15 @@ func LoadDefault() (State, bool, error) {
 	if root == "" {
 		return State{}, false, nil
 	}
-	raw, err := os.ReadFile(filepath.Join(root, "ProviderSwitchboard", "config.v1.dpapi"))
+	file, err := os.Open(filepath.Join(root, "ProviderSwitchboard", "config.v1.dpapi"))
 	if errors.Is(err, os.ErrNotExist) {
 		return State{}, false, nil
 	}
+	if err != nil {
+		return State{}, false, errors.New("legacy config is unreadable")
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, 4*1024*1024+1))
 	if err != nil || len(raw) <= len(legacyMagic) || len(raw) > 4*1024*1024 || !bytes.Equal(raw[:len(legacyMagic)], legacyMagic) {
 		return State{}, false, errors.New("legacy config is unreadable")
 	}

@@ -56,3 +56,21 @@ func TestDecoderRejectsUnknownAndDuplicateFields(t *testing.T) {
 		}
 	}
 }
+
+func TestShutdownAcknowledgesThenStopsDispatch(t *testing.T) {
+	input := strings.NewReader(
+		`{"v":1,"id":"shutdown","type":"command","method":"system.shutdown"}` + "\n" +
+			`{"v":1,"id":"late","type":"command","method":"system.echo"}` + "\n",
+	)
+	output := &strings.Builder{}
+	server := NewServer(input, output, 1)
+	called := false
+	server.Handle("system.echo", func(context.Context, json.RawMessage) (any, error) { called = true; return nil, nil })
+	if err := server.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var response Response
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil || !response.OK || response.ID != "shutdown" || called {
+		t.Fatalf("shutdown did not stop cleanly: response=%+v called=%v err=%v", response, called, err)
+	}
+}

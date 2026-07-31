@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +24,8 @@ type Store struct {
 	db        *sql.DB
 	queue     *batchqueue.Queue[domain.Event]
 	closed    atomic.Bool
+	closeMu   sync.Mutex
+	dbClosed  bool
 	retention time.Duration
 }
 
@@ -95,13 +98,20 @@ func (store *Store) Recent(ctx context.Context, ip string, limit int) ([]domain.
 }
 
 func (store *Store) Close(ctx context.Context) error {
-	if !store.closed.CompareAndSwap(false, true) {
-		return nil
-	}
+	store.closed.Store(true)
 	if err := store.queue.Close(ctx); err != nil {
 		return err
 	}
-	return store.db.Close()
+	store.closeMu.Lock()
+	defer store.closeMu.Unlock()
+	if store.dbClosed {
+		return nil
+	}
+	if err := store.db.Close(); err != nil {
+		return err
+	}
+	store.dbClosed = true
+	return nil
 }
 
 func (store *Store) writeBatch(batch []domain.Event) error {

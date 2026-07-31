@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/domain"
 	"sync"
+	"time"
 )
 
 var (
@@ -27,14 +28,18 @@ type RuntimeEvents interface {
 }
 type Routes interface{ Count() int }
 type Service struct {
-	opMu       sync.Mutex
-	mu         sync.RWMutex
-	repository Repository
-	runtime    Runtime
-	routes     Routes
-	config     domain.Config
-	snapshot   domain.Snapshot
-	listeners  []func(domain.Snapshot)
+	opMu              sync.Mutex
+	controlMu         sync.Mutex
+	controlCancel     context.CancelFunc
+	controlAction     string
+	controlGeneration uint64
+	mu                sync.RWMutex
+	repository        Repository
+	runtime           Runtime
+	routes            Routes
+	config            domain.Config
+	snapshot          domain.Snapshot
+	listeners         []func(domain.Snapshot)
 }
 
 func NewService(repository Repository, runtime Runtime, routes Routes) (*Service, error) {
@@ -108,6 +113,7 @@ func (service *Service) Configure(ctx context.Context, config domain.Config) err
 	return nil
 }
 func (service *Service) Start(ctx context.Context) error {
+	service.cancelOppositePublication("start")
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
 	service.mu.Lock()
@@ -139,6 +145,7 @@ func (service *Service) Start(ctx context.Context) error {
 	return err
 }
 func (service *Service) Stop(ctx context.Context) error {
+	service.cancelOppositePublication("stop")
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
 	err := service.runtime.Stop(ctx)
@@ -184,26 +191,89 @@ func (service *Service) Config() domain.Config {
 func (service *Service) SetPublicationState(state string) {
 	service.mu.Lock()
 	current := service.snapshot.State
-	if current != domain.StateOnline && current != domain.StatePaused {
-		service.mu.Unlock()
-		return
-	}
 	switch state {
 	case "running":
-		service.snapshot.State = domain.StateOnline
-		service.snapshot.Error = ""
+		stoppedRemotely := current == domain.StatePaused && service.snapshot.Error == "Publication stopped from Shared Control"
+		if current == domain.StatePaused && !stoppedRemotely {
+			service.snapshot.State = domain.StateOnline
+			service.snapshot.Error = ""
+			service.mu.Unlock()
+			service.publish()
+			return
+		}
+		shouldStart := (current == domain.StateStopped || current == domain.StateError || stoppedRemotely) && service.config.PublisherProfile != ""
+		service.mu.Unlock()
+		if shouldStart {
+			service.reconcilePublication("start")
+		}
+		return
 	case "paused":
+		if current != domain.StateOnline && current != domain.StatePaused {
+			service.mu.Unlock()
+			return
+		}
 		service.snapshot.State = domain.StatePaused
 		service.snapshot.Error = "Publication paused from Shared Control"
 	case "stopped":
+		if current == domain.StateStopped {
+			service.mu.Unlock()
+			return
+		}
 		service.snapshot.State = domain.StatePaused
 		service.snapshot.Error = "Publication stopped from Shared Control"
+		service.mu.Unlock()
+		service.publish()
+		service.reconcilePublication("stop")
+		return
 	default:
 		service.mu.Unlock()
 		return
 	}
 	service.mu.Unlock()
 	service.publish()
+}
+
+func (service *Service) reconcilePublication(action string) {
+	service.controlMu.Lock()
+	if service.controlAction == action {
+		service.controlMu.Unlock()
+		return
+	}
+	if service.controlCancel != nil {
+		service.controlCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	service.controlGeneration++
+	generation := service.controlGeneration
+	service.controlAction, service.controlCancel = action, cancel
+	service.controlMu.Unlock()
+	go func() {
+		timeout := 5 * time.Second
+		if action == "start" {
+			timeout = 50 * time.Second
+		}
+		opCtx, cancelOperation := context.WithTimeout(ctx, timeout)
+		if action == "start" {
+			_ = service.Start(opCtx)
+		} else {
+			_ = service.Stop(opCtx)
+		}
+		cancelOperation()
+		cancel()
+		service.controlMu.Lock()
+		if service.controlGeneration == generation {
+			service.controlAction, service.controlCancel = "", nil
+		}
+		service.controlMu.Unlock()
+	}()
+}
+
+func (service *Service) cancelOppositePublication(action string) {
+	service.controlMu.Lock()
+	if service.controlAction != "" && service.controlAction != action && service.controlCancel != nil {
+		service.controlCancel()
+	}
+	service.controlMu.Unlock()
 }
 func (service *Service) OnChanged(listener func(domain.Snapshot)) {
 	if listener == nil {

@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+const (
+	clientIdleTTL     = time.Hour
+	maxTrackedClients = 10_000
+)
+
 type Service struct {
 	mu        sync.RWMutex
 	clients   map[string]*clientState
@@ -96,6 +101,7 @@ func (service *Service) List() []domain.Client {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	now := service.now().UTC()
+	service.evictIdleLocked(now)
 	result := make([]domain.Client, 0, len(service.clients))
 	for _, state := range service.clients {
 		state.starts = prune(state.starts, now)
@@ -144,10 +150,39 @@ func (service *Service) OnChanged(listener func()) {
 func (service *Service) ensure(ip string) *clientState {
 	state := service.clients[ip]
 	if state == nil {
+		service.evictIdleLocked(service.now().UTC())
+		if len(service.clients) >= maxTrackedClients {
+			service.evictOldestIdleLocked()
+		}
 		state = &clientState{client: domain.Client{IP: ip, State: "idle"}}
 		service.clients[ip] = state
 	}
 	return state
+}
+
+func (service *Service) evictIdleLocked(now time.Time) {
+	cutoff := now.Add(-clientIdleTTL)
+	for ip, state := range service.clients {
+		if state.client.Active == 0 && state.client.Queued == 0 && state.client.LastSeen.Before(cutoff) {
+			delete(service.clients, ip)
+		}
+	}
+}
+
+func (service *Service) evictOldestIdleLocked() {
+	oldestIP := ""
+	var oldest time.Time
+	for ip, state := range service.clients {
+		if state.client.Active != 0 || state.client.Queued != 0 {
+			continue
+		}
+		if oldestIP == "" || state.client.LastSeen.Before(oldest) {
+			oldestIP, oldest = ip, state.client.LastSeen
+		}
+	}
+	if oldestIP != "" {
+		delete(service.clients, oldestIP)
+	}
 }
 func (service *Service) publish() {
 	service.mu.RLock()

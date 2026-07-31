@@ -221,6 +221,13 @@ func TestRateLimitRotatesCredentialWithoutLeaking429(t *testing.T) {
 	}
 }
 
+func TestRetryAfterHTTPDateIsClamped(t *testing.T) {
+	response := &http.Response{Header: http.Header{"Retry-After": []string{time.Now().Add(time.Minute).UTC().Format(http.TimeFormat)}}}
+	if delay := retryDelay(0, response, Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Second}); delay != 2*time.Second {
+		t.Fatalf("HTTP-date retry window was ignored: %s", delay)
+	}
+}
+
 func TestDispatchAttemptLimitBoundsHealthProbe(t *testing.T) {
 	var attempts int
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {

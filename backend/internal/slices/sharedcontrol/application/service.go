@@ -40,6 +40,7 @@ func NewService(client Client) (*Service, error) {
 }
 
 func (service *Service) Snapshot(ctx context.Context) domain.Snapshot {
+retry:
 	for attempt := 0; attempt < 2; attempt++ {
 		snapshot, err := service.client.Request(ctx, "list")
 		if err == nil && self(snapshot) != nil {
@@ -48,7 +49,7 @@ func (service *Service) Snapshot(ctx context.Context) domain.Snapshot {
 		if attempt == 0 {
 			select {
 			case <-ctx.Done():
-				break
+				break retry
 			case <-time.After(150 * time.Millisecond):
 			}
 		}

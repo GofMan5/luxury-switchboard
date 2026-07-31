@@ -332,6 +332,9 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 		}
 		t.Logf("public tunnel privacy gate passed: models=%d clients=%d", len(tunnelCatalog.Data), len(clients))
 	}
+	if result := call("shutdown", "system.shutdown"); result["ok"] != true {
+		t.Fatalf("graceful shutdown command failed: %+v", result)
+	}
 	_ = inputWriter.Close()
 	select {
 	case err := <-done:

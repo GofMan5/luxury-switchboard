@@ -16,6 +16,7 @@ export class SharedModel {
   #listeners = new Set<() => void>()
   #timer: ReturnType<typeof setInterval> | undefined
   #inFlight = false
+  #generation = 0
 
   constructor(port: SharedPort) { this.#port = port }
   snapshot = () => this.#state
@@ -27,14 +28,15 @@ export class SharedModel {
   }
 
   async refresh() {
-    if (this.#inFlight) return
+    if (this.#inFlight || this.#state.pendingPosition !== null) return
+    const generation = ++this.#generation
     this.#inFlight = true
     this.#set({ ...this.#state, refreshing: true })
     try {
       const snapshot = await this.#port.list()
-      this.#set({ ...this.#state, snapshot, refreshing: false, error: snapshot.error })
+      if (generation === this.#generation) this.#set({ ...this.#state, snapshot, refreshing: false, error: snapshot.error })
     } catch {
-      this.#set({ ...this.#state, refreshing: false, error: 'Shared tunnel control unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, refreshing: false, error: 'Shared tunnel control unavailable' })
     } finally {
       this.#inFlight = false
     }
@@ -42,13 +44,14 @@ export class SharedModel {
 
   async control(position: number, action: SharedAction) {
     if (this.#state.pendingPosition !== null) return false
+    const generation = ++this.#generation
     this.#set({ ...this.#state, pendingPosition: position, error: '' })
     try {
       const snapshot = await this.#port.control(position, this.#state.snapshot.revision, action)
-      this.#set({ snapshot, refreshing: false, pendingPosition: null, error: snapshot.error })
+      if (generation === this.#generation) this.#set({ snapshot, refreshing: false, pendingPosition: null, error: snapshot.error })
       return true
     } catch {
-      this.#set({ ...this.#state, pendingPosition: null, error: 'Shared tunnel control unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, pendingPosition: null, error: 'Shared tunnel control unavailable' })
       await this.refresh()
       return false
     }

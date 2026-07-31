@@ -1,4 +1,11 @@
-use std::sync::Mutex;
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -14,6 +21,7 @@ const LIFECYCLE_EVENT: &str = "sidecar-lifecycle";
 #[derive(Default)]
 pub struct SidecarState {
     child: Mutex<Option<CommandChild>>,
+    exiting: AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -115,6 +123,39 @@ pub fn stop_on_exit(app: &AppHandle) {
     }
 }
 
+pub fn begin_graceful_exit(app: &AppHandle) -> bool {
+    let state = app.state::<SidecarState>();
+    if state.exiting.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    if let Ok(mut guard) = state.child.lock()
+        && let Some(child) = guard.as_mut()
+    {
+        let _ = child.write(
+            b"{\"v\":1,\"id\":\"native_shutdown\",\"type\":\"command\",\"method\":\"system.shutdown\"}\n",
+        );
+    }
+    let app = app.clone();
+    thread::spawn(move || {
+        for _ in 0..200 {
+            if app
+                .state::<SidecarState>()
+                .child
+                .lock()
+                .map(|child| child.is_none())
+                .unwrap_or(true)
+            {
+                app.exit(0);
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        stop_on_exit(&app);
+        app.exit(0);
+    });
+    true
+}
+
 fn validate_outgoing(frame: &str) -> Result<(), String> {
     if frame.is_empty()
         || frame.len() > MAX_FRAME_BYTES
@@ -141,6 +182,7 @@ fn allowed_method(method: &str) -> bool {
         method,
         "system.handshake"
             | "system.cancel"
+            | "system.shutdown"
             | "relay.status"
             | "relay.start"
             | "relay.stop"
@@ -271,6 +313,10 @@ mod tests {
     fn accepts_allowlisted_command() {
         assert!(
             validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"relay.status"}"#)
+                .is_ok()
+        );
+        assert!(
+            validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"system.shutdown"}"#)
                 .is_ok()
         );
     }

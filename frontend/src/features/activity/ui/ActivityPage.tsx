@@ -29,7 +29,7 @@ export default function ActivityPage() {
     }),
     [source, stateFilter, deferredSearch],
   )
-  const selected = activity.requests.find((request) => request.id === selectedID)
+  const selected = source.find((request) => request.id === selectedID)
 
   const togglePause = () => {
     if (!paused) setFrozen(activity.requests)

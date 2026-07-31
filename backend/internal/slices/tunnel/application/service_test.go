@@ -134,3 +134,46 @@ func TestTunnelStartupHonorsCancellation(t *testing.T) {
 		t.Fatalf("cancelled startup left a misleading state: %+v", service.Snapshot())
 	}
 }
+
+type publicationRuntime struct {
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (runtime *publicationRuntime) Start(context.Context, domain.Config) (string, error) {
+	runtime.started <- struct{}{}
+	return "https://luxuryprivate.duckdns.org/model-tunnel/test/v1", nil
+}
+func (runtime *publicationRuntime) Stop(context.Context) error {
+	runtime.stopped <- struct{}{}
+	return nil
+}
+
+func TestSharedControlStopAndResumeReconcileRuntime(t *testing.T) {
+	runtime := &publicationRuntime{started: make(chan struct{}, 2), stopped: make(chan struct{}, 1)}
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	config := service.Config()
+	config.PublisherProfile = "v1.23456.0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := service.Configure(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-runtime.started
+	service.SetPublicationState("stopped")
+	select {
+	case <-runtime.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("shared stop did not close the reverse tunnel")
+	}
+	service.SetPublicationState("running")
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("shared resume did not restart the reverse tunnel")
+	}
+	if service.Snapshot().State != domain.StateOnline {
+		t.Fatalf("resumed tunnel is not online: %+v", service.Snapshot())
+	}
+}

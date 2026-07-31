@@ -43,10 +43,14 @@ export class ActivityModel {
   }
 
   async connect(): Promise<void> {
+    const baseline = new Map(this.#state.requests.map((request) => [request.id, request.updatedAt]))
     this.#unsubscribe ??= this.#port.subscribe((request) => this.#accept(request))
     try {
       const [requests, summary] = await Promise.all([this.#port.list(100), this.#port.summary()])
-      this.#set({ phase: 'ready', requests, summary, error: '' })
+      const live = this.#state.requests.filter((request) => baseline.get(request.id) !== request.updatedAt)
+      const liveIDs = new Set(live.map((request) => request.id))
+      const merged = [...live, ...requests.filter((request) => !liveIDs.has(request.id))].slice(0, 100)
+      this.#set({ phase: 'ready', requests: merged, summary, error: '' })
       this.#pollTimer ??= setInterval(() => void this.#refreshSummary(), 1_000)
     } catch {
       this.#set({ ...this.#state, phase: 'error', error: 'Activity is unavailable' })

@@ -28,7 +28,7 @@ func (assignment Assignment) Validate() error {
 	if !validModel(assignment.PublicModel) || !validModel(assignment.UpstreamModel) {
 		return errors.New("invalid route model")
 	}
-	if strings.TrimSpace(assignment.ProviderID) == "" {
+	if assignment.ProviderID == "" || assignment.ProviderID != strings.TrimSpace(assignment.ProviderID) {
 		return errors.New("route provider is required")
 	}
 	if assignment.ContextLimitKiB < 0 || assignment.ContextLimitKiB > 2*1024*1024 {
@@ -38,8 +38,7 @@ func (assignment Assignment) Validate() error {
 }
 
 func validModel(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 128 {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 128 {
 		return false
 	}
 	for _, character := range value {

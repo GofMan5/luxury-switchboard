@@ -13,18 +13,23 @@ export class TunnelModel {
   #state: TunnelModelState = { phase: 'loading', snapshot: null, pending: false, error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
+  #generation = 0
 
   constructor(port: TunnelPort) { this.#port = port }
   snapshot = () => this.#state
   subscribe = (listener: () => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
 
   async connect() {
-    this.#unsubscribe ??= this.#port.subscribe((snapshot) => this.#set({ phase: 'ready', snapshot, pending: false, error: snapshot.error ?? '' }))
+    const generation = ++this.#generation
+    this.#unsubscribe ??= this.#port.subscribe((snapshot) => {
+      this.#generation++
+      this.#set({ phase: 'ready', snapshot, pending: this.#state.pending, error: snapshot.error ?? '' })
+    })
     try {
       const snapshot = await this.#port.get()
-      this.#set({ phase: 'ready', snapshot, pending: false, error: snapshot.error ?? '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', snapshot, pending: false, error: snapshot.error ?? '' })
     } catch {
-      this.#set({ ...this.#state, phase: 'error', error: 'Tunnel is unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Tunnel is unavailable' })
     }
   }
 
@@ -50,6 +55,7 @@ export class TunnelModel {
 
   async #mutate(operation: () => Promise<TunnelSnapshot>) {
     if (this.#state.pending) return false
+    this.#generation++
     this.#set({ ...this.#state, pending: true, error: '' })
     try {
       const snapshot = await operation()

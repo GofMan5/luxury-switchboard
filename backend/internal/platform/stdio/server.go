@@ -95,6 +95,10 @@ func (server *Server) Serve(ctx context.Context) error {
 			server.cancelRequest(request)
 			continue
 		}
+		if request.Method == "system.shutdown" {
+			_ = server.write(Response{Version: ProtocolVersion, ID: request.ID, Type: "result", Method: request.Method, OK: true})
+			return nil
+		}
 		pending, err := server.prepareJob(serveCtx, request)
 		if err != nil {
 			_ = server.write(Failure(request, "duplicate_id", "Request id is already active"))

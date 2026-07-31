@@ -14,11 +14,17 @@ import (
 const DefaultMaxPlaintext = 4 * 1024 * 1024
 
 func Load(path string, magic []byte, maxPlaintext int, target any) (bool, error) {
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	if err != nil || len(raw) <= len(magic) || len(raw) > maxPlaintext*2 || !bytes.Equal(raw[:len(magic)], magic) {
+	if err != nil {
+		return false, errors.New("encrypted settings could not be read")
+	}
+	defer file.Close()
+	maxEncrypted := int64(maxPlaintext) * 2
+	raw, err := io.ReadAll(io.LimitReader(file, maxEncrypted+1))
+	if err != nil || int64(len(raw)) > maxEncrypted || len(raw) <= len(magic) || !bytes.Equal(raw[:len(magic)], magic) {
 		return false, errors.New("encrypted settings could not be read")
 	}
 	plaintext, err := secretstore.Unprotect(raw[len(magic):])

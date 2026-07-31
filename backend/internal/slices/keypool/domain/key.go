@@ -55,7 +55,7 @@ func NewKey(params Params) (Key, error) {
 	if err != nil {
 		return Key{}, err
 	}
-	digest := sha256.Sum256([]byte(providerID + "\x00" + params.Secret))
+	digest := sha256.Sum256([]byte(providerID + "\x00" + credential.Reveal()))
 	proxyURL := strings.TrimSpace(params.ProxyURL)
 	if proxyURL != "" {
 		parsed, err := url.Parse(proxyURL)

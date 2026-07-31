@@ -1,6 +1,7 @@
 package openssh
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -46,10 +47,18 @@ func Prepare(identityName string) (Client, error) {
 		return Client{}, errors.New("SSH identity is not installed")
 	}
 	knownHosts := filepath.Join(filepath.Dir(identity), "model-tunnel_known_hosts")
-	if err := atomicfile.Replace(knownHosts, []byte(Host+" "+HostKey+"\n"), 0o600); err != nil {
+	if err := ensureKnownHosts(knownHosts); err != nil {
 		return Client{}, errors.New("SSH host trust could not be prepared")
 	}
 	return Client{Executable: executable, Identity: identity, KnownHosts: knownHosts}, nil
+}
+
+func ensureKnownHosts(path string) error {
+	payload := []byte(Host + " " + HostKey + "\n")
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, payload) {
+		return nil
+	}
+	return atomicfile.Replace(path, payload, 0o600)
 }
 
 func (client Client) BaseArgs() []string {

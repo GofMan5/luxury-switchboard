@@ -29,6 +29,12 @@ describe('TauriSidecarSession', () => {
       if (frame.method === 'system.handshake') {
         queueMicrotask(() => mocks.listeners.get('sidecar-frame')?.({ payload: JSON.stringify({ v: 1, id: frame.id, type: 'result', ok: true, payload: {} }) }))
       }
+      if (frame.method === 'system.shutdown') {
+        queueMicrotask(() => {
+          mocks.listeners.get('sidecar-frame')?.({ payload: JSON.stringify({ v: 1, id: frame.id, type: 'result', ok: true }) })
+          queueMicrotask(() => mocks.listeners.get('sidecar-lifecycle')?.({ payload: { state: 'stopped' } }))
+        })
+      }
       return undefined
     })
   })

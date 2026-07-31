@@ -14,23 +14,29 @@ export class SettingsModel {
   #state: SettingsState = { phase: 'loading', settings: null, pending: false, restartRequired: false, error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
+  #generation = 0
 
   constructor(port: SettingsPort) { this.#port = port }
   snapshot = (): SettingsState => this.#state
   subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
 
   async connect(): Promise<void> {
-    this.#unsubscribe ??= this.#port.subscribe((result) => this.#set({ phase: 'ready', settings: result.settings, pending: false, restartRequired: result.restartRequired, error: '' }))
+    const generation = ++this.#generation
+    this.#unsubscribe ??= this.#port.subscribe((result) => {
+      this.#generation++
+      this.#set({ phase: 'ready', settings: result.settings, pending: this.#state.pending, restartRequired: result.restartRequired, error: '' })
+    })
     try {
       const settings = await this.#port.get()
-      this.#set({ phase: 'ready', settings, pending: false, restartRequired: false, error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', settings, pending: false, restartRequired: false, error: '' })
     } catch {
-      this.#set({ ...this.#state, phase: 'error', error: 'Settings are unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Settings are unavailable' })
     }
   }
 
   async save(settings: Settings): Promise<boolean> {
     if (this.#state.pending) return false
+    this.#generation++
     this.#set({ ...this.#state, pending: true, error: '' })
     try {
       const result = await this.#port.update(settings)

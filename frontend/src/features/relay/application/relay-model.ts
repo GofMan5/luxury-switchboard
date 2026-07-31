@@ -20,6 +20,7 @@ export class RelayModel {
   #state = initialState
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
+  #generation = 0
 
   constructor(port: RelayPort) {
     this.#port = port
@@ -33,14 +34,16 @@ export class RelayModel {
   }
 
   async connect(): Promise<void> {
+    const generation = ++this.#generation
     this.#unsubscribe ??= this.#port.subscribe((snapshot) => {
-      this.#set({ phase: 'ready', snapshot, pending: false, error: '' })
+      this.#generation++
+      this.#set({ phase: 'ready', snapshot, pending: this.#state.pending, error: '' })
     })
     try {
       const snapshot = await this.#port.status()
-      this.#set({ phase: 'ready', snapshot, pending: false, error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', snapshot, pending: false, error: '' })
     } catch {
-      this.#set({ ...this.#state, phase: 'error', error: 'Relay state is unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Relay state is unavailable' })
     }
   }
 
@@ -52,7 +55,12 @@ export class RelayModel {
         this.#state.snapshot.state === 'live' ? await this.#port.stop() : await this.#port.start()
       this.#set({ phase: 'ready', snapshot, pending: false, error: '' })
     } catch {
-      this.#set({ ...this.#state, pending: false, error: 'Relay operation failed' })
+      try {
+        const snapshot = await this.#port.status()
+        this.#set({ phase: 'ready', snapshot, pending: false, error: '' })
+      } catch {
+        this.#set({ ...this.#state, pending: false, error: 'Relay operation failed' })
+      }
     }
   }
 

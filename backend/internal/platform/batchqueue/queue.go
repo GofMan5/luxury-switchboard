@@ -11,16 +11,14 @@ type Queue[T any] struct {
 	batchSize   int
 	flush       func([]T) error
 	maintenance func()
-	cancel      context.CancelFunc
 	done        chan struct{}
 	mu          sync.RWMutex
 	closed      bool
 }
 
 func New[T any](capacity, batchSize int, interval time.Duration, flush func([]T) error, maintenance func()) *Queue[T] {
-	ctx, cancel := context.WithCancel(context.Background())
-	queue := &Queue[T]{items: make(chan T, capacity), batchSize: batchSize, flush: flush, maintenance: maintenance, cancel: cancel, done: make(chan struct{})}
-	go queue.run(ctx, interval)
+	queue := &Queue[T]{items: make(chan T, capacity), batchSize: batchSize, flush: flush, maintenance: maintenance, done: make(chan struct{})}
+	go queue.run(interval)
 	return queue
 }
 
@@ -42,7 +40,7 @@ func (queue *Queue[T]) Close(ctx context.Context) error {
 	queue.mu.Lock()
 	if !queue.closed {
 		queue.closed = true
-		queue.cancel()
+		close(queue.items)
 	}
 	queue.mu.Unlock()
 	select {
@@ -53,42 +51,49 @@ func (queue *Queue[T]) Close(ctx context.Context) error {
 	}
 }
 
-func (queue *Queue[T]) run(ctx context.Context, interval time.Duration) {
+func (queue *Queue[T]) run(interval time.Duration) {
 	defer close(queue.done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	batch := make([]T, 0, queue.batchSize)
 	lastMaintenance := time.Now()
-	flush := func() {
+	flush := func() bool {
 		if len(batch) == 0 {
-			return
+			return true
 		}
-		_ = queue.flush(batch)
+		if queue.flush(batch) != nil {
+			return false
+		}
 		batch = batch[:0]
 		if queue.maintenance != nil && time.Since(lastMaintenance) >= time.Hour {
 			queue.maintenance()
 			lastMaintenance = time.Now()
 		}
+		return true
 	}
+	items := (<-chan T)(queue.items)
 	for {
+		if items == nil {
+			if len(batch) == 0 || flush() {
+				return
+			}
+		}
+		intake := items
+		if len(batch) >= queue.batchSize {
+			intake = nil
+		}
 		select {
-		case value := <-queue.items:
+		case value, ok := <-intake:
+			if !ok {
+				items = nil
+				continue
+			}
 			batch = append(batch, value)
 			if len(batch) >= queue.batchSize {
 				flush()
 			}
 		case <-ticker.C:
 			flush()
-		case <-ctx.Done():
-			for {
-				select {
-				case value := <-queue.items:
-					batch = append(batch, value)
-				default:
-					flush()
-					return
-				}
-			}
 		}
 	}
 }

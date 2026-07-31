@@ -21,6 +21,7 @@ export class ProvidersModel {
   #state = initialState
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
+  #generation = 0
 
   constructor(port: ProvidersPort) {
     this.#port = port
@@ -34,16 +35,17 @@ export class ProvidersModel {
   }
 
   async connect(): Promise<void> {
-    this.#unsubscribe ??= this.#port.subscribe(() => void this.refresh())
+    this.#unsubscribe ??= this.#port.subscribe(() => void this.refresh(false))
     await this.refresh()
   }
 
-  async refresh(): Promise<void> {
+  async refresh(clearPending = true): Promise<void> {
+    const generation = ++this.#generation
     try {
       const catalog = await this.#port.list()
-      this.#set({ phase: 'ready', catalog, pendingId: '', error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', catalog, pendingId: clearPending ? '' : this.#state.pendingId, error: '' })
     } catch {
-      this.#set({ ...this.#state, phase: 'error', pendingId: '', error: 'Providers are unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', pendingId: clearPending ? '' : this.#state.pendingId, error: 'Providers are unavailable' })
     }
   }
 

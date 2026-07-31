@@ -32,3 +32,14 @@ func TestAmbiguousMutationReconcilesWithoutReplayingAction(t *testing.T) {
 		t.Fatalf("mutation was not reconciled safely: result=%+v calls=%v err=%v", result, client.calls, err)
 	}
 }
+
+func TestCancelledSnapshotDoesNotRetrySSH(t *testing.T) {
+	client := &fakeClient{responses: []domain.Snapshot{{}}, errors: []error{errors.New("unavailable")}}
+	service, _ := NewService(client)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	service.Snapshot(ctx)
+	if len(client.calls) != 1 {
+		t.Fatalf("cancelled snapshot retried SSH %d times", len(client.calls))
+	}
+}

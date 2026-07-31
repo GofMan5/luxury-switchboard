@@ -1,0 +1,60 @@
+import { lazy, Suspense, useEffect, useState } from 'react'
+import { AppShell } from './app/AppShell'
+import { ServicesProvider } from './app/ServicesProvider'
+import { navigation, type AppRoute } from './app/navigation'
+
+const OverviewPage = lazy(() => import('./features/overview/ui/OverviewPage'))
+const ActivityPage = lazy(() => import('./features/activity/ui/ActivityPage'))
+const ProvidersPage = lazy(() => import('./features/providers/ui/ProvidersPage'))
+const ApiKeysPage = lazy(() => import('./features/api-keys/ui/ApiKeysPage'))
+const SettingsPage = lazy(() => import('./features/settings/ui/SettingsPage'))
+const StatisticsPage = lazy(() => import('./features/statistics/ui/StatisticsPage'))
+const ModelRoutesPage = lazy(() => import('./features/model-routes/ui/ModelRoutesPage'))
+const TunnelPage = lazy(() => import('./features/tunnel/ui/TunnelPage'))
+const ClientsPage = lazy(() => import('./features/clients/ui/ClientsPage'))
+const SharedControlPage = lazy(() => import('./features/shared-control/ui/SharedControlPage'))
+
+export default function App() {
+  return (
+    <ServicesProvider>
+      <Switchboard />
+    </ServicesProvider>
+  )
+}
+
+function Switchboard() {
+  const [route, setRoute] = useState<AppRoute>(() => routeFromHash())
+
+  useEffect(() => {
+    const update = () => setRoute(routeFromHash())
+    window.addEventListener('hashchange', update)
+    return () => window.removeEventListener('hashchange', update)
+  }, [])
+
+  const navigate = (next: AppRoute) => {
+    window.location.hash = next
+    setRoute(next)
+  }
+
+  return (
+    <AppShell route={route} onNavigate={navigate}>
+      <Suspense fallback={<div className="page-loading">Loading workspace…</div>}>
+        {route === 'overview' ? <OverviewPage /> : null}
+        {route === 'activity' ? <ActivityPage /> : null}
+        {route === 'providers' ? <ProvidersPage /> : null}
+        {route === 'keys' ? <ApiKeysPage /> : null}
+        {route === 'settings' ? <SettingsPage /> : null}
+        {route === 'statistics' ? <StatisticsPage /> : null}
+        {route === 'routes' ? <ModelRoutesPage /> : null}
+        {route === 'tunnel' ? <TunnelPage /> : null}
+        {route === 'clients' ? <ClientsPage /> : null}
+        {route === 'shared' ? <SharedControlPage /> : null}
+      </Suspense>
+    </AppShell>
+  )
+}
+
+function routeFromHash(): AppRoute {
+  const value = window.location.hash.replace(/^#\/?/u, '') as AppRoute
+  return navigation.some((item) => item.id === value) ? value : 'overview'
+}

@@ -9,7 +9,7 @@ Group=tunnel-control
 StateDirectory=tunnel-hub
 StateDirectoryMode=0750
 Environment=TUNNEL_HUB_STATE=/var/lib/tunnel-hub/tunnels.json
-ExecStart=/usr/bin/python3 /usr/local/libexec/tunnel_hub.py serve --listen 172.20.0.1 --port 18080
+ExecStart=/usr/local/libexec/tunnel-hub serve --listen 172.20.0.1 --port 18080
 Restart=on-failure
 RestartSec=1s
 NoNewPrivileges=true

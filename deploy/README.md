@@ -27,8 +27,9 @@ stores no URL, slug, port, provider, model, API key, or proxy.
 
 ## Install/review checklist
 
-1. Create the locked-password `tunnel-control` user with `/bin/sh`; install
-   `tunnel_hub.py` as root-owned mode 0755.
+1. Build `GOOS=linux GOARCH=amd64 go build ./cmd/tunnel-hub`, create the
+   locked-password `tunnel-control` user with `/bin/sh`, and install the
+   resulting `tunnel-hub` binary as root-owned mode 0755 in `/usr/local/libexec`.
 2. Install the service and initialize `/var/lib/tunnel-hub/tunnels.json` from
    the example as `tunnel-control:tunnel-control`, mode 0640.
 3. Install `/etc/tunnel-hub/authorized_keys` as `root:tunnel-control`, mode

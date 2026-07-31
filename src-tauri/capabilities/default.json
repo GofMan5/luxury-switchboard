@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Core window and event permissions; process control remains in Rust",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

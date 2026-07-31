@@ -1,0 +1,47 @@
+import type { Settings } from '../domain/settings'
+import type { SettingsPort } from './settings-port'
+
+export interface SettingsState {
+  readonly phase: 'loading' | 'ready' | 'error'
+  readonly settings: Settings | null
+  readonly pending: boolean
+  readonly restartRequired: boolean
+  readonly error: string
+}
+
+export class SettingsModel {
+  readonly #port: SettingsPort
+  #state: SettingsState = { phase: 'loading', settings: null, pending: false, restartRequired: false, error: '' }
+  #listeners = new Set<() => void>()
+  #unsubscribe: (() => void) | null = null
+
+  constructor(port: SettingsPort) { this.#port = port }
+  snapshot = (): SettingsState => this.#state
+  subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
+
+  async connect(): Promise<void> {
+    this.#unsubscribe ??= this.#port.subscribe((result) => this.#set({ phase: 'ready', settings: result.settings, pending: false, restartRequired: result.restartRequired, error: '' }))
+    try {
+      const settings = await this.#port.get()
+      this.#set({ phase: 'ready', settings, pending: false, restartRequired: false, error: '' })
+    } catch {
+      this.#set({ ...this.#state, phase: 'error', error: 'Settings are unavailable' })
+    }
+  }
+
+  async save(settings: Settings): Promise<boolean> {
+    if (this.#state.pending) return false
+    this.#set({ ...this.#state, pending: true, error: '' })
+    try {
+      const result = await this.#port.update(settings)
+      this.#set({ phase: 'ready', settings: result.settings, pending: false, restartRequired: result.restartRequired, error: '' })
+      return true
+    } catch {
+      this.#set({ ...this.#state, pending: false, error: 'Settings could not be saved. Check every value.' })
+      return false
+    }
+  }
+
+  dispose(): void { this.#unsubscribe?.(); this.#listeners.clear() }
+  #set(state: SettingsState): void { this.#state = state; for (const listener of this.#listeners) listener() }
+}

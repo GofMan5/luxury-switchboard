@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+node_modules/
+.pnpm-store/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -31,5 +33,10 @@ tui-*.svg
 
 build/
 dist/
+frontend/dist/
+frontend/coverage/
+src-tauri/target/
+src-tauri/binaries/*.exe
+backend/bin/
 .coverage
 htmlcov/

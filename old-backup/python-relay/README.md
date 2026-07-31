@@ -1,0 +1,109 @@
+# Provider Switchboard
+
+Локальное OpenAI/Anthropic-реле с серым mouse-first TUI. Клиент всегда использует один адрес:
+
+- OpenAI / Codex: `http://127.0.0.1:8798/v1`;
+- Anthropic: `http://127.0.0.1:8798`.
+
+## Запуск
+
+```powershell
+python -m pip install -r requirements.txt
+python main.py
+python main.py --start-tunnel
+```
+
+Реле слушает только `127.0.0.1`. Режимы без TUI:
+
+```powershell
+python main.py --plain
+python main.py --headless --port 18798 --provider echo
+```
+
+Фоновый headless-запуск:
+
+```powershell
+$relay = Start-Process python -ArgumentList @("main.py", "--headless", "--port", "18798", "--provider", "echo") -WorkingDirectory $PWD -WindowStyle Hidden -PassThru
+Stop-Process -Id $relay.Id
+```
+
+## TUI
+
+- `Overview` — здоровье relay, фактический/effective RPM, очередь, outcomes, latency, непересекающиеся token totals и состояние всех провайдеров.
+- `Activity` — отдельная таблица live/recent-запросов. Цветной статус: зелёный — готово, синий — выполняется, жёлтый — очередь/retry, красный — ошибка, серый — отменено. Двойной клик или `Enter` открывает безопасные детали с финальным HTTP-статусом.
+- `Providers` — только endpoints, auth и общие лимиты провайдеров; добавление, редактирование, удаление, активация и просмотр каталога.
+- `Keys` — отдельный provider selector, приоритет ключей, RPM, proxy, cooldown, перемещение и ручной reset.
+- `Routes` — единственное место назначения `model → provider`: сначала выбирается `Target: Relay/Tunnel`, затем provider и его модели. Справа всегда видна итоговая матрица Relay/Tunnel.
+- `Tunnel` — только lifecycle публикации, URL/API key, per-IP RPM, context limit и publisher profile.
+- `Clients` — пользователи туннеля, их live RPM/active/queue и безопасные подробные логи.
+- `Stats` — `24h`, `48h`, `72h`, `All`, non-cached/processed usage и breakdown без хранения prompt/response body.
+- `Shared` — синхронизированный список общих туннелей, где собственный подписан `Ваш коннект`; pause/resume/stop работают по ревизии без передачи внутренних ID.
+
+Для ключа задаются RPM и необязательный HTTP proxy вида `http://user:pass@host:port`. Пустой proxy у нового ключа означает прямое подключение. Для выбранного ключа пустое поле сохраняет текущий proxy, слово `direct` отключает его. Credentials замаскированы и не попадают в таблицы, историю или метрики.
+
+Интерфейс адаптируется к окну: все девять вкладок помещаются на `80×24`, широкие таблицы прокручиваются горизонтально, workflow-формы переходят в несколько строк, а длинные страницы — вертикально. Редактируемый RPM не перезаписывается live-обновлением, а effective RPM учитывает одновременно лимит провайдера и сумму лимитов ключей.
+
+`Tok/s` фиксируется по финальному usage за время успешной upstream-попытки: от полной отправки запроса до terminal usage. Очередь и предыдущие retry не входят, а TTFT/reasoning входят — поэтому буферизированный ответ больше не показывает тысячи фиктивных tok/s. Пока OpenAI/Anthropic не прислал terminal usage, показывается `—`: точный live tok/s без tokenizer неизвестен.
+
+`Processed` равен provider-reported total и не складывает cached/reasoning второй раз. `Cached` — подмножество processed input, `Reasoning` — подмножество output. `Non-cached` равен `processed - cached`; это отдельная непересекающаяся цифра, удобная для сравнения с клиентами, которые показывают только новые токены.
+
+## SSH VPS tunnel
+
+Для запуска нужны системный Windows OpenSSH (`ssh.exe`) и отдельный publisher-ключ `%LOCALAPPDATA%\ProviderSwitchboard\ssh\model-tunnel_ed25519`. Controller всегда подключается ограниченным пользователем `model-tunnel`; root-ключ и SSH agent не используются. ED25519 host key VPS закреплён в приложении: рядом с publisher-ключом атомарно создаётся отдельный `model-tunnel_known_hosts`, а пользовательские SSH config/agent и глобальные trust-файлы игнорируются.
+
+Выданный publisher profile имеет строгий формат `v1.<port>.<48 lowercase hex>`. Из него одновременно выводятся reverse-port и персональный адрес `https://luxuryprivate.duckdns.org/model-tunnel/<slug>/v1`, поэтому чужой slug нельзя подставить к своему порту. Profile хранится в DPAPI-конфиге и меняется только при остановленном туннеле.
+
+Во вкладке `Routes` селектор провайдера выбирает источник каталога, а `Target: Tunnel` / `Target: Relay` — куда сохраняются галочки. Назначения независимы: например, GPT можно направить в один upstream, Claude — в другой, причём для туннеля и локального реле маршруты могут отличаться. Повторное назначение модели переносит её к выбранному провайдеру; смена каталога не стирает маршруты остальных провайдеров. Неназначенные модели локального реле идут через обычный active provider. Публичный `/v1/models` показывает объединение только туннельных назначений.
+
+После выбора хотя бы одной туннельной модели можно нажать `Start`. `Online` и копирование адреса доступны только после authenticated HTTPS readiness-запроса к собственному synthetic `/v1/models`. Если любой назначенный туннельный провайдер удалён, изменён небезопасным образом или использует passthrough-auth, публикация закрывается fail-closed; TUI показывает `Paused`, а не ложный `Online`. Per-IP RPM применяется отдельной FIFO-очередью для каждого адреса; `0` означает unlimited, а превышение лимита не отдаёт клиенту `429`. `Context KiB` ограничивает точный размер public request body только для текстовых API до очереди/upstream; `0` отключает пользовательский лимит, сохраняя жёсткий системный предел 64 MiB.
+
+Public tunnel пишет отдельную безопасную историю в `%LOCALAPPDATA%\ProviderSwitchboard\tunnel_history.db`: IP, method/path/model, status, latency и bytes. Prompt/response, headers, provider/upstream, owner/`OWNED_BY`, API/proxy/SSH credentials туда не записываются; сохранённые события восстанавливаются в Tunnel clients после перезапуска.
+
+`Test selected` и `Test all` выполняют короткую реальную генерацию с жёстким таймаутом 10 секунд и показывают локальные состояния `Testing`, `Available`, `Unavailable` или `Timeout`; ответы, ключи и данные провайдера не сохраняются и не публикуются.
+
+Publisher identity, publisher profile и публичный API key — разные сущности. Публичный ключ генерируется локально, принимается как `Authorization: Bearer` или `x-api-key`; `Rotate key` сразу отзывает предыдущий. Ни он, ни publisher-ключ не передаются провайдеру.
+
+Каждому следующему владельцу выдаются отдельные Ed25519 key, port и slug. Поэтому два реле не конфликтуют; повторный запуск одного profile на двух машинах fail-closed завершится ошибкой занятого reverse-port.
+
+Публичная граница не является passthrough/reverse proxy:
+
+- `GET /v1/models` всегда synthetic и содержит только выбранные model ID, без запроса к upstream; необязательный query игнорируется и не меняет каталог;
+- inference принимается только через exact `POST /v1/responses`, `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/images/generations` и `/v1/images/edits`; image edits принимают JSON references и `multipart/form-data`, остальные methods, paths, inference-query и trailing slash отклоняются;
+- model должна точно входить в allowlist; входной public key никогда не передаётся дальше, а provider/upstream, `OWNED_BY`, внутренние owner/ID, ключи и proxy не попадают в headers, JSON или SSE;
+- явный вопрос о provider/backend/source/owner на текстовом API получает локально синтезированную фирменную строку без обращения к upstream;
+- active provider с `passthrough` auth публиковать запрещено: туннель fail-closed отклонит запрос;
+- JSON и весь SSE-ответ целиком буферизуются и проверяются до public commit; unsafe/malformed данные не проходят. Локальное реле на `8798` сразу подтверждает SSE и посылает нейтральные keep-alive, но не отдаёт model data до `response.completed`, поэтому оборванная попытка бесшовно повторяется; non-stream ответы проверяются до commit, а публичный Tunnel отдаёт SSE только после полной проверки ради fail-closed анонимности.
+
+Выбранные model ID и содержимое запроса/ответа являются полезной нагрузкой публичного API и проходят через VPS, который терминирует TLS. Скрываются и не передаются именно настроенные provider name/id/URL, внутренние ключи и proxy credentials.
+
+## Lite → Pro
+
+`FREEMODEL_API_KEY` становится первым Lite-ключом EchoGate: по умолчанию `30 RPM`, прямой IP. RPM редактируется и сохраняется без копирования самого env-ключа в конфиг; позиция Primary и прямой IP остаются закреплены. Общий Pro-ключ добавляется вторым через `Providers`, обычно с `120 RPM` и proxy. Планировщик сначала использует Lite, затем Pro, затем держит запросы в бессрочной FIFO-очереди.
+
+Если Lite отвечает `404` с точным сообщением `Model '<model>' is not available on your plan`, только эта модель на этом ключе пропускается 5 минут. После паузы следующий запрос снова пробует Lite. Остальные модели продолжают использовать Lite. Все upstream `4xx/5xx`, transport errors и timeouts повторяются до успеха или остановки клиента/реле; `429` и `504` до клиента не коммитятся. Ошибка конкретного запроса (`400/404/409/413/422`) не замораживает ключ и не ставит в очередь другие модели.
+
+## EchoGate cache
+
+У существующих валидных Anthropic breakpoint-блоков
+`cache_control: {"type": "ephemeral"}` TTL меняется на `1h`. Невалидный top-level `cache_control` для Responses не добавляется; Local-запросы не меняются.
+
+## FREEMODEL_API_KEY
+
+Сохранить ключ в User Environment Windows достаточно один раз:
+
+```powershell
+[Environment]::SetEnvironmentVariable("FREEMODEL_API_KEY", "<key>", "User")
+```
+
+Реле читает значение и из текущего процесса, и напрямую из `HKCU\Environment`, поэтому перезапуск Codex через `$env:FREEMODEL_API_KEY=...; codex` больше не нужен. Сам env Lite-ключ не копируется в конфиг.
+
+Провайдеры, выбранный active provider, RPM, порядок дополнительных ключей и proxy сохраняются после каждого изменения в `%LOCALAPPDATA%\ProviderSwitchboard\config.v1.dpapi`. Файл целиком зашифрован Windows DPAPI для текущего пользователя и записывается атомарно; ключи и proxy credentials не попадают в логи. После ошибки записи изменение остаётся рабочим в текущей сессии, а TUI показывает `settings not saved`.
+
+Санитизированная история хранится в `%LOCALAPPDATA%\ProviderSwitchboard\history.db`: SQLite WAL, индексы по времени/provider и безопасная миграция схемы. Сохраняются status/state, latency/queue, input/context/output/cached/reasoning/total tokens, tok/s и cache TTL; prompt, response body, API keys и proxy credentials не записываются. Если запись БД перестала работать, TUI явно показывает `history not recording`.
+
+## Проверка
+
+```powershell
+python -m py_compile main.py relay_config.py relay_history.py relay_http.py relay_runtime.py relay_tunnel.py relay_ui.py deploy/tunnel_hub.py test_relay.py test_hub.py test_shared_control.py test_tunnel_privacy.py test_ui_layout.py
+python -m unittest -v
+```

@@ -1,0 +1,23 @@
+[package]
+name = "switchboard-desktop"
+version = "0.2.0"
+description = "Switchboard desktop shell"
+authors = ["Luxury Private"]
+license = "LicenseRef-Proprietary"
+edition = "2024"
+rust-version = "1.85"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "switchboard_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-shell = "2.3.5"

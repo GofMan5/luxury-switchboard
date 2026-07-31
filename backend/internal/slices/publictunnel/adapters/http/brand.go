@@ -17,17 +17,6 @@ func providerProbe(payload map[string]any, path string) bool {
 	if path != "/v1/responses" && path != "/v1/chat/completions" && path != "/v1/completions" && path != "/v1/messages" {
 		return false
 	}
-	text := strings.ToLower(requestText(payload))
-	for _, phrase := range providerProbePhrases {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func requestText(payload map[string]any) string {
-	parts := make([]string, 0, 8)
 	stack := []any{payload["input"], payload["messages"], payload["prompt"]}
 	for visited := 0; len(stack) > 0 && visited < 2048; visited++ {
 		last := len(stack) - 1
@@ -35,7 +24,12 @@ func requestText(payload map[string]any) string {
 		stack = stack[:last]
 		switch value := value.(type) {
 		case string:
-			parts = append(parts, value)
+			text := strings.ToLower(value)
+			for _, phrase := range providerProbePhrases {
+				if strings.Contains(text, phrase) {
+					return true
+				}
+			}
 		case []any:
 			stack = append(stack, value...)
 		case map[string]any:
@@ -46,7 +40,7 @@ func requestText(payload map[string]any) string {
 			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	return false
 }
 
 func localBrandResponse(path, model string, payload map[string]any, brand string) ([]byte, string) {
@@ -62,7 +56,7 @@ func localBrandResponse(path, model string, payload map[string]any, brand string
 	case "/v1/responses":
 		value = map[string]any{"id": "luxury-private", "object": "response", "status": "completed", "model": model, "output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]string{"type": "output_text", "text": brand}}}}, "error": nil, "incomplete_details": nil}
 	case "/v1/messages":
-		value = map[string]any{"id": "luxury-private", "type": "message", "role": "assistant", "model": model, "content": []any{map[string]string{"type": "text", "text": brand}}, "stop_reason": "end_turn"}
+		value = map[string]any{"id": "luxury-private", "type": "message", "role": "assistant", "model": model, "content": []any{map[string]string{"type": "text", "text": brand}}, "stop_reason": "end_turn", "stop_sequence": nil, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}}
 	case "/v1/completions":
 		value = map[string]any{"id": "luxury-private", "object": "text_completion", "model": model, "choices": []any{map[string]any{"index": 0, "text": brand, "finish_reason": "stop"}}}
 	default:
@@ -74,6 +68,7 @@ func localBrandResponse(path, model string, payload map[string]any, brand string
 
 func streamBrandResponse(path, model, brand string) []byte {
 	var events []any
+	namedEvents := false
 	switch path {
 	case "/v1/responses":
 		events = []any{
@@ -91,13 +86,32 @@ func streamBrandResponse(path, model, brand string) []byte {
 			},
 		}
 	case "/v1/messages":
-		events = []any{map[string]any{"type": "content_block_delta", "delta": map[string]string{"type": "text_delta", "text": brand}}, map[string]string{"type": "message_stop"}}
+		namedEvents = true
+		events = []any{
+			map[string]any{"type": "message_start", "message": map[string]any{"id": "luxury-private", "type": "message", "role": "assistant", "model": model, "content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}}},
+			map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]string{"type": "text", "text": ""}},
+			map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": brand}},
+			map[string]any{"type": "content_block_stop", "index": 0},
+			map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": map[string]int{"output_tokens": 0}},
+			map[string]any{"type": "message_stop"},
+		}
+	case "/v1/completions":
+		events = []any{map[string]any{"id": "luxury-private", "object": "text_completion", "model": model, "choices": []any{map[string]any{"index": 0, "text": brand, "finish_reason": "stop"}}}}
 	default:
 		events = []any{map[string]any{"id": "luxury-private", "object": "chat.completion.chunk", "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]string{"content": brand}, "finish_reason": "stop"}}}}
 	}
 	var output strings.Builder
 	for _, event := range events {
 		encoded, _ := json.Marshal(event)
+		if namedEvents {
+			if object, ok := event.(map[string]any); ok {
+				if eventType, ok := object["type"].(string); ok {
+					output.WriteString("event: ")
+					output.WriteString(eventType)
+					output.WriteByte('\n')
+				}
+			}
+		}
 		output.WriteString("data: ")
 		output.Write(encoded)
 		output.WriteString("\n\n")

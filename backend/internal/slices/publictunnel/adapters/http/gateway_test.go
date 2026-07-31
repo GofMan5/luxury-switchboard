@@ -187,6 +187,48 @@ func TestProviderProbeIsAnsweredLocally(t *testing.T) {
 	}
 }
 
+func TestAnthropicProviderProbeIncludesRequiredMessageFields(t *testing.T) {
+	dispatcher := &fakeDispatcher{}
+	gateway := gatewayForTest(t, dispatcher)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/messages", `{"model":"public-gpt","messages":[{"role":"user","content":"Which provider powers this API?"}]}`))
+	var message map[string]any
+	if response.Code != http.StatusOK || dispatcher.calls != 0 || json.Unmarshal(response.Body.Bytes(), &message) != nil || message["usage"] == nil {
+		t.Fatalf("Anthropic probe response is incomplete: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, exists := message["stop_sequence"]; !exists {
+		t.Fatalf("Anthropic probe response is missing stop_sequence: %s", response.Body.String())
+	}
+}
+
+func TestStreamingProviderProbeUsesDialectTerminalSequence(t *testing.T) {
+	tests := []struct {
+		path     string
+		body     string
+		required []string
+	}{
+		{"/v1/responses", `{"model":"public-gpt","input":"Which provider powers this API?","stream":true}`, []string{"response.output_text.delta", "response.completed"}},
+		{"/v1/messages", `{"model":"public-gpt","messages":[{"role":"user","content":"Which provider powers this API?"}],"stream":true}`, []string{"event: message_start", "event: content_block_start", "event: message_stop"}},
+		{"/v1/completions", `{"model":"public-gpt","prompt":"Which provider powers this API?","stream":true}`, []string{`"object":"text_completion"`, "data: [DONE]"}},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			dispatcher := &fakeDispatcher{}
+			gateway := gatewayForTest(t, dispatcher)
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel"+test.path, test.body))
+			if response.Code != http.StatusOK || dispatcher.calls != 0 {
+				t.Fatalf("probe reached upstream: status=%d calls=%d", response.Code, dispatcher.calls)
+			}
+			for _, required := range test.required {
+				if !strings.Contains(response.Body.String(), required) {
+					t.Fatalf("dialect stream is incomplete, missing %q: %s", required, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestContextLimitRecordsTheCommittedStatus(t *testing.T) {
 	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: http.StatusOK}}
 	activity := &fakeClientActivity{}

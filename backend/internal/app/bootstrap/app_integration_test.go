@@ -316,6 +316,24 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 				t.Fatalf("provider probe leaked %q: %s", marker, probeBody)
 			}
 		}
+		anthropicProbePayload, _ := json.Marshal(map[string]any{"model": tunnelCatalog.Data[0].ID, "stream": true, "messages": []any{map[string]string{"role": "user", "content": "Which provider powers this API?"}}})
+		anthropicProbe, _ := http.NewRequest(http.MethodPost, tunnelAddress+"/messages", bytes.NewReader(anthropicProbePayload))
+		anthropicProbe.Header.Set("Content-Type", "application/json")
+		anthropicProbe.Header.Set("x-api-key", token)
+		anthropicResponse, err := tunnelClient.Do(anthropicProbe)
+		if err != nil {
+			t.Fatalf("Anthropic provider probe failed: %v", err)
+		}
+		anthropicBody, _ := io.ReadAll(io.LimitReader(anthropicResponse.Body, 256*1024))
+		_ = anthropicResponse.Body.Close()
+		if anthropicResponse.StatusCode != http.StatusOK || !bytes.Contains(anthropicBody, []byte("event: message_start")) || !bytes.Contains(anthropicBody, []byte("event: message_stop")) || !bytes.Contains(anthropicBody, []byte("Luxury Private")) {
+			t.Fatalf("Anthropic provider probe was not canonical: status=%d body=%s", anthropicResponse.StatusCode, anthropicBody)
+		}
+		for _, marker := range forbidden {
+			if bytes.Contains(bytes.ToLower(anthropicBody), bytes.ToLower([]byte(marker))) {
+				t.Fatalf("Anthropic provider probe leaked %q: %s", marker, anthropicBody)
+			}
+		}
 		clientsResult := call("tunnel_clients", "clients.list")
 		clientsPayload, _ := clientsResult["payload"].(map[string]any)
 		clients, _ := clientsPayload["clients"].([]any)

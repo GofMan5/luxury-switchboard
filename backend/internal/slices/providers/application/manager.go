@@ -18,7 +18,6 @@ var (
 )
 
 type KeyPool interface {
-	Count(string) int
 	EnsureProvider(string, int) error
 	RemoveProvider(string) error
 }
@@ -138,15 +137,14 @@ func (manager *Manager) Delete(ctx context.Context, id string) error {
 	if active.ID == id {
 		return ErrActiveProvider
 	}
-	if manager.keys.Count(id) > 0 {
+	removed := providers[index]
+	if err := manager.keys.RemoveProvider(id); err != nil {
 		return ErrProviderHasKeys
 	}
 	providers = append(providers[:index], providers[index+1:]...)
 	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
+		_ = manager.keys.EnsureProvider(id, removed.RPM)
 		return errors.New("provider settings could not be saved")
-	}
-	if err := manager.keys.RemoveProvider(id); err != nil {
-		return err
 	}
 	return manager.catalog.Replace(providers, active.ID)
 }

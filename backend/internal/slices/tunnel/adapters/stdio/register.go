@@ -33,8 +33,8 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		return service.Snapshot(), nil
 	})
-	server.Handle("tunnel.start", func(_ context.Context, _ json.RawMessage) (any, error) {
-		if err := service.Start(); err != nil {
+	server.Handle("tunnel.start", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if err := service.Start(ctx); err != nil {
 			return nil, failed()
 		}
 		return service.Snapshot(), nil

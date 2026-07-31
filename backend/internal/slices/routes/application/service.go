@@ -41,7 +41,7 @@ func (service *Service) Load(ctx context.Context) error {
 		return err
 	}
 	for _, assignment := range assignments {
-		if assignment.Validate() != nil || !service.providers.Exists(assignment.ProviderID) {
+		if assignment.Validate() != nil {
 			return errors.New("saved routes are invalid")
 		}
 	}

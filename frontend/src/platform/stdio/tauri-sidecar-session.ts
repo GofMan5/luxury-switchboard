@@ -11,6 +11,7 @@ import {
 import type { ControlPlaneSession, EventListener } from './session'
 
 const CALL_TIMEOUT_MS = 30_000
+const TUNNEL_START_TIMEOUT_MS = 60_000
 const MODEL_TEST_TIMEOUT_MS = 15 * 60_000
 
 interface PendingCall {
@@ -27,6 +28,8 @@ export class TauriSidecarSession implements ControlPlaneSession {
   #starting: Promise<void> | null = null
   #stopping = false
   #unlisten: UnlistenFn[] = []
+  #restartTimer: number | undefined
+  #connectedOnce = false
 
   start(): Promise<void> {
     if (this.#started) return Promise.resolve()
@@ -51,8 +54,9 @@ export class TauriSidecarSession implements ControlPlaneSession {
     const result = new Promise<T>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.#pending.delete(id)
+        cancel()
         reject(new ControlPlaneError('timeout', 'Sidecar command timed out'))
-      }, method === 'models.test' ? MODEL_TEST_TIMEOUT_MS : CALL_TIMEOUT_MS)
+      }, commandTimeout(method))
       this.#pending.set(id, {
         method,
         resolve: (value) => resolve(value as T),
@@ -67,11 +71,21 @@ export class TauriSidecarSession implements ControlPlaneSession {
         type: 'command',
         method: 'system.cancel',
         payload: { id },
-      })
+      }).catch(() => undefined)
     }
-    signal?.addEventListener('abort', cancel, { once: true })
     try {
-      await this.#write(frame)
+      try {
+        await this.#write(frame)
+      } catch (error) {
+        const pending = this.#pending.get(id)
+        if (pending) {
+          this.#pending.delete(id)
+          window.clearTimeout(pending.timeout)
+        }
+        throw error
+      }
+      if (signal?.aborted) cancel()
+      else signal?.addEventListener('abort', cancel, { once: true })
       return await result
     } finally {
       signal?.removeEventListener('abort', cancel)
@@ -90,23 +104,48 @@ export class TauriSidecarSession implements ControlPlaneSession {
 
   async stop(): Promise<void> {
     this.#stopping = true
+    window.clearTimeout(this.#restartTimer)
+    this.#restartTimer = undefined
+    if (this.#starting) {
+      try { await this.#starting } catch { /* the failed start is cleaned below */ }
+    }
     this.#started = false
     this.#rejectPending(new ControlPlaneError('disconnected', 'Sidecar stopped'))
-    await invoke('sidecar_stop')
-    for (const unlisten of this.#unlisten.splice(0)) unlisten()
+    try {
+      await invoke('sidecar_stop')
+    } finally {
+      for (const unlisten of this.#unlisten.splice(0)) unlisten()
+    }
   }
 
   async #spawn(): Promise<void> {
     this.#stopping = false
     if (this.#unlisten.length === 0) {
-      this.#unlisten.push(
-        await listen<string>('sidecar-frame', (event) => this.#consume(event.payload)),
-        await listen('sidecar-lifecycle', () => this.#disconnect()),
-      )
+      const unlistenFrame = await listen<string>('sidecar-frame', (event) => this.#consume(event.payload))
+      try {
+        const unlistenLifecycle = await listen('sidecar-lifecycle', () => this.#disconnect())
+        this.#unlisten.push(unlistenFrame, unlistenLifecycle)
+      } catch (error) {
+        unlistenFrame()
+        throw error
+      }
     }
-    await invoke('sidecar_start')
-    this.#started = true
-    await this.call('system.handshake')
+    try {
+      await invoke('sidecar_start')
+      this.#started = true
+      await this.call('system.handshake')
+      if (this.#connectedOnce) {
+        this.#publish({ v: PROTOCOL_VERSION, type: 'event', topic: 'system.reconnected', seq: 0 })
+      }
+      this.#connectedOnce = true
+    } catch (error) {
+      this.#started = false
+      const stopping = this.#stopping
+      this.#stopping = true
+      try { await invoke('sidecar_stop') } catch { /* retain the original start error */ }
+      this.#stopping = stopping
+      throw error
+    }
   }
 
   async #write(frame: CommandFrame): Promise<void> {
@@ -149,9 +188,16 @@ export class TauriSidecarSession implements ControlPlaneSession {
   #disconnect(): void {
     this.#started = false
     this.#rejectPending(new ControlPlaneError('disconnected', 'Sidecar disconnected'))
-    if (!this.#stopping) {
-      window.setTimeout(() => void this.start(), 1_000)
-    }
+    if (!this.#stopping) this.#scheduleRestart()
+  }
+
+  #scheduleRestart(): void {
+    if (this.#restartTimer !== undefined || this.#stopping) return
+    this.#restartTimer = window.setTimeout(() => {
+      this.#restartTimer = undefined
+      if (this.#stopping) return
+      void this.start().catch(() => this.#scheduleRestart())
+    }, 1_000)
   }
 
   #rejectPending(error: Error): void {
@@ -165,4 +211,10 @@ export class TauriSidecarSession implements ControlPlaneSession {
 
 function requestID(): string {
   return `req_${crypto.randomUUID().replaceAll('-', '')}`
+}
+
+function commandTimeout(method: string): number {
+  if (method === 'models.test') return MODEL_TEST_TIMEOUT_MS
+  if (method === 'tunnel.start') return TUNNEL_START_TIMEOUT_MS
+  return CALL_TIMEOUT_MS
 }

@@ -19,7 +19,10 @@ import (
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
-const maxTunnelBody = 64 * 1024 * 1024
+const (
+	maxTunnelBody = 64 * 1024 * 1024
+	maxTunnelRPM  = 1_000_000
+)
 
 var allowedPaths = map[string]struct{}{"/v1/responses": {}, "/v1/chat/completions": {}, "/v1/completions": {}, "/v1/messages": {}, "/v1/images/generations": {}, "/v1/images/edits": {}}
 var textPaths = map[string]struct{}{"/v1/responses": {}, "/v1/chat/completions": {}, "/v1/completions": {}, "/v1/messages": {}}
@@ -34,7 +37,7 @@ type Gateway struct {
 }
 
 func NewGateway(config domain.Config, routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity) (*Gateway, error) {
-	if len(config.Token) < 32 || routes == nil || markers == nil || relay == nil || config.RPMPerIP < 0 || config.ContextLimitKiB < 0 {
+	if len(config.Token) < 32 || routes == nil || markers == nil || relay == nil || config.RPMPerIP < 0 || config.RPMPerIP > maxTunnelRPM || config.ContextLimitKiB < 0 {
 		return nil, errors.New("invalid tunnel gateway settings")
 	}
 	return &Gateway{config: config, routes: routes, markers: markers, relay: relay, limiter: newIPLimiter(), activity: activity}, nil
@@ -59,6 +62,25 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	ip := clientIP(request)
+	wait, release, accepted := gateway.limiter.Reserve(ip, gateway.config.RPMPerIP)
+	if !accepted {
+		gateway.error(writer, http.StatusServiceUnavailable, "Request could not be completed")
+		return
+	}
+	defer release()
+	if wait > 0 {
+		if gateway.activity != nil {
+			gateway.activity.Queue(ip, 1)
+			defer gateway.activity.Queue(ip, -1)
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-request.Context().Done():
+			return
+		case <-timer.C:
+		}
+	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxTunnelBody+1))
 	if err != nil || len(body) > maxTunnelBody {
 		gateway.error(writer, http.StatusRequestEntityTooLarge, "Request rejected")
@@ -93,6 +115,8 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	_, textRequest := textPaths[path]
 	if textRequest && limit > 0 && len(body) > limit*1024 {
+		status = http.StatusRequestEntityTooLarge
+		errorCode = "context_limit"
 		gateway.error(writer, http.StatusRequestEntityTooLarge, "Request rejected")
 		return
 	}
@@ -102,22 +126,13 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("Content-Length", strconv.Itoa(len(clean)))
 		writer.WriteHeader(http.StatusOK)
-		status, bytesOut = http.StatusOK, int64(len(clean))
-		_, _ = writer.Write(clean)
+		status = http.StatusOK
+		written, writeErr := writer.Write(clean)
+		bytesOut = int64(written)
+		if writeErr != nil {
+			errorCode = "client_disconnected"
+		}
 		return
-	}
-	if wait := gateway.limiter.Reserve(ip, gateway.config.RPMPerIP); wait > 0 {
-		if gateway.activity != nil {
-			gateway.activity.Queue(ip, 1)
-			defer gateway.activity.Queue(ip, -1)
-		}
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-request.Context().Done():
-			return
-		case <-timer.C:
-		}
 	}
 	if payload != nil {
 		body = applyBrandPolicy(payload, path, gateway.config.BrandResponse)
@@ -143,8 +158,11 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Content-Length", strconv.Itoa(len(clean)))
 	writer.WriteHeader(response.Status)
 	status = response.Status
-	bytesOut = int64(len(clean))
-	_, _ = writer.Write(clean)
+	written, writeErr := writer.Write(clean)
+	bytesOut = int64(written)
+	if writeErr != nil {
+		errorCode = "client_disconnected"
+	}
 }
 
 func requestPayload(body []byte, contentType, path string) (string, map[string]any, error) {

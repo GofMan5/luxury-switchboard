@@ -38,6 +38,31 @@ type credentialSource struct {
 	outcomes []relayapp.AttemptOutcome
 }
 
+type delayedCredentialSource struct {
+	delay time.Duration
+	value string
+}
+
+type delayedCredentialLease string
+
+func (lease delayedCredentialLease) Credential() relayapp.Credential {
+	return relayapp.Credential{Value: string(lease)}
+}
+func (delayedCredentialLease) Finish(relayapp.AttemptOutcome) {}
+
+func (source delayedCredentialSource) Acquire(ctx context.Context, _, _ string, waiting func()) (relayapp.CredentialLease, time.Duration, error) {
+	waiting()
+	started := time.Now()
+	timer := time.NewTimer(source.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, time.Since(started), ctx.Err()
+	case <-timer.C:
+		return delayedCredentialLease(source.value), time.Since(started), nil
+	}
+}
+
 func (source *credentialSource) Acquire(context.Context, string, string, func()) (relayapp.CredentialLease, time.Duration, error) {
 	source.mu.Lock()
 	value := source.values[min(source.calls, len(source.values)-1)]
@@ -82,6 +107,18 @@ func TestRelayUsesProxyFromSelectedCredential(t *testing.T) {
 	}
 }
 
+func TestProxyClientCacheIsBounded(t *testing.T) {
+	server := NewServer("127.0.0.1:0", Dependencies{})
+	for index := range maxProxyClients + 1 {
+		if _, err := server.clientForProxy(fmt.Sprintf("http://127.0.0.1:%d", 10_000+index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(server.proxyClients) > maxProxyClients {
+		t.Fatalf("proxy client cache grew without a bound: %d", len(server.proxyClients))
+	}
+}
+
 func (lease *credentialLease) Finish(outcome relayapp.AttemptOutcome) {
 	lease.source.mu.Lock()
 	lease.source.outcomes = append(lease.source.outcomes, outcome)
@@ -90,9 +127,11 @@ func (lease *credentialLease) Finish(outcome relayapp.AttemptOutcome) {
 
 func TestRelayRewritesAuthAndExtendsExistingCacheTTL(t *testing.T) {
 	var receivedAuth string
+	var receivedEncoding string
 	var receivedBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		receivedAuth = request.Header.Get("Authorization")
+		receivedEncoding = request.Header.Get("Accept-Encoding")
 		body, _ := io.ReadAll(request.Body)
 		receivedBody = string(body)
 		writer.Header().Set("Content-Type", "application/json")
@@ -110,6 +149,7 @@ func TestRelayRewritesAuthAndExtendsExistingCacheTTL(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","input":[{"cache_control":{"type":"ephemeral"}}]}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer client-key")
+	request.Header.Set("Accept-Encoding", "gzip, br")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -117,6 +157,9 @@ func TestRelayRewritesAuthAndExtendsExistingCacheTTL(t *testing.T) {
 	}
 	if receivedAuth != "Bearer configured-key" {
 		t.Fatalf("upstream auth was not replaced")
+	}
+	if receivedEncoding != "identity" {
+		t.Fatalf("compressed upstream response bypassed stream inspection: %q", receivedEncoding)
 	}
 	if !strings.Contains(receivedBody, `"ttl":"1h"`) {
 		t.Fatalf("cache TTL was not extended: %s", receivedBody)
@@ -255,6 +298,40 @@ func TestPermanentErrorIsBoundedAndSanitized(t *testing.T) {
 	}
 }
 
+func TestStreamingPermanentErrorEndsWithDialectTerminal(t *testing.T) {
+	tests := []struct {
+		path     string
+		body     string
+		terminal string
+	}{
+		{"/v1/responses", `{"model":"gpt-test","stream":true}`, "response.failed"},
+		{"/v1/chat/completions", `{"model":"gpt-test","stream":true}`, "[DONE]"},
+		{"/v1/messages", `{"model":"gpt-test","stream":true}`, `"type":"error"`},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = writer.Write([]byte(`{"error":"private provider detail"}`))
+			}))
+			defer upstream.Close()
+			parsed, _ := url.Parse(upstream.URL)
+			server := NewServer("127.0.0.1:0", Dependencies{
+				Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+				Credentials: &credentialSource{values: []string{"key"}},
+				Config:      Config{PermanentAttempts: 1},
+			})
+			request := httptest.NewRequest(http.MethodPost, "http://relay"+test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.terminal) || strings.Contains(response.Body.String(), "private provider detail") {
+				t.Fatalf("stream did not finish safely: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestBalanceErrorsIncludePaymentAndLocalizedMarkers(t *testing.T) {
 	if !balanceUnavailable(http.StatusPaymentRequired, nil) || !balanceUnavailable(http.StatusForbidden, []byte(`{"error":"Недостаточный баланс"}`)) || balanceUnavailable(http.StatusBadRequest, []byte(`{"error":"bad prompt"}`)) {
 		t.Fatal("balance error classification is incomplete")
@@ -311,6 +388,27 @@ func TestResponsesStreamRetriesTruncatedAttemptBeforeForwarding(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "discard") || !strings.Contains(response.Body.String(), "response.completed") {
 		t.Fatalf("partial attempt leaked or terminal missing: %s", response.Body.String())
+	}
+}
+
+func TestStreamHeartbeatCoversCredentialQueue(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: delayedCredentialSource{delay: 25 * time.Millisecond, value: "key"},
+		Config:      Config{HeartbeatInterval: 5 * time.Millisecond, StreamIdleTimeout: time.Second},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), ": switchboard keep-alive") || !strings.Contains(response.Body.String(), "response.completed") {
+		t.Fatalf("stream was idle while queued or lost its terminal event: %s", response.Body.String())
 	}
 }
 

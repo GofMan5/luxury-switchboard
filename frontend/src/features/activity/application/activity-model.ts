@@ -29,6 +29,7 @@ export class ActivityModel {
   #unsubscribe: (() => void) | null = null
   #summaryTimer = 0
   #pollTimer: ReturnType<typeof setInterval> | undefined
+  #summaryInFlight = false
 
   constructor(port: ActivityPort) {
     this.#port = port
@@ -67,6 +68,8 @@ export class ActivityModel {
   }
 
   async #refreshSummary(): Promise<void> {
+    if (this.#summaryInFlight) return
+    this.#summaryInFlight = true
     try {
       const summary = await this.#port.summary()
       const current = this.#state.summary
@@ -76,6 +79,8 @@ export class ActivityModel {
     } catch {
       // Live rows remain authoritative; a missed summary refresh is retried on
       // the next event and does not blank the surface.
+    } finally {
+      this.#summaryInFlight = false
     }
   }
 

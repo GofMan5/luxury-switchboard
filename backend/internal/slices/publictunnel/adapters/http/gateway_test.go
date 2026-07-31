@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	tunnelapp "github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
@@ -39,6 +40,14 @@ type fakeDispatcher struct {
 	response relayapp.DispatchResponse
 	request  relayapp.DispatchRequest
 	calls    int
+}
+
+type fakeClientActivity struct{ finish tunnelapp.ClientFinish }
+
+func (*fakeClientActivity) Queue(string, int)                  {}
+func (*fakeClientActivity) Begin(tunnelapp.ClientStart) string { return "activity" }
+func (activity *fakeClientActivity) Finish(_ string, value tunnelapp.ClientFinish) {
+	activity.finish = value
 }
 
 func (dispatcher *fakeDispatcher) Dispatch(_ context.Context, request relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
@@ -127,6 +136,23 @@ func TestSSEFailureIsNeutralAndSuccessfulStreamIsCanonical(t *testing.T) {
 	}
 }
 
+func TestDynamicProviderKeyFailsClosed(t *testing.T) {
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: 200, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"private-gpt","SecretProvider_metadata":true}`)}}
+	gateway := gatewayForTest(t, dispatcher)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/responses", `{"model":"public-gpt"}`))
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "SecretProvider") {
+		t.Fatalf("dynamic provider key was committed: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRedactionDoesNotReinsertItsOwnMarker(t *testing.T) {
+	value := redactMarkers("Private upstream", []string{"Private"}, "Luxury Private")
+	if strings.Contains(strings.ToLower(value), "private") {
+		t.Fatalf("redaction reinserted the sensitive marker: %q", value)
+	}
+}
+
 func TestAuthFailsClosed(t *testing.T) {
 	gateway := gatewayForTest(t, &fakeDispatcher{response: relayapp.DispatchResponse{Status: 200, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"ok":true}`)}})
 	unauthorized := httptest.NewRecorder()
@@ -161,14 +187,71 @@ func TestProviderProbeIsAnsweredLocally(t *testing.T) {
 	}
 }
 
+func TestContextLimitRecordsTheCommittedStatus(t *testing.T) {
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: http.StatusOK}}
+	activity := &fakeClientActivity{}
+	gateway, err := NewGateway(domain.Config{Token: testToken, ContextLimitKiB: 1}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{}, dispatcher, activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	body := `{"model":"public-gpt","input":"` + strings.Repeat("x", 1024) + `"}`
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/responses", body))
+	if response.Code != http.StatusRequestEntityTooLarge || activity.finish.Status != http.StatusRequestEntityTooLarge || activity.finish.ErrorCode != "context_limit" || dispatcher.calls != 0 {
+		t.Fatalf("context rejection telemetry is wrong: response=%d finish=%+v calls=%d", response.Code, activity.finish, dispatcher.calls)
+	}
+}
+
 func TestIPLimiterReservesQueuedSlots(t *testing.T) {
 	limiter := newIPLimiter()
 	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
-	if wait := limiter.Reserve("203.0.113.10", 2); wait != 0 {
+	wait, releaseFirst, ok := limiter.Reserve("203.0.113.10", 2)
+	if !ok || wait != 0 {
 		t.Fatalf("first request waited %s", wait)
 	}
-	if wait := limiter.Reserve("203.0.113.10", 2); wait != 30*time.Second {
+	wait, releaseSecond, ok := limiter.Reserve("203.0.113.10", 2)
+	if !ok || wait != 30*time.Second {
 		t.Fatalf("second request was not queued uniformly: %s", wait)
+	}
+	releaseFirst()
+	releaseSecond()
+}
+
+func TestIPLimiterBoundsPendingRequests(t *testing.T) {
+	limiter := newIPLimiter()
+	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
+	releases := make([]func(), 0, maxQueuedPerIP)
+	for range maxQueuedPerIP {
+		_, release, ok := limiter.Reserve("203.0.113.10", 1)
+		if !ok {
+			t.Fatal("in-capacity request was rejected")
+		}
+		releases = append(releases, release)
+	}
+	if _, _, ok := limiter.Reserve("203.0.113.10", 1); ok {
+		t.Fatal("per-IP request queue grew without a bound")
+	}
+	for _, release := range releases {
+		release()
+	}
+	if _, release, ok := limiter.Reserve("203.0.113.10", 1); !ok {
+		t.Fatal("released queue capacity was not reusable")
+	} else {
+		release()
+	}
+}
+
+func TestIPLimiterBoundsUnlimitedAndGlobalTraffic(t *testing.T) {
+	limiter := newIPLimiter()
+	limiter.pending = maxQueuedTotal
+	if _, _, ok := limiter.Reserve("203.0.113.20", 0); ok {
+		t.Fatal("unlimited RPM bypassed the global memory bound")
+	}
+	limiter.pending = 0
+	if _, release, ok := limiter.Reserve("203.0.113.20", 0); !ok {
+		t.Fatal("unlimited RPM was rejected below the safety bound")
+	} else {
+		release()
 	}
 }
 

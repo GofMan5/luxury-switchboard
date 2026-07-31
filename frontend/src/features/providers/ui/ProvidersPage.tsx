@@ -135,7 +135,7 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
 
   return (
     <div className="ui-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
-      <form className={`ui-modal ${styles.providerModal}`} aria-label={mode === 'add' ? 'Add provider' : 'Edit provider'} onSubmit={submit}>
+      <form className={`ui-modal ${styles.providerModal}`} role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add provider' : 'Edit provider'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add provider' : `Edit ${provider?.name}`}</h2><p>Remote endpoints require HTTPS; loopback HTTP is allowed.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Display name</span><input value={name} maxLength={80} autoFocus onChange={(event) => setName(event.currentTarget.value)} /></label>

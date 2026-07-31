@@ -208,9 +208,8 @@
 }
 
 @media (max-width: 959px) {
-  .metrics { grid-template-columns: repeat(4, minmax(100px, 1fr)); }
+  .metrics { grid-template-columns: repeat(5, minmax(90px, 1fr)); }
   .metric { padding: 14px 16px; }
-  .metric[data-optional='true'] { display: none; }
   .grid { padding: 16px; }
   .table th:nth-child(3), .table td:nth-child(3) { display: none; }
 }

@@ -156,7 +156,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
 
   return (
     <div className="ui-scrim" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
-      <form className="ui-modal" aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
+      <form className="ui-modal" role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add API key' : 'Edit API key'}</h2><p>The secret is encrypted locally and never shown again.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Label</span><input value={label} maxLength={80} autoFocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>

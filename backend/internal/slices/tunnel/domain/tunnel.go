@@ -22,7 +22,7 @@ type Config struct {
 }
 
 func (config Config) Validate() error {
-	if config.Port < 1 || config.Port > 65535 || len(config.Token) < 32 || config.RPMPerIP < 0 || config.ContextLimitKiB < 0 || config.ContextLimitKiB > 2*1024*1024 || len(config.BrandResponse) > 500 {
+	if config.Port < 1 || config.Port > 65535 || len(config.Token) < 32 || config.RPMPerIP < 0 || config.RPMPerIP > 1_000_000 || config.ContextLimitKiB < 0 || config.ContextLimitKiB > 2*1024*1024 || len(config.BrandResponse) > 500 {
 		return errors.New("invalid tunnel settings")
 	}
 	if config.PublisherProfile != "" {

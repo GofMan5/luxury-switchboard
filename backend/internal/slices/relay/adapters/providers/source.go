@@ -22,11 +22,13 @@ func (source *Source) Current(_ context.Context, model string) (relayapp.Route, 
 	upstreamModel := model
 	if source.routes != nil {
 		if assignment, ok := source.routes.Relay(model); ok {
-			if routed, exists := source.catalog.Get(assignment.ProviderID); exists {
-				provider = routed
-				err = nil
-				upstreamModel = assignment.UpstreamModel
+			routed, exists := source.catalog.Get(assignment.ProviderID)
+			if !exists {
+				return relayapp.Route{}, providerapp.ErrProviderUnavailable
 			}
+			provider = routed
+			err = nil
+			upstreamModel = assignment.UpstreamModel
 		}
 	}
 	if err != nil {

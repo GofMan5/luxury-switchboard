@@ -19,7 +19,7 @@ type Repository interface {
 	Save(context.Context, domain.Config) error
 }
 type Runtime interface {
-	Start(domain.Config) (string, error)
+	Start(context.Context, domain.Config) (string, error)
 	Stop(context.Context) error
 }
 type RuntimeEvents interface {
@@ -27,6 +27,7 @@ type RuntimeEvents interface {
 }
 type Routes interface{ Count() int }
 type Service struct {
+	opMu       sync.Mutex
 	mu         sync.RWMutex
 	repository Repository
 	runtime    Runtime
@@ -85,6 +86,8 @@ func (service *Service) Snapshot() domain.Snapshot {
 	return service.snapshot
 }
 func (service *Service) Configure(ctx context.Context, config domain.Config) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	if err := config.Validate(); err != nil {
 		return err
 	}
@@ -104,7 +107,9 @@ func (service *Service) Configure(ctx context.Context, config domain.Config) err
 	service.publish()
 	return nil
 }
-func (service *Service) Start() error {
+func (service *Service) Start(ctx context.Context) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	service.mu.Lock()
 	if service.snapshot.State != domain.StateStopped && service.snapshot.State != domain.StateError {
 		service.mu.Unlock()
@@ -121,7 +126,7 @@ func (service *Service) Start() error {
 	config := service.config
 	service.mu.Unlock()
 	service.publish()
-	address, err := service.runtime.Start(config)
+	address, err := service.runtime.Start(ctx, config)
 	service.mu.Lock()
 	if err != nil {
 		service.snapshot = publicSnapshot(domain.StateError, "", config)
@@ -134,9 +139,16 @@ func (service *Service) Start() error {
 	return err
 }
 func (service *Service) Stop(ctx context.Context) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	err := service.runtime.Stop(ctx)
 	service.mu.Lock()
-	service.snapshot = publicSnapshot(domain.StateStopped, "", service.config)
+	if err != nil {
+		service.snapshot = publicSnapshot(domain.StateError, "", service.config)
+		service.snapshot.Error = "Tunnel could not be stopped cleanly"
+	} else {
+		service.snapshot = publicSnapshot(domain.StateStopped, "", service.config)
+	}
 	service.mu.Unlock()
 	service.publish()
 	return err

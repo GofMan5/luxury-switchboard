@@ -22,7 +22,10 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/relay/domain"
 )
 
-const absoluteMaxRequestBytes = 256 * 1024 * 1024
+const (
+	absoluteMaxRequestBytes = 256 * 1024 * 1024
+	maxProxyClients         = 64
+)
 
 var hopHeaders = map[string]struct{}{
 	"connection": {}, "expect": {}, "host": {}, "keep-alive": {},
@@ -65,6 +68,7 @@ type Config struct {
 	RetryBase             time.Duration
 	RetryMax              time.Duration
 	PermanentAttempts     int
+	HeartbeatInterval     time.Duration
 }
 
 func NewServer(address string, dependencies Dependencies) *Server {
@@ -91,6 +95,9 @@ func NewServer(address string, dependencies Dependencies) *Server {
 	}
 	if config.PermanentAttempts < 1 {
 		config.PermanentAttempts = 2
+	}
+	if config.HeartbeatInterval <= 0 {
+		config.HeartbeatInterval = 15 * time.Second
 	}
 	transport.ResponseHeaderTimeout = config.ResponseHeaderTimeout
 	ctx, cancel := context.WithCancel(context.Background())
@@ -145,7 +152,12 @@ func (server *Server) Stop(ctx context.Context) error {
 	if httpServer == nil {
 		return nil
 	}
-	return httpServer.Shutdown(ctx)
+	if err := httpServer.Shutdown(ctx); err != nil {
+		if closeErr := httpServer.Close(); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+	}
+	return nil
 }
 
 func (server *Server) CancelActive() {
@@ -208,7 +220,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	}()
 	committed := false
 	flusher, _ := writer.(http.Flusher)
-	heartbeat := func() error { return nil }
+	var heartbeat func() error
 	clientStream := requiresStreamTerminal(request, body) && !imageCompat
 	bufferTerminal := clientStream || imageCompat
 	if clientStream {
@@ -230,12 +242,20 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			return nil
 		}
 	}
-	response, err := server.requestWithRetry(ctx, upstreamRequest, body, route, activityID, bufferTerminal, 0, heartbeat)
+	requestUpstream := func(requestCtx context.Context) (*http.Response, error) {
+		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, bufferTerminal, 0)
+	}
+	var response *http.Response
+	if clientStream {
+		response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
+	} else {
+		response, err = requestUpstream(ctx)
+	}
 	if err != nil {
 		if committed {
 			cancelled = errors.Is(err, context.Canceled) || errors.Is(err, errClientDisconnected)
 			errorCode = "stream_incomplete"
-			writeResponseFailed(writer, model)
+			writeStreamFailure(writer, request.URL.Path, model)
 			return
 		}
 		if errors.Is(err, context.Canceled) {
@@ -254,6 +274,10 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	status = response.StatusCode
 	if status >= 400 {
 		errorCode = "request_rejected"
+		if committed {
+			writeStreamFailure(writer, request.URL.Path, model)
+			return
+		}
 	}
 	if bufferTerminal {
 		terminal := response.Header.Get("X-Switchboard-Terminal")
@@ -339,7 +363,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		ProviderName: route.ProviderName, Method: request.Method,
 		Path: urlValue.Path, BytesIn: int64(len(body)),
 	})
-	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, terminalStream, request.AttemptLimit, func() error { return nil })
+	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, terminalStream, request.AttemptLimit)
 	if err != nil {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{Cancelled: errors.Is(err, context.Canceled), ErrorCode: "transport"})
 		return relayapp.DispatchResponse{}, err
@@ -380,7 +404,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	}, nil
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream bool, attemptLimit int, heartbeat func() error) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream bool, attemptLimit int) (*http.Response, error) {
 	requestFailures := 0
 	model := requestModel(body, incoming.Header.Get("Content-Type"))
 	for attempt := 0; ; attempt++ {
@@ -416,7 +440,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		status := response.StatusCode
 		if status < 400 {
 			if terminalStream {
-				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, incoming.URL.Path, server.config, heartbeat)
+				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, incoming.URL.Path, server.config)
 				if bufferErr != nil {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 					if errors.Is(bufferErr, errClientDisconnected) || errors.Is(bufferErr, context.Canceled) {
@@ -541,6 +565,36 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	}
 }
 
+func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error, operation func(context.Context) (*http.Response, error)) (*http.Response, error) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(server.config.HeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-requestCtx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+				if err := heartbeat(); err != nil {
+					done <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	response, err := operation(requestCtx)
+	cancel()
+	heartbeatErr := <-done
+	if heartbeatErr != nil {
+		drainResponse(response)
+		return nil, heartbeatErr
+	}
+	return response, err
+}
+
 func canRetry(attempt, limit int) bool {
 	return limit <= 0 || attempt+1 < limit
 }
@@ -571,6 +625,14 @@ func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
 	defer server.mu.Unlock()
 	if client := server.proxyClients[rawURL]; client != nil {
 		return client, nil
+	}
+	if len(server.proxyClients) >= maxProxyClients {
+		// ponytail: proxy edits are rare, so a bounded full eviction is simpler
+		// and safer than retaining an LRU plus idle sockets forever.
+		for key, client := range server.proxyClients {
+			client.CloseIdleConnections()
+			delete(server.proxyClients, key)
+		}
 	}
 	transport := server.transport.Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
@@ -635,6 +697,7 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		}
 	}
 	request.Host = route.BaseURL.Host
+	request.Header.Set("Accept-Encoding", "identity")
 	return request, nil
 }
 
@@ -672,7 +735,7 @@ type bodyRead struct {
 	err   error
 }
 
-func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, heartbeat func() error) (string, []byte, relayapp.TokenUsage, error) {
+func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config) (string, []byte, relayapp.TokenUsage, error) {
 	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
 		drainResponse(response)
 		return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
@@ -701,8 +764,6 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	}()
 	idle := time.NewTimer(config.StreamIdleTimeout)
 	defer idle.Stop()
-	heartbeats := time.NewTicker(15 * time.Second)
-	defer heartbeats.Stop()
 	limit := max(config.MaxRequestBytes*4, 8*1024*1024)
 	limit = min(limit, int64(absoluteMaxRequestBytes))
 	buffered := make([]byte, 0, min(limit, 1024*1024))
@@ -715,11 +776,6 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 		case <-idle.C:
 			response.Body.Close()
 			return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
-		case <-heartbeats.C:
-			if err := heartbeat(); err != nil {
-				response.Body.Close()
-				return "", nil, relayapp.TokenUsage{}, err
-			}
 		case result := <-reads:
 			if len(result.chunk) > 0 {
 				if int64(len(buffered))+int64(len(result.chunk)) > limit {
@@ -959,7 +1015,18 @@ func positiveInt(value any) int64 {
 	return int64(number)
 }
 
-func writeResponseFailed(writer http.ResponseWriter, model string) {
+func writeStreamFailure(writer http.ResponseWriter, path, model string) {
+	path = strings.TrimRight(path, "/")
+	if path == "/v1/messages" {
+		body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": "The request could not be completed"}})
+		_, _ = writer.Write(append(append([]byte("event: error\ndata: "), body...), []byte("\n\n")...))
+		return
+	}
+	if path == "/v1/chat/completions" || path == "/v1/completions" {
+		body, _ := json.Marshal(map[string]any{"error": map[string]string{"code": "upstream_unavailable", "message": "The request could not be completed"}})
+		_, _ = writer.Write(append(append([]byte("data: "), body...), []byte("\n\ndata: [DONE]\n\n")...))
+		return
+	}
 	if len(model) > 128 {
 		model = model[:128]
 	}

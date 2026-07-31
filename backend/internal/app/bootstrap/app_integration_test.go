@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -205,6 +206,51 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 			}
 		}
 		t.Log("two parallel streams completed")
+
+		cancelPayload, _ := json.Marshal(map[string]any{"model": "gpt-5.6-sol", "input": "Write a long detailed technical essay.", "stream": true, "store": false, "max_output_tokens": 4096})
+		cancelRequest, _ := http.NewRequest(http.MethodPost, address+"/v1/responses", bytes.NewReader(cancelPayload))
+		cancelRequest.Header.Set("Content-Type", "application/json")
+		cancelResponse, err := (&http.Client{Timeout: 30 * time.Second}).Do(cancelRequest)
+		if err != nil {
+			t.Fatalf("cancellation stream could not start: %v", err)
+		}
+		if result := call("activate_local", "providers.activate", map[string]string{"id": "local"}); result["ok"] != true {
+			_ = cancelResponse.Body.Close()
+			t.Fatalf("provider switch failed: %+v", result)
+		}
+		cancelBody, cancelReadErr := io.ReadAll(io.LimitReader(cancelResponse.Body, 2*1024*1024))
+		_ = cancelResponse.Body.Close()
+		if result := call("restore_echo", "providers.activate", map[string]string{"id": "echo"}); result["ok"] != true {
+			t.Fatalf("EchoGate restore failed: %+v", result)
+		}
+		if cancelReadErr != nil || cancelResponse.StatusCode != http.StatusOK || !bytes.Contains(cancelBody, []byte(`"response.failed"`)) {
+			t.Fatalf("provider switch did not terminate the old stream: status=%d bytes=%d err=%v", cancelResponse.StatusCode, len(cancelBody), cancelReadErr)
+		}
+		t.Log("provider switch cancellation emitted a terminal stream event")
+
+		imagePayload, _ := json.Marshal(map[string]any{"model": "gpt-image-2", "prompt": "A single small black circle centered on a plain white background", "quality": "low", "size": "1024x1024"})
+		imageRequest, _ := http.NewRequest(http.MethodPost, address+"/v1/images/generations", bytes.NewReader(imagePayload))
+		imageRequest.Header.Set("Content-Type", "application/json")
+		imageStarted := time.Now()
+		imageResponse, err := (&http.Client{Timeout: 180 * time.Second}).Do(imageRequest)
+		if err != nil {
+			t.Fatalf("live image request failed: %v", err)
+		}
+		imageBody, imageReadErr := io.ReadAll(io.LimitReader(imageResponse.Body, 20*1024*1024))
+		_ = imageResponse.Body.Close()
+		var imageResult struct {
+			Data []struct {
+				Base64 string `json:"b64_json"`
+			} `json:"data"`
+		}
+		if imageReadErr != nil || imageResponse.StatusCode != http.StatusOK || json.Unmarshal(imageBody, &imageResult) != nil || len(imageResult.Data) != 1 {
+			t.Fatalf("live image response is invalid: status=%d bytes=%d", imageResponse.StatusCode, len(imageBody))
+		}
+		imageBytes, decodeErr := base64.StdEncoding.Strict().DecodeString(imageResult.Data[0].Base64)
+		if decodeErr != nil || len(imageBytes) < 100 {
+			t.Fatalf("live image payload is invalid: decoded=%d err=%v", len(imageBytes), decodeErr)
+		}
+		t.Logf("live image completed: duration=%s encoded_bytes=%d decoded_bytes=%d", time.Since(imageStarted).Round(time.Millisecond), len(imageBody), len(imageBytes))
 
 		reservation, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {

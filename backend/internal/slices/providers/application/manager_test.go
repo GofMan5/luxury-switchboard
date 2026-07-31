@@ -11,8 +11,9 @@ import (
 )
 
 type memoryProviderRepository struct {
-	state    SavedState
-	saveFail bool
+	state      SavedState
+	saveFail   bool
+	beforeSave func()
 }
 
 func (repository *memoryProviderRepository) Load(context.Context) (SavedState, error) {
@@ -20,6 +21,9 @@ func (repository *memoryProviderRepository) Load(context.Context) (SavedState, e
 }
 
 func (repository *memoryProviderRepository) Save(_ context.Context, state SavedState) error {
+	if repository.beforeSave != nil {
+		repository.beforeSave()
+	}
 	if repository.saveFail {
 		return errors.New("injected failure")
 	}
@@ -103,6 +107,26 @@ func TestManagerRollsBackRateWhenPersistenceFails(t *testing.T) {
 	})
 	if err == nil || keys.rates["local"] != 0 || catalog.List()[0].RPM != 0 {
 		t.Fatalf("failed persistence mutated runtime: rate=%d provider=%+v err=%v", keys.rates["local"], catalog.List()[0], err)
+	}
+}
+
+func TestDeleteReservesKeyPoolBeforePersistenceAndRollsBack(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	custom := providerFixture(t, "custom", false)
+	catalog, _ := NewCatalog([]domain.Provider{local, custom}, local.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: make(map[string]int)}
+	repository := &memoryProviderRepository{saveFail: true}
+	repository.beforeSave = func() {
+		if _, exists := keys.rates["custom"]; exists {
+			t.Fatal("provider remained open for concurrent key insertion during delete")
+		}
+	}
+	manager, _ := NewManager(catalog, repository, keys)
+	if err := manager.Delete(context.Background(), "custom"); err == nil {
+		t.Fatal("injected persistence failure was ignored")
+	}
+	if keys.rates["custom"] != 0 {
+		t.Fatalf("failed delete did not restore provider admission: %+v", keys.rates)
 	}
 }
 

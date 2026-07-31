@@ -1,6 +1,6 @@
 module github.com/luxuryprivate/switchboard/backend
 
-go 1.25.5
+go 1.25.12
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

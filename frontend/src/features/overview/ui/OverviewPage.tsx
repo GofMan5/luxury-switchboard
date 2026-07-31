@@ -28,7 +28,7 @@ export default function OverviewPage() {
         <Metric label="Requests / min" value={formatDecimal(summary.rpm)} />
         <Metric label="Active" value={String(summary.active)} />
         <Metric label="Queued" value={String(summary.queued)} />
-        <Metric label="Success rate" value={`${formatDecimal(summary.successRate)}%`} optional />
+        <Metric label="Success rate" value={`${formatDecimal(summary.successRate)}%`} />
         <Metric label="p95 latency" value={formatDuration(summary.p95Ms)} />
       </div>
 
@@ -107,9 +107,9 @@ export default function OverviewPage() {
   )
 }
 
-function Metric({ label, value, optional = false }: { label: string; value: string; optional?: boolean }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className={styles.metric} data-optional={optional}>
+    <div className={styles.metric}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>

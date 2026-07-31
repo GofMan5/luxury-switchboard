@@ -28,9 +28,12 @@ type Runtime struct {
 func NewRuntime(routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity) *Runtime {
 	return &Runtime{routes: routes, markers: markers, relay: relay, activity: activity}
 }
-func (runtime *Runtime) Start(config domain.Config) (string, error) {
+func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string, error) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if runtime.server != nil {
 		return "", errors.New("tunnel already running")
 	}
@@ -40,6 +43,10 @@ func (runtime *Runtime) Start(config domain.Config) (string, error) {
 	}
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", config.Port))
 	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
 		return "", err
 	}
 	server := &http.Server{Handler: gateway, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 64 * 1024}
@@ -57,5 +64,10 @@ func (runtime *Runtime) Stop(ctx context.Context) error {
 	if server == nil {
 		return nil
 	}
-	return server.Shutdown(ctx)
+	if err := server.Shutdown(ctx); err != nil {
+		if closeErr := server.Close(); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+	}
+	return nil
 }

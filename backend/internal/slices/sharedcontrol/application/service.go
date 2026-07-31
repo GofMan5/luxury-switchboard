@@ -16,6 +16,7 @@ const (
 	errorText = "Shared tunnel control unavailable"
 )
 
+var errUnavailable = errors.New("shared tunnel control unavailable")
 var validActions = map[string]string{"pause": "paused", "resume": "running", "stop": "stopped"}
 
 type Client interface {
@@ -65,7 +66,7 @@ func (service *Service) Snapshot(ctx context.Context) domain.Snapshot {
 func (service *Service) Control(ctx context.Context, position int, revision int64, action string) (domain.Snapshot, error) {
 	desired, valid := validActions[action]
 	if !valid || position < 0 || position > 999 || revision < 0 {
-		return domain.Snapshot{}, errors.New(errorText)
+		return domain.Snapshot{}, errUnavailable
 	}
 	snapshot, err := service.client.Request(ctx, action, strconv.FormatInt(revision, 10), strconv.Itoa(position))
 	if err == nil {
@@ -75,17 +76,17 @@ func (service *Service) Control(ctx context.Context, position int, revision int6
 	if listErr == nil && position < len(current.Tunnels) && current.Tunnels[position].State == desired {
 		return service.remember(current), nil
 	}
-	return domain.Snapshot{}, errors.New(errorText)
+	return domain.Snapshot{}, errUnavailable
 }
 
 func (service *Service) EnsureSelfRunning(ctx context.Context) (domain.Snapshot, error) {
 	snapshot, err := service.client.Request(ctx, "list")
 	if err != nil {
-		return domain.Snapshot{}, errors.New(errorText)
+		return domain.Snapshot{}, errUnavailable
 	}
 	row := self(snapshot)
 	if row == nil {
-		return domain.Snapshot{}, errors.New(errorText)
+		return domain.Snapshot{}, errUnavailable
 	}
 	if row.State == "running" {
 		return service.remember(snapshot), nil

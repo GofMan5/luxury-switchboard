@@ -29,7 +29,7 @@ const (
 )
 
 type LocalRuntime interface {
-	Start(domain.Config) (string, error)
+	Start(context.Context, domain.Config) (string, error)
 	Stop(context.Context) error
 }
 
@@ -67,20 +67,33 @@ func (runtime *Runtime) OnState(handler func(domain.State, string, string)) {
 	runtime.mu.Unlock()
 }
 
-func (runtime *Runtime) Start(config domain.Config) (string, error) {
+func (runtime *Runtime) Start(startupCtx context.Context, config domain.Config) (string, error) {
 	runtime.opMu.Lock()
 	defer runtime.opMu.Unlock()
+	if err := startupCtx.Err(); err != nil {
+		return "", err
+	}
 	if config.PublisherProfile != "" && runtime.beforeStart != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+		ctx, cancel := context.WithTimeout(startupCtx, 18*time.Second)
 		err := runtime.beforeStart(ctx)
 		cancel()
 		if err != nil {
+			if startupCtx.Err() != nil {
+				return "", startupCtx.Err()
+			}
 			return "", errors.New("shared tunnel control is unavailable")
 		}
 	}
-	localAddress, err := runtime.local.Start(config)
+	localAddress, err := runtime.local.Start(startupCtx, config)
 	if err != nil {
+		if startupCtx.Err() != nil {
+			return "", startupCtx.Err()
+		}
 		return "", errors.New("local tunnel port is unavailable")
+	}
+	if err := startupCtx.Err(); err != nil {
+		_ = runtime.local.Stop(context.Background())
+		return "", err
 	}
 	if config.PublisherProfile == "" {
 		return localAddress, nil
@@ -102,6 +115,7 @@ func (runtime *Runtime) Start(config domain.Config) (string, error) {
 		return "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	stopStartupCancel := context.AfterFunc(startupCtx, cancel)
 	runtime.mu.Lock()
 	if runtime.desired {
 		runtime.mu.Unlock()
@@ -113,12 +127,22 @@ func (runtime *Runtime) Start(config domain.Config) (string, error) {
 	runtime.mu.Unlock()
 	process, err := runtime.connect(ctx, sshClient, localPort, remotePort, publicURL, config.Token)
 	if err != nil {
+		stopStartupCancel()
 		cancel()
 		runtime.mu.Lock()
 		runtime.desired, runtime.cancel = false, nil
 		runtime.mu.Unlock()
 		_ = runtime.local.Stop(context.Background())
 		return "", err
+	}
+	if !stopStartupCancel() {
+		cancel()
+		_ = process.cmd.Process.Kill()
+		runtime.mu.Lock()
+		runtime.desired, runtime.cancel = false, nil
+		runtime.mu.Unlock()
+		_ = runtime.local.Stop(context.Background())
+		return "", startupCtx.Err()
 	}
 	runtime.mu.Lock()
 	runtime.process = process

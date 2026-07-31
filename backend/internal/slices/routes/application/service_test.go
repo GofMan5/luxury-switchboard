@@ -77,3 +77,17 @@ func TestBulkUpsertPersistsRoutesOnce(t *testing.T) {
 		t.Fatal("bulk routes were not persisted")
 	}
 }
+
+func TestLoadKeepsStaleProviderRouteVisibleAndFailClosed(t *testing.T) {
+	stale := domain.Assignment{Target: domain.TargetRelay, PublicModel: "public", UpstreamModel: "private", ProviderID: "removed", Enabled: true}
+	service, _ := NewService(&memoryRepository{values: []domain.Assignment{stale}}, providers{"active": true})
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if routes := service.List(domain.TargetRelay); len(routes) != 1 || routes[0] != stale {
+		t.Fatalf("stale route was silently discarded: %+v", routes)
+	}
+	if err := service.Upsert(context.Background(), stale); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("stale provider became writable again: %v", err)
+	}
+}

@@ -15,6 +15,7 @@ type Runtime interface {
 }
 
 type Service struct {
+	opMu      sync.Mutex
 	mu        sync.Mutex
 	runtime   Runtime
 	snapshot  domain.Snapshot
@@ -29,6 +30,8 @@ func NewService(runtime Runtime) *Service {
 }
 
 func (service *Service) Start() (domain.Snapshot, error) {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	service.mu.Lock()
 	if service.snapshot.State == domain.StateLive {
 		snapshot := service.snapshot
@@ -53,6 +56,8 @@ func (service *Service) Start() (domain.Snapshot, error) {
 }
 
 func (service *Service) Stop(ctx context.Context) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	service.mu.Lock()
 	if service.snapshot.State == domain.StateStopped {
 		service.mu.Unlock()

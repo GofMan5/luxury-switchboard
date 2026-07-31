@@ -18,8 +18,9 @@ func sanitizeResponse(response relayapp.DispatchResponse, path, publicModel stri
 		return nil, "", errors.New("upstream status rejected")
 	}
 	contentType := strings.ToLower(response.Headers.Get("Content-Type"))
+	redactor := newMarkerRedactor(markers, brand)
 	if strings.Contains(contentType, "text/event-stream") {
-		body, err := sanitizeSSE(response.Body, path, publicModel, markers, brand)
+		body, err := sanitizeSSE(response.Body, path, publicModel, redactor)
 		return body, "text/event-stream; charset=utf-8", err
 	}
 	var value any
@@ -28,7 +29,7 @@ func sanitizeResponse(response relayapp.DispatchResponse, path, publicModel stri
 	if decoder.Decode(&value) != nil {
 		return nil, "", errors.New("invalid upstream JSON")
 	}
-	clean, err := sanitizeJSON(value, publicModel, markers, brand, 0)
+	clean, err := sanitizeJSON(value, publicModel, redactor, 0)
 	if err != nil {
 		return nil, "", err
 	}
@@ -39,10 +40,13 @@ func sanitizeResponse(response relayapp.DispatchResponse, path, publicModel stri
 	if err != nil {
 		return nil, "", errors.New("response serialization failed")
 	}
+	if redactor.contains(body) {
+		return nil, "", errors.New("sensitive response marker remains")
+	}
 	return body, "application/json", nil
 }
 
-func sanitizeJSON(value any, publicModel string, markers []string, brand string, depth int) (any, error) {
+func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth int) (any, error) {
 	if depth > 64 {
 		return nil, errors.New("response nesting rejected")
 	}
@@ -57,7 +61,7 @@ func sanitizeJSON(value any, publicModel string, markers []string, brand string,
 				clean[key] = publicModel
 				continue
 			}
-			sanitized, err := sanitizeJSON(item, publicModel, markers, brand, depth+1)
+			sanitized, err := sanitizeJSON(item, publicModel, redactor, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -67,7 +71,7 @@ func sanitizeJSON(value any, publicModel string, markers []string, brand string,
 	case []any:
 		clean := make([]any, len(value))
 		for index, item := range value {
-			sanitized, err := sanitizeJSON(item, publicModel, markers, brand, depth+1)
+			sanitized, err := sanitizeJSON(item, publicModel, redactor, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -75,7 +79,7 @@ func sanitizeJSON(value any, publicModel string, markers []string, brand string,
 		}
 		return clean, nil
 	case string:
-		return redactMarkers(value, markers, brand), nil
+		return redactor.replace(value), nil
 	default:
 		return value, nil
 	}
@@ -116,7 +120,7 @@ func mapValue(value any) map[string]any {
 	return result
 }
 
-func sanitizeSSE(body []byte, path, publicModel string, markers []string, brand string) ([]byte, error) {
+func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor) ([]byte, error) {
 	blocks := splitSSE(body)
 	output := bytes.Buffer{}
 	terminal := false
@@ -136,7 +140,7 @@ func sanitizeSSE(body []byte, path, publicModel string, markers []string, brand 
 		if json.Unmarshal(data, &value) != nil {
 			return nil, errors.New("invalid SSE event")
 		}
-		clean, err := sanitizeJSON(value, publicModel, markers, brand, 0)
+		clean, err := sanitizeJSON(value, publicModel, redactor, 0)
 		if err != nil || failedValue(clean) {
 			return nil, errors.New("unsafe SSE event")
 		}
@@ -159,6 +163,9 @@ func sanitizeSSE(body []byte, path, publicModel string, markers []string, brand 
 	if !terminal {
 		return nil, errors.New("SSE terminal event missing")
 	}
+	if redactor.contains(output.Bytes()) {
+		return nil, errors.New("sensitive SSE marker remains")
+	}
 	return output.Bytes(), nil
 }
 
@@ -179,22 +186,53 @@ func eventData(block []byte) []byte {
 }
 
 func redactMarkers(value string, markers []string, brand string) string {
+	return newMarkerRedactor(markers, brand).replace(value)
+}
+
+type markerReplacement struct {
+	pattern     *regexp.Regexp
+	replacement string
+}
+
+type markerRedactor []markerReplacement
+
+func newMarkerRedactor(markers []string, brand string) markerRedactor {
 	if brand == "" {
 		brand = "Luxury Private"
 	}
+	redactor := make(markerRedactor, 0, len(markers))
 	for _, marker := range markers {
 		marker = strings.TrimSpace(marker)
 		if len(marker) < 4 {
 			continue
 		}
-		for {
-			lower := strings.ToLower(value)
-			index := strings.Index(lower, strings.ToLower(marker))
-			if index < 0 {
-				break
+		replacement := brand
+		if strings.Contains(strings.ToLower(replacement), strings.ToLower(marker)) {
+			replacement = "[hidden]"
+			if strings.Contains(strings.ToLower(replacement), strings.ToLower(marker)) {
+				replacement = ""
 			}
-			value = value[:index] + brand + value[index+len(marker):]
+		}
+		pattern, err := regexp.Compile("(?i:" + regexp.QuoteMeta(marker) + ")")
+		if err == nil {
+			redactor = append(redactor, markerReplacement{pattern: pattern, replacement: replacement})
 		}
 	}
+	return redactor
+}
+
+func (redactor markerRedactor) replace(value string) string {
+	for _, marker := range redactor {
+		value = marker.pattern.ReplaceAllStringFunc(value, func(string) string { return marker.replacement })
+	}
 	return value
+}
+
+func (redactor markerRedactor) contains(body []byte) bool {
+	for _, marker := range redactor {
+		if marker.pattern.Match(body) {
+			return true
+		}
+	}
+	return false
 }

@@ -100,7 +100,7 @@ func TestManualResetPreservesRPMWindowAndRetryTelemetry(t *testing.T) {
 	if !scheduler.Reset("echo", key.ID) {
 		t.Fatal("reset did not find key")
 	}
-	lease, _, err := scheduler.Acquire(context.Background(), "echo", "blocked-model")
+	_, _, err := scheduler.Acquire(context.Background(), "echo", "blocked-model")
 	if err != nil {
 		t.Fatal(err)
 	}

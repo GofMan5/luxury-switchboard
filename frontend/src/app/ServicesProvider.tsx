@@ -37,6 +37,52 @@ export function ServicesProvider({ children }: PropsWithChildren) {
     let disposed = false
     let session: ControlPlaneSession | null = null
     let services: AppServices | null = null
+    let sessionStopped = false
+    let unsubscribeReconnect: (() => void) | null = null
+    let reconnecting: Promise<void> | null = null
+    const connectServices = (): Promise<void> => {
+      if (!services) return Promise.resolve()
+      if (reconnecting) return reconnecting
+      const current = services
+      const keys = current.apiKeys.snapshot()
+      const routes = current.routes.snapshot()
+      const models = current.models.snapshot()
+      const statistics = current.statistics.snapshot()
+      current.models.connect()
+      reconnecting = Promise.all([
+        current.relay.connect(),
+        current.providers.connect(),
+        current.activity.connect(),
+        current.settings.connect(),
+        current.tunnel.connect(),
+        current.clients.connect(),
+        current.shared.connect(),
+        keys.providerId ? current.apiKeys.load(keys.providerId) : Promise.resolve(),
+        routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
+        models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
+        statistics.phase !== 'idle' ? current.statistics.load(statistics.period) : Promise.resolve(),
+      ]).then(() => undefined).finally(() => { reconnecting = null })
+      return reconnecting
+    }
+    const shutdown = () => {
+      unsubscribeReconnect?.()
+      unsubscribeReconnect = null
+      services?.relay.dispose()
+      services?.providers.dispose()
+      services?.activity.dispose()
+      services?.apiKeys.dispose()
+      services?.settings.dispose()
+      services?.statistics.dispose()
+      services?.routes.dispose()
+      services?.tunnel.dispose()
+      services?.clients.dispose()
+      services?.models.dispose()
+      services?.shared.dispose()
+      if (session && !sessionStopped) {
+        sessionStopped = true
+        void session.stop().catch(() => undefined)
+      }
+    }
 
     void (async () => {
       try {
@@ -55,37 +101,22 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           models: new ModelsModel(new StdioModelsPort(session)),
           shared: new SharedModel(new StdioSharedPort(session)),
         }
-        if (disposed) return
+        if (disposed) { shutdown(); return }
         setState({ phase: 'ready', services })
-        await Promise.all([
-          services.relay.connect(),
-          services.providers.connect(),
-          services.activity.connect(),
-          services.settings.connect(),
-          services.tunnel.connect(),
-          services.clients.connect(),
-          services.shared.connect(),
-        ])
-        services.models.connect()
+        unsubscribeReconnect = session.subscribe('system.reconnected', () => { void connectServices().catch(() => undefined) })
+        await connectServices()
+        if (disposed) { shutdown(); return }
       } catch {
-        if (!disposed) setState({ phase: 'error', services: null })
+        if (!disposed) {
+          shutdown()
+          setState({ phase: 'error', services: null })
+        }
       }
     })()
 
     return () => {
       disposed = true
-      services?.relay.dispose()
-      services?.providers.dispose()
-      services?.activity.dispose()
-      services?.apiKeys.dispose()
-      services?.settings.dispose()
-      services?.statistics.dispose()
-      services?.routes.dispose()
-      services?.tunnel.dispose()
-      services?.clients.dispose()
-      services?.models.dispose()
-      services?.shared.dispose()
-      if (session) void session.stop()
+      shutdown()
     }
   }, [])
 

@@ -107,6 +107,14 @@ pub fn sidecar_stop(state: State<'_, SidecarState>) -> Result<(), String> {
     Ok(())
 }
 
+pub fn stop_on_exit(app: &AppHandle) {
+    if let Ok(mut guard) = app.state::<SidecarState>().child.lock()
+        && let Some(child) = guard.take()
+    {
+        let _ = child.kill();
+    }
+}
+
 fn validate_outgoing(frame: &str) -> Result<(), String> {
     if frame.is_empty()
         || frame.len() > MAX_FRAME_BYTES
@@ -212,25 +220,37 @@ async fn forward_events(
 }
 
 fn append_frames(app: &AppHandle, buffer: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ()> {
-    if buffer.len().saturating_add(bytes.len()) > MAX_FRAME_BYTES {
-        return Err(());
-    }
-    buffer.extend_from_slice(bytes);
-    while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-        let mut frame = buffer.drain(..=newline).collect::<Vec<_>>();
-        frame.pop();
-        if frame.last() == Some(&b'\r') {
-            frame.pop();
+    decode_frames(buffer, bytes, |text| {
+        app.emit(FRAME_EVENT, text).map_err(|_| ())
+    })
+}
+
+fn decode_frames(
+    buffer: &mut Vec<u8>,
+    bytes: &[u8],
+    mut emit: impl FnMut(String) -> Result<(), ()>,
+) -> Result<(), ()> {
+    for &byte in bytes {
+        if byte != b'\n' {
+            if buffer.len() == MAX_FRAME_BYTES {
+                return Err(());
+            }
+            buffer.push(byte);
+            continue;
         }
-        if frame.is_empty() || frame.len() > MAX_FRAME_BYTES {
+        if buffer.last() == Some(&b'\r') {
+            buffer.pop();
+        }
+        if buffer.is_empty() {
             return Err(());
         }
+        let frame = std::mem::replace(buffer, Vec::with_capacity(8 * 1024));
         let text = String::from_utf8(frame).map_err(|_| ())?;
         let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| ())?;
         if value.get("v").and_then(serde_json::Value::as_u64) != Some(1) {
             return Err(());
         }
-        app.emit(FRAME_EVENT, text).map_err(|_| ())?;
+        emit(text)?;
     }
     Ok(())
 }
@@ -253,5 +273,21 @@ mod tests {
             validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"relay.status"}"#)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn accepts_many_frames_in_one_chunk_larger_than_one_frame_limit() {
+        let frame = b"{\"v\":1,\"type\":\"event\",\"topic\":\"x\",\"seq\":1}\n";
+        let bytes = frame.repeat(MAX_FRAME_BYTES / frame.len() + 2);
+        let mut buffer = Vec::new();
+        let mut count = 0;
+        decode_frames(&mut buffer, &bytes, |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(bytes.len() > MAX_FRAME_BYTES);
+        assert_eq!(count, bytes.len() / frame.len());
+        assert!(buffer.is_empty());
     }
 }

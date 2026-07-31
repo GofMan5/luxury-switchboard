@@ -167,7 +167,7 @@ func prune(starts []time.Time, now time.Time) []time.Time {
 }
 func safeError(value string) string {
 	switch value {
-	case "upstream_rejected", "unsafe_response":
+	case "upstream_rejected", "unsafe_response", "context_limit", "client_disconnected":
 		return value
 	default:
 		return ""

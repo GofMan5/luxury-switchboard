@@ -1,18 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { FrameDecoder } from './frame-decoder'
+import { decodeIncomingFrame } from '../../shared/contracts/protocol'
 
-describe('FrameDecoder', () => {
-  it('keeps partial frames and emits complete NDJSON messages', () => {
-    const decoder = new FrameDecoder()
-    expect(decoder.push('{"v":1,"type":"event","topic":"relay.')).toEqual([])
-    expect(decoder.push('changed","seq":1}\n')).toEqual([
+describe('decodeIncomingFrame', () => {
+  it('accepts a complete validated event from the Rust bridge', () => {
+    expect(decodeIncomingFrame('{"v":1,"type":"event","topic":"relay.changed","seq":1}')).toEqual(
       { v: 1, type: 'event', topic: 'relay.changed', seq: 1 },
-    ])
+    )
   })
 
   it('rejects unknown protocol versions', () => {
-    const decoder = new FrameDecoder()
-    expect(() => decoder.push('{"v":2,"type":"event","topic":"x","seq":1}\n')).toThrow(
+    expect(() => decodeIncomingFrame('{"v":2,"type":"event","topic":"x","seq":1}')).toThrow(
       'invalid protocol frame',
     )
   })

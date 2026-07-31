@@ -26,11 +26,7 @@ type clientState struct {
 	events []domain.Event
 }
 
-func NewService(histories ...History) *Service {
-	var history History
-	if len(histories) > 0 {
-		history = histories[0]
-	}
+func NewService(history History) *Service {
 	return &Service{clients: make(map[string]*clientState), requests: make(map[string]domain.Start), now: time.Now, history: history}
 }
 func (service *Service) Queue(ip string, delta int) {

@@ -155,8 +155,8 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
   }
 
   return (
-    <div className={styles.scrim} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
-      <form className={styles.modal} aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
+    <div className="ui-scrim" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
+      <form className="ui-modal" aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add API key' : 'Edit API key'}</h2><p>The secret is encrypted locally and never shown again.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Label</span><input value={label} maxLength={80} autoFocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
@@ -172,7 +172,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
 }
 
 function ConfirmRemove({ keyValue, pending, onCancel, onConfirm }: { keyValue: ApiKey; pending: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
-  return <div className={styles.scrim}><section className={`${styles.modal} ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
+  return <div className="ui-scrim"><section className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
 }
 
 function formatCooldown(milliseconds: number, blockedModels: number): string {

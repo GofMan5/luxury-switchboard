@@ -12,10 +12,7 @@ type Route struct {
 	BaseURL       *url.URL
 	AuthMode      string
 	AuthHeader    string
-	Dialect       string
-	ModelsPath    string
 	UpstreamModel string
-	RPM           int
 	CacheTTL      time.Duration
 }
 

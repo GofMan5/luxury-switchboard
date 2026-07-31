@@ -2,13 +2,12 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   ControlPlaneError,
+  decodeIncomingFrame,
   PROTOCOL_VERSION,
   type CommandFrame,
   type EventFrame,
-  type IncomingFrame,
   type ResultFrame,
 } from '../../shared/contracts/protocol'
-import { FrameDecoder } from './frame-decoder'
 import type { ControlPlaneSession, EventListener } from './session'
 
 const CALL_TIMEOUT_MS = 30_000
@@ -23,7 +22,6 @@ interface PendingCall {
 
 export class TauriSidecarSession implements ControlPlaneSession {
   #started = false
-  #decoder = new FrameDecoder()
   #pending = new Map<string, PendingCall>()
   #listeners = new Map<string, Set<EventListener>>()
   #starting: Promise<void> | null = null
@@ -117,17 +115,15 @@ export class TauriSidecarSession implements ControlPlaneSession {
   }
 
   #consume(chunk: string): void {
-    let frames: IncomingFrame[]
+    let frame: ResultFrame | EventFrame
     try {
-      frames = this.#decoder.push(`${chunk}\n`)
+      frame = decodeIncomingFrame(chunk)
     } catch {
       this.#disconnect()
       return
     }
-    for (const frame of frames) {
-      if (frame.type === 'result') this.#resolve(frame)
-      else this.#publish(frame)
-    }
+    if (frame.type === 'result') this.#resolve(frame)
+    else this.#publish(frame)
   }
 
   #resolve(frame: ResultFrame): void {

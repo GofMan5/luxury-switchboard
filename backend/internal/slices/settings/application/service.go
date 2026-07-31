@@ -17,7 +17,6 @@ type Service struct {
 	mu         sync.RWMutex
 	repository Repository
 	settings   domain.Settings
-	listeners  []func(domain.Settings)
 }
 
 type UpdateResult struct {
@@ -65,19 +64,6 @@ func (service *Service) Update(ctx context.Context, settings domain.Settings) (U
 	}
 	service.mu.Lock()
 	service.settings = settings
-	listeners := append([]func(domain.Settings){}, service.listeners...)
 	service.mu.Unlock()
-	for _, listener := range listeners {
-		listener(settings)
-	}
 	return UpdateResult{Settings: settings, RestartRequired: previous != settings}, nil
-}
-
-func (service *Service) OnChanged(listener func(domain.Settings)) {
-	if listener == nil {
-		return
-	}
-	service.mu.Lock()
-	service.listeners = append(service.listeners, listener)
-	service.mu.Unlock()
 }

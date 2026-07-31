@@ -25,11 +25,7 @@ type Runtime struct {
 	listener net.Listener
 }
 
-func NewRuntime(routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activities ...tunnelapp.ClientActivity) *Runtime {
-	var activity tunnelapp.ClientActivity
-	if len(activities) > 0 {
-		activity = activities[0]
-	}
+func NewRuntime(routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity) *Runtime {
 	return &Runtime{routes: routes, markers: markers, relay: relay, activity: activity}
 }
 func (runtime *Runtime) Start(config domain.Config) (string, error) {

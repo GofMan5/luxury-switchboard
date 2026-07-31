@@ -3,7 +3,7 @@ package application
 import "testing"
 
 func TestQueueStateIsVisibleAndReleased(t *testing.T) {
-	service := NewService()
+	service := NewService(nil)
 	service.Queue("203.0.113.10", 1)
 	clients := service.List()
 	if len(clients) != 1 || clients[0].Queued != 1 || clients[0].State != "queued" {

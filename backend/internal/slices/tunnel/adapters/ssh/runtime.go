@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,14 +55,10 @@ type sshProcess struct {
 	stderr *limitedBuffer
 }
 
-func NewRuntime(local LocalRuntime, routes Routes, beforeStart ...func(context.Context) error) *Runtime {
+func NewRuntime(local LocalRuntime, routes Routes, beforeStart func(context.Context) error) *Runtime {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	var before func(context.Context) error
-	if len(beforeStart) > 0 {
-		before = beforeStart[0]
-	}
-	return &Runtime{local: local, routes: routes, client: &http.Client{Transport: transport, Timeout: 8 * time.Second}, beforeStart: before}
+	return &Runtime{local: local, routes: routes, client: &http.Client{Transport: transport, Timeout: 8 * time.Second}, beforeStart: beforeStart}
 }
 
 func (runtime *Runtime) OnState(handler func(domain.State, string, string)) {
@@ -263,7 +260,7 @@ func (runtime *Runtime) modelsReady(ctx context.Context, baseURL, token string) 
 	}
 	sort.Strings(actual)
 	sort.Strings(expected)
-	return len(actual) == len(expected) && strings.Join(actual, "\x00") == strings.Join(expected, "\x00")
+	return slices.Equal(actual, expected)
 }
 
 func startSSH(ctx context.Context, sshClient openssh.Client, localPort, remotePort int) (*sshProcess, error) {

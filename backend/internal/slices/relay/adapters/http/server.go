@@ -1009,10 +1009,6 @@ func joinPath(base, request string) string {
 	return base + "/" + strings.TrimLeft(request, "/")
 }
 
-func retryableStatus(status int) bool {
-	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
-}
-
 func finishLease(lease relayapp.CredentialLease, outcome relayapp.AttemptOutcome) {
 	if lease != nil {
 		lease.Finish(outcome)
@@ -1298,9 +1294,4 @@ func writeError(writer http.ResponseWriter, status int, message string) {
 	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	writer.WriteHeader(status)
 	_, _ = writer.Write(body)
-}
-
-func parseURL(raw string) *url.URL {
-	parsed, _ := url.Parse(raw)
-	return parsed
 }

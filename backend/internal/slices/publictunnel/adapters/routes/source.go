@@ -12,11 +12,7 @@ type Source struct {
 	policy  ProviderPolicy
 }
 
-func NewSource(service *application.Service, policies ...ProviderPolicy) *Source {
-	var policy ProviderPolicy
-	if len(policies) > 0 {
-		policy = policies[0]
-	}
+func NewSource(service *application.Service, policy ProviderPolicy) *Source {
 	return &Source{service: service, policy: policy}
 }
 func (source *Source) List() []domain.Route {

@@ -49,7 +49,7 @@ func (dispatcher *fakeDispatcher) Dispatch(_ context.Context, request relayapp.D
 
 func gatewayForTest(t *testing.T, dispatcher *fakeDispatcher) *Gateway {
 	t.Helper()
-	gateway, err := NewGateway(domain.Config{Token: testToken, RPMPerIP: 0, BrandResponse: brand}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{[]string{"SecretProvider", "https://private.invalid/v1", "fixture-secret"}}, dispatcher)
+	gateway, err := NewGateway(domain.Config{Token: testToken, RPMPerIP: 0, BrandResponse: brand}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{[]string{"SecretProvider", "https://private.invalid/v1", "fixture-secret"}}, dispatcher, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

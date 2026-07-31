@@ -4,24 +4,21 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 )
 
-type SensitiveValues interface{ SensitiveValues(string) []string }
-type KeyCount interface{ Count(string) int }
+type Keys interface {
+	SensitiveValues(string) []string
+	Count(string) int
+}
 type Markers struct {
 	catalog *application.Catalog
-	keys    SensitiveValues
-	counts  KeyCount
+	keys    Keys
 }
 
-func NewMarkers(catalog *application.Catalog, keys SensitiveValues) *Markers {
-	markers := &Markers{catalog: catalog, keys: keys}
-	if counts, ok := keys.(KeyCount); ok {
-		markers.counts = counts
-	}
-	return markers
+func NewMarkers(catalog *application.Catalog, keys Keys) *Markers {
+	return &Markers{catalog: catalog, keys: keys}
 }
 func (markers *Markers) Publishable(providerID string) bool {
 	provider, ok := markers.catalog.Get(providerID)
-	return ok && provider.Enabled && provider.AuthMode != "passthrough" && markers.counts != nil && markers.counts.Count(providerID) > 0
+	return ok && provider.Enabled && provider.AuthMode != "passthrough" && markers.keys != nil && markers.keys.Count(providerID) > 0
 }
 func (markers *Markers) SensitiveMarkers(providerID string) []string {
 	provider, ok := markers.catalog.Get(providerID)

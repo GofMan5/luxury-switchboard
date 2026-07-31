@@ -3,14 +3,10 @@
 package dpapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/atomicfile"
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
-	"io"
 	"os"
 	"path/filepath"
 )
@@ -35,22 +31,15 @@ func (repository *Repository) Load(ctx context.Context) ([]domain.Assignment, er
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(repository.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil || len(raw) <= len(magic) || string(raw[:len(magic)]) != string(magic) {
-		return nil, errors.New("encrypted routes could not be read")
-	}
-	plaintext, err := secretstore.Unprotect(raw[len(magic):])
+	var value document
+	found, err := encryptedfile.Load(repository.path, magic, encryptedfile.DefaultMaxPlaintext, &value)
 	if err != nil {
 		return nil, err
 	}
-	defer clear(plaintext)
-	var value document
-	decoder := json.NewDecoder(bytes.NewReader(plaintext))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil || decoder.Decode(&struct{}{}) != io.EOF || value.Version != 1 {
+	if !found {
+		return nil, nil
+	}
+	if value.Version != 1 {
 		return nil, errors.New("encrypted routes are invalid")
 	}
 	for _, assignment := range value.Assignments {
@@ -64,16 +53,5 @@ func (repository *Repository) Save(ctx context.Context, assignments []domain.Ass
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	plaintext, err := json.Marshal(document{Version: 1, Assignments: assignments})
-	if err != nil {
-		return errors.New("routes could not be encoded")
-	}
-	protected, err := secretstore.Protect(plaintext)
-	clear(plaintext)
-	if err != nil {
-		return err
-	}
-	payload := append(append([]byte(nil), magic...), protected...)
-	defer clear(payload)
-	return atomicfile.Replace(repository.path, payload, 0o600)
+	return encryptedfile.Save(repository.path, magic, encryptedfile.DefaultMaxPlaintext, document{Version: 1, Assignments: assignments})
 }

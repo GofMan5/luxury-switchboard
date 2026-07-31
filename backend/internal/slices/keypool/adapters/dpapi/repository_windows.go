@@ -3,23 +3,18 @@
 package dpapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/atomicfile"
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 )
 
 const (
-	fileVersion   = 1
-	fileName      = "keys.v2.dpapi"
-	maxConfigSize = 4 * 1024 * 1024
+	fileVersion = 1
+	fileName    = "keys.v2.dpapi"
 )
 
 var fileMagic = []byte("SWKEYS2\n")
@@ -59,25 +54,15 @@ func (repository *Repository) Load(ctx context.Context) ([]domain.Key, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(repository.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil || len(raw) <= len(fileMagic) || len(raw) > maxConfigSize*2 {
-		return nil, errors.New("encrypted key settings could not be read")
-	}
-	if string(raw[:len(fileMagic)]) != string(fileMagic) {
-		return nil, errors.New("encrypted key settings have an invalid header")
-	}
-	plaintext, err := secretstore.Unprotect(raw[len(fileMagic):])
+	var value document
+	found, err := encryptedfile.Load(repository.path, fileMagic, encryptedfile.DefaultMaxPlaintext, &value)
 	if err != nil {
 		return nil, err
 	}
-	defer clear(plaintext)
-	var value document
-	decoder := json.NewDecoder(bytes.NewReader(plaintext))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil || decoder.Decode(&struct{}{}) != io.EOF || value.Version != fileVersion {
+	if !found {
+		return nil, nil
+	}
+	if value.Version != fileVersion {
 		return nil, errors.New("encrypted key settings are invalid")
 	}
 	keys := make([]domain.Key, 0, len(value.Keys))
@@ -107,16 +92,5 @@ func (repository *Repository) Save(ctx context.Context, keys []domain.Key) error
 			RPM: key.RPM, ProxyURL: key.ProxyURL, Pinned: key.Pinned,
 		})
 	}
-	plaintext, err := json.Marshal(value)
-	if err != nil || len(plaintext) > maxConfigSize {
-		return errors.New("key settings could not be encoded")
-	}
-	protected, err := secretstore.Protect(plaintext)
-	clear(plaintext)
-	if err != nil {
-		return err
-	}
-	payload := append(append([]byte(nil), fileMagic...), protected...)
-	defer clear(payload)
-	return atomicfile.Replace(repository.path, payload, 0o600)
+	return encryptedfile.Save(repository.path, fileMagic, encryptedfile.DefaultMaxPlaintext, value)
 }

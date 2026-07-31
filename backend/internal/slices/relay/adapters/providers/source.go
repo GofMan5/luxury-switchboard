@@ -13,12 +13,8 @@ type Source struct {
 	routes  relayapp.ModelRouteResolver
 }
 
-func NewSource(catalog *providerapp.Catalog, routes ...relayapp.ModelRouteResolver) *Source {
-	var resolver relayapp.ModelRouteResolver
-	if len(routes) > 0 {
-		resolver = routes[0]
-	}
-	return &Source{catalog: catalog, routes: resolver}
+func NewSource(catalog *providerapp.Catalog, routes relayapp.ModelRouteResolver) *Source {
+	return &Source{catalog: catalog, routes: routes}
 }
 
 func (source *Source) Current(_ context.Context, model string) (relayapp.Route, error) {
@@ -51,7 +47,6 @@ func providerRoute(provider providerdomain.Provider, upstreamModel string) relay
 	return relayapp.Route{
 		ProviderID: provider.ID, ProviderName: provider.Name, BaseURL: provider.BaseURL,
 		AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader,
-		Dialect: string(provider.Dialect), ModelsPath: provider.ModelsPath,
-		UpstreamModel: upstreamModel, RPM: provider.RPM, CacheTTL: provider.CacheTTL,
+		UpstreamModel: upstreamModel, CacheTTL: provider.CacheTTL,
 	}
 }

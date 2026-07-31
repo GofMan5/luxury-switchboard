@@ -31,6 +31,16 @@ export interface EventFrame<T = unknown> {
 
 export type IncomingFrame = ResultFrame | EventFrame
 
+export function decodeIncomingFrame(text: string): IncomingFrame {
+  const value: unknown = JSON.parse(text)
+  if (!value || typeof value !== 'object') throw new Error('Sidecar returned an invalid protocol frame')
+  const frame = value as Record<string, unknown>
+  if (frame.v !== PROTOCOL_VERSION) throw new Error('Sidecar returned an invalid protocol frame')
+  if (frame.type === 'result' && typeof frame.id === 'string' && typeof frame.ok === 'boolean') return frame as unknown as ResultFrame
+  if (frame.type === 'event' && typeof frame.topic === 'string' && Number.isSafeInteger(frame.seq)) return frame as unknown as EventFrame
+  throw new Error('Sidecar returned an invalid protocol frame')
+}
+
 export class ControlPlaneError extends Error {
   readonly code: string
 

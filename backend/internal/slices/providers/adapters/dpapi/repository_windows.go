@@ -3,17 +3,13 @@
 package dpapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/atomicfile"
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
 )
@@ -58,22 +54,15 @@ func (repository *Repository) Load(ctx context.Context) (application.SavedState,
 	if err := ctx.Err(); err != nil {
 		return application.SavedState{}, err
 	}
-	raw, err := os.ReadFile(repository.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return application.SavedState{}, nil
-	}
-	if err != nil || len(raw) <= len(fileMagic) || string(raw[:len(fileMagic)]) != string(fileMagic) {
-		return application.SavedState{}, errors.New("encrypted provider settings could not be read")
-	}
-	plaintext, err := secretstore.Unprotect(raw[len(fileMagic):])
+	var value document
+	found, err := encryptedfile.Load(repository.path, fileMagic, encryptedfile.DefaultMaxPlaintext, &value)
 	if err != nil {
 		return application.SavedState{}, err
 	}
-	defer clear(plaintext)
-	var value document
-	decoder := json.NewDecoder(bytes.NewReader(plaintext))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil || decoder.Decode(&struct{}{}) != io.EOF || value.Version != fileVersion {
+	if !found {
+		return application.SavedState{}, nil
+	}
+	if value.Version != fileVersion {
 		return application.SavedState{}, errors.New("encrypted provider settings are invalid")
 	}
 	providers := make([]domain.Provider, 0, len(value.Providers))
@@ -109,16 +98,5 @@ func (repository *Repository) Save(ctx context.Context, state application.SavedS
 			Enabled:         provider.Enabled, Builtin: provider.Builtin,
 		})
 	}
-	plaintext, err := json.Marshal(value)
-	if err != nil {
-		return errors.New("provider settings could not be encoded")
-	}
-	protected, err := secretstore.Protect(plaintext)
-	clear(plaintext)
-	if err != nil {
-		return err
-	}
-	payload := append(append([]byte(nil), fileMagic...), protected...)
-	defer clear(payload)
-	return atomicfile.Replace(repository.path, payload, 0o600)
+	return encryptedfile.Save(repository.path, fileMagic, encryptedfile.DefaultMaxPlaintext, value)
 }

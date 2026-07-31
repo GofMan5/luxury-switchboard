@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/batchqueue"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/activity/domain"
 	_ "modernc.org/sqlite"
@@ -23,9 +23,7 @@ const (
 
 type Store struct {
 	db            *sql.DB
-	queue         chan domain.Request
-	cancel        context.CancelFunc
-	workers       sync.WaitGroup
+	queue         *batchqueue.Queue[domain.Request]
 	closed        atomic.Bool
 	retentionDays int
 }
@@ -59,15 +57,12 @@ func Open(path string, retentionDays int) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	store := &Store{db: db, queue: make(chan domain.Request, queueCapacity), cancel: cancel, retentionDays: retentionDays}
+	store := &Store{db: db, retentionDays: retentionDays}
 	if err := store.prune(context.Background()); err != nil {
 		db.Close()
-		cancel()
 		return nil, err
 	}
-	store.workers.Add(1)
-	go store.run(ctx)
+	store.queue = batchqueue.New(queueCapacity, batchSize, 100*time.Millisecond, store.writeBatch, func() { _ = store.prune(context.Background()) })
 	return store, nil
 }
 
@@ -75,12 +70,7 @@ func (store *Store) Record(request domain.Request) bool {
 	if store.closed.Load() || !terminal(request.State) {
 		return false
 	}
-	select {
-	case store.queue <- request:
-		return true
-	default:
-		return false
-	}
+	return store.queue.Add(request)
 }
 
 func (store *Store) Recent(ctx context.Context, period application.Period, limit int) ([]domain.Request, error) {
@@ -158,55 +148,10 @@ func (store *Store) Close(ctx context.Context) error {
 	if !store.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	store.cancel()
-	done := make(chan struct{})
-	go func() { store.workers.Wait(); close(done) }()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-done:
-		return store.db.Close()
+	if err := store.queue.Close(ctx); err != nil {
+		return err
 	}
-}
-
-func (store *Store) run(ctx context.Context) {
-	defer store.workers.Done()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	batch := make([]domain.Request, 0, batchSize)
-	lastPrune := time.Now()
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		_ = store.writeBatch(batch)
-		batch = batch[:0]
-		if time.Since(lastPrune) >= time.Hour {
-			_ = store.prune(context.Background())
-			lastPrune = time.Now()
-		}
-	}
-	for {
-		select {
-		case request := <-store.queue:
-			batch = append(batch, request)
-			if len(batch) >= batchSize {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		case <-ctx.Done():
-			for {
-				select {
-				case request := <-store.queue:
-					batch = append(batch, request)
-				default:
-					flush()
-					return
-				}
-			}
-		}
-	}
+	return store.db.Close()
 }
 
 func (store *Store) writeBatch(batch []domain.Request) error {

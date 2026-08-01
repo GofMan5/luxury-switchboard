@@ -1,6 +1,8 @@
 import type { ModelTestResult } from '../domain/model'
 import type { ModelsPort } from './models-port'
 
+const MODEL_TEST_BATCH = 500
+
 export interface ModelsState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'error'
   readonly providerId: string
@@ -16,6 +18,8 @@ export class ModelsModel {
   #state: ModelsState = { phase: 'idle', providerId: '', models: [], selected: [], results: {}, testing: false, error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
+  #discoverController: AbortController | null = null
+  #testController: AbortController | null = null
   #generation = 0
 
   constructor(port: ModelsPort) {
@@ -30,13 +34,20 @@ export class ModelsModel {
   }
 
   async discover(providerId: string) {
+    this.#discoverController?.abort()
+    this.#testController?.abort()
+    this.#testController = null
+    const controller = new AbortController()
+    this.#discoverController = controller
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', providerId, selected: [], results: {}, error: '' })
+    this.#set({ ...this.#state, phase: 'loading', providerId, models: [], selected: [], results: {}, testing: false, error: '' })
     try {
-      const models = await this.#port.discover(providerId)
+      const models = await this.#port.discover(providerId, controller.signal)
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', providerId, models, selected: [], results: {}, error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', models: [], selected: [], error: 'Provider model catalog is unavailable' })
+    } finally {
+      if (this.#discoverController === controller) this.#discoverController = null
     }
   }
 
@@ -53,20 +64,33 @@ export class ModelsModel {
 
   async test(models: readonly string[]) {
     if (this.#state.testing || models.length === 0) return false
+    const providerId = this.#state.providerId
+    const controller = new AbortController()
+    this.#testController = controller
     const results = { ...this.#state.results }
-    for (const model of models) results[model] = { providerId: this.#state.providerId, model, state: 'testing', status: 0, latencyMs: 0 }
+    for (const model of models) results[model] = { providerId, model, state: 'testing', status: 0, latencyMs: 0 }
     this.#set({ ...this.#state, testing: true, results, error: '' })
     try {
-      await this.#port.test(this.#state.providerId, models)
-      this.#set({ ...this.#state, testing: false })
+      for (let offset = 0; offset < models.length; offset += MODEL_TEST_BATCH) {
+        const batch = models.slice(offset, offset + MODEL_TEST_BATCH)
+        if (await this.#port.test(providerId, batch, controller.signal) !== batch.length) throw new Error('incomplete model test batch')
+      }
+      this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'result_missing') })
       return true
     } catch {
-      this.#set({ ...this.#state, testing: false, error: 'Model tests were interrupted' })
+      const sameProvider = this.#state.providerId === providerId
+      this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'interrupted'), error: sameProvider ? 'Model tests were interrupted' : this.#state.error })
       return false
+    } finally {
+      if (this.#testController === controller) this.#testController = null
     }
   }
 
+  cancelTest() { this.#testController?.abort() }
+
   dispose() {
+    this.#discoverController?.abort()
+    this.#testController?.abort()
     this.#unsubscribe?.()
     this.#listeners.clear()
   }
@@ -74,6 +98,15 @@ export class ModelsModel {
   #accept(result: ModelTestResult) {
     if (result.providerId !== this.#state.providerId) return
     this.#set({ ...this.#state, results: { ...this.#state.results, [result.model]: result } })
+  }
+
+  #settle(models: readonly string[], providerId: string, errorCode: string) {
+    const results = { ...this.#state.results }
+    if (this.#state.providerId !== providerId) return results
+    for (const model of models) {
+      if (results[model]?.state === 'testing') results[model] = { providerId, model, state: 'unavailable', status: 0, latencyMs: 0, errorCode }
+    }
+    return results
   }
 
   #set(state: ModelsState) {

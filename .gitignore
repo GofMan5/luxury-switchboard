@@ -20,6 +20,9 @@ venv/
 *.key
 *.p12
 *.pfx
+model-tunnel*_ed25519*
+id_ed25519*
+id_rsa*
 
 *.db
 *.db-wal

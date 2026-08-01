@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -13,5 +15,12 @@ func TestSSHCommandIgnoresUserConfigAgentAndPasswords(t *testing.T) {
 		if !strings.Contains(command, required) {
 			t.Fatalf("SSH hardening missing %q: %s", required, command)
 		}
+	}
+}
+
+func TestPublicReadinessProbeRejectsRedirects(t *testing.T) {
+	runtime := NewRuntime(nil, nil, nil)
+	if err := runtime.client.CheckRedirect(&http.Request{}, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("public readiness probe followed a redirect: %v", err)
 	}
 }

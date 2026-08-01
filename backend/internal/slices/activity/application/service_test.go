@@ -59,3 +59,22 @@ func TestRequestIDsDoNotCollideAcrossServiceRestarts(t *testing.T) {
 		t.Fatalf("request id was reused across service instances: %s", first)
 	}
 }
+
+func TestTrimmedInflightRequestStillPublishesItsTerminalEvent(t *testing.T) {
+	service := NewService(1)
+	var terminalEvent domain.Request
+	service.OnChanged(func(request domain.Request) {
+		if request.State == domain.StateCompleted {
+			terminalEvent = request
+		}
+	})
+	first := service.Start(domain.Start{Model: "first"})
+	service.Start(domain.Start{Model: "second"})
+	service.Finish(first, domain.Finish{Status: 200})
+	if terminalEvent.ID != first || terminalEvent.State != domain.StateCompleted {
+		t.Fatalf("trimmed inflight request lost its terminal event: %+v", terminalEvent)
+	}
+	if _, retained := service.requests[first]; retained {
+		t.Fatal("hidden terminal request was retained after publication")
+	}
+}

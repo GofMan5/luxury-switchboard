@@ -58,8 +58,10 @@ type sshProcess struct {
 func NewRuntime(local LocalRuntime, routes Routes, beforeStart func(context.Context) error) *Runtime {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	return &Runtime{local: local, routes: routes, client: &http.Client{Transport: transport, Timeout: 8 * time.Second}, beforeStart: beforeStart}
+	return &Runtime{local: local, routes: routes, client: &http.Client{Transport: transport, Timeout: 8 * time.Second, CheckRedirect: rejectRedirect}, beforeStart: beforeStart}
 }
+
+func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 func (runtime *Runtime) OnState(handler func(domain.State, string, string)) {
 	runtime.mu.Lock()

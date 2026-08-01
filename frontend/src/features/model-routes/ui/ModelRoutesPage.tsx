@@ -3,6 +3,7 @@ import { CheckCheck, FlaskConical, Pencil, Plus, RefreshCw, Search, Trash2, X } 
 import { formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import { useModels } from '../../models/ui/useModels'
 import { useProviders } from '../../providers/ui/useProviders'
 import type { ModelRoute, RouteTarget } from '../domain/route'
@@ -65,7 +66,7 @@ export default function ModelRoutesPage() {
           <label className={styles.search}><Search size={15} /><input type="search" value={search} placeholder="Filter models" onChange={(event) => setSearch(event.currentTarget.value)} /></label>
           <Button disabled={models.models.length === 0 || models.testing} onClick={() => modelsModel.toggleAll()}><CheckCheck size={15} />{allSelected ? 'Clear all' : 'All models'}</Button>
           <Button disabled={models.selected.length === 0 || models.testing} onClick={() => void modelsModel.test(models.selected)}><FlaskConical size={15} />Test selected</Button>
-          <Button disabled={models.models.length === 0 || models.testing} onClick={() => void modelsModel.test(models.models)}>Test all</Button>
+          <Button disabled={models.models.length === 0} onClick={() => models.testing ? modelsModel.cancelTest() : void modelsModel.test(models.models)}>{models.testing ? 'Cancel tests' : 'Test all'}</Button>
           <Button variant="primary" disabled={bulkRoutes.length === 0 || Boolean(state.pending)} onClick={() => void model.upsertMany(bulkRoutes)}>{state.target === 'tunnel' ? 'Publish selected' : 'Route selected'}</Button>
         </div>
         <div className={styles.modelList}>
@@ -104,6 +105,7 @@ function RouteEditor({ target, route, providers, pending, onClose, onSave }: { t
   const [contextMiB, setContextMiB] = useState(String((route?.contextLimitKiB ?? 0) / 1024))
   const [enabled, setEnabled] = useState(route?.enabled ?? true)
   const [error, setError] = useState('')
+  const dialogRef = useModalFocus<HTMLFormElement>(onClose, pending)
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const context = Number(contextMiB)
@@ -111,5 +113,5 @@ function RouteEditor({ target, route, providers, pending, onClose, onSave }: { t
     setError('')
     void onSave({ target, publicModel: publicModel.trim(), upstreamModel: upstreamModel.trim(), providerId, contextLimitKiB: Math.round(context * 1024), enabled })
   }
-  return <div className="ui-scrim"><form className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error ? <p className={styles.formError} role="alert">{error}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
+  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} autoFocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error ? <p className={styles.formError} role="alert">{error}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
 }

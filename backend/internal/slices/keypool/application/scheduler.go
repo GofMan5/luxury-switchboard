@@ -123,6 +123,9 @@ func (scheduler *Scheduler) Acquire(ctx context.Context, providerID, model strin
 
 func (scheduler *Scheduler) AcquireWithQueue(ctx context.Context, providerID, model string, queued func()) (*Lease, time.Duration, error) {
 	started := scheduler.now()
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	reportedQueued := false
 	scheduler.mu.Lock()
 	if len(scheduler.waiters) >= scheduler.maxQueued {
@@ -138,6 +141,11 @@ func (scheduler *Scheduler) AcquireWithQueue(ctx context.Context, providerID, mo
 	for {
 		scheduler.mu.Lock()
 		now := scheduler.now()
+		if err := ctx.Err(); err != nil {
+			scheduler.removeWaiterLocked(pending)
+			scheduler.mu.Unlock()
+			return nil, now.Sub(started), err
+		}
 		provider := scheduler.providers[providerID]
 		if provider == nil || len(provider.keys) == 0 {
 			scheduler.removeWaiterLocked(pending)

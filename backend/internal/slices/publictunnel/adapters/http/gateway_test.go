@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -35,6 +36,16 @@ func (routes fakeRoutes) Resolve(model string) (domain.Route, bool) {
 type fakeMarkers struct{ values []string }
 
 func (markers fakeMarkers) SensitiveMarkers(string) []string { return markers.values }
+
+type changingMarkers struct{ calls int }
+
+func (markers *changingMarkers) SensitiveMarkers(string) []string {
+	markers.calls++
+	if markers.calls == 1 {
+		return []string{"old-secret"}
+	}
+	return []string{"new-secret"}
+}
 
 type fakeDispatcher struct {
 	response relayapp.DispatchResponse
@@ -119,6 +130,30 @@ func TestJSONResponseRewritesModelAndRedactsProviderMarkers(t *testing.T) {
 	}
 }
 
+func TestGatewayRedactsMarkersAcrossConcurrentCredentialChanges(t *testing.T) {
+	markers := &changingMarkers{}
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{
+		Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{"output":"old-secret mid-secret new-secret"}`), SensitiveMarkers: []string{"mid-secret"},
+	}}
+	gateway, err := NewGateway(
+		domain.Config{Token: testToken},
+		fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}},
+		markers, dispatcher, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/responses", `{"model":"public-gpt"}`))
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "old-secret") || strings.Contains(response.Body.String(), "mid-secret") || strings.Contains(response.Body.String(), "new-secret") {
+		t.Fatalf("credential change leaked a marker: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if markers.calls != 2 {
+		t.Fatalf("marker snapshots were not captured around dispatch: %d", markers.calls)
+	}
+}
+
 func TestSanitizerDropsPrivateFieldsAcrossNamingStyles(t *testing.T) {
 	clean, err := sanitizeJSON(map[string]any{
 		"providerId": "private", "provider-name": "private", "upstreamUrl": "https://private.invalid",
@@ -172,6 +207,15 @@ func TestRedactionDoesNotReinsertItsOwnMarker(t *testing.T) {
 	value := redactMarkers("Private upstream", []string{"Private"}, "Luxury Private")
 	if strings.Contains(strings.ToLower(value), "private") {
 		t.Fatalf("redaction reinserted the sensitive marker: %q", value)
+	}
+}
+
+func TestShortCredentialMarkerFailsClosed(t *testing.T) {
+	_, _, err := sanitizeResponse(relayapp.DispatchResponse{
+		Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"output":"x"}`),
+	}, "/v1/responses", "public-model", []string{"x"}, brand)
+	if err == nil {
+		t.Fatal("short credential marker was allowed through public output")
 	}
 }
 
@@ -316,6 +360,21 @@ func TestIPLimiterBoundsUnlimitedAndGlobalTraffic(t *testing.T) {
 		t.Fatal("unlimited RPM was rejected below the safety bound")
 	} else {
 		release()
+	}
+}
+
+func TestIPLimiterBoundsDistinctIdentityState(t *testing.T) {
+	limiter := newIPLimiter()
+	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
+	for index := range maxQueuedTotal {
+		_, release, ok := limiter.Reserve(fmt.Sprintf("203.0.%d.%d", index/256, index%256), 1)
+		if !ok {
+			t.Fatalf("identity %d was rejected below the bound", index)
+		}
+		release()
+	}
+	if _, _, ok := limiter.Reserve("198.51.100.1", 1); ok || len(limiter.next) != maxQueuedTotal {
+		t.Fatalf("distinct IP state exceeded its bound: %d", len(limiter.next))
 	}
 }
 

@@ -96,6 +96,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		gateway.error(writer, http.StatusForbidden, "Request rejected")
 		return
 	}
+	markers := append([]string(nil), gateway.markers.SensitiveMarkers(route.ProviderID)...)
 	activityID := ""
 	started := time.Now()
 	if gateway.activity != nil {
@@ -143,7 +144,8 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		gateway.error(writer, http.StatusBadGateway, "Request could not be completed")
 		return
 	}
-	markers := gateway.markers.SensitiveMarkers(route.ProviderID)
+	markers = append(markers, response.SensitiveMarkers...)
+	markers = append(markers, gateway.markers.SensitiveMarkers(route.ProviderID)...)
 	if route.UpstreamModel != route.PublicModel {
 		markers = append(markers, route.UpstreamModel)
 	}

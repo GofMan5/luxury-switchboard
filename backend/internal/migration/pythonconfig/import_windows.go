@@ -97,7 +97,10 @@ func LoadDefault() (State, bool, error) {
 		state.Providers = append(state.Providers, provider)
 		priority := 0
 		if item.EnvironmentKeyRPM != nil && item.ID == "echo" && userenv.Get("FREEMODEL_API_KEY") != "" {
-			metadata, _ := keydomain.NewKey(keydomain.Params{ProviderID: item.ID, Label: "Environment key", Secret: "environment-managed", RPM: *item.EnvironmentKeyRPM, Pinned: true})
+			metadata, err := keydomain.NewKey(keydomain.Params{ProviderID: item.ID, Label: "Environment key", Secret: "environment-managed", RPM: *item.EnvironmentKeyRPM, Pinned: true})
+			if err != nil {
+				return State{}, false, errors.New("legacy environment key metadata is invalid")
+			}
 			state.Keys = append(state.Keys, metadata)
 			priority = 1
 		}
@@ -130,13 +133,8 @@ func LoadDefault() (State, bool, error) {
 		}
 		state.HasTunnel = state.Tunnel.Validate() == nil
 	}
-	if !providerExists(state.Providers, state.ActiveID) {
-		return State{}, false, errors.New("legacy active provider is invalid")
-	}
-	for _, route := range state.Routes {
-		if route.Validate() != nil || !providerExists(state.Providers, route.ProviderID) {
-			return State{}, false, errors.New("legacy route is invalid")
-		}
+	if err := validateState(state); err != nil {
+		return State{}, false, err
 	}
 	return state, true, nil
 }
@@ -147,11 +145,46 @@ func cacheDuration(enabled bool) time.Duration {
 	}
 	return 0
 }
-func providerExists(providers []providerdomain.Provider, id string) bool {
-	for _, provider := range providers {
-		if provider.ID == id {
-			return true
+func validateState(state State) error {
+	providers := make(map[string]struct{}, len(state.Providers))
+	for _, provider := range state.Providers {
+		if provider.ID == "" {
+			return errors.New("legacy provider is invalid")
 		}
+		if _, duplicate := providers[provider.ID]; duplicate {
+			return errors.New("legacy provider is duplicated")
+		}
+		providers[provider.ID] = struct{}{}
 	}
-	return false
+	if _, exists := providers[state.ActiveID]; !exists {
+		return errors.New("legacy active provider is invalid")
+	}
+	keys := make(map[string]struct{}, len(state.Keys))
+	for _, key := range state.Keys {
+		if key.ID == "" {
+			return errors.New("legacy key is invalid")
+		}
+		if _, exists := providers[key.ProviderID]; !exists {
+			return errors.New("legacy key provider is invalid")
+		}
+		if _, duplicate := keys[key.ID]; duplicate {
+			return errors.New("legacy key is duplicated")
+		}
+		keys[key.ID] = struct{}{}
+	}
+	routes := make(map[string]struct{}, len(state.Routes))
+	for _, route := range state.Routes {
+		if route.Validate() != nil {
+			return errors.New("legacy route is invalid")
+		}
+		if _, exists := providers[route.ProviderID]; !exists {
+			return errors.New("legacy route provider is invalid")
+		}
+		key := string(route.Target) + "\x00" + route.PublicModel
+		if _, duplicate := routes[key]; duplicate {
+			return errors.New("legacy route is duplicated")
+		}
+		routes[key] = struct{}{}
+	}
+	return nil
 }

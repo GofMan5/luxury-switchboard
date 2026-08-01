@@ -73,6 +73,7 @@ type Config struct {
 
 func NewServer(address string, dependencies Dependencies) *Server {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	transport.ForceAttemptHTTP2 = true
 	transport.MaxIdleConns = 128
 	transport.MaxIdleConnsPerHost = 32
@@ -111,7 +112,7 @@ func NewServer(address string, dependencies Dependencies) *Server {
 		credentials:  dependencies.Credentials,
 		activity:     activity,
 		config:       config,
-		client:       &http.Client{Transport: transport},
+		client:       &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
 		transport:    transport,
 		proxyClients: make(map[string]*http.Client),
 		routeCtx:     ctx,
@@ -243,7 +244,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 	}
 	requestUpstream := func(requestCtx context.Context) (*http.Response, error) {
-		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, bufferTerminal, 0)
+		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, bufferTerminal, 0, nil)
 	}
 	var response *http.Response
 	if clientStream {
@@ -279,15 +280,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 	}
-	if bufferTerminal {
-		terminal := response.Header.Get("X-Switchboard-Terminal")
-		response.Header.Del("X-Switchboard-Terminal")
-		if terminal == "response.incomplete" {
-			errorCode = "stream_incomplete"
-		}
-		if terminal == "response.failed" {
-			errorCode = "upstream_status"
-		}
+	terminal := response.Header.Get("X-Switchboard-Terminal")
+	response.Header.Del("X-Switchboard-Terminal")
+	if terminal == "response.incomplete" {
+		errorCode = "stream_incomplete"
+	}
+	if terminal == "response.failed" {
+		errorCode = "upstream_status"
 	}
 	usage = usageFromHeaders(response.Header)
 	generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
@@ -363,7 +362,10 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		ProviderName: route.ProviderName, Method: request.Method,
 		Path: urlValue.Path, BytesIn: int64(len(body)),
 	})
-	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, terminalStream, request.AttemptLimit)
+	markers := make([]string, 0, 4)
+	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
+		markers = sensitiveCredentialMarkers(credential)
+	})
 	if err != nil {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{Cancelled: errors.Is(err, context.Canceled), ErrorCode: "transport"})
 		return relayapp.DispatchResponse{}, err
@@ -399,18 +401,21 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		Usage: usage, Generation: generation, ErrorCode: dispatchError,
 	})
 	return relayapp.DispatchResponse{
-		Status: response.StatusCode, Headers: response.Header.Clone(),
-		Body: responseBody, Terminal: terminal,
+		Status: response.StatusCode, Headers: response.Header.Clone(), Body: responseBody,
+		Terminal: terminal, SensitiveMarkers: markers,
 	}, nil
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream bool, attemptLimit int) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream bool, attemptLimit int, onCredential func(relayapp.Credential)) (*http.Response, error) {
 	requestFailures := 0
 	model := requestModel(body, incoming.Header.Get("Content-Type"))
 	for attempt := 0; ; attempt++ {
 		lease, credential, waited, err := server.acquireCredential(ctx, route, model, func() { server.activity.Waiting(activityID) })
 		if err != nil {
 			return nil, err
+		}
+		if onCredential != nil {
+			onCredential(credential)
 		}
 		server.activity.Resume(activityID, waited)
 		upstream, err := buildUpstreamRequest(ctx, incoming, body, route, credential.Value)
@@ -438,7 +443,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		}
 		status := response.StatusCode
-		if status < 400 {
+		if status >= 200 && status < 400 {
+			if status >= 300 {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				drainResponse(response)
+				return genericErrorResponse(http.StatusBadGateway), nil
+			}
 			if terminalStream {
 				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, incoming.URL.Path, server.config)
 				if bufferErr != nil {
@@ -483,7 +493,13 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					}
 					continue
 				}
-				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
+				terminal := jsonTerminal(buffered)
+				kind := relayapp.AttemptSuccess
+				if terminal != "" {
+					kind = relayapp.AttemptRequestError
+					response.Header.Set("X-Switchboard-Terminal", terminal)
+				}
+				finishLease(lease, relayapp.AttemptOutcome{Kind: kind})
 				response.Body = io.NopCloser(bytes.NewReader(buffered))
 				response.ContentLength = int64(len(buffered))
 				response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
@@ -504,9 +520,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
-			// The scheduler already holds this key until Retry-After. Reacquire
-			// immediately so another eligible key can take over without a global wait.
-			server.observeRetry(activityID, attempt, status, 0)
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, delay); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -531,21 +547,27 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
-			server.observeRetry(activityID, attempt, status, 0)
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+				return nil, err
+			}
 			continue
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication})
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
-			server.observeRetry(activityID, attempt, status, 0)
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+				return nil, err
+			}
 			continue
 		case status == http.StatusNotFound && modelUnavailable(errorBody, model):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model})
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
-			server.observeRetry(activityID, attempt, status, 0)
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -562,6 +584,39 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 		return genericErrorResponse(status), nil
 	}
+}
+
+func sensitiveCredentialMarkers(credential relayapp.Credential) []string {
+	markers := make([]string, 0, 5)
+	if credential.Value != "" {
+		markers = append(markers, credential.Value)
+	}
+	if credential.ProxyURL == "" {
+		return markers
+	}
+	markers = append(markers, credential.ProxyURL)
+	proxy, err := url.Parse(credential.ProxyURL)
+	if err != nil {
+		return markers
+	}
+	markers = append(markers, proxy.Hostname())
+	if proxy.User != nil {
+		markers = append(markers, proxy.User.Username())
+		if password, configured := proxy.User.Password(); configured {
+			markers = append(markers, password)
+		}
+	}
+	return markers
+}
+
+func (server *Server) retryCredentialFailure(ctx context.Context, lease relayapp.CredentialLease, activityID string, attempt, status int, delay time.Duration) error {
+	// Credentialed routes delegate waiting to the scheduler so another key can
+	// take over immediately. Passthrough routes have no scheduler and must back off.
+	if lease != nil {
+		delay = 0
+	}
+	server.observeRetry(activityID, attempt, status, delay)
+	return waitRetry(ctx, delay)
 }
 
 func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error, operation func(context.Context) (*http.Response, error)) (*http.Response, error) {
@@ -635,10 +690,12 @@ func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
 	}
 	transport := server.transport.Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: transport, CheckRedirect: rejectRedirect}
 	server.proxyClients[rawURL] = client
 	return client, nil
 }
+
+func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 func (server *Server) observeRetry(activityID string, attempt, status int, delay time.Duration) {
 	server.activity.Retry(activityID, relayapp.ActivityRetry{
@@ -783,6 +840,9 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				}
 				buffered = append(buffered, result.chunk...)
 				if terminal := inspector.Feed(result.chunk); terminal != "" {
+					if terminal == "response.invalid" {
+						return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+					}
 					return terminal, buffered, inspector.usage, nil
 				}
 				if !idle.Stop() {
@@ -795,6 +855,9 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			}
 			if result.err != nil {
 				if terminal := inspector.Finish(); terminal != "" {
+					if terminal == "response.invalid" {
+						return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+					}
 					return terminal, buffered, inspector.usage, nil
 				}
 				return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
@@ -854,7 +917,7 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 				idle.Reset(config.StreamIdleTimeout)
 			}
 			if result.err != nil {
-				if !errors.Is(result.err, io.EOF) || (len(buffered) > 0 && !json.Valid(buffered)) {
+				if !errors.Is(result.err, io.EOF) || len(buffered) == 0 || !json.Valid(buffered) {
 					return nil, errIncompleteSSE
 				}
 				return buffered, nil
@@ -933,8 +996,14 @@ func (inspector *sseInspector) finishEvent() {
 	inspector.mergeUsage(payload)
 	eventType, _ := payload["type"].(string)
 	if eventType == "response.completed" {
-		if response, ok := payload["response"].(map[string]any); ok && (response["status"] != "completed" || response["incomplete_details"] != nil || response["error"] != nil) {
-			eventType = "response.incomplete"
+		response, ok := payload["response"].(map[string]any)
+		if !ok {
+			inspector.terminal = "response.invalid"
+			return
+		}
+		if response["status"] != "completed" || response["incomplete_details"] != nil || response["error"] != nil {
+			inspector.terminal = "response.invalid"
+			return
 		}
 	}
 	if eventType == "response.completed" || eventType == "response.failed" || eventType == "response.incomplete" {
@@ -1004,6 +1073,26 @@ func usageFromJSON(body []byte) relayapp.TokenUsage {
 	inspector := sseInspector{}
 	inspector.mergeUsage(payload)
 	return inspector.usage
+}
+
+func jsonTerminal(body []byte) string {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil || !responseFailed(value) {
+		return ""
+	}
+	object, _ := value.(map[string]any)
+	response, _ := object["response"].(map[string]any)
+	eventType, _ := object["type"].(string)
+	status, _ := object["status"].(string)
+	if status == "" {
+		status, _ = response["status"].(string)
+	}
+	if eventType == "response.incomplete" || status == "incomplete" || object["incomplete_details"] != nil || response["incomplete_details"] != nil {
+		return "response.incomplete"
+	}
+	return "response.failed"
 }
 
 func positiveInt(value any) int64 {

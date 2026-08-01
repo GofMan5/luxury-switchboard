@@ -75,6 +75,9 @@ func New(params Params) (Provider, error) {
 	if parsed.User != nil || parsed.Fragment != "" {
 		return Provider{}, errors.New("provider URL must not contain credentials or a fragment")
 	}
+	if sensitiveQuery(parsed) {
+		return Provider{}, errors.New("provider credentials must use the encrypted key pool")
+	}
 	if parsed.Scheme == "http" && !loopbackHost(parsed.Hostname()) {
 		return Provider{}, errors.New("remote provider URL must use HTTPS")
 	}
@@ -116,6 +119,17 @@ func New(params Params) (Provider, error) {
 		Enabled:    params.Enabled,
 		Builtin:    params.Builtin,
 	}, nil
+}
+
+func sensitiveQuery(value *url.URL) bool {
+	for name := range value.Query() {
+		normalized := strings.NewReplacer("-", "", "_", "", ".", "").Replace(strings.ToLower(name))
+		switch normalized {
+		case "apikey", "xapikey", "subscriptionkey", "key", "token", "accesstoken", "auth", "authorization", "password", "secret", "signature", "sig", "code":
+			return true
+		}
+	}
+	return false
 }
 
 func validText(value string, limit int) bool {

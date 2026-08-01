@@ -5,7 +5,6 @@ import (
 )
 
 type Keys interface {
-	SensitiveValues(string) []string
 	Count(string) int
 }
 type Markers struct {
@@ -25,9 +24,12 @@ func (markers *Markers) SensitiveMarkers(providerID string) []string {
 	if !ok {
 		return nil
 	}
-	values := []string{provider.ID, provider.Name, provider.BaseURL.String(), provider.BaseURL.Hostname()}
-	if markers.keys != nil {
-		values = append(values, markers.keys.SensitiveValues(providerID)...)
+	values := []string{provider.BaseURL.String(), provider.BaseURL.Hostname()}
+	if len(provider.ID) >= 4 {
+		values = append(values, provider.ID)
+	}
+	if len(provider.Name) >= 4 {
+		values = append(values, provider.Name)
 	}
 	return values
 }

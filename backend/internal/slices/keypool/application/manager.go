@@ -3,7 +3,6 @@ package application
 import (
 	"context"
 	"errors"
-	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -92,31 +91,6 @@ func (manager *Manager) List(providerID string) []domain.PublicKey {
 
 func (manager *Manager) Count(providerID string) int {
 	return manager.scheduler.Count(providerID)
-}
-
-func (manager *Manager) SensitiveValues(providerID string) []string {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	values := make([]string, 0)
-	for _, key := range manager.combinedLocked(manager.userKeys) {
-		if key.ProviderID != providerID {
-			continue
-		}
-		values = append(values, key.Credential.Reveal())
-		if key.ProxyURL != "" {
-			values = append(values, key.ProxyURL)
-			if proxy, err := url.Parse(key.ProxyURL); err == nil {
-				values = append(values, proxy.Hostname())
-				if proxy.User != nil {
-					values = append(values, proxy.User.Username())
-					if password, configured := proxy.User.Password(); configured {
-						values = append(values, password)
-					}
-				}
-			}
-		}
-	}
-	return values
 }
 
 func (manager *Manager) EnsureProvider(providerID string, rpm int) error {

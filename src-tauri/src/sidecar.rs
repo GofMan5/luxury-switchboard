@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -21,6 +21,7 @@ const LIFECYCLE_EVENT: &str = "sidecar-lifecycle";
 #[derive(Default)]
 pub struct SidecarState {
     child: Mutex<Option<CommandChild>>,
+    generation: AtomicU64,
     exiting: AtomicBool,
 }
 
@@ -75,12 +76,13 @@ pub fn sidecar_start(
         .spawn()
         .map_err(|_| "Sidecar could not start".to_string())?;
     let pid = child.pid();
+    let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
     *guard = Some(child);
     drop(guard);
 
     let event_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        forward_events(event_app, receiver).await;
+        forward_events(event_app, receiver, pid, generation).await;
     });
     Ok(StartResult { pid })
 }
@@ -225,6 +227,8 @@ fn allowed_method(method: &str) -> bool {
 async fn forward_events(
     app: AppHandle,
     mut receiver: tauri::async_runtime::Receiver<CommandEvent>,
+    pid: u32,
+    generation: u64,
 ) {
     let mut buffer = Vec::with_capacity(8 * 1024);
     while let Some(event) = receiver.recv().await {
@@ -254,11 +258,28 @@ async fn forward_events(
             _ => {}
         }
     }
-    if let Ok(mut child) = app.state::<SidecarState>().child.lock()
+    let state = app.state::<SidecarState>();
+    let active_generation = state.generation.load(Ordering::Acquire);
+    if let Ok(mut child) = state.child.lock()
+        && matching_process(
+            child.as_ref().map(CommandChild::pid),
+            active_generation,
+            pid,
+            generation,
+        )
         && let Some(child) = child.take()
     {
         let _ = child.kill();
     }
+}
+
+fn matching_process(
+    active_pid: Option<u32>,
+    active_generation: u64,
+    completed_pid: u32,
+    completed_generation: u64,
+) -> bool {
+    active_pid == Some(completed_pid) && active_generation == completed_generation
 }
 
 fn append_frames(app: &AppHandle, buffer: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ()> {
@@ -335,5 +356,13 @@ mod tests {
         assert!(bytes.len() > MAX_FRAME_BYTES);
         assert_eq!(count, bytes.len() / frame.len());
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn stale_reader_cannot_claim_a_restarted_sidecar() {
+        assert!(matching_process(Some(10), 1, 10, 1));
+        assert!(!matching_process(Some(10), 2, 10, 1));
+        assert!(!matching_process(Some(11), 1, 10, 1));
+        assert!(!matching_process(None, 1, 10, 1));
     }
 }

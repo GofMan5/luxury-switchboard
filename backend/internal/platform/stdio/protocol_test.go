@@ -57,6 +57,21 @@ func TestDecoderRejectsUnknownAndDuplicateFields(t *testing.T) {
 	}
 }
 
+func TestOversizedResultBecomesTypedFailureWithoutBreakingProtocol(t *testing.T) {
+	input := strings.NewReader(`{"v":1,"id":"large","type":"command","method":"large"}` + "\n")
+	var output strings.Builder
+	server := NewServer(input, &output, 1)
+	server.Handle("large", func(context.Context, json.RawMessage) (any, error) {
+		return strings.Repeat("x", MaxFrameBytes), nil
+	})
+	if err := server.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() > MaxFrameBytes || !strings.Contains(output.String(), `"code":"response_too_large"`) {
+		t.Fatalf("oversized response escaped the protocol bound: bytes=%d body=%s", output.Len(), output.String())
+	}
+}
+
 func TestShutdownAcknowledgesThenStopsDispatch(t *testing.T) {
 	input := strings.NewReader(
 		`{"v":1,"id":"shutdown","type":"command","method":"system.shutdown"}` + "\n" +

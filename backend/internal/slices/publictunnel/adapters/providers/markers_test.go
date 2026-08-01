@@ -9,8 +9,7 @@ import (
 
 type keys struct{ count int }
 
-func (value keys) Count(string) int                { return value.count }
-func (value keys) SensitiveValues(string) []string { return nil }
+func (value keys) Count(string) int { return value.count }
 
 func TestOnlyAuthenticatedKeyedProviderIsPublishable(t *testing.T) {
 	local, _ := providerdomain.New(providerdomain.Params{ID: "local", Name: "Local", BaseURL: "http://127.0.0.1:8799", AuthMode: providerdomain.AuthPassthrough, Enabled: true})

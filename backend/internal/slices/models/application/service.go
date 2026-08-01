@@ -16,6 +16,8 @@ var (
 	ErrTestsRunning        = errors.New("model tests are already running")
 )
 
+const maxTestModels = 500
+
 type Providers interface {
 	Get(string) (domain.Provider, bool)
 }
@@ -57,6 +59,9 @@ func (service *Service) Test(ctx context.Context, providerID string, models []st
 	provider, exists := service.providers.Get(strings.TrimSpace(providerID))
 	if !exists {
 		return 0, ErrProviderUnavailable
+	}
+	if len(models) > maxTestModels {
+		return 0, errors.New("too many models")
 	}
 	models = normalizeModels(models)
 	if len(models) == 0 {
@@ -114,11 +119,11 @@ func (service *Service) publish(result domain.TestResult) {
 }
 
 func normalizeModels(values []string) []string {
-	seen := make(map[string]struct{}, min(len(values), 500))
-	result := make([]string, 0, min(len(values), 500))
+	seen := make(map[string]struct{}, min(len(values), maxTestModels))
+	result := make([]string, 0, min(len(values), maxTestModels))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 128 || len(result) == 500 {
+		if value == "" || len(value) > 128 || len(result) == maxTestModels {
 			continue
 		}
 		if _, exists := seen[value]; exists {

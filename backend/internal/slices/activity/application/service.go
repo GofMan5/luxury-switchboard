@@ -20,6 +20,7 @@ var serviceSequence atomic.Uint64
 type Service struct {
 	mu        sync.RWMutex
 	requests  map[string]domain.Request
+	hidden    map[string]struct{}
 	order     []string
 	capacity  int
 	namespace string
@@ -34,6 +35,7 @@ func NewService(capacity int) *Service {
 	}
 	return &Service{
 		requests:  make(map[string]domain.Request),
+		hidden:    make(map[string]struct{}),
 		capacity:  capacity,
 		namespace: fmt.Sprintf("req_%016x_%x", uint64(time.Now().UnixNano()), serviceSequence.Add(1)),
 		now:       time.Now,
@@ -181,7 +183,12 @@ func (service *Service) update(id string, mutate func(*domain.Request, time.Time
 		return
 	}
 	mutate(&request, service.now().UTC())
-	service.requests[id] = request
+	if _, hidden := service.hidden[id]; hidden && terminal(request.State) {
+		delete(service.hidden, id)
+		delete(service.requests, id)
+	} else {
+		service.requests[id] = request
+	}
 	service.mu.Unlock()
 	service.publish(request)
 }
@@ -197,10 +204,25 @@ func (service *Service) publish(request domain.Request) {
 
 func (service *Service) trimLocked() {
 	for len(service.order) > service.capacity {
-		last := service.order[len(service.order)-1]
-		delete(service.requests, last)
-		service.order = service.order[:len(service.order)-1]
+		index := len(service.order) - 1
+		for candidate := len(service.order) - 1; candidate >= 0; candidate-- {
+			if terminal(service.requests[service.order[candidate]].State) {
+				index = candidate
+				break
+			}
+		}
+		id := service.order[index]
+		service.order = append(service.order[:index], service.order[index+1:]...)
+		if terminal(service.requests[id].State) {
+			delete(service.requests, id)
+		} else {
+			service.hidden[id] = struct{}{}
+		}
 	}
+}
+
+func terminal(state domain.State) bool {
+	return state == domain.StateCompleted || state == domain.StateFailed || state == domain.StateCancelled
 }
 
 func clean(value string, limit int) string {

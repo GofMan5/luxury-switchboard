@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -82,6 +83,25 @@ func TestModelBlockFallsThroughAndAllBlockedWaitsForRecovery(t *testing.T) {
 	_, _, err := scheduler.Acquire(ctx, "echo", "gpt-5.6-sol")
 	if err == nil || time.Since(started) < 20*time.Millisecond {
 		t.Fatalf("all-key model block escaped the recovery queue: %v", err)
+	}
+}
+
+func TestCancelledAcquireDoesNotConsumeRateCapacity(t *testing.T) {
+	scheduler := NewScheduler(10)
+	key, err := domain.NewKey(domain.Params{ProviderID: "echo", Label: "Key", Secret: "secret", RPM: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Configure("echo", 1, []domain.Key{key}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := scheduler.Acquire(ctx, "echo", "model"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled acquire returned %v", err)
+	}
+	if snapshot := scheduler.Snapshot("echo"); len(snapshot) != 1 || snapshot[0].StartsInWindow != 0 {
+		t.Fatalf("cancelled acquire consumed RPM: %+v", snapshot)
 	}
 }
 

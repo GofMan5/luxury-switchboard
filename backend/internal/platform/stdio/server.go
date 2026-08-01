@@ -19,6 +19,8 @@ type MethodError struct {
 	Message string
 }
 
+var errFrameTooLarge = errors.New("stdio frame is too large")
+
 func (err MethodError) Error() string { return err.Message }
 
 type Server struct {
@@ -151,14 +153,17 @@ func (server *Server) handleRequest(pending job) {
 		_ = server.write(Failure(request, "command_failed", "Command failed"))
 		return
 	}
-	_ = server.write(Response{
+	response := Response{
 		Version: ProtocolVersion,
 		ID:      request.ID,
 		Type:    "result",
 		Method:  request.Method,
 		OK:      true,
 		Payload: payload,
-	})
+	}
+	if err := server.write(response); errors.Is(err, errFrameTooLarge) {
+		_ = server.write(Failure(request, "response_too_large", "Command response is too large"))
+	}
 }
 
 func (server *Server) prepareJob(parent context.Context, request Request) (job, error) {
@@ -205,11 +210,19 @@ func (server *Server) cancelRequest(request Request) {
 }
 
 func (server *Server) write(value any) error {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return err
+	}
+	if buffer.Len() > MaxFrameBytes {
+		return errFrameTooLarge
+	}
 	server.writeMu.Lock()
 	defer server.writeMu.Unlock()
-	encoder := json.NewEncoder(server.writer)
-	encoder.SetEscapeHTML(false)
-	return encoder.Encode(value)
+	_, err := server.writer.Write(buffer.Bytes())
+	return err
 }
 
 func decodeRequest(line []byte) (Request, error) {

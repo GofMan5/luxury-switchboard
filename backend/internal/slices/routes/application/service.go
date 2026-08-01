@@ -40,10 +40,16 @@ func (service *Service) Load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	seen := make(map[string]struct{}, len(assignments))
 	for _, assignment := range assignments {
 		if assignment.Validate() != nil {
 			return errors.New("saved routes are invalid")
 		}
+		key := assignmentKey(assignment)
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("saved routes are invalid")
+		}
+		seen[key] = struct{}{}
 	}
 	service.mu.Lock()
 	service.assignments = slices.Clone(assignments)
@@ -103,10 +109,16 @@ func (service *Service) UpsertMany(ctx context.Context, assignments []domain.Ass
 		return errors.New("invalid route batch")
 	}
 	target := assignments[0].Target
+	seen := make(map[string]struct{}, len(assignments))
 	for _, assignment := range assignments {
 		if assignment.Target != target || assignment.Validate() != nil || !service.providers.Exists(assignment.ProviderID) {
 			return errors.New("invalid route batch")
 		}
+		key := assignmentKey(assignment)
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("invalid route batch")
+		}
+		seen[key] = struct{}{}
 	}
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
@@ -127,6 +139,9 @@ func (service *Service) UpsertMany(ctx context.Context, assignments []domain.Ass
 }
 
 func (service *Service) Delete(ctx context.Context, target domain.Target, publicModel string) error {
+	if err := domain.ValidateIdentity(target, publicModel); err != nil {
+		return err
+	}
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
 	service.mu.RLock()
@@ -138,6 +153,10 @@ func (service *Service) Delete(ctx context.Context, target domain.Target, public
 	}
 	candidate = append(candidate[:index], candidate[index+1:]...)
 	return service.persist(ctx, candidate, target)
+}
+
+func assignmentKey(assignment domain.Assignment) string {
+	return string(assignment.Target) + "\x00" + assignment.PublicModel
 }
 
 func (service *Service) OnChanged(listener func(domain.Target)) {

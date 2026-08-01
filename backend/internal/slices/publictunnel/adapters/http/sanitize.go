@@ -207,6 +207,7 @@ func redactMarkers(value string, markers []string, brand string) string {
 type markerReplacement struct {
 	pattern     *regexp.Regexp
 	replacement string
+	replace     bool
 }
 
 type markerRedactor []markerReplacement
@@ -218,7 +219,7 @@ func newMarkerRedactor(markers []string, brand string) markerRedactor {
 	redactor := make(markerRedactor, 0, len(markers))
 	for _, marker := range markers {
 		marker = strings.TrimSpace(marker)
-		if len(marker) < 4 {
+		if marker == "" {
 			continue
 		}
 		replacement := brand
@@ -230,7 +231,7 @@ func newMarkerRedactor(markers []string, brand string) markerRedactor {
 		}
 		pattern, err := regexp.Compile("(?i:" + regexp.QuoteMeta(marker) + ")")
 		if err == nil {
-			redactor = append(redactor, markerReplacement{pattern: pattern, replacement: replacement})
+			redactor = append(redactor, markerReplacement{pattern: pattern, replacement: replacement, replace: len(marker) >= 4})
 		}
 	}
 	return redactor
@@ -238,6 +239,9 @@ func newMarkerRedactor(markers []string, brand string) markerRedactor {
 
 func (redactor markerRedactor) replace(value string) string {
 	for _, marker := range redactor {
+		if !marker.replace {
+			continue
+		}
 		value = marker.pattern.ReplaceAllStringFunc(value, func(string) string { return marker.replacement })
 	}
 	return value

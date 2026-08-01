@@ -95,15 +95,25 @@ func (catalog *Catalog) Replace(providers []domain.Provider, activeID string) er
 		return ErrProviderUnavailable
 	}
 	catalog.mu.Lock()
+	previous, hadPrevious := catalog.providers[catalog.activeID]
+	routeChanged := catalog.activeID != activeID || !hadPrevious || !sameRelayProvider(previous, active)
 	catalog.providers = next
 	catalog.order = order
 	catalog.activeID = activeID
 	listeners := append([]func(string){}, catalog.listeners...)
 	catalog.mu.Unlock()
-	for _, listener := range listeners {
-		listener(activeID)
+	if routeChanged {
+		for _, listener := range listeners {
+			listener(activeID)
+		}
 	}
 	return nil
+}
+
+func sameRelayProvider(left, right domain.Provider) bool {
+	return left.ID == right.ID && left.BaseURL.String() == right.BaseURL.String() &&
+		left.AuthMode == right.AuthMode && left.AuthHeader == right.AuthHeader &&
+		left.CacheTTL == right.CacheTTL && left.Enabled == right.Enabled
 }
 
 func (catalog *Catalog) OnActivated(listener func(string)) {

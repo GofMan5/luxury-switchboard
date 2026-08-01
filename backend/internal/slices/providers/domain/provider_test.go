@@ -33,3 +33,15 @@ func TestProviderRejectsUnboundedOperationalValues(t *testing.T) {
 		t.Fatal("unsupported cache TTL was accepted")
 	}
 }
+
+func TestProviderURLRejectsQueryCredentialsButAllowsVersioning(t *testing.T) {
+	base := Params{ID: "provider", Name: "Provider", AuthMode: AuthBearer, Enabled: true}
+	base.BaseURL = "https://provider.example/v1?api-version=2026-08-01"
+	if _, err := New(base); err != nil {
+		t.Fatalf("safe provider query was rejected: %v", err)
+	}
+	base.BaseURL = "https://provider.example/v1?api_key=secret"
+	if _, err := New(base); err == nil {
+		t.Fatal("query credential was accepted into provider metadata")
+	}
+}

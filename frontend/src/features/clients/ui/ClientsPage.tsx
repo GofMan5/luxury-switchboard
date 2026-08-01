@@ -2,6 +2,7 @@ import { RefreshCw, UsersRound, X } from 'lucide-react'
 import { formatBytes, formatClock, formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { TunnelClient, TunnelClientEvent } from '../domain/client'
 import { useClients } from './useClients'
 import styles from './ClientsPage.module.css'
@@ -75,9 +76,10 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: '
 }
 
 function ClientDialog({ client, ip, events, onClose }: { client?: TunnelClient; ip: string; events: readonly TunnelClientEvent[]; onClose: () => void }) {
+  const dialogRef = useModalFocus<HTMLElement>(onClose)
   return (
     <div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="client-dialog-title">
+      <section ref={dialogRef} className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="client-dialog-title">
         <header>
           <div>
             <span className={styles.state}><StatusDot state={client?.active ? 'active' : 'stopped'} />{client?.active ? 'Active now' : 'Idle'}</span>

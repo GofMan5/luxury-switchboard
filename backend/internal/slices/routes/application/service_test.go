@@ -91,3 +91,18 @@ func TestLoadKeepsStaleProviderRouteVisibleAndFailClosed(t *testing.T) {
 		t.Fatalf("stale provider became writable again: %v", err)
 	}
 }
+
+func TestDuplicatePersistedAndBulkRoutesAreRejected(t *testing.T) {
+	route := domain.Assignment{Target: domain.TargetTunnel, PublicModel: "public", UpstreamModel: "private", ProviderID: "echo", Enabled: true}
+	service, _ := NewService(&memoryRepository{values: []domain.Assignment{route, route}}, providers{"echo": true})
+	if err := service.Load(context.Background()); err == nil {
+		t.Fatal("duplicate persisted routes were accepted")
+	}
+	service, _ = NewService(&memoryRepository{}, providers{"echo": true})
+	if err := service.UpsertMany(context.Background(), []domain.Assignment{route, route}); err == nil {
+		t.Fatal("duplicate route batch was accepted")
+	}
+	if err := service.Delete(context.Background(), domain.Target("invalid"), "public"); err == nil {
+		t.Fatal("invalid route deletion was reported successful")
+	}
+}

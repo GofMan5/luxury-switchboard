@@ -107,6 +107,69 @@ func TestRelayUsesProxyFromSelectedCredential(t *testing.T) {
 	}
 }
 
+func TestDefaultTransportNeverUsesAmbientProxy(t *testing.T) {
+	server := NewServer("127.0.0.1:0", Dependencies{})
+	if server.transport.Proxy != nil {
+		t.Fatal("direct credentials inherited an ambient process proxy")
+	}
+}
+
+func TestProviderRedirectCannotMoveCredentialsToAnotherOrigin(t *testing.T) {
+	reached := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached <- struct{}{} }))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"secret"}},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	select {
+	case <-reached:
+		t.Fatal("provider redirect escaped its configured origin")
+	default:
+	}
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("provider redirect returned status %d", response.Code)
+	}
+}
+
+func TestDispatchCarriesTheExactSelectedCredentialMarkers(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer proxy.Close()
+	parsed, _ := url.Parse("http://provider.invalid")
+	proxyURL := strings.Replace(proxy.URL, "http://", "http://proxy-user:proxy-pass@", 1)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{
+			values: []string{"selected-secret"}, proxyURL: proxyURL,
+		},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`), AttemptLimit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(response.SensitiveMarkers, "\n")
+	for _, marker := range []string{"selected-secret", "127.0.0.1", "proxy-user", "proxy-pass"} {
+		if !strings.Contains(joined, marker) {
+			t.Fatalf("selected credential marker %q was lost: %q", marker, joined)
+		}
+	}
+}
+
 func TestProxyClientCacheIsBounded(t *testing.T) {
 	server := NewServer("127.0.0.1:0", Dependencies{})
 	for index := range maxProxyClients + 1 {
@@ -251,10 +314,52 @@ func TestRateLimitRotatesCredentialWithoutLeaking429(t *testing.T) {
 	}
 }
 
+func TestPassthroughCredentialFailuresBackOffWithoutBusyLoop(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusUnauthorized} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			attempts := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				attempts++
+				if attempts == 1 {
+					writer.Header().Set("Retry-After", "0.04")
+					writer.WriteHeader(status)
+					return
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"ok":true}`))
+			}))
+			defer upstream.Close()
+			parsed, _ := url.Parse(upstream.URL)
+			server := NewServer("127.0.0.1:0", Dependencies{
+				Routes: fixedRoute{route: relayapp.Route{ProviderID: "local", BaseURL: parsed, AuthMode: "passthrough"}},
+				Config: Config{RetryBase: 40 * time.Millisecond, RetryMax: time.Second},
+			})
+			started := time.Now()
+			response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+				Method: http.MethodPost, Path: "/v1/responses", ProviderID: "local", UpstreamModel: "gpt-test",
+				Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`), AttemptLimit: 2,
+			})
+			if err != nil || response.Status != http.StatusOK || attempts != 2 {
+				t.Fatalf("passthrough retry failed: status=%d attempts=%d err=%v", response.Status, attempts, err)
+			}
+			if elapsed := time.Since(started); elapsed < 30*time.Millisecond {
+				t.Fatalf("passthrough retry did not back off: %s", elapsed)
+			}
+		})
+	}
+}
+
 func TestRetryAfterHTTPDateIsClamped(t *testing.T) {
 	response := &http.Response{Header: http.Header{"Retry-After": []string{time.Now().Add(time.Minute).UTC().Format(http.TimeFormat)}}}
 	if delay := retryDelay(0, response, Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Second}); delay != 2*time.Second {
 		t.Fatalf("HTTP-date retry window was ignored: %s", delay)
+	}
+}
+
+func TestPlanSpecificModelUnavailableErrorIsClassified(t *testing.T) {
+	body := []byte(`{"error":{"message":"Model 'gpt-5.6-sol' is not available on your plan."}}`)
+	if !modelUnavailable(body, "gpt-5.6-sol") {
+		t.Fatal("plan-specific unavailable model did not fall through to the next key")
 	}
 }
 
@@ -547,6 +652,18 @@ func TestSSEInspectorHandlesFragmentedMultilineEvent(t *testing.T) {
 	}
 }
 
+func TestSSEInspectorRejectsCompletedEventWithoutResponse(t *testing.T) {
+	for _, event := range []string{
+		"data: {\"type\":\"response.completed\"}\n\n",
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"failed\",\"error\":{}}}\n\n",
+	} {
+		inspector := &sseInspector{}
+		if terminal := inspector.Feed([]byte(event)); terminal != "response.invalid" {
+			t.Fatalf("malformed completion was accepted: %q", terminal)
+		}
+	}
+}
+
 func TestSSEUsageKeepsCacheAndReasoningAsSubsets(t *testing.T) {
 	inspector := &sseInspector{}
 	event := `data: {"type":"response.completed","response":{"status":"completed","error":null,"incomplete_details":null,"usage":{"input_tokens":100,"output_tokens":40,"total_tokens":140,"input_tokens_details":{"cached_tokens":30},"output_tokens_details":{"reasoning_tokens":10}}}}` + "\n\n"
@@ -573,6 +690,26 @@ func TestJSONUsageDoesNotDoubleCountCachedOrReasoningSubsets(t *testing.T) {
 	usage := usageFromJSON([]byte(`{"usage":{"input_tokens":100,"output_tokens":40,"total_tokens":140,"input_tokens_details":{"cached_tokens":30},"output_tokens_details":{"reasoning_tokens":10}}}`))
 	if usage.InputTokens != 100 || usage.OutputTokens != 40 || usage.CachedTokens != 30 || usage.ReasoningTokens != 10 || usage.TotalTokens != 140 {
 		t.Fatalf("JSON usage subsets were inflated: %+v", usage)
+	}
+}
+
+func TestNonStreamingApplicationFailureIsTerminalAndNotCountedAsSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"failed","error":{"code":"provider_error"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}}, Credentials: credentials,
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`), AttemptLimit: 1,
+	})
+	if err != nil || response.Terminal != "response.failed" || len(credentials.outcomes) != 1 || credentials.outcomes[0].Kind != relayapp.AttemptRequestError {
+		t.Fatalf("application failure was reported as success: terminal=%q outcomes=%+v err=%v", response.Terminal, credentials.outcomes, err)
 	}
 }
 

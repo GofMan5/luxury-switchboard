@@ -4,6 +4,7 @@ import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import type { TunnelConfig, TunnelSnapshot } from '../domain/tunnel'
 import { useTunnel } from './useTunnel'
+import { tunnelLimitsAreValid } from './tunnel-form'
 import styles from './TunnelPage.module.css'
 
 export default function TunnelPage() {
@@ -33,7 +34,7 @@ function TunnelForm({ snapshot, pending, error, onSave, onStart, onStop, onRevea
   const parsedPort = Number(port)
   const parsedRPM = Number(rpm)
   const parsedContext = Number(contextMiB)
-  const valid = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65_535 && Number.isInteger(parsedRPM) && parsedRPM >= 0 && parsedRPM <= 1_000_000 && Number.isFinite(parsedContext) && parsedContext >= 0 && parsedContext <= 2_048
+  const valid = tunnelLimitsAreValid(port, rpm, contextMiB)
   const dirty = parsedPort !== snapshot.port || parsedRPM !== snapshot.rpmPerIp || Math.round(parsedContext * 1024) !== snapshot.contextLimitKiB || brand !== snapshot.brandResponse || publisherProfile.trim() !== snapshot.publisherProfile
   const config = { port: parsedPort, rpmPerIp: parsedRPM, contextLimitKiB: Math.round(parsedContext * 1024), brandResponse: brand, publisherProfile: publisherProfile.trim() }
   const submit = (event: FormEvent) => {

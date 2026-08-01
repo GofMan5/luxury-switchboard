@@ -86,19 +86,3 @@ func TestManagerDoesNotCommitFailedPersistence(t *testing.T) {
 		t.Fatalf("failed save mutated runtime: %+v", keys)
 	}
 }
-
-func TestSensitiveValuesDecomposesProxyCredentials(t *testing.T) {
-	manager, err := NewManager(NewScheduler(10), &memoryRepository{}, map[string]int{"echo": 0}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := manager.Add(context.Background(), domain.Params{ProviderID: "echo", Label: "Proxy", Secret: "api-secret", ProxyURL: "http://proxy-user:proxy-pass@proxy.invalid:8080"}); err != nil {
-		t.Fatal(err)
-	}
-	values := manager.SensitiveValues("echo")
-	for _, required := range []string{"api-secret", "proxy-user", "proxy-pass", "proxy.invalid"} {
-		if !slices.Contains(values, required) {
-			t.Fatalf("sensitive proxy marker %q missing: %v", required, values)
-		}
-	}
-}

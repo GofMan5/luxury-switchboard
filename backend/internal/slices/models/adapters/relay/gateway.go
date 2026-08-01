@@ -20,7 +20,7 @@ type Gateway struct {
 
 func NewGateway(dispatcher relayapp.Dispatcher, timeout time.Duration) *Gateway {
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = 90 * time.Second
 	}
 	return &Gateway{dispatcher: dispatcher, timeout: timeout}
 }

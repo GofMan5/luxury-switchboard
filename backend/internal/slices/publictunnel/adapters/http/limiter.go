@@ -36,6 +36,13 @@ func (limiter *ipLimiter) Reserve(ip string, rpm int) (time.Duration, func(), bo
 	}
 	state := limiter.next[ip]
 	if state == nil {
+		if len(limiter.next) >= maxQueuedTotal {
+			limiter.evictExpiredLocked(now)
+			if len(limiter.next) >= maxQueuedTotal {
+				limiter.mu.Unlock()
+				return 0, nil, false
+			}
+		}
 		state = &ipLimit{}
 		limiter.next[ip] = state
 	}
@@ -52,15 +59,16 @@ func (limiter *ipLimiter) Reserve(ip string, rpm int) (time.Duration, func(), bo
 	if rpm > 0 {
 		state.next = slot.Add(time.Minute / time.Duration(rpm))
 	}
-	if len(limiter.next) > 10000 {
-		for key, candidate := range limiter.next {
-			if candidate.pending == 0 && candidate.next.Before(now) {
-				delete(limiter.next, key)
-			}
-		}
-	}
 	limiter.mu.Unlock()
 	return max(slot.Sub(now), 0), func() { limiter.release(ip) }, true
+}
+
+func (limiter *ipLimiter) evictExpiredLocked(now time.Time) {
+	for key, candidate := range limiter.next {
+		if candidate.pending == 0 && !candidate.next.After(now) {
+			delete(limiter.next, key)
+		}
+	}
 }
 
 func (limiter *ipLimiter) release(ip string) {

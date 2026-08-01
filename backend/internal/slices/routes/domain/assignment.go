@@ -22,10 +22,10 @@ type Assignment struct {
 }
 
 func (assignment Assignment) Validate() error {
-	if assignment.Target != TargetRelay && assignment.Target != TargetTunnel {
-		return errors.New("invalid route target")
+	if err := ValidateIdentity(assignment.Target, assignment.PublicModel); err != nil {
+		return err
 	}
-	if !validModel(assignment.PublicModel) || !validModel(assignment.UpstreamModel) {
+	if !validModel(assignment.UpstreamModel) {
 		return errors.New("invalid route model")
 	}
 	if assignment.ProviderID == "" || assignment.ProviderID != strings.TrimSpace(assignment.ProviderID) {
@@ -33,6 +33,16 @@ func (assignment Assignment) Validate() error {
 	}
 	if assignment.ContextLimitKiB < 0 || assignment.ContextLimitKiB > 2*1024*1024 {
 		return errors.New("route context limit is invalid")
+	}
+	return nil
+}
+
+func ValidateIdentity(target Target, publicModel string) error {
+	if target != TargetRelay && target != TargetTunnel {
+		return errors.New("invalid route target")
+	}
+	if !validModel(publicModel) {
+		return errors.New("invalid route model")
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { KeyRound, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { Provider, ProviderInput } from '../domain/provider'
 import { useProviders } from './useProviders'
 import styles from './ProvidersPage.module.css'
@@ -121,6 +122,7 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
   const [cache1h, setCache1H] = useState(provider?.cacheTtl === '1h0m0s')
   const [enabled, setEnabled] = useState(provider?.enabled ?? true)
   const [error, setError] = useState('')
+  const dialogRef = useModalFocus<HTMLFormElement>(onClose, pending)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -135,7 +137,7 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
 
   return (
     <div className="ui-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
-      <form className={`ui-modal ${styles.providerModal}`} role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add provider' : 'Edit provider'} onSubmit={submit}>
+      <form ref={dialogRef} className={`ui-modal ${styles.providerModal}`} role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add provider' : 'Edit provider'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add provider' : `Edit ${provider?.name}`}</h2><p>Remote endpoints require HTTPS; loopback HTTP is allowed.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Display name</span><input value={name} maxLength={80} autoFocus onChange={(event) => setName(event.currentTarget.value)} /></label>
@@ -156,5 +158,6 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
 }
 
 function ConfirmDelete({ provider, pending, onCancel, onConfirm }: { provider: Provider; pending: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
-  return <div className="ui-scrim"><section className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>This removes only provider settings. Requests are not affected because active providers cannot be deleted.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
+  const dialogRef = useModalFocus<HTMLElement>(onCancel, pending)
+  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>This removes only provider settings. Requests are not affected because active providers cannot be deleted.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
 }

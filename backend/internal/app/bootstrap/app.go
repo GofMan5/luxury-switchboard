@@ -137,7 +137,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	})
 	modelService, err := modelapp.NewService(
 		modelproviders.NewCatalog(catalog),
-		modelrelay.NewGateway(httpRuntime, min(time.Duration(settings.HeaderTimeoutSeconds)*time.Second, 10*time.Second)),
+		modelrelay.NewGateway(httpRuntime, max(time.Duration(settings.HeaderTimeoutSeconds)*time.Second, 90*time.Second)),
 	)
 	if err != nil {
 		return nil, err
@@ -175,7 +175,11 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	})
 	relay := relayapp.NewService(httpRuntime)
 	catalog.OnActivated(func(string) { relay.CancelActive() })
-	routeService.OnChanged(func(routedomain.Target) { relay.CancelActive() })
+	routeService.OnChanged(func(target routedomain.Target) {
+		if target == routedomain.TargetRelay {
+			relay.CancelActive()
+		}
+	})
 
 	protocol := platform.NewServer(stdin, stdout, 32)
 	systemstdio.Register(protocol)
@@ -242,7 +246,7 @@ func defaultProviders() ([]providerdomain.Provider, string, error) {
 	echo, err := providerdomain.New(providerdomain.Params{
 		ID: "echo", Name: "EchoGate", BaseURL: "https://api.echogate.one/v1",
 		AuthMode: providerdomain.AuthAuto,
-		RPM:      environmentInt("SWITCHBOARD_ECHO_RPM", 0),
+		RPM:      environmentBounded("SWITCHBOARD_ECHO_RPM", 0, providerdomain.MaxRPM),
 		CacheTTL: time.Hour, Enabled: true, Builtin: true,
 	})
 	if err != nil {
@@ -268,7 +272,7 @@ func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*key
 					Label:      "Environment key",
 					Secret:     secret,
 					Priority:   0,
-					RPM:        environmentInt("SWITCHBOARD_LITE_RPM", 30),
+					RPM:        environmentBounded("SWITCHBOARD_LITE_RPM", 30, keydomain.MaxRPM),
 					Pinned:     true,
 				})
 				if err != nil {
@@ -398,16 +402,16 @@ func defaultTunnelService(runtime tunnelapp.Runtime, routes tunnelapp.Routes) (*
 }
 
 func environmentPort(fallback int) int {
-	return environmentInt("SWITCHBOARD_PORT", fallback)
+	return environmentBounded("SWITCHBOARD_PORT", fallback, 65535)
 }
 
-func environmentInt(name string, fallback int) int {
+func environmentBounded(name string, fallback, maximum int) int {
 	raw := os.Getenv(name)
 	if raw == "" {
 		return fallback
 	}
 	value, err := strconv.Atoi(raw)
-	if err != nil || value < 0 || value > 65535 {
+	if err != nil || value < 0 || value > maximum {
 		return fallback
 	}
 	return value

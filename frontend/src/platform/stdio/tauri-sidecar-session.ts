@@ -14,7 +14,8 @@ const CALL_TIMEOUT_MS = 30_000
 const SHUTDOWN_CALL_TIMEOUT_MS = 2_000
 const SHUTDOWN_EXIT_TIMEOUT_MS = 10_000
 const TUNNEL_START_TIMEOUT_MS = 60_000
-const MODEL_TEST_TIMEOUT_MS = 15 * 60_000
+const MODEL_DISCOVERY_TIMEOUT_MS = 2 * 60_000
+const MODEL_TEST_TIMEOUT_MS = 30 * 60_000
 
 interface PendingCall {
   readonly method: string
@@ -236,6 +237,7 @@ function requestID(): string {
 }
 
 function commandTimeout(method: string): number {
+  if (method === 'models.discover') return MODEL_DISCOVERY_TIMEOUT_MS
   if (method === 'models.test') return MODEL_TEST_TIMEOUT_MS
   if (method === 'tunnel.start') return TUNNEL_START_TIMEOUT_MS
   if (method === 'system.shutdown') return SHUTDOWN_CALL_TIMEOUT_MS

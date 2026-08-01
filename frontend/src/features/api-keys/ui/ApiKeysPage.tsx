@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 
 import { ArrowDown, ArrowUp, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
 import { useProviders } from '../../providers/ui/useProviders'
 import { Button } from '../../../shared/ui/Button'
+import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
 import { useApiKeys } from './useApiKeys'
 import styles from './ApiKeysPage.module.css'
@@ -21,6 +22,10 @@ export default function ApiKeysPage() {
   const ordered = useMemo(
     () => [...state.keys].sort((left, right) => left.priority - right.priority),
     [state.keys],
+  )
+  const movablePositions = useMemo(
+    () => new Map(ordered.filter((key) => !key.pinned).map((key, index) => [key.id, index])),
+    [ordered],
   )
 
   return (
@@ -52,28 +57,31 @@ export default function ApiKeysPage() {
             </tr>
           </thead>
           <tbody>
-            {ordered.map((key, index) => (
-              <tr key={key.id}>
-                <td className={styles.priority}>{index + 1}</td>
-                <td>
-                  <span className={styles.keyLabel}><KeyRound size={15} aria-hidden="true" /><span><strong>{key.label}</strong><small>{key.pinned ? 'Environment · direct IP' : 'Encrypted local key'}</small></span></span>
-                </td>
-                <td>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
-                <td>{key.startsInWindow} / min</td>
-                <td>{key.pinned ? 'Direct' : key.proxyConfigured ? 'Configured' : 'Direct'}</td>
-                <td>{formatCooldown(key.cooldownMs, key.blockedModels)}</td>
-                <td>{key.retries429}</td>
-                <td>
-                  <div className={styles.rowActions}>
-                    <IconAction label={`Move ${key.label} up`} disabled={key.pinned || index === 0 || state.pendingId === key.id} onClick={() => void model.move(key.id, -1)}><ArrowUp /></IconAction>
-                    <IconAction label={`Move ${key.label} down`} disabled={key.pinned || index === ordered.length - 1 || state.pendingId === key.id} onClick={() => void model.move(key.id, 1)}><ArrowDown /></IconAction>
-                    <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => setEditor({ mode: 'edit', key })}><Pencil /></IconAction>
-                    <IconAction label={`Reset cooldown for ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => void model.reset(key.id)}><RefreshCcw /></IconAction>
-                    <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => setRemoveKey(key)}><Trash2 /></IconAction>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {ordered.map((key, index) => {
+              const movablePosition = movablePositions.get(key.id) ?? -1
+              return (
+                <tr key={key.id}>
+                  <td className={styles.priority}>{index + 1}</td>
+                  <td>
+                    <span className={styles.keyLabel}><KeyRound size={15} aria-hidden="true" /><span><strong>{key.label}</strong><small>{key.pinned ? 'Environment · direct IP' : 'Encrypted local key'}</small></span></span>
+                  </td>
+                  <td>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
+                  <td>{key.startsInWindow} / min</td>
+                  <td>{key.pinned ? 'Direct' : key.proxyConfigured ? 'Configured' : 'Direct'}</td>
+                  <td>{formatCooldown(key.cooldownMs, key.blockedModels)}</td>
+                  <td>{key.retries429}</td>
+                  <td>
+                    <div className={styles.rowActions}>
+                      <IconAction label={`Move ${key.label} up`} disabled={key.pinned || movablePosition === 0 || state.pendingId === key.id} onClick={() => void model.move(key.id, -1)}><ArrowUp /></IconAction>
+                      <IconAction label={`Move ${key.label} down`} disabled={key.pinned || movablePosition === movablePositions.size - 1 || state.pendingId === key.id} onClick={() => void model.move(key.id, 1)}><ArrowDown /></IconAction>
+                      <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => setEditor({ mode: 'edit', key })}><Pencil /></IconAction>
+                      <IconAction label={`Reset cooldown for ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => void model.reset(key.id)}><RefreshCcw /></IconAction>
+                      <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => setRemoveKey(key)}><Trash2 /></IconAction>
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
             {state.phase !== 'loading' && ordered.length === 0 ? <tr><td colSpan={8} className={styles.empty}>No keys configured for this provider.</td></tr> : null}
           </tbody>
         </table>
@@ -130,6 +138,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
   const [replaceProxy, setReplaceProxy] = useState(mode === 'add')
   const [proxyUrl, setProxyURL] = useState('')
   const [error, setError] = useState('')
+  const dialogRef = useModalFocus<HTMLFormElement>(onClose, pending)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -156,7 +165,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
 
   return (
     <div className="ui-scrim" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
-      <form className="ui-modal" role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
+      <form ref={dialogRef} className="ui-modal" role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add API key' : 'Edit API key'}</h2><p>The secret is encrypted locally and never shown again.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Label</span><input value={label} maxLength={80} autoFocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
@@ -172,7 +181,8 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
 }
 
 function ConfirmRemove({ keyValue, pending, onCancel, onConfirm }: { keyValue: ApiKey; pending: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
-  return <div className="ui-scrim"><section className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
+  const dialogRef = useModalFocus<HTMLElement>(onCancel, pending)
+  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
 }
 
 function formatCooldown(milliseconds: number, blockedModels: number): string {

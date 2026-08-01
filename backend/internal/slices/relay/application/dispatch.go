@@ -17,10 +17,11 @@ type DispatchRequest struct {
 }
 
 type DispatchResponse struct {
-	Status   int
-	Headers  http.Header
-	Body     []byte
-	Terminal string
+	Status           int
+	Headers          http.Header
+	Body             []byte
+	Terminal         string
+	SensitiveMarkers []string `json:"-"`
 }
 
 type Dispatcher interface {

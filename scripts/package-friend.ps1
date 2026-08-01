@@ -9,7 +9,8 @@ $ErrorActionPreference = "Stop"
 
 $workspace = Split-Path -Parent $PSScriptRoot
 if (-not $InstallerPath) {
-    $InstallerPath = Join-Path $workspace "src-tauri\target\release\bundle\nsis\Switchboard_0.2.0_x64-setup.exe"
+    $version = (Get-Content -Raw -LiteralPath (Join-Path $workspace "src-tauri\tauri.conf.json") | ConvertFrom-Json).version
+    $InstallerPath = Join-Path $workspace "src-tauri\target\release\bundle\nsis\Switchboard_${version}_x64-setup.exe"
 }
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 $checksumPath = Join-Path $workspace "SHA256SUMS.txt"

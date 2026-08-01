@@ -52,7 +52,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
         </nav>
         <div className={styles.sidebarFooter}>
           <PanelLeftClose size={17} aria-hidden="true" />
-          <span>v0.2.0</span>
+          <span>v1.0.1</span>
         </div>
       </aside>
 

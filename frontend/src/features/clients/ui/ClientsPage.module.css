@@ -1,37 +1,37 @@
 .page { min-height: 100%; }
 .error { padding: 10px 28px; color: #ffaaa4; background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
-.metrics { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); border-bottom: 1px solid var(--border-subtle); background: var(--bg-surface); }
-.metric { min-width: 0; border-right: 1px solid var(--border-subtle); padding: 16px 20px; }
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); overflow: hidden; margin: 18px 28px 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
+.metric { min-width: 0; border-right: 1px solid var(--border-subtle); padding: 15px 18px; }
 .metric:last-child { border-right: 0; }
 .metric span { display: block; color: var(--text-muted); font-size: 11px; }
-.metric strong { display: block; margin-top: 6px; color: var(--text-primary); font-size: 24px; font-variant-numeric: tabular-nums; }
+.metric strong { display: block; margin-top: 6px; color: var(--text-primary); font-size: 23px; font-variant-numeric: tabular-nums; font-weight: 630; }
 .metric[data-tone='active'] strong { color: var(--status-success); }
 .metric[data-tone='queued'] strong { color: var(--status-warning); }
-.clients { margin: 20px 28px; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--bg-surface); }
+.clients { margin: 16px 28px 20px; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); box-shadow: inset 0 1px rgb(255 255 255 / 2%); }
 .clients > header { display: flex; min-height: 56px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 0 14px; }
 .clients > header div { display: flex; align-items: center; gap: 9px; color: var(--text-secondary); }
 .clients h2 { color: var(--text-primary); font-size: 15px; }
 .clients > header span { color: var(--text-muted); font-size: 11px; }
 .tableWrap, .eventTable { overflow: auto; }
 .clients table, .eventTable table { width: 100%; min-width: 760px; border-collapse: collapse; table-layout: fixed; }
-.clients th, .clients td, .eventTable th, .eventTable td { height: 42px; overflow: hidden; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.clients th, .eventTable th { color: var(--text-muted); background: var(--bg-chrome); font-size: 11px; font-weight: 600; }
+.clients th, .clients td, .eventTable th, .eventTable td { height: 42px; overflow: hidden; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.clients th, .eventTable th { color: var(--text-muted); background: #171717; font-size: 11px; font-weight: 620; }
 .clients tbody tr { cursor: default; }
-.clients tbody tr:hover, .clients tbody tr:focus { background: var(--bg-hover); outline: none; }
+.clients tbody tr:hover, .clients tbody tr:focus { background: color-mix(in srgb, var(--bg-hover) 76%, transparent); outline: none; }
 .clients th:nth-child(1) { width: 112px; }
 .clients th:nth-child(3), .clients th:nth-child(4), .clients th:nth-child(5), .clients th:nth-child(6) { width: 86px; }
 .clients th:nth-child(7) { width: 112px; }
 .state { display: inline-flex; min-width: 0; align-items: center; gap: 7px; }
 .mono { font-family: var(--font-mono); font-size: 12px; }
 .empty { height: 170px !important; color: var(--text-muted); text-align: center !important; }
-.backdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 58%); }
-.dialog { display: flex; width: min(1040px, 100%); max-height: min(720px, calc(100vh - 48px)); min-height: 360px; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 12px; flex-direction: column; background: var(--bg-surface); box-shadow: 0 24px 80px rgb(0 0 0 / 46%); }
+.backdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 72%); animation: scrim-in var(--motion-fast) ease-out both; }
+.dialog { display: flex; width: min(1040px, 100%); max-height: min(720px, calc(100vh - 48px)); min-height: 360px; overflow: hidden; border: 1px solid #484848; border-radius: 14px; flex-direction: column; background: var(--bg-surface); box-shadow: var(--shadow-float); animation: dialog-in var(--motion-standard) var(--ease-standard) both; }
 .dialog > header { display: flex; min-height: 76px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border-subtle); padding: 12px 16px; }
 .dialog h2 { margin-top: 6px; color: var(--text-primary); font-family: var(--font-mono); font-size: 17px; }
 .close { display: grid; width: 36px; height: 36px; place-items: center; border: 0; border-radius: 7px; color: var(--text-secondary); background: transparent; cursor: pointer; }
 .close:hover { color: var(--text-primary); background: var(--bg-hover); }
 .clientSummary { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--border-subtle); }
-.clientSummary > span { border-right: 1px solid var(--border-subtle); padding: 12px 16px; }
+.clientSummary > span { border-right: 1px solid var(--border-subtle); padding: 11px 16px; }
 .clientSummary > span:last-child { border-right: 0; }
 .clientSummary small, .clientSummary strong { display: block; }
 .clientSummary small { color: var(--text-muted); font-size: 10px; text-transform: uppercase; }
@@ -42,8 +42,9 @@
 .eventTable th:nth-child(1) { width: 132px; }
 .eventTable th:nth-child(3) { width: 160px; }
 .eventTable th:nth-child(4), .eventTable th:nth-child(5), .eventTable th:nth-child(6), .eventTable th:nth-child(7) { width: 90px; }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @media (max-width: 959px) {
-  .metrics { grid-template-columns: repeat(2, 1fr); }
+  .metrics { grid-template-columns: repeat(2, 1fr); margin: 14px 16px 0; }
   .metric:nth-child(2) { border-right: 0; }
   .metric:nth-child(n + 3) { border-top: 1px solid var(--border-subtle); }
   .clients { margin: 16px; }

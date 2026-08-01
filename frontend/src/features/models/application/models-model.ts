@@ -20,6 +20,8 @@ export class ModelsModel {
   #unsubscribe: (() => void) | null = null
   #discoverController: AbortController | null = null
   #testController: AbortController | null = null
+  #resultTimer: ReturnType<typeof setTimeout> | undefined
+  #pendingResults = new Map<string, ModelTestResult>()
   #generation = 0
 
   constructor(port: ModelsPort) {
@@ -37,6 +39,9 @@ export class ModelsModel {
     this.#discoverController?.abort()
     this.#testController?.abort()
     this.#testController = null
+    clearTimeout(this.#resultTimer)
+    this.#resultTimer = undefined
+    this.#pendingResults.clear()
     const controller = new AbortController()
     this.#discoverController = controller
     const generation = ++this.#generation
@@ -74,10 +79,12 @@ export class ModelsModel {
       for (let offset = 0; offset < models.length; offset += MODEL_TEST_BATCH) {
         const batch = models.slice(offset, offset + MODEL_TEST_BATCH)
         if (await this.#port.test(providerId, batch, controller.signal) !== batch.length) throw new Error('incomplete model test batch')
+        this.#flushResults()
       }
       this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'result_missing') })
       return true
     } catch {
+      this.#flushResults()
       const sameProvider = this.#state.providerId === providerId
       this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'interrupted'), error: sameProvider ? 'Model tests were interrupted' : this.#state.error })
       return false
@@ -91,13 +98,28 @@ export class ModelsModel {
   dispose() {
     this.#discoverController?.abort()
     this.#testController?.abort()
+    clearTimeout(this.#resultTimer)
+    this.#pendingResults.clear()
     this.#unsubscribe?.()
     this.#listeners.clear()
   }
 
   #accept(result: ModelTestResult) {
     if (result.providerId !== this.#state.providerId) return
-    this.#set({ ...this.#state, results: { ...this.#state.results, [result.model]: result } })
+    this.#pendingResults.set(result.model, result)
+    this.#resultTimer ??= setTimeout(() => this.#flushResults(), 16)
+  }
+
+  #flushResults() {
+    clearTimeout(this.#resultTimer)
+    this.#resultTimer = undefined
+    if (this.#pendingResults.size === 0) return
+    const results = { ...this.#state.results }
+    for (const [model, result] of this.#pendingResults) {
+      if (result.providerId === this.#state.providerId) results[model] = result
+    }
+    this.#pendingResults.clear()
+    this.#set({ ...this.#state, results })
   }
 
   #settle(models: readonly string[], providerId: string, errorCode: string) {

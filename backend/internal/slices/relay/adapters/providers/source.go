@@ -48,7 +48,7 @@ func (source *Source) Pinned(_ context.Context, providerID, upstreamModel string
 func providerRoute(provider providerdomain.Provider, upstreamModel string) relayapp.Route {
 	return relayapp.Route{
 		ProviderID: provider.ID, ProviderName: provider.Name, BaseURL: provider.BaseURL,
-		AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader,
-		UpstreamModel: upstreamModel, CacheTTL: provider.CacheTTL,
+		AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader, Dialect: string(provider.Dialect),
+		ImageCompat: provider.ImageCompat, UpstreamModel: upstreamModel, CacheTTL: provider.CacheTTL,
 	}
 }

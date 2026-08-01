@@ -14,9 +14,11 @@ type Repository interface {
 }
 
 type Service struct {
+	opMu       sync.Mutex
 	mu         sync.RWMutex
 	repository Repository
 	settings   domain.Settings
+	applied    domain.Settings
 }
 
 type UpdateResult struct {
@@ -28,7 +30,8 @@ func NewService(repository Repository) (*Service, error) {
 	if repository == nil {
 		return nil, errors.New("settings repository is required")
 	}
-	return &Service{repository: repository, settings: domain.Defaults()}, nil
+	defaults := domain.Defaults()
+	return &Service{repository: repository, settings: defaults, applied: defaults}, nil
 }
 
 func (service *Service) Load(ctx context.Context) error {
@@ -44,6 +47,7 @@ func (service *Service) Load(ctx context.Context) error {
 	}
 	service.mu.Lock()
 	service.settings = settings
+	service.applied = settings
 	service.mu.Unlock()
 	return nil
 }
@@ -55,15 +59,17 @@ func (service *Service) Snapshot() domain.Settings {
 }
 
 func (service *Service) Update(ctx context.Context, settings domain.Settings) (UpdateResult, error) {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	if err := settings.Validate(); err != nil {
 		return UpdateResult{}, err
 	}
-	previous := service.Snapshot()
 	if err := service.repository.Save(ctx, settings); err != nil {
 		return UpdateResult{}, errors.New("settings could not be saved")
 	}
 	service.mu.Lock()
 	service.settings = settings
+	restartRequired := service.applied != settings
 	service.mu.Unlock()
-	return UpdateResult{Settings: settings, RestartRequired: previous != settings}, nil
+	return UpdateResult{Settings: settings, RestartRequired: restartRequired}, nil
 }

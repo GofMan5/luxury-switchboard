@@ -52,16 +52,17 @@ func Register(server *platform.Server, catalog *application.Catalog, manager *ap
 	})
 	server.Handle("providers.update", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			BaseURL    string `json:"baseUrl"`
-			AuthMode   string `json:"authMode"`
-			AuthHeader string `json:"authHeader"`
-			Dialect    string `json:"dialect"`
-			ModelsPath string `json:"modelsPath"`
-			RPM        int    `json:"rpm"`
-			Cache1H    bool   `json:"cache1h"`
-			Enabled    bool   `json:"enabled"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			BaseURL     string `json:"baseUrl"`
+			AuthMode    string `json:"authMode"`
+			AuthHeader  string `json:"authHeader"`
+			Dialect     string `json:"dialect"`
+			ModelsPath  string `json:"modelsPath"`
+			ImageCompat bool   `json:"imageCompat"`
+			RPM         int    `json:"rpm"`
+			Cache1H     bool   `json:"cache1h"`
+			Enabled     bool   `json:"enabled"`
 		}
 		if platform.DecodePayload(payload, &command) != nil || command.ID == "" {
 			return nil, invalidPayload()
@@ -69,7 +70,7 @@ func Register(server *platform.Server, catalog *application.Catalog, manager *ap
 		provider, err := manager.Update(ctx, command.ID, domain.Params{
 			Name: command.Name, BaseURL: command.BaseURL,
 			AuthMode: domain.AuthMode(command.AuthMode), AuthHeader: command.AuthHeader,
-			Dialect: domain.Dialect(command.Dialect), ModelsPath: command.ModelsPath,
+			Dialect: domain.Dialect(command.Dialect), ModelsPath: command.ModelsPath, ImageCompat: command.ImageCompat,
 			RPM:      command.RPM,
 			CacheTTL: cacheTTL(command.Cache1H), Enabled: command.Enabled,
 		})
@@ -96,15 +97,16 @@ func Register(server *platform.Server, catalog *application.Catalog, manager *ap
 
 func providerParams(payload json.RawMessage) (domain.Params, error) {
 	var command struct {
-		Name       string `json:"name"`
-		BaseURL    string `json:"baseUrl"`
-		AuthMode   string `json:"authMode"`
-		AuthHeader string `json:"authHeader"`
-		Dialect    string `json:"dialect"`
-		ModelsPath string `json:"modelsPath"`
-		RPM        int    `json:"rpm"`
-		Cache1H    bool   `json:"cache1h"`
-		Enabled    bool   `json:"enabled"`
+		Name        string `json:"name"`
+		BaseURL     string `json:"baseUrl"`
+		AuthMode    string `json:"authMode"`
+		AuthHeader  string `json:"authHeader"`
+		Dialect     string `json:"dialect"`
+		ModelsPath  string `json:"modelsPath"`
+		ImageCompat bool   `json:"imageCompat"`
+		RPM         int    `json:"rpm"`
+		Cache1H     bool   `json:"cache1h"`
+		Enabled     bool   `json:"enabled"`
 	}
 	if platform.DecodePayload(payload, &command) != nil {
 		return domain.Params{}, invalidPayload()
@@ -112,7 +114,7 @@ func providerParams(payload json.RawMessage) (domain.Params, error) {
 	return domain.Params{
 		Name: command.Name, BaseURL: command.BaseURL,
 		AuthMode: domain.AuthMode(command.AuthMode), AuthHeader: command.AuthHeader,
-		Dialect: domain.Dialect(command.Dialect), ModelsPath: command.ModelsPath,
+		Dialect: domain.Dialect(command.Dialect), ModelsPath: command.ModelsPath, ImageCompat: command.ImageCompat,
 		RPM:      command.RPM,
 		CacheTTL: cacheTTL(command.Cache1H), Enabled: command.Enabled,
 	}, nil
@@ -161,6 +163,8 @@ func managementError(err error) platform.MethodError {
 		return platform.MethodError{Code: "provider_active", Message: "Active provider cannot be disabled or deleted"}
 	case errors.Is(err, application.ErrProviderHasKeys):
 		return platform.MethodError{Code: "provider_has_keys", Message: "Remove provider keys first"}
+	case errors.Is(err, application.ErrProviderHasRoutes):
+		return platform.MethodError{Code: "provider_has_routes", Message: "Reassign or delete provider model routes first"}
 	default:
 		return platform.MethodError{Code: "provider_update_failed", Message: "Provider settings could not be saved"}
 	}

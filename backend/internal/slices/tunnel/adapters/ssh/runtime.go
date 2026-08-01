@@ -25,7 +25,7 @@ import (
 const (
 	sshDestination = "model-tunnel@" + openssh.Host
 	identityName   = "model-tunnel_ed25519"
-	maxModelsBody  = 128 * 1024
+	maxModelsBody  = 512 * 1024
 )
 
 type LocalRuntime interface {
@@ -94,7 +94,7 @@ func (runtime *Runtime) Start(startupCtx context.Context, config domain.Config) 
 		return "", errors.New("local tunnel port is unavailable")
 	}
 	if err := startupCtx.Err(); err != nil {
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", err
 	}
 	if config.PublisherProfile == "" {
@@ -102,18 +102,18 @@ func (runtime *Runtime) Start(startupCtx context.Context, config domain.Config) 
 	}
 	remotePort, _, err := domain.ParsePublisherProfile(config.PublisherProfile)
 	if err != nil {
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", err
 	}
 	publicURL, _ := domain.PublisherURL(config.PublisherProfile)
 	localPort, err := loopbackPort(localAddress)
 	if err != nil {
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", errors.New("local tunnel address is invalid")
 	}
 	sshClient, err := publisherClient()
 	if err != nil {
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,7 +122,7 @@ func (runtime *Runtime) Start(startupCtx context.Context, config domain.Config) 
 	if runtime.desired {
 		runtime.mu.Unlock()
 		cancel()
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", errors.New("tunnel publisher is already running")
 	}
 	runtime.desired, runtime.cancel, runtime.url = true, cancel, publicURL
@@ -134,7 +134,7 @@ func (runtime *Runtime) Start(startupCtx context.Context, config domain.Config) 
 		runtime.mu.Lock()
 		runtime.desired, runtime.cancel = false, nil
 		runtime.mu.Unlock()
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", err
 	}
 	if !stopStartupCancel() {
@@ -143,7 +143,7 @@ func (runtime *Runtime) Start(startupCtx context.Context, config domain.Config) 
 		runtime.mu.Lock()
 		runtime.desired, runtime.cancel = false, nil
 		runtime.mu.Unlock()
-		_ = runtime.local.Stop(context.Background())
+		runtime.stopLocal()
 		return "", startupCtx.Err()
 	}
 	runtime.mu.Lock()
@@ -169,6 +169,12 @@ func (runtime *Runtime) Stop(ctx context.Context) error {
 		_ = process.cmd.Process.Kill()
 	}
 	return runtime.local.Stop(ctx)
+}
+
+func (runtime *Runtime) stopLocal() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = runtime.local.Stop(ctx)
+	cancel()
 }
 
 func (runtime *Runtime) monitor(ctx context.Context, sshClient openssh.Client, localPort, remotePort int, publicURL, token string, process *sshProcess) {

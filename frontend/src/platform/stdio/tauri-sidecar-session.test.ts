@@ -66,4 +66,14 @@ describe('TauriSidecarSession', () => {
     await session.stop()
     vi.useRealTimers()
   })
+
+  it('does not send a command that was cancelled before dispatch', async () => {
+    const session = new TauriSidecarSession()
+    await session.start()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(session.call('models.test', {}, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(mocks.writes.some((frame) => frame.method === 'models.test')).toBe(false)
+    await session.stop()
+  })
 })

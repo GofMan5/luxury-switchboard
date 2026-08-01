@@ -86,3 +86,18 @@ func TestManagerDoesNotCommitFailedPersistence(t *testing.T) {
 		t.Fatalf("failed save mutated runtime: %+v", keys)
 	}
 }
+
+func TestManagerRejectsDuplicatePersistedKeysWithoutMutatingRuntime(t *testing.T) {
+	key := testKey(t, "echo", "Duplicate", "same-secret", 1, 10)
+	repository := &memoryRepository{keys: []domain.Key{key, key}}
+	manager, err := NewManager(NewScheduler(10), repository, map[string]int{"echo": 0}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Load(context.Background()); !errors.Is(err, ErrDuplicateKey) {
+		t.Fatalf("duplicate persisted keys were accepted: %v", err)
+	}
+	if keys := manager.List("echo"); len(keys) != 0 {
+		t.Fatalf("failed load mutated the scheduler: %+v", keys)
+	}
+}

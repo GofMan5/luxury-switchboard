@@ -45,3 +45,10 @@ func TestProviderURLRejectsQueryCredentialsButAllowsVersioning(t *testing.T) {
 		t.Fatal("query credential was accepted into provider metadata")
 	}
 }
+
+func TestCustomAuthorizationHeaderAllowsExactCredentialSchemes(t *testing.T) {
+	provider, err := New(Params{ID: "provider", Name: "Provider", BaseURL: "https://provider.example/v1", AuthMode: AuthCustom, AuthHeader: "Authorization", Enabled: true})
+	if err != nil || provider.AuthHeader != "Authorization" {
+		t.Fatalf("custom Authorization scheme was rejected: %+v %v", provider, err)
+	}
+}

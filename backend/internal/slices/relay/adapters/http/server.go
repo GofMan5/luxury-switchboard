@@ -182,7 +182,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusServiceUnavailable, "Relay route is unavailable")
 		return
 	}
-	dispatchPath, preparedBody, imageCompat, imageErr := prepareImageRequest(request.Method, request.URL.Path, body, request.Header.Get("Content-Type"), route.UpstreamModel)
+	dispatchPath, preparedBody, imageCompat, imageErr := prepareImageRequest(request.Method, request.URL.Path, body, request.Header.Get("Content-Type"), route.UpstreamModel, route.ImageCompat)
 	if imageErr != nil {
 		writeError(writer, http.StatusBadRequest, "Image generation request is invalid")
 		return
@@ -341,7 +341,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if err != nil {
 		return relayapp.DispatchResponse{}, err
 	}
-	path, body, imageCompat, err := prepareImageRequest(request.Method, request.Path, request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel)
+	path, body, imageCompat, err := prepareImageRequest(request.Method, request.Path, request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel, route.ImageCompat)
 	if err != nil {
 		return relayapp.DispatchResponse{}, err
 	}
@@ -466,20 +466,33 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					}
 					continue
 				}
-				kind := relayapp.AttemptSuccess
-				if terminal == "response.failed" || terminal == "response.incomplete" {
-					kind = relayapp.AttemptRequestError
+				failed := terminal == "response.failed"
+				if failed {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+					requestFailures++
+					if requestFailures < server.config.PermanentAttempts && canRetry(attempt, attemptLimit) {
+						delay := retryDelay(attempt, nil, server.config)
+						server.observeRetry(activityID, attempt, http.StatusOK, delay)
+						if err := waitRetry(ctx, delay); err != nil {
+							return nil, err
+						}
+						continue
+					}
+				} else if terminal == "response.incomplete" {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				} else {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
 				}
-				finishLease(lease, relayapp.AttemptOutcome{Kind: kind})
 				response.Body = io.NopCloser(bytes.NewReader(buffered))
 				response.ContentLength = -1
+				response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
 				response.Header.Del("Content-Length")
 				response.Header.Del("Content-Encoding")
 				response.Header.Set("X-Switchboard-Terminal", terminal)
 				setUsageHeaders(response.Header, streamUsage, time.Since(attemptStarted))
 				return response, nil
 			}
-			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") {
+			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") || expectsJSONResponse(incoming.URL.Path) {
 				buffered, bufferErr := bufferJSONResponse(ctx, response, server.config)
 				if bufferErr != nil {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
@@ -494,12 +507,24 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					continue
 				}
 				terminal := jsonTerminal(buffered)
-				kind := relayapp.AttemptSuccess
-				if terminal != "" {
-					kind = relayapp.AttemptRequestError
+				if terminal == "response.failed" {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+					requestFailures++
+					if requestFailures < server.config.PermanentAttempts && canRetry(attempt, attemptLimit) {
+						delay := retryDelay(attempt, nil, server.config)
+						server.observeRetry(activityID, attempt, http.StatusOK, delay)
+						if err := waitRetry(ctx, delay); err != nil {
+							return nil, err
+						}
+						continue
+					}
 					response.Header.Set("X-Switchboard-Terminal", terminal)
+				} else if terminal != "" {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+					response.Header.Set("X-Switchboard-Terminal", terminal)
+				} else {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
 				}
-				finishLease(lease, relayapp.AttemptOutcome{Kind: kind})
 				response.Body = io.NopCloser(bytes.NewReader(buffered))
 				response.ContentLength = int64(len(buffered))
 				response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
@@ -544,7 +569,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		switch {
 		case balanceUnavailable(status, errorBody):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted})
-			if !canRetry(attempt, attemptLimit) {
+			if !canRetryCredentialFailure(attempt, attemptLimit, lease, server.config.PermanentAttempts) {
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
@@ -553,7 +578,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication})
-			if !canRetry(attempt, attemptLimit) {
+			if !canRetryCredentialFailure(attempt, attemptLimit, lease, server.config.PermanentAttempts) {
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
@@ -562,7 +587,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		case status == http.StatusNotFound && modelUnavailable(errorBody, model):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model})
-			if !canRetry(attempt, attemptLimit) {
+			if !canRetryCredentialFailure(attempt, attemptLimit, lease, server.config.PermanentAttempts) {
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
@@ -583,6 +608,15 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 		}
 		return genericErrorResponse(status), nil
+	}
+}
+
+func expectsJSONResponse(path string) bool {
+	switch strings.TrimRight(path, "/") {
+	case "/v1/responses", "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/images/generations", "/v1/images/edits":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -651,6 +685,10 @@ func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error,
 
 func canRetry(attempt, limit int) bool {
 	return limit <= 0 || attempt+1 < limit
+}
+
+func canRetryCredentialFailure(attempt, limit int, lease relayapp.CredentialLease, permanentAttempts int) bool {
+	return canRetry(attempt, limit) && (lease != nil || attempt+1 < permanentAttempts)
 }
 
 func (server *Server) acquireCredential(ctx context.Context, route relayapp.Route, model string, waiting func()) (relayapp.CredentialLease, relayapp.Credential, time.Duration, error) {
@@ -729,7 +767,7 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		request.Header.Del("Authorization")
 		request.Header.Del("x-api-key")
 		path := strings.TrimRight(request.URL.Path, "/")
-		anthropic := path == "/v1/messages" || strings.HasSuffix(path, "/v1/messages") || strings.Contains(path, "/v1/messages/") || request.Header.Get("Anthropic-Version") != ""
+		anthropic := route.Dialect == "anthropic" || (route.Dialect != "openai" && (path == "/v1/messages" || strings.HasSuffix(path, "/v1/messages") || strings.Contains(path, "/v1/messages/") || request.Header.Get("Anthropic-Version") != ""))
 		if credential != "" && anthropic {
 			request.Header.Set("x-api-key", credential)
 		} else if credential != "" {
@@ -753,7 +791,7 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		}
 	}
 	request.Host = route.BaseURL.Host
-	request.Header.Set("Accept-Encoding", "identity")
+	request.Header.Del("Accept-Encoding")
 	return request, nil
 }
 
@@ -792,10 +830,6 @@ type bodyRead struct {
 }
 
 func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config) (string, []byte, relayapp.TokenUsage, error) {
-	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
-		drainResponse(response)
-		return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
-	}
 	defer response.Body.Close()
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
@@ -917,7 +951,13 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 				idle.Reset(config.StreamIdleTimeout)
 			}
 			if result.err != nil {
-				if !errors.Is(result.err, io.EOF) || len(buffered) == 0 || !json.Valid(buffered) {
+				if !errors.Is(result.err, io.EOF) {
+					return nil, errIncompleteSSE
+				}
+				if len(buffered) == 0 {
+					return buffered, nil
+				}
+				if !json.Valid(buffered) {
 					return nil, errIncompleteSSE
 				}
 				return buffered, nil
@@ -931,6 +971,7 @@ type sseInspector struct {
 	line     []byte
 	event    []byte
 	terminal string
+	finished bool
 	usage    relayapp.TokenUsage
 }
 
@@ -957,6 +998,9 @@ func (inspector *sseInspector) Finish() string {
 		inspector.line = nil
 	}
 	inspector.finishEvent()
+	if inspector.terminal == "" && inspector.finished && (inspector.path == "/v1/chat/completions" || inspector.path == "/v1/completions") {
+		inspector.terminal = "done"
+	}
 	return inspector.terminal
 }
 
@@ -1011,6 +1055,17 @@ func (inspector *sseInspector) finishEvent() {
 	}
 	if eventType == "message_stop" && inspector.path == "/v1/messages" {
 		inspector.terminal = eventType
+	}
+	if inspector.path == "/v1/chat/completions" || inspector.path == "/v1/completions" {
+		if choices, ok := payload["choices"].([]any); ok {
+			for _, choice := range choices {
+				item, _ := choice.(map[string]any)
+				if reason, ok := item["finish_reason"].(string); ok && reason != "" {
+					inspector.finished = true
+					break
+				}
+			}
+		}
 	}
 }
 
@@ -1160,6 +1215,9 @@ func joinPath(base, request string) string {
 			return "/"
 		}
 		return request
+	}
+	if strings.HasSuffix(base, "/v1") && (request == "/v1" || strings.HasPrefix(request, "/v1/")) {
+		return base + strings.TrimPrefix(request, "/v1")
 	}
 	return base + "/" + strings.TrimLeft(request, "/")
 }
@@ -1365,7 +1423,9 @@ func rewriteRequestModel(body []byte, contentType, model string) []byte {
 	}
 	if strings.Contains(strings.ToLower(contentType), "json") {
 		var payload map[string]any
-		if json.Unmarshal(body, &payload) != nil {
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		if decoder.Decode(&payload) != nil {
 			return body
 		}
 		payload["model"] = model
@@ -1420,7 +1480,9 @@ func extendCacheTTL(body []byte, contentType string) []byte {
 		return body
 	}
 	var payload any
-	if json.Unmarshal(body, &payload) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
 		return body
 	}
 	changed := extendCacheValue(payload)

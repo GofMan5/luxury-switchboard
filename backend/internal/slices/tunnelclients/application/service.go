@@ -88,7 +88,11 @@ func (service *Service) Finish(id string, finish domain.Finish) {
 	state.client.Active = max(state.client.Active-1, 0)
 	state.client.LastSeen = now
 	if state.client.Active == 0 {
-		state.client.State = "idle"
+		if state.client.Queued > 0 {
+			state.client.State = "queued"
+		} else {
+			state.client.State = "idle"
+		}
 	}
 	event := domain.Event{ID: id, IP: start.IP, Time: now, State: "completed", Method: start.Method, Path: start.Path, Model: start.Model, Status: finish.Status, LatencyMS: float64(finish.Duration.Microseconds()) / 1000, BytesIn: start.BytesIn, BytesOut: finish.BytesOut, ErrorCode: safeError(finish.ErrorCode)}
 	if finish.ErrorCode != "" || finish.Status >= 400 {

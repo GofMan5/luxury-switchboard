@@ -1,6 +1,7 @@
 import type { ProviderCatalog } from '../domain/provider'
 import type { ProviderInput } from '../domain/provider'
 import type { ProvidersPort } from './providers-port'
+import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
 export interface ProvidersModelState {
   readonly phase: 'loading' | 'ready' | 'error'
@@ -72,6 +73,10 @@ export class ProvidersModel {
     return this.#mutate(id, () => this.#port.delete(id))
   }
 
+  clearError(): void {
+    if (this.#state.error) this.#set({ ...this.#state, error: '' })
+  }
+
   dispose(): void {
     this.#unsubscribe?.()
     this.#unsubscribe = null
@@ -90,8 +95,8 @@ export class ProvidersModel {
       await operation()
       await this.refresh()
       return true
-    } catch {
-      this.#set({ ...this.#state, pendingId: '', error: 'Provider settings could not be saved' })
+    } catch (error) {
+      this.#set({ ...this.#state, pendingId: '', error: error instanceof ControlPlaneError ? error.message : 'Provider settings could not be saved' })
       return false
     }
   }

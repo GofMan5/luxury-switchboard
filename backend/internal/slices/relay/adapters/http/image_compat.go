@@ -21,22 +21,24 @@ var (
 	errInvalidImageResponse = errors.New("invalid image generation response")
 )
 
-func prepareImageRequest(method, path string, body []byte, contentType, upstreamModel string) (string, []byte, bool, error) {
-	if method != http.MethodPost || strings.TrimRight(path, "/") != "/v1/images/generations" || !strings.Contains(strings.ToLower(contentType), "json") {
+func prepareImageRequest(method, path string, body []byte, contentType, upstreamModel string, enabled bool) (string, []byte, bool, error) {
+	if !enabled || method != http.MethodPost || strings.TrimRight(path, "/") != "/v1/images/generations" || !strings.Contains(strings.ToLower(contentType), "json") {
 		return path, body, false, nil
 	}
 	var payload map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
-	if decoder.Decode(&payload) != nil || payload["model"] != codexImageModel {
+	if decoder.Decode(&payload) != nil {
 		return path, body, false, nil
 	}
+	requestedModel, _ := payload["model"].(string)
+	requestedModel = strings.TrimSpace(requestedModel)
 	prompt, ok := payload["prompt"].(string)
 	prompt = strings.TrimSpace(prompt)
-	if !ok || prompt == "" {
+	if requestedModel == "" || !ok || prompt == "" {
 		return path, body, true, errInvalidImageRequest
 	}
-	if upstreamModel == "" || upstreamModel == codexImageModel {
+	if upstreamModel == "" || (requestedModel == codexImageModel && upstreamModel == requestedModel) {
 		upstreamModel = defaultImageUpstream
 	}
 	tool := map[string]any{"type": "image_generation", "action": "generate"}

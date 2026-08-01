@@ -76,6 +76,9 @@ func (manager *Manager) Load(ctx context.Context) error {
 		}
 		loadedUsers = append(loadedUsers, key)
 	}
+	if duplicateKeyID(append(slices.Clone(loadedBuiltins), loadedUsers...)) {
+		return ErrDuplicateKey
+	}
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
 	manager.mu.Lock()
@@ -368,6 +371,17 @@ func keyByID(keys []domain.Key, id string) (*domain.Key, bool) {
 func containsKey(keys []domain.Key, id string) bool {
 	key, _ := keyByID(keys, id)
 	return key != nil
+}
+
+func duplicateKeyID(keys []domain.Key) bool {
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if _, duplicate := seen[key.ID]; duplicate {
+			return true
+		}
+		seen[key.ID] = struct{}{}
+	}
+	return false
 }
 
 func nextPriority(keys []domain.Key, providerID string) int {

@@ -100,13 +100,25 @@ func (gateway *Gateway) testRequest(ctx context.Context, provider domain.Provide
 	response, err := gateway.dispatch(ctx, provider.ID, model, "/v1/responses", map[string]any{
 		"model": model, "input": "Reply OK", "max_output_tokens": 8,
 	})
-	if err == nil && response.Status != http.StatusNotFound && response.Status != http.StatusMethodNotAllowed {
+	if err == nil && !responsesFallback(response) {
 		return response, nil
 	}
 	return gateway.dispatch(ctx, provider.ID, model, "/v1/chat/completions", map[string]any{
 		"model": model, "max_tokens": 8,
 		"messages": []map[string]string{{"role": "user", "content": "Reply OK"}},
 	})
+}
+
+func responsesFallback(response relayapp.DispatchResponse) bool {
+	if response.Status >= 200 && response.Status < 300 && failedResponse(response.Body) {
+		return true
+	}
+	switch response.Status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
 }
 
 func (gateway *Gateway) dispatch(ctx context.Context, providerID, model, path string, payload any) (relayapp.DispatchResponse, error) {
@@ -128,15 +140,17 @@ func extractModelIDs(body []byte) ([]string, error) {
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, errors.New("invalid model catalog")
 	}
-	root, ok := payload.(map[string]any)
-	if !ok {
-		return nil, errors.New("invalid model catalog")
+	var values []any
+	switch root := payload.(type) {
+	case map[string]any:
+		values, _ = root["data"].([]any)
+		if values == nil {
+			values, _ = root["models"].([]any)
+		}
+	case []any:
+		values = root
 	}
-	values, ok := root["data"].([]any)
-	if !ok {
-		values, ok = root["models"].([]any)
-	}
-	if !ok {
+	if values == nil {
 		return nil, errors.New("model catalog is missing models")
 	}
 	seen := make(map[string]struct{}, len(values))

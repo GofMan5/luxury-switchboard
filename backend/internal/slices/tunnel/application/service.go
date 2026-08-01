@@ -39,6 +39,10 @@ type Service struct {
 	routes            Routes
 	config            domain.Config
 	snapshot          domain.Snapshot
+	runtimeStatus     domain.State
+	runtimeAddress    string
+	runtimeMessage    string
+	publicationState  string
 	listeners         []func(domain.Snapshot)
 }
 
@@ -51,7 +55,7 @@ func NewService(repository Repository, runtime Runtime, routes Routes) (*Service
 		return nil, err
 	}
 	config := domain.Config{Port: 8797, Token: token, BrandResponse: "Luxury Private лучший приватный софт для абузов - @Luxuryprivate_bot"}
-	service := &Service{repository: repository, runtime: runtime, routes: routes, config: config, snapshot: publicSnapshot(domain.StateStopped, "", config)}
+	service := &Service{repository: repository, runtime: runtime, routes: routes, config: config, snapshot: publicSnapshot(domain.StateStopped, "", config), runtimeStatus: domain.StateStopped}
 	if events, ok := runtime.(RuntimeEvents); ok {
 		events.OnState(service.runtimeState)
 	}
@@ -63,8 +67,8 @@ func (service *Service) runtimeState(state domain.State, address, message string
 		service.mu.Unlock()
 		return
 	}
-	service.snapshot = publicSnapshot(state, address, service.config)
-	service.snapshot.Error = message
+	service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = state, address, message
+	service.snapshot = service.visibleRuntimeLocked()
 	service.mu.Unlock()
 	service.publish()
 }
@@ -81,6 +85,7 @@ func (service *Service) Load(ctx context.Context) error {
 	}
 	service.mu.Lock()
 	service.config = config
+	service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateStopped, "", ""
 	service.snapshot = publicSnapshot(domain.StateStopped, "", config)
 	service.mu.Unlock()
 	return nil
@@ -107,6 +112,7 @@ func (service *Service) Configure(ctx context.Context, config domain.Config) err
 	}
 	service.mu.Lock()
 	service.config = config
+	service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateStopped, "", ""
 	service.snapshot = publicSnapshot(domain.StateStopped, "", config)
 	service.mu.Unlock()
 	service.publish()
@@ -128,18 +134,19 @@ func (service *Service) Start(ctx context.Context) error {
 		service.publish()
 		return ErrNoRoutes
 	}
-	service.snapshot = publicSnapshot(domain.StateStarting, "", service.config)
+	service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateStarting, "", ""
+	service.snapshot = service.visibleRuntimeLocked()
 	config := service.config
 	service.mu.Unlock()
 	service.publish()
 	address, err := service.runtime.Start(ctx, config)
 	service.mu.Lock()
 	if err != nil {
-		service.snapshot = publicSnapshot(domain.StateError, "", config)
-		service.snapshot.Error = err.Error()
+		service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateError, "", err.Error()
 	} else {
-		service.snapshot = publicSnapshot(domain.StateOnline, address, config)
+		service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateOnline, address, ""
 	}
+	service.snapshot = service.visibleRuntimeLocked()
 	service.mu.Unlock()
 	service.publish()
 	return err
@@ -151,11 +158,11 @@ func (service *Service) Stop(ctx context.Context) error {
 	err := service.runtime.Stop(ctx)
 	service.mu.Lock()
 	if err != nil {
-		service.snapshot = publicSnapshot(domain.StateError, "", service.config)
-		service.snapshot.Error = "Tunnel could not be stopped cleanly"
+		service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateError, "", "Tunnel could not be stopped cleanly"
 	} else {
-		service.snapshot = publicSnapshot(domain.StateStopped, "", service.config)
+		service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateStopped, "", ""
 	}
+	service.snapshot = service.visibleRuntimeLocked()
 	service.mu.Unlock()
 	service.publish()
 	return err
@@ -190,13 +197,13 @@ func (service *Service) Config() domain.Config {
 }
 func (service *Service) SetPublicationState(state string) {
 	service.mu.Lock()
+	service.publicationState = state
 	current := service.snapshot.State
 	switch state {
 	case "running":
 		stoppedRemotely := current == domain.StatePaused && service.snapshot.Error == "Publication stopped from Shared Control"
 		if current == domain.StatePaused && !stoppedRemotely {
-			service.snapshot.State = domain.StateOnline
-			service.snapshot.Error = ""
+			service.snapshot = service.visibleRuntimeLocked()
 			service.mu.Unlock()
 			service.publish()
 			return
@@ -208,19 +215,17 @@ func (service *Service) SetPublicationState(state string) {
 		}
 		return
 	case "paused":
-		if current != domain.StateOnline && current != domain.StatePaused {
+		if current != domain.StateOnline && current != domain.StateStarting && current != domain.StatePaused {
 			service.mu.Unlock()
 			return
 		}
-		service.snapshot.State = domain.StatePaused
-		service.snapshot.Error = "Publication paused from Shared Control"
+		service.snapshot = service.visibleRuntimeLocked()
 	case "stopped":
 		if current == domain.StateStopped {
 			service.mu.Unlock()
 			return
 		}
-		service.snapshot.State = domain.StatePaused
-		service.snapshot.Error = "Publication stopped from Shared Control"
+		service.snapshot = service.visibleRuntimeLocked()
 		service.mu.Unlock()
 		service.publish()
 		service.reconcilePublication("stop")
@@ -231,6 +236,23 @@ func (service *Service) SetPublicationState(state string) {
 	}
 	service.mu.Unlock()
 	service.publish()
+}
+
+func (service *Service) visibleRuntimeLocked() domain.Snapshot {
+	snapshot := publicSnapshot(service.runtimeStatus, service.runtimeAddress, service.config)
+	snapshot.Error = service.runtimeMessage
+	if service.config.PublisherProfile == "" || service.runtimeStatus == domain.StateStopped || service.runtimeStatus == domain.StateError {
+		return snapshot
+	}
+	switch service.publicationState {
+	case "paused":
+		snapshot.State = domain.StatePaused
+		snapshot.Error = "Publication paused from Shared Control"
+	case "stopped":
+		snapshot.State = domain.StatePaused
+		snapshot.Error = "Publication stopped from Shared Control"
+	}
+	return snapshot
 }
 
 func (service *Service) reconcilePublication(action string) {

@@ -16,7 +16,10 @@ export function useModalFocus<T extends HTMLElement>(onDismiss: () => void, bloc
     const focusable = () => [...element.querySelectorAll<HTMLElement>(focusableSelector)]
       .filter((item) => item.tabIndex >= 0 && !item.hasAttribute('disabled'))
     queueMicrotask(() => {
-      if (element.isConnected && !element.contains(document.activeElement)) focusable()[0]?.focus()
+      if (!element.isConnected || element.contains(document.activeElement)) return
+      const items = focusable()
+      element.scrollTop = 0
+      ;(items.find((item) => item.hasAttribute('data-autofocus')) ?? items[0])?.focus({ preventScroll: true })
     })
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !locked.current) {

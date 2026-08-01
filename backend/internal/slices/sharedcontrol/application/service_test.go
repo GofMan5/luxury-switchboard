@@ -43,3 +43,12 @@ func TestCancelledSnapshotDoesNotRetrySSH(t *testing.T) {
 		t.Fatalf("cancelled snapshot retried SSH %d times", len(client.calls))
 	}
 }
+
+func TestAmbiguousMutationRejectsAStateAfterMultipleRevisionChanges(t *testing.T) {
+	current := domain.Snapshot{Available: true, Revision: 6, Tunnels: []domain.Tunnel{{Position: 0, Name: SelfName, State: "paused"}}}
+	client := &fakeClient{responses: []domain.Snapshot{{}, current}, errors: []error{errors.New("response lost"), nil}}
+	service, _ := NewService(client)
+	if _, err := service.Control(context.Background(), 0, 3, "pause"); !errors.Is(err, errUnavailable) {
+		t.Fatalf("unrelated revision changes were mistaken for a successful control: %v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -193,6 +194,18 @@ func TestSSEFailureIsNeutralAndSuccessfulStreamIsCanonical(t *testing.T) {
 	}
 }
 
+func TestChatSSEWithoutDoneIsCanonicalizedAfterFinishReason(t *testing.T) {
+	response := relayapp.DispatchResponse{
+		Status:  200,
+		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:    []byte("data: {\"model\":\"private-gpt\",\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\n"),
+	}
+	body, _, err := sanitizeResponse(response, "/v1/chat/completions", "public-gpt", []string{"private-gpt"}, brand)
+	if err != nil || !bytes.Contains(body, []byte("data: [DONE]")) || bytes.Contains(body, []byte("private-gpt")) {
+		t.Fatalf("compatible chat stream was not canonicalized: %s err=%v", body, err)
+	}
+}
+
 func TestDynamicProviderKeyFailsClosed(t *testing.T) {
 	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: 200, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"private-gpt","SecretProvider_metadata":true}`)}}
 	gateway := gatewayForTest(t, dispatcher)
@@ -310,19 +323,63 @@ func TestContextLimitRecordsTheCommittedStatus(t *testing.T) {
 	}
 }
 
-func TestIPLimiterReservesQueuedSlots(t *testing.T) {
+func TestIPLimiterQueuesUniformly(t *testing.T) {
 	limiter := newIPLimiter()
-	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
-	wait, releaseFirst, ok := limiter.Reserve("203.0.113.10", 2)
-	if !ok || wait != 0 {
-		t.Fatalf("first request waited %s", wait)
+	now := time.Unix(1_000, 0)
+	limiter.now = func() time.Time { return now }
+	releaseFirst, queued, err := limiter.Acquire(context.Background(), "203.0.113.10", 2, nil)
+	if err != nil || queued {
+		t.Fatalf("first request was queued: %v", err)
 	}
-	wait, releaseSecond, ok := limiter.Reserve("203.0.113.10", 2)
-	if !ok || wait != 30*time.Second {
-		t.Fatalf("second request was not queued uniformly: %s", wait)
+	queuedSignal := make(chan struct{})
+	second := make(chan func(), 1)
+	go func() {
+		release, wasQueued, acquireErr := limiter.Acquire(context.Background(), "203.0.113.10", 2, func() { close(queuedSignal) })
+		if acquireErr == nil && wasQueued {
+			second <- release
+			return
+		}
+		second <- nil
+	}()
+	<-queuedSignal
+	limiter.mu.Lock()
+	now = now.Add(30 * time.Second)
+	limiter.wakeLocked(limiter.next["203.0.113.10"])
+	limiter.mu.Unlock()
+	releaseSecond := <-second
+	if releaseSecond == nil {
+		t.Fatal("second request was not admitted after one interval")
 	}
 	releaseFirst()
 	releaseSecond()
+}
+
+func TestIPLimiterCancellationDoesNotLeaveAReservedHole(t *testing.T) {
+	limiter := newIPLimiter()
+	now := time.Unix(2_000, 0)
+	limiter.now = func() time.Time { return now }
+	releaseFirst, _, _ := limiter.Acquire(context.Background(), "203.0.113.11", 2, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	queued := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := limiter.Acquire(ctx, "203.0.113.11", 2, func() { close(queued) })
+		result <- err
+	}()
+	<-queued
+	cancel()
+	if !errors.Is(<-result, context.Canceled) {
+		t.Fatal("cancelled request remained in the limiter queue")
+	}
+	limiter.mu.Lock()
+	now = now.Add(30 * time.Second)
+	limiter.mu.Unlock()
+	releaseNext, wasQueued, err := limiter.Acquire(context.Background(), "203.0.113.11", 2, nil)
+	if err != nil || wasQueued {
+		t.Fatalf("cancelled slot delayed the next request: queued=%v err=%v", wasQueued, err)
+	}
+	releaseFirst()
+	releaseNext()
 }
 
 func TestIPLimiterBoundsPendingRequests(t *testing.T) {
@@ -330,19 +387,19 @@ func TestIPLimiterBoundsPendingRequests(t *testing.T) {
 	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
 	releases := make([]func(), 0, maxQueuedPerIP)
 	for range maxQueuedPerIP {
-		_, release, ok := limiter.Reserve("203.0.113.10", 1)
-		if !ok {
+		release, _, err := limiter.Acquire(context.Background(), "203.0.113.10", 0, nil)
+		if err != nil {
 			t.Fatal("in-capacity request was rejected")
 		}
 		releases = append(releases, release)
 	}
-	if _, _, ok := limiter.Reserve("203.0.113.10", 1); ok {
+	if _, _, err := limiter.Acquire(context.Background(), "203.0.113.10", 0, nil); !errors.Is(err, errIPQueueFull) {
 		t.Fatal("per-IP request queue grew without a bound")
 	}
 	for _, release := range releases {
 		release()
 	}
-	if _, release, ok := limiter.Reserve("203.0.113.10", 1); !ok {
+	if release, _, err := limiter.Acquire(context.Background(), "203.0.113.10", 0, nil); err != nil {
 		t.Fatal("released queue capacity was not reusable")
 	} else {
 		release()
@@ -352,11 +409,11 @@ func TestIPLimiterBoundsPendingRequests(t *testing.T) {
 func TestIPLimiterBoundsUnlimitedAndGlobalTraffic(t *testing.T) {
 	limiter := newIPLimiter()
 	limiter.pending = maxQueuedTotal
-	if _, _, ok := limiter.Reserve("203.0.113.20", 0); ok {
+	if _, _, err := limiter.Acquire(context.Background(), "203.0.113.20", 0, nil); !errors.Is(err, errIPQueueFull) {
 		t.Fatal("unlimited RPM bypassed the global memory bound")
 	}
 	limiter.pending = 0
-	if _, release, ok := limiter.Reserve("203.0.113.20", 0); !ok {
+	if release, _, err := limiter.Acquire(context.Background(), "203.0.113.20", 0, nil); err != nil {
 		t.Fatal("unlimited RPM was rejected below the safety bound")
 	} else {
 		release()
@@ -366,15 +423,19 @@ func TestIPLimiterBoundsUnlimitedAndGlobalTraffic(t *testing.T) {
 func TestIPLimiterBoundsDistinctIdentityState(t *testing.T) {
 	limiter := newIPLimiter()
 	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
+	releases := make([]func(), 0, maxQueuedTotal)
 	for index := range maxQueuedTotal {
-		_, release, ok := limiter.Reserve(fmt.Sprintf("203.0.%d.%d", index/256, index%256), 1)
-		if !ok {
+		release, _, err := limiter.Acquire(context.Background(), fmt.Sprintf("203.0.%d.%d", index/256, index%256), 0, nil)
+		if err != nil {
 			t.Fatalf("identity %d was rejected below the bound", index)
 		}
-		release()
+		releases = append(releases, release)
 	}
-	if _, _, ok := limiter.Reserve("198.51.100.1", 1); ok || len(limiter.next) != maxQueuedTotal {
+	if _, _, err := limiter.Acquire(context.Background(), "198.51.100.1", 0, nil); !errors.Is(err, errIPQueueFull) || len(limiter.next) != maxQueuedTotal {
 		t.Fatalf("distinct IP state exceeded its bound: %d", len(limiter.next))
+	}
+	for _, release := range releases {
+		release()
 	}
 }
 
@@ -395,5 +456,37 @@ func TestMultipartImageEditIsAcceptedWithoutExposingRoute(t *testing.T) {
 	gateway.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "private-gpt") || dispatcher.request.UpstreamModel != "private-gpt" {
 		t.Fatalf("multipart tunnel route failed: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAnthropicBrandPolicyPreservesSystemBlocks(t *testing.T) {
+	payload := map[string]any{
+		"model":  "public-claude",
+		"system": []any{map[string]any{"type": "text", "text": "Keep this instruction"}},
+	}
+	encoded := applyBrandPolicy(payload, "/v1/messages", brand)
+	var result map[string]any
+	if json.Unmarshal(encoded, &result) != nil {
+		t.Fatal("brand policy produced invalid JSON")
+	}
+	blocks, ok := result["system"].([]any)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("system blocks were discarded: %#v", result["system"])
+	}
+	first, _ := blocks[0].(map[string]any)
+	second, _ := blocks[1].(map[string]any)
+	if !strings.Contains(first["text"].(string), brand) || second["text"] != "Keep this instruction" {
+		t.Fatalf("system block order is wrong: %#v", blocks)
+	}
+}
+
+func TestTunnelBrandPolicyPreservesLargeNumericFields(t *testing.T) {
+	model, payload, err := requestPayload([]byte(`{"model":"public-gpt","seed":9007199254740993,"input":"hello"}`), "application/json", "/v1/responses")
+	if err != nil || model != "public-gpt" {
+		t.Fatal(err)
+	}
+	encoded := applyBrandPolicy(payload, "/v1/responses", brand)
+	if !bytes.Contains(encoded, []byte(`"seed":9007199254740993`)) {
+		t.Fatalf("tunnel policy changed a provider field: %s", encoded)
 	}
 }

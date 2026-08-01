@@ -81,15 +81,28 @@ func (service *Service) Resolve(target domain.Target, model string) (domain.Assi
 	return domain.Assignment{}, false
 }
 
+func (service *Service) referencesProvider(providerID string) bool {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	return slices.ContainsFunc(service.assignments, func(assignment domain.Assignment) bool {
+		return assignment.ProviderID == providerID
+	})
+}
+
+func (service *Service) LockProvider(providerID string) (bool, func()) {
+	service.opMu.Lock()
+	return service.referencesProvider(providerID), service.opMu.Unlock
+}
+
 func (service *Service) Upsert(ctx context.Context, assignment domain.Assignment) error {
 	if err := assignment.Validate(); err != nil {
 		return err
 	}
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	if !service.providers.Exists(assignment.ProviderID) {
 		return ErrProviderUnavailable
 	}
-	service.opMu.Lock()
-	defer service.opMu.Unlock()
 	service.mu.RLock()
 	candidate := slices.Clone(service.assignments)
 	service.mu.RUnlock()
@@ -111,7 +124,7 @@ func (service *Service) UpsertMany(ctx context.Context, assignments []domain.Ass
 	target := assignments[0].Target
 	seen := make(map[string]struct{}, len(assignments))
 	for _, assignment := range assignments {
-		if assignment.Target != target || assignment.Validate() != nil || !service.providers.Exists(assignment.ProviderID) {
+		if assignment.Target != target || assignment.Validate() != nil {
 			return errors.New("invalid route batch")
 		}
 		key := assignmentKey(assignment)
@@ -122,6 +135,11 @@ func (service *Service) UpsertMany(ctx context.Context, assignments []domain.Ass
 	}
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	for _, assignment := range assignments {
+		if !service.providers.Exists(assignment.ProviderID) {
+			return ErrProviderUnavailable
+		}
+	}
 	service.mu.RLock()
 	candidate := slices.Clone(service.assignments)
 	service.mu.RUnlock()

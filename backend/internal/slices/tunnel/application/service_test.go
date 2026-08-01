@@ -138,6 +138,7 @@ func TestTunnelStartupHonorsCancellation(t *testing.T) {
 type publicationRuntime struct {
 	started chan struct{}
 	stopped chan struct{}
+	handler func(domain.State, string, string)
 }
 
 func (runtime *publicationRuntime) Start(context.Context, domain.Config) (string, error) {
@@ -147,6 +148,9 @@ func (runtime *publicationRuntime) Start(context.Context, domain.Config) (string
 func (runtime *publicationRuntime) Stop(context.Context) error {
 	runtime.stopped <- struct{}{}
 	return nil
+}
+func (runtime *publicationRuntime) OnState(handler func(domain.State, string, string)) {
+	runtime.handler = handler
 }
 
 func TestSharedControlStopAndResumeReconcileRuntime(t *testing.T) {
@@ -175,5 +179,28 @@ func TestSharedControlStopAndResumeReconcileRuntime(t *testing.T) {
 	}
 	if service.Snapshot().State != domain.StateOnline {
 		t.Fatalf("resumed tunnel is not online: %+v", service.Snapshot())
+	}
+}
+
+func TestSharedPauseSurvivesPublisherReconnectEvents(t *testing.T) {
+	runtime := &publicationRuntime{started: make(chan struct{}, 1), stopped: make(chan struct{}, 1)}
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	config := service.Config()
+	config.PublisherProfile = "v1.23456.0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := service.Configure(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	service.SetPublicationState("paused")
+	runtime.handler(domain.StateStarting, "", "")
+	runtime.handler(domain.StateOnline, "https://luxuryprivate.duckdns.org/model-tunnel/test/v1", "")
+	if snapshot := service.Snapshot(); snapshot.State != domain.StatePaused || snapshot.Error != "Publication paused from Shared Control" {
+		t.Fatalf("publisher reconnect overwrote the shared pause: %+v", snapshot)
+	}
+	service.SetPublicationState("running")
+	if snapshot := service.Snapshot(); snapshot.State != domain.StateOnline {
+		t.Fatalf("shared resume did not restore the runtime state: %+v", snapshot)
 	}
 }

@@ -7,5 +7,7 @@ describe('tunnelLimitsAreValid', () => {
     expect(tunnelLimitsAreValid('8797', '0', '')).toBe(false)
     expect(tunnelLimitsAreValid('8797', '1000001', '0')).toBe(false)
     expect(tunnelLimitsAreValid('8797', '120', '2048')).toBe(true)
+    expect(tunnelLimitsAreValid('8797', '120', '0', 'v1.23456.0123456789abcdef0123456789abcdef0123456789abcdef')).toBe(true)
+    expect(tunnelLimitsAreValid('8797', '120', '0', 'https://example.invalid/tunnel')).toBe(false)
   })
 })

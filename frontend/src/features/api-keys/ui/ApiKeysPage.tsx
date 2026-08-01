@@ -5,6 +5,7 @@ import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
 import { useApiKeys } from './useApiKeys'
+import { proxyURLIsValid } from './key-form'
 import styles from './ApiKeysPage.module.css'
 
 export default function ApiKeysPage() {
@@ -13,7 +14,7 @@ export default function ApiKeysPage() {
   const [providerID, setProviderID] = useState('')
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; key?: ApiKey } | null>(null)
   const [removeKey, setRemoveKey] = useState<ApiKey | null>(null)
-  const selectedProvider = providerID || providers.catalog.activeId || providers.catalog.providers[0]?.id || ''
+  const selectedProvider = (providers.catalog.providers.some((provider) => provider.id === providerID) ? providerID : '') || providers.catalog.activeId || providers.catalog.providers[0]?.id || ''
 
   useEffect(() => {
     if (selectedProvider) void model.load(selectedProvider)
@@ -42,7 +43,7 @@ export default function ApiKeysPage() {
               {providers.catalog.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
             </select>
           </label>
-          <Button variant="primary" disabled={!selectedProvider} onClick={() => setEditor({ mode: 'add' })}>
+          <Button variant="primary" disabled={!selectedProvider} onClick={() => { model.clearError(); setEditor({ mode: 'add' }) }}>
             <Plus size={16} aria-hidden="true" />Add key
           </Button>
         </div>
@@ -74,9 +75,9 @@ export default function ApiKeysPage() {
                     <div className={styles.rowActions}>
                       <IconAction label={`Move ${key.label} up`} disabled={key.pinned || movablePosition === 0 || state.pendingId === key.id} onClick={() => void model.move(key.id, -1)}><ArrowUp /></IconAction>
                       <IconAction label={`Move ${key.label} down`} disabled={key.pinned || movablePosition === movablePositions.size - 1 || state.pendingId === key.id} onClick={() => void model.move(key.id, 1)}><ArrowDown /></IconAction>
-                      <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => setEditor({ mode: 'edit', key })}><Pencil /></IconAction>
+                      <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => { model.clearError(); setEditor({ mode: 'edit', key }) }}><Pencil /></IconAction>
                       <IconAction label={`Reset cooldown for ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => void model.reset(key.id)}><RefreshCcw /></IconAction>
-                      <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => setRemoveKey(key)}><Trash2 /></IconAction>
+                      <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => { model.clearError(); setRemoveKey(key) }}><Trash2 /></IconAction>
                     </div>
                   </td>
                 </tr>
@@ -97,6 +98,7 @@ export default function ApiKeysPage() {
           mode={editor.mode}
           keyValue={editor.key}
           pending={Boolean(state.pendingId)}
+          operationError={state.error}
           onClose={() => setEditor(null)}
           onSubmit={async (value) => {
             const saved = editor.mode === 'add'
@@ -110,6 +112,7 @@ export default function ApiKeysPage() {
         <ConfirmRemove
           keyValue={removeKey}
           pending={Boolean(state.pendingId)}
+          error={state.error}
           onCancel={() => setRemoveKey(null)}
           onConfirm={async () => {
             if (await model.remove(removeKey.id)) setRemoveKey(null)
@@ -124,11 +127,12 @@ function IconAction({ label, disabled, danger = false, onClick, children }: { la
   return <button type="button" className={styles.iconAction} data-danger={danger} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>
 }
 
-function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
+function KeyEditor({ providerId, mode, keyValue, pending, operationError, onClose, onSubmit }: {
   providerId: string
   mode: 'add' | 'edit'
   keyValue?: ApiKey
   pending: boolean
+  operationError: string
   onClose: () => void
   onSubmit: (value: AddApiKey | UpdateApiKey) => Promise<void>
 }) {
@@ -144,7 +148,11 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
     event.preventDefault()
     const parsedRPM = Number(rpm)
     if (!label.trim() || !Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000 || (mode === 'add' && !secret.trim())) {
-      setError('Enter a label, a non-negative RPM, and the key secret.')
+      setError('Enter a label, an RPM from 0 to 1,000,000, and the key secret.')
+      return
+    }
+    if (replaceProxy && !proxyURLIsValid(proxyUrl)) {
+      setError('Enter a valid HTTP(S) or SOCKS5 proxy URL without a fragment.')
       return
     }
     setError('')
@@ -168,11 +176,11 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
       <form ref={dialogRef} className="ui-modal" role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add API key' : 'Edit API key'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add API key' : 'Edit API key'}</h2><p>The secret is encrypted locally and never shown again.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
-          <label><span>Label</span><input value={label} maxLength={80} autoFocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
+          <label><span>Label</span><input value={label} maxLength={80} data-autofocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
           <label><span>Requests per minute</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited.</small></label>
           {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} maxLength={8192} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Environment key material stays managed by the local account; RPM can still be changed.</div>}
           {!keyValue?.pinned ? <div className={styles.proxyField}><span>Proxy</span>{mode === 'edit' ? <label className={styles.check}><input type="checkbox" checked={replaceProxy} onChange={(event) => setReplaceProxy(event.currentTarget.checked)} />Replace current proxy setting</label> : null}<input aria-label="Proxy URL" type="password" disabled={!replaceProxy} value={proxyUrl} maxLength={8192} placeholder="Optional http(s) or socks5 URL" autoComplete="new-password" onChange={(event) => setProxyURL(event.currentTarget.value)} /><small>Leave empty to use the native IP.</small></div> : null}
-          {error ? <p className={styles.formError} role="alert">{error}</p> : null}
+          {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
         </div>
         <footer><Button type="button" disabled={pending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save key'}</Button></footer>
       </form>
@@ -180,9 +188,9 @@ function KeyEditor({ providerId, mode, keyValue, pending, onClose, onSubmit }: {
   )
 }
 
-function ConfirmRemove({ keyValue, pending, onCancel, onConfirm }: { keyValue: ApiKey; pending: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
+function ConfirmRemove({ keyValue, pending, error, onCancel, onConfirm }: { keyValue: ApiKey; pending: boolean; error: string; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const dialogRef = useModalFocus<HTMLElement>(onCancel, pending)
-  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
+  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header>{error ? <p className={styles.confirmError} role="alert">{error}</p> : null}<footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
 }
 
 function formatCooldown(milliseconds: number, blockedModels: number): string {

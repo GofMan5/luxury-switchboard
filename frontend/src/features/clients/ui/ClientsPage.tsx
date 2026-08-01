@@ -10,8 +10,12 @@ import styles from './ClientsPage.module.css'
 export default function ClientsPage() {
   const { model, state } = useClients()
   const selected = state.clients.find((client) => client.ip === state.selectedIp)
-  const active = state.clients.filter((client) => client.active > 0).length
-  const queued = state.clients.reduce((sum, client) => sum + client.queued, 0)
+  const metrics = state.clients.reduce((total, client) => {
+    if (client.active > 0) total.active++
+    total.queued += client.queued
+    total.rpm += client.actualRpm
+    return total
+  }, { active: 0, queued: 0, rpm: 0 })
 
   return (
     <section className={styles.page}>
@@ -26,9 +30,9 @@ export default function ClientsPage() {
 
       <div className={styles.metrics}>
         <Metric label="Connected clients" value={state.clients.length} />
-        <Metric label="Active now" value={active} tone="active" />
-        <Metric label="Queued" value={queued} tone={queued > 0 ? 'queued' : undefined} />
-        <Metric label="Current RPM" value={state.clients.reduce((sum, client) => sum + client.actualRpm, 0)} />
+        <Metric label="Active now" value={metrics.active} tone="active" />
+        <Metric label="Queued" value={metrics.queued} tone={metrics.queued > 0 ? 'queued' : undefined} />
+        <Metric label="Current RPM" value={metrics.rpm} />
       </div>
 
       <section className={styles.clients}>
@@ -40,8 +44,10 @@ export default function ClientsPage() {
           <table>
             <thead><tr><th>State</th><th>Client IP</th><th>RPM</th><th>Active</th><th>Queued</th><th>Requests</th><th>Last seen</th></tr></thead>
             <tbody>
-              {state.clients.map((client) => (
-                <tr
+              {state.clients.map((client) => {
+                const stateLabel = client.active > 0 ? 'Active' : client.queued > 0 ? 'Queued' : 'Idle'
+                const stateTone = client.active > 0 ? 'active' : client.queued > 0 ? 'retrying' : 'stopped'
+                return <tr
                   key={client.ip}
                   tabIndex={0}
                   onDoubleClick={() => void model.select(client.ip)}
@@ -51,7 +57,7 @@ export default function ClientsPage() {
                     void model.select(client.ip)
                   }}
                 >
-                  <td><span className={styles.state}><StatusDot state={client.active > 0 ? 'active' : 'stopped'} />{client.active > 0 ? 'Active' : 'Idle'}</span></td>
+                  <td><span className={styles.state}><StatusDot state={stateTone} />{stateLabel}</span></td>
                   <td className={styles.mono}>{client.ip}</td>
                   <td>{client.actualRpm}</td>
                   <td>{client.active}</td>
@@ -59,7 +65,7 @@ export default function ClientsPage() {
                   <td>{client.count.toLocaleString()}</td>
                   <td>{formatClock(client.lastSeen)}</td>
                 </tr>
-              ))}
+              })}
               {state.phase !== 'loading' && state.clients.length === 0 ? <tr><td colSpan={7} className={styles.empty}>No tunnel clients yet.</td></tr> : null}
             </tbody>
           </table>
@@ -77,12 +83,14 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: '
 
 function ClientDialog({ client, ip, events, onClose }: { client?: TunnelClient; ip: string; events: readonly TunnelClientEvent[]; onClose: () => void }) {
   const dialogRef = useModalFocus<HTMLElement>(onClose)
+  const stateLabel = client?.active ? 'Active now' : client?.queued ? 'Queued' : 'Idle'
+  const stateTone = client?.active ? 'active' : client?.queued ? 'retrying' : 'stopped'
   return (
     <div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section ref={dialogRef} className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="client-dialog-title">
         <header>
           <div>
-            <span className={styles.state}><StatusDot state={client?.active ? 'active' : 'stopped'} />{client?.active ? 'Active now' : 'Idle'}</span>
+            <span className={styles.state}><StatusDot state={stateTone} />{stateLabel}</span>
             <h2 id="client-dialog-title">{ip}</h2>
           </div>
           <button type="button" className={styles.close} aria-label="Close client logs" onClick={onClose}><X size={18} aria-hidden="true" /></button>

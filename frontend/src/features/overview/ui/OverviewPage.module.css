@@ -13,13 +13,17 @@
 .metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(120px, 1fr));
-  border-bottom: 1px solid var(--border-subtle);
+  overflow: hidden;
+  margin: 18px 24px 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
   background: var(--bg-surface);
+  box-shadow: inset 0 1px rgb(255 255 255 / 2%);
 }
 
 .metric {
   min-width: 0;
-  padding: 18px 24px 20px;
+  padding: 17px 20px 18px;
   border-right: 1px solid var(--border-subtle);
 }
 
@@ -36,7 +40,7 @@
 
 .metric strong {
   color: var(--text-primary);
-  font-size: clamp(22px, 2.2vw, 30px);
+  font-size: clamp(22px, 2.1vw, 28px);
   font-variant-numeric: tabular-nums;
   font-weight: 620;
 }
@@ -44,8 +48,8 @@
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
-  gap: 16px;
-  padding: 20px 24px 24px;
+  gap: 14px;
+  padding: 16px 24px 24px;
 }
 
 .activityPane,
@@ -53,18 +57,19 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  border-radius: var(--radius-panel);
   background: var(--bg-surface);
+  box-shadow: inset 0 1px rgb(255 255 255 / 2%);
 }
 
 .sectionHeader {
   display: flex;
-  min-height: 58px;
+  min-height: 60px;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   border-bottom: 1px solid var(--border-subtle);
-  padding: 10px 14px;
+  padding: 10px 16px;
 }
 
 .sectionHeader h2 {
@@ -88,7 +93,9 @@
   color: #72acf1;
   background: transparent;
   cursor: pointer;
+  transition: color var(--motion-fast), transform var(--motion-fast);
 }
+.linkButton:hover { color: #9ac3ee; transform: translateX(2px); }
 
 .tableWrap {
   overflow: auto;
@@ -102,7 +109,7 @@
 
 .table th,
 .table td {
-  height: 40px;
+  height: 42px;
   overflow: hidden;
   border-bottom: 1px solid var(--border-subtle);
   padding: 0 12px;
@@ -113,8 +120,8 @@
 
 .table th {
   color: var(--text-muted);
-  background: #191d20;
-  font-size: 12px;
+  background: #191919;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -149,12 +156,14 @@
 .providerRow {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  min-height: 64px;
+  min-height: 62px;
   align-items: center;
   gap: 10px;
   border-bottom: 1px solid var(--border-subtle);
-  padding: 10px 14px;
+  padding: 10px 16px;
+  transition: background var(--motion-fast);
 }
+.providerRow:hover { background: color-mix(in srgb, var(--bg-hover) 62%, transparent); }
 
 .providerRow strong {
   display: block;
@@ -202,13 +211,12 @@
 
 @media (max-width: 1100px) {
   .grid { grid-template-columns: minmax(0, 1fr); }
-  .healthPane { order: -1; }
   .providerList { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .providerRow:nth-child(odd) { border-right: 1px solid var(--border-subtle); }
 }
 
 @media (max-width: 959px) {
-  .metrics { grid-template-columns: repeat(5, minmax(90px, 1fr)); }
+  .metrics { grid-template-columns: repeat(5, minmax(90px, 1fr)); margin: 14px 16px 0; }
   .metric { padding: 14px 16px; }
   .grid { padding: 16px; }
   .table th:nth-child(3), .table td:nth-child(3) { display: none; }

@@ -88,7 +88,7 @@ func LoadDefault() (State, bool, error) {
 		provider, err := providerdomain.New(providerdomain.Params{
 			ID: item.ID, Name: item.Name, BaseURL: item.Upstream,
 			AuthMode: providerdomain.AuthMode(item.AuthMode), Dialect: providerdomain.DialectAuto,
-			ModelsPath: "/v1/models", RPM: item.RPM, CacheTTL: cacheDuration(item.Cache1H),
+			ModelsPath: "/v1/models", ImageCompat: item.ID == "echo", RPM: item.RPM, CacheTTL: cacheDuration(item.Cache1H),
 			Enabled: true, Builtin: item.ID == "local" || item.ID == "echo",
 		})
 		if err != nil {

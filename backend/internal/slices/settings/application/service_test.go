@@ -34,6 +34,10 @@ func TestServicePersistsBeforePublishing(t *testing.T) {
 	if err != nil || !result.RestartRequired || service.Snapshot().ListenerPort != 9000 {
 		t.Fatalf("unexpected update: %+v %v", result, err)
 	}
+	result, err = service.Update(context.Background(), next)
+	if err != nil || !result.RestartRequired {
+		t.Fatalf("restart requirement was cleared before restart: %+v %v", result, err)
+	}
 	repository.fail = true
 	failed := next
 	failed.ListenerPort = 9001

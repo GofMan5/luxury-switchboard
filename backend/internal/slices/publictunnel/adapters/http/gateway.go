@@ -62,25 +62,22 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	ip := clientIP(request)
-	wait, release, accepted := gateway.limiter.Reserve(ip, gateway.config.RPMPerIP)
-	if !accepted {
+	release, queued, err := gateway.limiter.Acquire(request.Context(), ip, gateway.config.RPMPerIP, func() {
+		if gateway.activity != nil {
+			gateway.activity.Queue(ip, 1)
+		}
+	})
+	if queued && gateway.activity != nil {
+		gateway.activity.Queue(ip, -1)
+	}
+	if err != nil {
+		if request.Context().Err() != nil {
+			return
+		}
 		gateway.error(writer, http.StatusServiceUnavailable, "Request could not be completed")
 		return
 	}
 	defer release()
-	if wait > 0 {
-		if gateway.activity != nil {
-			gateway.activity.Queue(ip, 1)
-			defer gateway.activity.Queue(ip, -1)
-		}
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-request.Context().Done():
-			return
-		case <-timer.C:
-		}
-	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxTunnelBody+1))
 	if err != nil || len(body) > maxTunnelBody {
 		gateway.error(writer, http.StatusRequestEntityTooLarge, "Request rejected")
@@ -170,7 +167,9 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 func requestPayload(body []byte, contentType, path string) (string, map[string]any, error) {
 	if strings.Contains(strings.ToLower(contentType), "json") {
 		var payload map[string]any
-		if json.Unmarshal(body, &payload) != nil {
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		if decoder.Decode(&payload) != nil {
 			return "", nil, errors.New("invalid JSON request")
 		}
 		model, _ := payload["model"].(string)
@@ -283,9 +282,16 @@ func applyBrandPolicy(payload map[string]any, path, brand string) []byte {
 		messages, _ := payload["messages"].([]any)
 		payload["messages"] = append([]any{map[string]any{"role": "system", "content": instruction}}, messages...)
 	case "/v1/messages":
-		if existing, ok := payload["system"].(string); ok && existing != "" {
-			payload["system"] = existing + "\n\n" + instruction
-		} else {
+		switch existing := payload["system"].(type) {
+		case string:
+			if existing != "" {
+				payload["system"] = existing + "\n\n" + instruction
+			} else {
+				payload["system"] = instruction
+			}
+		case []any:
+			payload["system"] = append([]any{map[string]string{"type": "text", "text": instruction}}, existing...)
+		default:
 			payload["system"] = instruction
 		}
 	}

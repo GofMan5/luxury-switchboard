@@ -17,9 +17,12 @@ export default function ModelRoutesPage() {
   const [editor, setEditor] = useState<ModelRoute | 'new' | null>(null)
   const [search, setSearch] = useState('')
   const defaultProvider = providers.catalog.activeId || providers.catalog.providers[0]?.id || ''
+  const selectedProviderAvailable = providers.catalog.providers.some((provider) => provider.enabled && provider.id === models.providerId)
 
   useEffect(() => { if (state.phase === 'idle') void model.load('relay') }, [model, state.phase])
-  useEffect(() => { if (models.phase === 'idle' && defaultProvider) void modelsModel.discover(defaultProvider) }, [defaultProvider, models.phase, modelsModel])
+  useEffect(() => {
+    if (defaultProvider && (models.phase === 'idle' || !selectedProviderAvailable)) void modelsModel.discover(defaultProvider)
+  }, [defaultProvider, models.phase, modelsModel, selectedProviderAvailable])
 
   const visibleModels = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
@@ -28,20 +31,20 @@ export default function ModelRoutesPage() {
   const selectedModels = useMemo(() => new Set(models.selected), [models.selected])
   const providerNames = useMemo(() => new Map(providers.catalog.providers.map((provider) => [provider.id, provider.name])), [providers.catalog.providers])
   const allSelected = models.models.length > 0 && models.selected.length === models.models.length
-  const bulkRoutes = models.selected.map((upstreamModel) => ({
+  const bulkRoutes = useMemo(() => models.selected.map((upstreamModel) => ({
     target: state.target,
     publicModel: upstreamModel,
     upstreamModel,
     providerId: models.providerId,
     contextLimitKiB: 0,
     enabled: true,
-  } satisfies ModelRoute))
+  } satisfies ModelRoute)), [models.providerId, models.selected, state.target])
 
   return (
     <section className={styles.page}>
       <header className="page-header">
         <div><h1>Model Routes</h1><p>Discover, test and assign models independently for Relay and Tunnel</p></div>
-        <Button variant="primary" onClick={() => setEditor('new')}><Plus size={16} />Add route</Button>
+        <Button variant="primary" onClick={() => { model.clearError(); setEditor('new') }}><Plus size={16} />Add route</Button>
       </header>
 
       <div className={styles.toolbar}>
@@ -82,12 +85,12 @@ export default function ModelRoutesPage() {
       <section className={styles.routes}>
         <header><div><h2>{state.target === 'relay' ? 'Relay assignments' : 'Published tunnel models'}</h2><p>{state.routes.length} routes</p></div></header>
         <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Public model / alias</th><th>Upstream model</th><th>Provider</th><th>Context cap</th><th>State</th><th>Actions</th></tr></thead><tbody>
-          {state.routes.map((route) => <tr key={route.publicModel}><td><strong>{route.publicModel}</strong></td><td>{route.upstreamModel}</td><td>{providerNames.get(route.providerId) ?? route.providerId}</td><td>{route.contextLimitKiB === 0 ? 'Default' : `${Math.round(route.contextLimitKiB / 1024)} MiB`}</td><td>{route.enabled ? 'Enabled' : 'Disabled'}</td><td><div className={styles.actions}><button type="button" aria-label={`Edit ${route.publicModel}`} onClick={() => setEditor(route)}><Pencil /></button><button type="button" aria-label={`Delete ${route.publicModel}`} onClick={() => void model.delete(route.publicModel)}><Trash2 /></button></div></td></tr>)}
+          {state.routes.map((route) => <tr key={route.publicModel}><td><strong>{route.publicModel}</strong></td><td>{route.upstreamModel}</td><td>{providerNames.get(route.providerId) ?? route.providerId}</td><td>{route.contextLimitKiB === 0 ? 'Default' : `${Math.round(route.contextLimitKiB / 1024)} MiB`}</td><td>{route.enabled ? 'Enabled' : 'Disabled'}</td><td><div className={styles.actions}><button type="button" aria-label={`Edit ${route.publicModel}`} onClick={() => { model.clearError(); setEditor(route) }}><Pencil /></button><button type="button" aria-label={`Delete ${route.publicModel}`} onClick={() => void model.delete(route.publicModel)}><Trash2 /></button></div></td></tr>)}
           {state.phase !== 'loading' && state.routes.length === 0 ? <tr><td colSpan={6} className={styles.empty}>No {state.target === 'relay' ? 'relay assignments' : 'public tunnel models'} yet.</td></tr> : null}
         </tbody></table></div>
       </section>
 
-      {editor ? <RouteEditor target={state.target} route={editor === 'new' ? undefined : editor} providers={providers.catalog.providers.filter((provider) => provider.enabled)} pending={Boolean(state.pending)} onClose={() => setEditor(null)} onSave={async route => { if (await model.upsert(route)) setEditor(null) }} /> : null}
+      {editor ? <RouteEditor target={state.target} route={editor === 'new' ? undefined : editor} providers={providers.catalog.providers.filter((provider) => provider.enabled)} pending={Boolean(state.pending)} operationError={state.error} onClose={() => setEditor(null)} onSave={async route => { if (await model.upsert(route)) setEditor(null) }} /> : null}
     </section>
   )
 }
@@ -98,7 +101,7 @@ function ModelResult({ result }: { result?: ReturnType<typeof useModels>['state'
   return <small className={styles.testResult}><StatusDot state={state} />{result.state === 'testing' ? 'Testing' : result.state === 'available' ? `${formatDuration(result.latencyMs)} · ${result.status}` : `${result.errorCode || 'Unavailable'} · ${result.status || '—'}`}</small>
 }
 
-function RouteEditor({ target, route, providers, pending, onClose, onSave }: { target: RouteTarget; route?: ModelRoute; providers: readonly { id: string; name: string }[]; pending: boolean; onClose: () => void; onSave: (route: ModelRoute) => Promise<void> }) {
+function RouteEditor({ target, route, providers, pending, operationError, onClose, onSave }: { target: RouteTarget; route?: ModelRoute; providers: readonly { id: string; name: string }[]; pending: boolean; operationError: string; onClose: () => void; onSave: (route: ModelRoute) => Promise<void> }) {
   const [publicModel, setPublicModel] = useState(route?.publicModel ?? '')
   const [upstreamModel, setUpstreamModel] = useState(route?.upstreamModel ?? '')
   const [providerId, setProviderId] = useState(providers.some((provider) => provider.id === route?.providerId) ? route?.providerId ?? '' : providers[0]?.id ?? '')
@@ -113,5 +116,5 @@ function RouteEditor({ target, route, providers, pending, onClose, onSave }: { t
     setError('')
     void onSave({ target, publicModel: publicModel.trim(), upstreamModel: upstreamModel.trim(), providerId, contextLimitKiB: Math.round(context * 1024), enabled })
   }
-  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} autoFocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error ? <p className={styles.formError} role="alert">{error}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
+  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
 }

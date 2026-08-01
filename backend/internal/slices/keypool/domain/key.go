@@ -17,7 +17,7 @@ type Credential struct {
 
 func NewCredential(value string) (Credential, error) {
 	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 8*1024 {
+	if value == "" || len(value) > 8*1024 || strings.ContainsAny(value, "\r\n\x00") {
 		return Credential{}, errors.New("invalid credential")
 	}
 	return Credential{value: value}, nil

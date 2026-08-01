@@ -45,7 +45,9 @@ export class TauriSidecarSession implements ControlPlaneSession {
   }
 
   async call<T>(method: string, payload?: unknown, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new DOMException('Sidecar command aborted', 'AbortError')
     await this.start()
+    if (signal?.aborted) throw new DOMException('Sidecar command aborted', 'AbortError')
     if (!this.#started) throw new ControlPlaneError('not_connected', 'Sidecar is not connected')
     const id = requestID()
     const frame: CommandFrame = {

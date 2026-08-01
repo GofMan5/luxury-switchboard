@@ -115,6 +115,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if routeLoadErr != nil {
 		logger.Printf("encrypted model routes could not be loaded; using active provider")
 	}
+	providerManager.SetRouteUsage(routeService)
 	routes := relayproviders.NewSource(catalog, relayroutes.NewResolver(routeService))
 	credentials := relaykeypool.NewSource(keyScheduler)
 	activity := activityapp.NewService(settings.ActivityCapacity)
@@ -247,7 +248,7 @@ func defaultProviders() ([]providerdomain.Provider, string, error) {
 		ID: "echo", Name: "EchoGate", BaseURL: "https://api.echogate.one/v1",
 		AuthMode: providerdomain.AuthAuto,
 		RPM:      environmentBounded("SWITCHBOARD_ECHO_RPM", 0, providerdomain.MaxRPM),
-		CacheTTL: time.Hour, Enabled: true, Builtin: true,
+		CacheTTL: time.Hour, ImageCompat: true, Enabled: true, Builtin: true,
 	})
 	if err != nil {
 		return nil, "", err

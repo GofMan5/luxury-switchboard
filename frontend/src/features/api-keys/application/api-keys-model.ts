@@ -1,5 +1,6 @@
 import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
 import type { ApiKeysPort } from './api-keys-port'
+import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
 export interface ApiKeysState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'error'
@@ -30,17 +31,17 @@ export class ApiKeysModel {
     return () => this.#listeners.delete(listener)
   }
 
-  async load(providerId: string): Promise<void> {
+  async load(providerId: string, clearPending = false): Promise<void> {
     if (!providerId) return
     const generation = ++this.#generation
     this.#set({ ...this.#state, phase: 'loading', providerId, error: '' })
     try {
       const keys = await this.#port.list(providerId)
       if (generation !== this.#generation) return
-      this.#set({ phase: 'ready', providerId, keys, pendingId: '', error: '' })
+      this.#set({ phase: 'ready', providerId, keys, pendingId: clearPending ? '' : this.#state.pendingId, error: '' })
     } catch {
       if (generation !== this.#generation) return
-      this.#set({ ...this.#state, phase: 'error', pendingId: '', error: 'API keys are unavailable' })
+      this.#set({ ...this.#state, phase: 'error', pendingId: clearPending ? '' : this.#state.pendingId, error: 'API keys are unavailable' })
     }
   }
 
@@ -64,6 +65,10 @@ export class ApiKeysModel {
     return this.#mutate(keyId, () => this.#port.reset(this.#state.providerId, keyId))
   }
 
+  clearError(): void {
+    if (this.#state.error) this.#set({ ...this.#state, error: '' })
+  }
+
   dispose(): void {
     this.#unsubscribe?.()
     this.#listeners.clear()
@@ -74,10 +79,10 @@ export class ApiKeysModel {
     this.#set({ ...this.#state, pendingId, error: '' })
     try {
       await operation()
-      await this.load(this.#state.providerId)
+      await this.load(this.#state.providerId, true)
       return true
-    } catch {
-      this.#set({ ...this.#state, pendingId: '', error: 'Key settings could not be saved' })
+    } catch (error) {
+      this.#set({ ...this.#state, pendingId: '', error: error instanceof ControlPlaneError ? error.message : 'Key settings could not be saved' })
       return false
     }
   }

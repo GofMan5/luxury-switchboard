@@ -139,6 +139,7 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor)
 	blocks := splitSSE(body)
 	output := bytes.Buffer{}
 	terminal := false
+	finished := false
 	for _, block := range blocks {
 		data := eventData(block)
 		if len(data) == 0 {
@@ -167,6 +168,9 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor)
 		if eventType == "message_stop" && path == "/v1/messages" {
 			terminal = true
 		}
+		if (path == "/v1/chat/completions" || path == "/v1/completions") && chatFinished(object) {
+			finished = true
+		}
 		encoded, _ := json.Marshal(clean)
 		if safeEventType.MatchString(eventType) {
 			fmt.Fprintf(&output, "event: %s\n", eventType)
@@ -175,6 +179,10 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor)
 		output.Write(encoded)
 		output.WriteString("\n\n")
 	}
+	if !terminal && finished {
+		output.WriteString("data: [DONE]\n\n")
+		terminal = true
+	}
 	if !terminal {
 		return nil, errors.New("SSE terminal event missing")
 	}
@@ -182,6 +190,17 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor)
 		return nil, errors.New("sensitive SSE marker remains")
 	}
 	return output.Bytes(), nil
+}
+
+func chatFinished(payload map[string]any) bool {
+	choices, _ := payload["choices"].([]any)
+	for _, choice := range choices {
+		item, _ := choice.(map[string]any)
+		if reason, ok := item["finish_reason"].(string); ok && reason != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func splitSSE(body []byte) [][]byte {

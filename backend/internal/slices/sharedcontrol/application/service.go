@@ -74,7 +74,8 @@ func (service *Service) Control(ctx context.Context, position int, revision int6
 		return service.remember(snapshot), nil
 	}
 	current, listErr := service.client.Request(ctx, "list")
-	if listErr == nil && position < len(current.Tunnels) && current.Tunnels[position].State == desired {
+	revisionMatches := current.Revision == revision || (revision < 1<<63-1 && current.Revision == revision+1)
+	if listErr == nil && revisionMatches && position < len(current.Tunnels) && current.Tunnels[position].State == desired {
 		return service.remember(current), nil
 	}
 	return domain.Snapshot{}, errUnavailable

@@ -5,6 +5,7 @@ import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { Provider, ProviderInput } from '../domain/provider'
 import { useProviders } from './useProviders'
+import { providerInputError } from './provider-form'
 import styles from './ProvidersPage.module.css'
 
 export default function ProvidersPage() {
@@ -12,8 +13,8 @@ export default function ProvidersPage() {
   const [selectedID, setSelectedID] = useState('')
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; provider?: Provider } | null>(null)
   const [removeProvider, setRemoveProvider] = useState<Provider | null>(null)
-  const effectiveID = selectedID || state.catalog.activeId
-  const selected = state.catalog.providers.find((provider) => provider.id === effectiveID)
+  const selected = state.catalog.providers.find((provider) => provider.id === selectedID) ?? state.catalog.providers.find((provider) => provider.id === state.catalog.activeId)
+  const effectiveID = selected?.id ?? ''
 
   return (
     <section className={styles.page}>
@@ -21,7 +22,7 @@ export default function ProvidersPage() {
         <div><h1>Providers</h1><p>Endpoints, limits and active routing</p></div>
         <div className={styles.headerActions}>
           <Button variant="secondary" disabled={state.phase === 'loading'} onClick={() => void model.refresh()}><RefreshCw size={15} />Refresh</Button>
-          <Button variant="primary" onClick={() => setEditor({ mode: 'add' })}><Plus size={16} />Add provider</Button>
+          <Button variant="primary" onClick={() => { model.clearError(); setEditor({ mode: 'add' }) }}><Plus size={16} />Add provider</Button>
         </div>
       </header>
 
@@ -49,8 +50,8 @@ export default function ProvidersPage() {
             active={selected.id === state.catalog.activeId}
             pending={state.pendingId === selected.id}
             onActivate={() => void model.activate(selected.id)}
-            onEdit={() => setEditor({ mode: 'edit', provider: selected })}
-            onDelete={() => setRemoveProvider(selected)}
+            onEdit={() => { model.clearError(); setEditor({ mode: 'edit', provider: selected }) }}
+            onDelete={() => { model.clearError(); setRemoveProvider(selected) }}
           />
         ) : <div className={styles.noSelection}>Select a provider to inspect its policy.</div>}
       </div>
@@ -60,6 +61,7 @@ export default function ProvidersPage() {
           mode={editor.mode}
           provider={editor.provider}
           pending={Boolean(state.pendingId)}
+          operationError={state.error}
           active={editor.provider?.id === state.catalog.activeId}
           onClose={() => setEditor(null)}
           onSubmit={async (value) => {
@@ -74,6 +76,7 @@ export default function ProvidersPage() {
         <ConfirmDelete
           provider={removeProvider}
           pending={Boolean(state.pendingId)}
+          error={state.error}
           onCancel={() => setRemoveProvider(null)}
           onConfirm={async () => {
             if (await model.delete(removeProvider.id)) {
@@ -102,14 +105,15 @@ function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDe
         </div>
       </header>
       <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
-      <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Requests per minute</dt><dd>{provider.rpm === 0 ? 'Unlimited' : provider.rpm}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
+      <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Requests per minute</dt><dd>{provider.rpm === 0 ? 'Unlimited' : provider.rpm}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
       <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>Secret material is never returned to the UI.</span></div></div></section>
     </aside>
   )
 }
 
-function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: {
+function ProviderEditor({ mode, provider, pending, operationError, active, onClose, onSubmit }: {
   mode: 'add' | 'edit'; provider?: Provider; pending: boolean; active: boolean
+  operationError: string
   onClose: () => void; onSubmit: (value: ProviderInput) => Promise<void>
 }) {
   const [name, setName] = useState(provider?.name ?? '')
@@ -118,6 +122,7 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
   const [authHeader, setAuthHeader] = useState(provider?.authHeader ?? '')
   const [dialect, setDialect] = useState<Provider['dialect']>(provider?.dialect ?? 'auto')
   const [modelsPath, setModelsPath] = useState(provider?.modelsPath ?? '/v1/models')
+  const [imageCompat, setImageCompat] = useState(provider?.imageCompat ?? false)
   const [rpm, setRPM] = useState(String(provider?.rpm ?? 0))
   const [cache1h, setCache1H] = useState(provider?.cacheTtl === '1h0m0s')
   const [enabled, setEnabled] = useState(provider?.enabled ?? true)
@@ -127,12 +132,14 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const parsedRPM = Number(rpm)
-    if (!name.trim() || !baseUrl.trim() || !modelsPath.startsWith('/') || (authMode === 'custom' && !authHeader.trim()) || !Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000 || (active && !enabled)) {
-      setError(active && !enabled ? 'Switch away from the provider before disabling it.' : 'Enter a name, an absolute endpoint and a non-negative RPM.')
+    const value = { name: name.trim(), baseUrl: baseUrl.trim(), authMode, authHeader: authHeader.trim(), dialect, modelsPath: modelsPath.trim(), imageCompat, rpm: parsedRPM, cache1h, enabled }
+    const validationError = providerInputError(value)
+    if (validationError || (active && !enabled)) {
+      setError(active && !enabled ? 'Switch away from the provider before disabling it.' : validationError)
       return
     }
     setError('')
-    void onSubmit({ name: name.trim(), baseUrl: baseUrl.trim(), authMode, authHeader: authHeader.trim(), dialect, modelsPath: modelsPath.trim(), rpm: parsedRPM, cache1h, enabled })
+    void onSubmit(value)
   }
 
   return (
@@ -140,16 +147,17 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
       <form ref={dialogRef} className={`ui-modal ${styles.providerModal}`} role="dialog" aria-modal="true" aria-label={mode === 'add' ? 'Add provider' : 'Edit provider'} onSubmit={submit}>
         <header><div><h2>{mode === 'add' ? 'Add provider' : `Edit ${provider?.name}`}</h2><p>Remote endpoints require HTTPS; loopback HTTP is allowed.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
-          <label><span>Display name</span><input value={name} maxLength={80} autoFocus onChange={(event) => setName(event.currentTarget.value)} /></label>
+          <label><span>Display name</span><input value={name} maxLength={80} data-autofocus onChange={(event) => setName(event.currentTarget.value)} /></label>
           <label><span>Base URL</span><input type="url" value={baseUrl} maxLength={2048} required placeholder="https://provider.example/v1" onChange={(event) => setBaseURL(event.currentTarget.value)} /></label>
           <label><span>API dialect</span><select value={dialect} onChange={(event) => setDialect(event.currentTarget.value as Provider['dialect'])}><option value="auto">Auto-detect from request</option><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic compatible</option></select></label>
           <label><span>Models discovery path</span><input value={modelsPath} maxLength={160} required placeholder="/v1/models" onChange={(event) => setModelsPath(event.currentTarget.value)} /></label>
+          <label className={styles.check}><input type="checkbox" checked={imageCompat} onChange={(event) => setImageCompat(event.currentTarget.checked)} />Bridge image generation through the Responses image tool</label>
           <label><span>Authentication</span><select value={authMode} onChange={(event) => setAuthMode(event.currentTarget.value as Provider['authMode'])}><option value="auto">Auto by API dialect</option><option value="bearer">Bearer token</option><option value="x-api-key">x-api-key</option><option value="custom">Custom header</option><option value="passthrough">Pass through client auth</option></select></label>
-          {authMode === 'custom' ? <label><span>Custom auth header</span><input value={authHeader} maxLength={64} required placeholder="api-key" onChange={(event) => setAuthHeader(event.currentTarget.value)} /><small>Header name only. The value comes from the encrypted key pool.</small></label> : null}
+          {authMode === 'custom' ? <label><span>Custom auth header</span><input value={authHeader} maxLength={64} required placeholder="Authorization or api-key" onChange={(event) => setAuthHeader(event.currentTarget.value)} /><small>The encrypted key value is sent exactly as stored, including an optional Token or Basic prefix.</small></label> : null}
           <label><span>Provider RPM</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited. Per-key RPM still applies.</small></label>
           <label className={styles.check}><input type="checkbox" checked={cache1h} onChange={(event) => setCache1H(event.currentTarget.checked)} />Extend existing ephemeral cache controls to 1 hour</label>
           <label className={styles.check}><input type="checkbox" checked={enabled} disabled={active} onChange={(event) => setEnabled(event.currentTarget.checked)} />Provider enabled</label>
-          {error ? <p className={styles.formError} role="alert">{error}</p> : null}
+          {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
         </div>
         <footer><Button type="button" disabled={pending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save provider'}</Button></footer>
       </form>
@@ -157,7 +165,7 @@ function ProviderEditor({ mode, provider, pending, active, onClose, onSubmit }: 
   )
 }
 
-function ConfirmDelete({ provider, pending, onCancel, onConfirm }: { provider: Provider; pending: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
+function ConfirmDelete({ provider, pending, error, onCancel, onConfirm }: { provider: Provider; pending: boolean; error: string; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const dialogRef = useModalFocus<HTMLElement>(onCancel, pending)
-  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>This removes only provider settings. Requests are not affected because active providers cannot be deleted.</p></div></header><footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
+  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>The provider must have no API keys or model routes. Reassign those first so active workflows cannot break.</p></div></header>{error ? <p className={styles.confirmError} role="alert">{error}</p> : null}<footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
 }

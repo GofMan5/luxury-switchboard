@@ -21,6 +21,17 @@ func TestQueueStateIsVisibleAndReleased(t *testing.T) {
 	}
 }
 
+func TestQueuedStateSurvivesAnActiveRequestFinishing(t *testing.T) {
+	service := NewService(nil)
+	service.Queue("203.0.113.11", 1)
+	id := service.Begin(domain.Start{IP: "203.0.113.11"})
+	service.Finish(id, domain.Finish{Status: 200})
+	client := service.List()[0]
+	if client.Active != 0 || client.Queued != 1 || client.State != "queued" {
+		t.Fatalf("finishing an active request hid the remaining queue: %+v", client)
+	}
+}
+
 func TestIdleClientIsEvictedWithoutDroppingActiveClient(t *testing.T) {
 	service := NewService(nil)
 	now := time.Unix(1_000, 0).UTC()

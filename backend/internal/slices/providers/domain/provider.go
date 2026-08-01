@@ -27,31 +27,33 @@ const (
 )
 
 type Provider struct {
-	ID         string
-	Name       string
-	BaseURL    *url.URL
-	AuthMode   AuthMode
-	AuthHeader string
-	Dialect    Dialect
-	ModelsPath string
-	RPM        int
-	CacheTTL   time.Duration
-	Enabled    bool
-	Builtin    bool
+	ID          string
+	Name        string
+	BaseURL     *url.URL
+	AuthMode    AuthMode
+	AuthHeader  string
+	Dialect     Dialect
+	ModelsPath  string
+	ImageCompat bool
+	RPM         int
+	CacheTTL    time.Duration
+	Enabled     bool
+	Builtin     bool
 }
 
 type Params struct {
-	ID         string
-	Name       string
-	BaseURL    string
-	AuthMode   AuthMode
-	AuthHeader string
-	Dialect    Dialect
-	ModelsPath string
-	RPM        int
-	CacheTTL   time.Duration
-	Enabled    bool
-	Builtin    bool
+	ID          string
+	Name        string
+	BaseURL     string
+	AuthMode    AuthMode
+	AuthHeader  string
+	Dialect     Dialect
+	ModelsPath  string
+	ImageCompat bool
+	RPM         int
+	CacheTTL    time.Duration
+	Enabled     bool
+	Builtin     bool
 }
 
 func New(params Params) (Provider, error) {
@@ -107,17 +109,18 @@ func New(params Params) (Provider, error) {
 		return Provider{}, errors.New("provider cache TTL is unsupported")
 	}
 	return Provider{
-		ID:         params.ID,
-		Name:       params.Name,
-		BaseURL:    parsed,
-		AuthMode:   params.AuthMode,
-		AuthHeader: params.AuthHeader,
-		Dialect:    params.Dialect,
-		ModelsPath: params.ModelsPath,
-		RPM:        params.RPM,
-		CacheTTL:   params.CacheTTL,
-		Enabled:    params.Enabled,
-		Builtin:    params.Builtin,
+		ID:          params.ID,
+		Name:        params.Name,
+		BaseURL:     parsed,
+		AuthMode:    params.AuthMode,
+		AuthHeader:  params.AuthHeader,
+		Dialect:     params.Dialect,
+		ModelsPath:  params.ModelsPath,
+		ImageCompat: params.ImageCompat,
+		RPM:         params.RPM,
+		CacheTTL:    params.CacheTTL,
+		Enabled:     params.Enabled,
+		Builtin:     params.Builtin,
 	}, nil
 }
 
@@ -152,6 +155,7 @@ type PublicProvider struct {
 	AuthHeader    string `json:"authHeader,omitempty"`
 	Dialect       string `json:"dialect"`
 	ModelsPath    string `json:"modelsPath"`
+	ImageCompat   bool   `json:"imageCompat"`
 	RPM           int    `json:"rpm"`
 	CacheTTL      string `json:"cacheTtl"`
 	Enabled       bool   `json:"enabled"`
@@ -162,17 +166,18 @@ type PublicProvider struct {
 
 func (provider Provider) Public() PublicProvider {
 	return PublicProvider{
-		ID:         provider.ID,
-		Name:       provider.Name,
-		BaseURL:    provider.BaseURL.String(),
-		AuthMode:   string(provider.AuthMode),
-		AuthHeader: provider.AuthHeader,
-		Dialect:    string(provider.Dialect),
-		ModelsPath: provider.ModelsPath,
-		RPM:        provider.RPM,
-		CacheTTL:   provider.CacheTTL.String(),
-		Enabled:    provider.Enabled,
-		Builtin:    provider.Builtin,
+		ID:          provider.ID,
+		Name:        provider.Name,
+		BaseURL:     provider.BaseURL.String(),
+		AuthMode:    string(provider.AuthMode),
+		AuthHeader:  provider.AuthHeader,
+		Dialect:     string(provider.Dialect),
+		ModelsPath:  provider.ModelsPath,
+		ImageCompat: provider.ImageCompat,
+		RPM:         provider.RPM,
+		CacheTTL:    provider.CacheTTL.String(),
+		Enabled:     provider.Enabled,
+		Builtin:     provider.Builtin,
 	}
 }
 
@@ -186,7 +191,8 @@ func validAuthHeader(value string) bool {
 		}
 	}
 	forbidden := map[string]struct{}{
-		"authorization": {}, "connection": {}, "content-length": {}, "host": {},
+		"accept": {}, "accept-encoding": {}, "connection": {}, "content-encoding": {},
+		"content-length": {}, "content-type": {}, "host": {}, "user-agent": {},
 		"proxy-authorization": {}, "transfer-encoding": {}, "upgrade": {},
 		"x-provider-switch-tunnel": {}, "x-provider-switch-model": {},
 	}

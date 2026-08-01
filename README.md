@@ -26,7 +26,7 @@ pnpm build
 
 ## Core workflow
 
-1. Add any HTTPS provider in **Providers**. Loopback HTTP is allowed; remote plaintext HTTP is rejected.
+1. Add any OpenAI/Anthropic-compatible provider in **Providers**. Configure its base path/query, dialect, model-discovery path, exact auth header, RPM, one-hour cache policy and optional Responses image-tool bridge. Loopback HTTP is allowed; remote plaintext HTTP is rejected.
 2. Add one or more secrets in **API Keys**, set priority/RPM and optionally a per-key HTTP(S)/SOCKS proxy.
 3. Use **Model Routes** to discover and test models, then assign selected models independently to the local Relay or public Tunnel. A second click on **All models** clears the selection.
 4. Configure the public API key, per-IP RPM, context cap and optional publisher profile in **Tunnel**.
@@ -71,7 +71,7 @@ The public tunnel is an allowlist gateway, not a passthrough proxy:
 - explicit provider/source probes receive the configured Luxury Private identity locally without contacting upstream;
 - request/response bodies and secrets are never written to activity or tunnel history.
 
-Image generation supports Codex `gpt-image-2` compatibility through the Responses image tool, JSON generations, and multipart image edits.
+Image generation uses each provider's native JSON/multipart endpoint by default. Providers that expose image generation through the Responses tool can enable the profile-level bridge; the built-in EchoGate profile enables it by default and supports Codex `gpt-image-2` plus public aliases without forcing that behavior onto custom providers.
 
 ## Storage
 

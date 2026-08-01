@@ -36,6 +36,10 @@ type fakeKeyPool struct {
 	count map[string]int
 }
 
+type fakeRouteUsage map[string]bool
+
+func (usage fakeRouteUsage) LockProvider(id string) (bool, func()) { return usage[id], func() {} }
+
 func (keys *fakeKeyPool) Count(id string) int { return keys.count[id] }
 func (keys *fakeKeyPool) EnsureProvider(id string, rpm int) error {
 	if keys.rates == nil {
@@ -127,6 +131,21 @@ func TestDeleteReservesKeyPoolBeforePersistenceAndRollsBack(t *testing.T) {
 	}
 	if keys.rates["custom"] != 0 {
 		t.Fatalf("failed delete did not restore provider admission: %+v", keys.rates)
+	}
+}
+
+func TestDeleteRejectsProviderReferencedByModelRoutes(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	custom := providerFixture(t, "custom", false)
+	catalog, _ := NewCatalog([]domain.Provider{local, custom}, local.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: make(map[string]int)}
+	manager, _ := NewManager(catalog, &memoryProviderRepository{}, keys)
+	manager.SetRouteUsage(fakeRouteUsage{"custom": true})
+	if err := manager.Delete(context.Background(), "custom"); !errors.Is(err, ErrProviderHasRoutes) {
+		t.Fatalf("routed provider deletion was accepted: %v", err)
+	}
+	if keys.rates["custom"] != 77 {
+		t.Fatal("blocked deletion changed key admission")
 	}
 }
 

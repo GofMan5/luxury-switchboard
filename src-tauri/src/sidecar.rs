@@ -171,12 +171,20 @@ fn validate_outgoing(frame: &str) -> Result<(), String> {
         serde_json::from_str(frame).map_err(|_| "Invalid sidecar protocol frame".to_string())?;
     if envelope.v != 1
         || envelope.kind != "command"
-        || envelope.id.is_empty()
+        || !valid_request_id(&envelope.id)
         || !allowed_method(&envelope.method)
     {
         return Err("Sidecar command is not allowed".to_string());
     }
     Ok(())
+}
+
+fn valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn allowed_method(method: &str) -> bool {
@@ -327,6 +335,10 @@ mod tests {
         assert!(validate_outgoing("{}\n").is_err());
         assert!(
             validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"shell.run"}"#).is_err()
+        );
+        assert!(
+            validate_outgoing(r#"{"v":1,"id":"bad id","type":"command","method":"relay.status"}"#)
+                .is_err()
         );
     }
 

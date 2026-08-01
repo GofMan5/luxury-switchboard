@@ -34,6 +34,7 @@ type storedProvider struct {
 	AuthHeader      string `json:"authHeader,omitempty"`
 	Dialect         string `json:"dialect"`
 	ModelsPath      string `json:"modelsPath"`
+	ImageCompat     *bool  `json:"imageCompat,omitempty"`
 	RPM             int    `json:"rpm"`
 	CacheTTLSeconds int64  `json:"cacheTtlSeconds"`
 	Enabled         bool   `json:"enabled"`
@@ -67,10 +68,14 @@ func (repository *Repository) Load(ctx context.Context) (application.SavedState,
 	}
 	providers := make([]domain.Provider, 0, len(value.Providers))
 	for _, saved := range value.Providers {
+		imageCompat := saved.ImageCompat != nil && *saved.ImageCompat
+		if saved.ImageCompat == nil && saved.ID == "echo" {
+			imageCompat = true
+		}
 		provider, err := domain.New(domain.Params{
 			ID: saved.ID, Name: saved.Name, BaseURL: saved.BaseURL,
 			AuthMode: domain.AuthMode(saved.AuthMode), AuthHeader: saved.AuthHeader,
-			Dialect: domain.Dialect(saved.Dialect), ModelsPath: saved.ModelsPath,
+			Dialect: domain.Dialect(saved.Dialect), ModelsPath: saved.ModelsPath, ImageCompat: imageCompat,
 			RPM:      saved.RPM,
 			CacheTTL: time.Duration(saved.CacheTTLSeconds) * time.Second,
 			Enabled:  saved.Enabled, Builtin: saved.Builtin,
@@ -89,11 +94,13 @@ func (repository *Repository) Save(ctx context.Context, state application.SavedS
 	}
 	value := document{Version: fileVersion, ActiveID: state.ActiveID, Providers: make([]storedProvider, 0, len(state.Providers))}
 	for _, provider := range state.Providers {
+		imageCompat := provider.ImageCompat
 		value.Providers = append(value.Providers, storedProvider{
 			ID: provider.ID, Name: provider.Name, BaseURL: provider.BaseURL.String(),
 			AuthMode: string(provider.AuthMode), RPM: provider.RPM,
 			AuthHeader: provider.AuthHeader, Dialect: string(provider.Dialect),
 			ModelsPath:      provider.ModelsPath,
+			ImageCompat:     &imageCompat,
 			CacheTTLSeconds: int64(provider.CacheTTL / time.Second),
 			Enabled:         provider.Enabled, Builtin: provider.Builtin,
 		})

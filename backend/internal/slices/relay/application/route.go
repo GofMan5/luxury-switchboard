@@ -12,6 +12,8 @@ type Route struct {
 	BaseURL       *url.URL
 	AuthMode      string
 	AuthHeader    string
+	Dialect       string
+	ImageCompat   bool
 	UpstreamModel string
 	CacheTTL      time.Duration
 }

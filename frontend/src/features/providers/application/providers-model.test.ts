@@ -4,8 +4,8 @@ import type { ProvidersPort } from './providers-port'
 import { ProvidersModel } from './providers-model'
 
 const configured: readonly Provider[] = [
-  { id: 'local', name: 'Local', baseUrl: 'http://127.0.0.1:8799', authMode: 'passthrough', authHeader: '', dialect: 'auto', modelsPath: '/v1/models', rpm: 0, cacheTtl: '0s', enabled: true, keyConfigured: false, keyCount: 0, builtin: true },
-  { id: 'echo', name: 'Echo', baseUrl: 'https://example.invalid/v1', authMode: 'bearer', authHeader: '', dialect: 'auto', modelsPath: '/v1/models', rpm: 120, cacheTtl: '1h0m0s', enabled: true, keyConfigured: true, keyCount: 1, builtin: true },
+  { id: 'local', name: 'Local', baseUrl: 'http://127.0.0.1:8799', authMode: 'passthrough', authHeader: '', dialect: 'auto', modelsPath: '/v1/models', imageCompat: false, rpm: 0, cacheTtl: '0s', enabled: true, keyConfigured: false, keyCount: 0, builtin: true },
+  { id: 'echo', name: 'Echo', baseUrl: 'https://example.invalid/v1', authMode: 'bearer', authHeader: '', dialect: 'auto', modelsPath: '/v1/models', imageCompat: true, rpm: 120, cacheTtl: '1h0m0s', enabled: true, keyConfigured: true, keyCount: 1, builtin: true },
 ]
 
 class FakeProvidersPort implements ProvidersPort {

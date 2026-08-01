@@ -2,7 +2,9 @@ package relayhttp
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -198,7 +200,10 @@ func TestRelayRewritesAuthAndExtendsExistingCacheTTL(t *testing.T) {
 		body, _ := io.ReadAll(request.Body)
 		receivedBody = string(body)
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"ok":true}`))
+		writer.Header().Set("Content-Encoding", "gzip")
+		compressed := gzip.NewWriter(writer)
+		_, _ = compressed.Write([]byte(`{"ok":true}`))
+		_ = compressed.Close()
 	}))
 	defer upstream.Close()
 	parsed, _ := url.Parse(upstream.URL + "/v1")
@@ -221,8 +226,8 @@ func TestRelayRewritesAuthAndExtendsExistingCacheTTL(t *testing.T) {
 	if receivedAuth != "Bearer configured-key" {
 		t.Fatalf("upstream auth was not replaced")
 	}
-	if receivedEncoding != "identity" {
-		t.Fatalf("compressed upstream response bypassed stream inspection: %q", receivedEncoding)
+	if receivedEncoding != "gzip" || response.Header().Get("Content-Encoding") != "" || response.Body.String() != `{"ok":true}` {
+		t.Fatalf("upstream compression was not normalized safely: request=%q response=%q body=%s", receivedEncoding, response.Header().Get("Content-Encoding"), response.Body.String())
 	}
 	if !strings.Contains(receivedBody, `"ttl":"1h"`) {
 		t.Fatalf("cache TTL was not extended: %s", receivedBody)
@@ -277,6 +282,20 @@ func TestAutoAuthRecognizesMessagesBelowProviderBasePath(t *testing.T) {
 	headers := <-seen
 	if headers.Get("x-api-key") != "configured-key" || headers.Get("Authorization") != "" {
 		t.Fatalf("nested Anthropic route used the wrong auth: %v", headers)
+	}
+}
+
+func TestExplicitProviderDialectOverridesAutoAuthPathGuess(t *testing.T) {
+	base, _ := url.Parse("https://provider.example/v1")
+	responses := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", nil)
+	anthropic, err := buildUpstreamRequest(context.Background(), responses, nil, relayapp.Route{BaseURL: base, AuthMode: "auto", Dialect: "anthropic"}, "secret")
+	if err != nil || anthropic.Header.Get("x-api-key") != "secret" || anthropic.Header.Get("Authorization") != "" {
+		t.Fatalf("explicit Anthropic dialect used the wrong auth: %v err=%v", anthropic.Header, err)
+	}
+	messages := httptest.NewRequest(http.MethodPost, "http://relay/v1/messages", nil)
+	openai, err := buildUpstreamRequest(context.Background(), messages, nil, relayapp.Route{BaseURL: base, AuthMode: "auto", Dialect: "openai"}, "secret")
+	if err != nil || openai.Header.Get("Authorization") != "Bearer secret" || openai.Header.Get("x-api-key") != "" {
+		t.Fatalf("explicit OpenAI dialect used the wrong auth: %v err=%v", openai.Header, err)
 	}
 }
 
@@ -346,6 +365,28 @@ func TestPassthroughCredentialFailuresBackOffWithoutBusyLoop(t *testing.T) {
 				t.Fatalf("passthrough retry did not back off: %s", elapsed)
 			}
 		})
+	}
+}
+
+func TestPassthroughAuthenticationFailureStopsAfterPermanentAttempts(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":"invalid credential"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "local", BaseURL: parsed, AuthMode: "passthrough"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "local", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusUnauthorized || attempts != 2 {
+		t.Fatalf("passthrough authentication did not terminate: status=%d attempts=%d err=%v", response.Status, attempts, err)
 	}
 }
 
@@ -533,6 +574,46 @@ func TestResponsesStreamRetriesTruncatedAttemptBeforeForwarding(t *testing.T) {
 	}
 }
 
+func TestChatStreamAcceptsFinishReasonWhenProviderOmitsDoneSentinel(t *testing.T) {
+	inspector := sseInspector{path: "/v1/chat/completions"}
+	inspector.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\n"))
+	if terminal := inspector.Finish(); terminal != "done" {
+		t.Fatalf("compatible chat terminal was rejected: %q", terminal)
+	}
+}
+
+func TestTerminalSSEAcceptsIncorrectProviderContentTypeOnlyAfterValidation(t *testing.T) {
+	response := &http.Response{
+		Header: http.Header{"Content-Type": []string{"text/plain"}},
+		Body:   io.NopCloser(strings.NewReader("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n")),
+	}
+	terminal, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024})
+	if err != nil || terminal != "done" {
+		t.Fatalf("valid SSE with a wrong content type was rejected: terminal=%q err=%v", terminal, err)
+	}
+}
+
+func TestKnownJSONEndpointAcceptsMissingProviderContentType(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header()["Content-Type"] = nil
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{StreamIdleTimeout: time.Second},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`), AttemptLimit: 1,
+	})
+	if err != nil || response.Status != http.StatusOK || !json.Valid(response.Body) {
+		t.Fatalf("valid JSON without a content type was rejected: status=%d body=%s err=%v", response.Status, response.Body, err)
+	}
+}
+
 func TestStreamHeartbeatCoversCredentialQueue(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -713,6 +794,33 @@ func TestNonStreamingApplicationFailureIsTerminalAndNotCountedAsSuccess(t *testi
 	}
 }
 
+func TestApplicationFailureRetriesBeforeReturningSuccess(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+		if attempts == 1 {
+			_, _ = writer.Write([]byte(`{"status":"failed","error":{"code":"temporary"}}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusOK || response.Terminal != "" || attempts != 2 {
+		t.Fatalf("application failure was not recovered: status=%d terminal=%q attempts=%d err=%v", response.Status, response.Terminal, attempts, err)
+	}
+}
+
 func TestMultipartImageRequestModelIsReadAndRewritten(t *testing.T) {
 	buffer := bytes.Buffer{}
 	writer := multipart.NewWriter(&buffer)
@@ -749,7 +857,7 @@ func TestCodexImagesEndpointBridgesResponsesImageTool(t *testing.T) {
 	defer upstream.Close()
 	parsed, _ := url.Parse(upstream.URL)
 	server := NewServer("127.0.0.1:0", Dependencies{
-		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer", UpstreamModel: "gpt-5.6-sol"}},
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer", UpstreamModel: "gpt-5.6-sol", ImageCompat: true}},
 		Credentials: &credentialSource{values: []string{"key"}},
 	})
 	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/images/generations", strings.NewReader(`{"model":"gpt-image-2","prompt":"blue robot","quality":"high"}`))
@@ -768,6 +876,12 @@ func TestJoinPathDoesNotDuplicateVersionPrefix(t *testing.T) {
 	if value := joinPath("/gateway", "/v1/models"); value != "/gateway/v1/models" {
 		t.Fatalf("unexpected path %q", value)
 	}
+	if value := joinPath("/gateway/v1", "/v1/models"); value != "/gateway/v1/models" {
+		t.Fatalf("nested API version was duplicated: %q", value)
+	}
+	if value := joinPath("/gateway/v1", "/v1"); value != "/gateway/v1" {
+		t.Fatalf("nested API root was duplicated: %q", value)
+	}
 }
 
 func TestBuildUpstreamRequestPreservesProviderAndClientQuery(t *testing.T) {
@@ -780,5 +894,23 @@ func TestBuildUpstreamRequestPreservesProviderAndClientQuery(t *testing.T) {
 	query := request.URL.Query()
 	if query.Get("api-version") != "2026-08-01" || query.Get("preview") != "true" {
 		t.Fatalf("provider or request query was lost: %s", request.URL.RawQuery)
+	}
+}
+
+func TestBuildUpstreamRequestSupportsExactCustomAuthorizationScheme(t *testing.T) {
+	base, _ := url.Parse("https://provider.example/v1")
+	incoming := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{}`))
+	request, err := buildUpstreamRequest(context.Background(), incoming, []byte(`{}`), relayapp.Route{BaseURL: base, AuthMode: "custom", AuthHeader: "Authorization"}, "Token custom-secret")
+	if err != nil || request.Header.Get("Authorization") != "Token custom-secret" {
+		t.Fatalf("custom Authorization value was not preserved exactly: %q err=%v", request.Header.Get("Authorization"), err)
+	}
+}
+
+func TestJSONRewritesPreserveLargeProviderNumbers(t *testing.T) {
+	body := []byte(`{"model":"public","seed":9007199254740993,"input":[{"cache_control":{"type":"ephemeral"}}]}`)
+	rewritten := rewriteRequestModel(body, "application/json", "private")
+	extended := extendCacheTTL(rewritten, "application/json")
+	if !bytes.Contains(extended, []byte(`"seed":9007199254740993`)) || !bytes.Contains(extended, []byte(`"ttl":"1h"`)) {
+		t.Fatalf("JSON mutation changed provider values: %s", extended)
 	}
 }

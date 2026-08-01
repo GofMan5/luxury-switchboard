@@ -16,7 +16,7 @@ import (
 func TestProviderRepositoryRoundTripIsEncrypted(t *testing.T) {
 	provider, err := domain.New(domain.Params{
 		ID: "custom", Name: "Private provider", BaseURL: "https://private-provider.invalid/v1",
-		AuthMode: domain.AuthBearer, RPM: 120, Enabled: true,
+		AuthMode: domain.AuthBearer, RPM: 120, ImageCompat: true, Enabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestProviderRepositoryRoundTripIsEncrypted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Providers) != 1 || loaded.ActiveID != "custom" || loaded.Providers[0].RPM != 120 {
+	if len(loaded.Providers) != 1 || loaded.ActiveID != "custom" || loaded.Providers[0].RPM != 120 || !loaded.Providers[0].ImageCompat {
 		t.Fatalf("unexpected provider state: %+v", loaded)
 	}
 }

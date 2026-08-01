@@ -29,3 +29,9 @@ func TestKeyAcceptsUnicodeLabelAndBoundsRates(t *testing.T) {
 		t.Fatal("unbounded key RPM was accepted")
 	}
 }
+
+func TestCredentialRejectsHeaderControlCharacters(t *testing.T) {
+	if _, err := NewCredential("secret\r\nX-Injected: value"); err == nil {
+		t.Fatal("credential containing a header injection was accepted")
+	}
+}

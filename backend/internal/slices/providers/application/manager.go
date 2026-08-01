@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	ErrBuiltinProvider = errors.New("builtin provider cannot be deleted")
-	ErrActiveProvider  = errors.New("active provider cannot be deleted")
-	ErrProviderHasKeys = errors.New("provider still has keys")
+	ErrBuiltinProvider   = errors.New("builtin provider cannot be deleted")
+	ErrActiveProvider    = errors.New("active provider cannot be deleted")
+	ErrProviderHasKeys   = errors.New("provider still has keys")
+	ErrProviderHasRoutes = errors.New("provider still has model routes")
 )
 
 type KeyPool interface {
@@ -22,11 +23,22 @@ type KeyPool interface {
 	RemoveProvider(string) error
 }
 
+type RouteUsage interface {
+	LockProvider(string) (bool, func())
+}
+
 type Manager struct {
 	opMu       sync.Mutex
 	catalog    *Catalog
 	repository Repository
 	keys       KeyPool
+	routes     RouteUsage
+}
+
+func (manager *Manager) SetRouteUsage(routes RouteUsage) {
+	manager.opMu.Lock()
+	manager.routes = routes
+	manager.opMu.Unlock()
 }
 
 func NewManager(catalog *Catalog, repository Repository, keys KeyPool) (*Manager, error) {
@@ -139,6 +151,13 @@ func (manager *Manager) Delete(ctx context.Context, id string) error {
 	}
 	if active.ID == id {
 		return ErrActiveProvider
+	}
+	if manager.routes != nil {
+		referenced, unlock := manager.routes.LockProvider(id)
+		defer unlock()
+		if referenced {
+			return ErrProviderHasRoutes
+		}
 	}
 	removed := providers[index]
 	if err := manager.keys.RemoveProvider(id); err != nil {

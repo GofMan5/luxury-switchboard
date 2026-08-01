@@ -9,6 +9,7 @@ class FakeModelsPort implements ModelsPort {
   waitForAbort = false
   waitingDiscovery = ''
   discoveryAborted = false
+  listener: ((result: ModelTestResult) => void) | undefined
   async discover(providerId: string, signal?: AbortSignal) {
     if (providerId === this.waitingDiscovery) {
       await new Promise<void>((_resolve, reject) => signal?.addEventListener('abort', () => { this.discoveryAborted = true; reject(new Error('cancelled')) }, { once: true }))
@@ -19,9 +20,10 @@ class FakeModelsPort implements ModelsPort {
     this.testBatches.push(models.length)
     if (this.fail) throw new Error('injected')
     if (this.waitForAbort) await new Promise<void>((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
+    for (const model of models) this.listener?.({ providerId: _providerId, model, state: 'available', status: 200, latencyMs: 1 })
     return models.length
   }
-  subscribe(_listener: (result: ModelTestResult) => void) { return () => undefined }
+  subscribe(listener: (result: ModelTestResult) => void) { this.listener = listener; return () => { this.listener = undefined } }
 }
 
 describe('ModelsModel', () => {
@@ -39,11 +41,14 @@ describe('ModelsModel', () => {
   it('chunks large tests and clears testing rows after interruption', async () => {
     const port = new FakeModelsPort()
     const model = new ModelsModel(port)
+    let notifications = 0
+    model.subscribe(() => { notifications++ })
     model.connect()
     await model.discover('provider-a')
     const models = Array.from({ length: 501 }, (_, index) => `model-${index}`)
     expect(await model.test(models)).toBe(true)
     expect(port.testBatches).toEqual([500, 1])
+    expect(notifications).toBeLessThan(20)
     port.fail = true
     expect(await model.test(['model-a', 'model-b'])).toBe(false)
     expect(Object.values(model.snapshot().results).some((result) => result.state === 'testing')).toBe(false)

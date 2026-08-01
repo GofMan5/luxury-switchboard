@@ -6,7 +6,7 @@ import { useModalFocus } from './useModalFocus'
 
 function Fixture({ dismiss }: { dismiss: () => void }) {
   const ref = useModalFocus<HTMLDivElement>(dismiss)
-  return <><button>Outside</button><div ref={ref}><button>First</button><button>Last</button></div></>
+  return <><button>Outside</button><div ref={ref}><button>First</button><input aria-label="Disabled target" data-autofocus disabled /><input aria-label="Target" data-autofocus /><button>Last</button></div></>
 }
 
 describe('useModalFocus', () => {
@@ -14,8 +14,9 @@ describe('useModalFocus', () => {
     const dismiss = vi.fn()
     render(<Fixture dismiss={dismiss} />)
     const first = screen.getByRole('button', { name: 'First' })
+    const target = screen.getByRole('textbox', { name: 'Target' })
     const last = screen.getByRole('button', { name: 'Last' })
-    await waitFor(() => expect(document.activeElement).toBe(first))
+    await waitFor(() => expect(document.activeElement).toBe(target))
     last.focus()
     fireEvent.keyDown(last, { key: 'Tab' })
     expect(document.activeElement).toBe(first)

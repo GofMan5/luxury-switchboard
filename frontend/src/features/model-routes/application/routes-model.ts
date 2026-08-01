@@ -1,6 +1,8 @@
 import type { ModelRoute, RouteTarget } from '../domain/route'
 import type { RoutesPort } from './routes-port'
 
+const ROUTE_BATCH = 500
+
 export interface RoutesState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'error'
   readonly target: RouteTarget
@@ -30,13 +32,13 @@ export class RoutesModel {
     return () => this.#listeners.delete(listener)
   }
 
-  async load(target: RouteTarget): Promise<void> {
+  async load(target: RouteTarget, clearPending = false): Promise<void> {
     const generation = ++this.#generation
     this.#set({ ...this.#state, phase: 'loading', target, error: '' })
     try {
       const routes = await this.#port.list(target)
       if (generation === this.#generation) {
-        this.#set({ phase: 'ready', target, routes, pending: '', error: '' })
+        this.#set({ phase: 'ready', target, routes, pending: clearPending ? '' : this.#state.pending, error: '' })
       }
     } catch {
       if (generation === this.#generation) {
@@ -51,11 +53,19 @@ export class RoutesModel {
 
   async upsertMany(routes: readonly ModelRoute[]): Promise<boolean> {
     if (routes.length === 0) return false
-    return this.#mutate('*', () => this.#port.upsertMany(routes))
+    return this.#mutate('*', async () => {
+      for (let offset = 0; offset < routes.length; offset += ROUTE_BATCH) {
+        await this.#port.upsertMany(routes.slice(offset, offset + ROUTE_BATCH))
+      }
+    })
   }
 
   async delete(publicModel: string): Promise<boolean> {
     return this.#mutate(publicModel, () => this.#port.delete(this.#state.target, publicModel))
+  }
+
+  clearError(): void {
+    if (this.#state.error) this.#set({ ...this.#state, error: '' })
   }
 
   dispose(): void {
@@ -68,9 +78,10 @@ export class RoutesModel {
     this.#set({ ...this.#state, pending, error: '' })
     try {
       await operation()
-      await this.load(this.#state.target)
+      await this.load(this.#state.target, true)
       return true
     } catch {
+      await this.load(this.#state.target, true)
       this.#set({ ...this.#state, pending: '', error: 'Route could not be saved' })
       return false
     }

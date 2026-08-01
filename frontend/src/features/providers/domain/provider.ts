@@ -6,6 +6,7 @@ export interface Provider {
   readonly authHeader: string
   readonly dialect: 'auto' | 'openai' | 'anthropic'
   readonly modelsPath: string
+  readonly imageCompat: boolean
   readonly rpm: number
   readonly cacheTtl: string
   readonly enabled: boolean
@@ -26,6 +27,7 @@ export interface ProviderInput {
   readonly authHeader: string
   readonly dialect: Provider['dialect']
   readonly modelsPath: string
+  readonly imageCompat: boolean
   readonly rpm: number
   readonly cache1h: boolean
   readonly enabled: boolean

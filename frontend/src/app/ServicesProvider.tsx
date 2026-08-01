@@ -23,6 +23,7 @@ import { StdioSharedPort } from '../features/shared-control/adapters/stdio-share
 import { SharedModel } from '../features/shared-control/application/shared-model'
 import { createControlPlaneSession } from '../platform/stdio/create-session'
 import type { ControlPlaneSession } from '../platform/stdio/session'
+import { Button } from '../shared/ui/Button'
 import { ServicesContext, type AppServices } from './services'
 
 type BootstrapState =
@@ -32,6 +33,7 @@ type BootstrapState =
 
 export function ServicesProvider({ children }: PropsWithChildren) {
   const [state, setState] = useState<BootstrapState>({ phase: 'connecting', services: null })
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let disposed = false
@@ -118,23 +120,24 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       disposed = true
       shutdown()
     }
-  }, [])
+  }, [attempt])
 
   if (state.phase === 'connecting') {
     return <BootstrapView title="Starting Switchboard" detail="Connecting the local relay…" />
   }
   if (state.phase === 'error') {
-    return <BootstrapView title="Switchboard could not start" detail="The local control plane is unavailable." error />
+    return <BootstrapView title="Switchboard could not start" detail="The local control plane is unavailable." error onRetry={() => { setState({ phase: 'connecting', services: null }); setAttempt((value) => value + 1) }} />
   }
   return <ServicesContext value={state.services}>{children}</ServicesContext>
 }
 
-function BootstrapView({ title, detail, error = false }: { title: string; detail: string; error?: boolean }) {
+function BootstrapView({ title, detail, error = false, onRetry }: { title: string; detail: string; error?: boolean; onRetry?: () => void }) {
   return (
     <main className="bootstrap-view" aria-live="polite">
       <div className="brand-mark" aria-hidden="true">S</div>
       <h1>{title}</h1>
       <p className={error ? 'bootstrap-error' : undefined}>{detail}</p>
+      {onRetry ? <Button type="button" variant="primary" onClick={onRetry}>Retry</Button> : null}
     </main>
   )
 }

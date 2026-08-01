@@ -26,6 +26,8 @@ const (
 	absoluteMaxRequestBytes  = 256 * 1024 * 1024
 	maxBufferedResponseBytes = 32 * 1024 * 1024
 	maxProxyClients          = 64
+	maxRequestModelBytes     = 128
+	maxCacheTraversalDepth   = 64
 )
 
 var hopHeaders = map[string]struct{}{
@@ -1408,7 +1410,7 @@ func requestModel(body []byte, contentType string) string {
 			Model string `json:"model"`
 		}
 		if json.Unmarshal(body, &payload) == nil {
-			return strings.TrimSpace(payload.Model)
+			return normalizeRequestModel(payload.Model)
 		}
 	}
 	mediaType, params, err := mime.ParseMediaType(contentType)
@@ -1426,10 +1428,23 @@ func requestModel(body []byte, contentType string) string {
 		}
 		if part.FormName() == "model" && part.FileName() == "" {
 			value, _ := io.ReadAll(io.LimitReader(part, 129))
-			return strings.TrimSpace(string(value))
+			return normalizeRequestModel(string(value))
 		}
 	}
 	return ""
+}
+
+func normalizeRequestModel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxRequestModelBytes {
+		return ""
+	}
+	for _, character := range value {
+		if character < 32 || character == 127 {
+			return ""
+		}
+	}
+	return value
 }
 
 func rewriteRequestModel(body []byte, contentType, model string) []byte {
@@ -1500,8 +1515,8 @@ func extendCacheTTL(body []byte, contentType string) []byte {
 	if decoder.Decode(&payload) != nil {
 		return body
 	}
-	changed := extendCacheValue(payload)
-	if !changed {
+	changed, withinLimit := extendCacheValue(payload, 0)
+	if !withinLimit || !changed {
 		return body
 	}
 	encoded, err := json.Marshal(payload)
@@ -1511,7 +1526,10 @@ func extendCacheTTL(body []byte, contentType string) []byte {
 	return encoded
 }
 
-func extendCacheValue(value any) bool {
+func extendCacheValue(value any, depth int) (bool, bool) {
+	if depth > maxCacheTraversalDepth {
+		return false, false
+	}
 	changed := false
 	switch value := value.(type) {
 	case map[string]any:
@@ -1520,14 +1538,22 @@ func extendCacheValue(value any) bool {
 			changed = true
 		}
 		for _, child := range value {
-			changed = extendCacheValue(child) || changed
+			childChanged, withinLimit := extendCacheValue(child, depth+1)
+			if !withinLimit {
+				return false, false
+			}
+			changed = childChanged || changed
 		}
 	case []any:
 		for _, child := range value {
-			changed = extendCacheValue(child) || changed
+			childChanged, withinLimit := extendCacheValue(child, depth+1)
+			if !withinLimit {
+				return false, false
+			}
+			changed = childChanged || changed
 		}
 	}
-	return changed
+	return changed, true
 }
 
 func snapshot(address net.Addr) domain.Snapshot {

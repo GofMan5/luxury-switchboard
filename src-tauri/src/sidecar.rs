@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Mutex,
+        Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -54,10 +54,7 @@ pub fn sidecar_start(
     app: AppHandle,
     state: State<'_, SidecarState>,
 ) -> Result<StartResult, String> {
-    let mut guard = state
-        .child
-        .lock()
-        .map_err(|_| "Sidecar state is unavailable".to_string())?;
+    let mut guard = lock_start(state.inner())?;
     if let Some(child) = guard.as_ref() {
         return Ok(StartResult { pid: child.pid() });
     }
@@ -85,6 +82,17 @@ pub fn sidecar_start(
         forward_events(event_app, receiver, pid, generation).await;
     });
     Ok(StartResult { pid })
+}
+
+fn lock_start(state: &SidecarState) -> Result<MutexGuard<'_, Option<CommandChild>>, String> {
+    let guard = state
+        .child
+        .lock()
+        .map_err(|_| "Sidecar state is unavailable".to_string())?;
+    if state.exiting.load(Ordering::Acquire) {
+        return Err("Application is exiting".to_string());
+    }
+    Ok(guard)
 }
 
 #[tauri::command]
@@ -399,5 +407,13 @@ mod tests {
             Some("protocol-error")
         );
         assert_eq!(lifecycle_for_process(Some(10), 2, 10, 1, "stopped"), None);
+    }
+
+    #[test]
+    fn sidecar_cannot_start_after_exit_begins() {
+        let state = SidecarState::default();
+        assert!(lock_start(&state).is_ok());
+        state.exiting.store(true, Ordering::Release);
+        assert!(lock_start(&state).is_err());
     }
 }

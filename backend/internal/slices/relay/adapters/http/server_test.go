@@ -864,6 +864,16 @@ func TestMultipartImageRequestModelIsReadAndRewritten(t *testing.T) {
 	}
 }
 
+func TestRequestModelRejectsOversizedAndControlIdentities(t *testing.T) {
+	oversized, _ := json.Marshal(map[string]string{"model": strings.Repeat("m", maxRequestModelBytes+1)})
+	if model := requestModel(oversized, "application/json"); model != "" {
+		t.Fatalf("oversized model reached the scheduler: %d bytes", len(model))
+	}
+	if model := requestModel([]byte(`{"model":"bad\u0001model"}`), "application/json"); model != "" {
+		t.Fatalf("control-bearing model reached the scheduler: %q", model)
+	}
+}
+
 func TestCodexImagesEndpointBridgesResponsesImageTool(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
@@ -931,5 +941,20 @@ func TestJSONRewritesPreserveLargeProviderNumbers(t *testing.T) {
 	extended := extendCacheTTL(rewritten, "application/json")
 	if !bytes.Contains(extended, []byte(`"seed":9007199254740993`)) || !bytes.Contains(extended, []byte(`"ttl":"1h"`)) {
 		t.Fatalf("JSON mutation changed provider values: %s", extended)
+	}
+}
+
+func TestCacheExtensionStopsAtTheNestingLimit(t *testing.T) {
+	var nested any = "leaf"
+	for range maxCacheTraversalDepth + 1 {
+		nested = map[string]any{"child": nested}
+	}
+	payload := map[string]any{
+		"cache_control": map[string]any{"type": "ephemeral"},
+		"nested":        nested,
+	}
+	body, _ := json.Marshal(payload)
+	if extended := extendCacheTTL(body, "application/json"); !bytes.Equal(extended, body) {
+		t.Fatal("cache traversal crossed its nesting limit")
 	}
 }

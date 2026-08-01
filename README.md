@@ -98,3 +98,5 @@ Linux VPS hub build:
 $env:GOOS='linux'; $env:GOARCH='amd64'
 go -C backend build -trimpath -o tunnel-hub ./cmd/tunnel-hub
 ```
+
+After the final installer and `SHA256SUMS.txt` are verified, create the friend archive with `scripts/package-friend.ps1`. The packager fails closed on a stale checksum and rejects SSH identities, DPAPI files, databases and private-key formats.

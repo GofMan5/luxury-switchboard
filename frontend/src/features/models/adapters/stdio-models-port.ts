@@ -14,8 +14,8 @@ export class StdioModelsPort implements ModelsPort {
     return result.models
   }
 
-  async test(providerId: string, models: readonly string[], signal?: AbortSignal) {
-    const result = await this.#session.call<{ tested: number }>('models.test', { providerId, models }, signal)
+  async test(providerId: string, runId: string, models: readonly string[], signal?: AbortSignal) {
+    const result = await this.#session.call<{ tested: number }>('models.test', { providerId, runId, models }, signal)
     return result.tested
   }
 

@@ -102,9 +102,9 @@ func (service *Service) Configure(ctx context.Context, config domain.Config) err
 		return err
 	}
 	service.mu.RLock()
-	state := service.snapshot.State
+	snapshot := service.snapshot
 	service.mu.RUnlock()
-	if state != domain.StateStopped && state != domain.StateError {
+	if !configurable(snapshot) {
 		return ErrRunning
 	}
 	if err := service.repository.Save(ctx, config); err != nil {
@@ -123,7 +123,7 @@ func (service *Service) Start(ctx context.Context) error {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
 	service.mu.Lock()
-	if service.snapshot.State != domain.StateStopped && service.snapshot.State != domain.StateError {
+	if !configurable(service.snapshot) {
 		service.mu.Unlock()
 		return ErrRunning
 	}
@@ -158,7 +158,7 @@ func (service *Service) Stop(ctx context.Context) error {
 	err := service.runtime.Stop(ctx)
 	service.mu.Lock()
 	if err != nil {
-		service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateError, "", "Tunnel could not be stopped cleanly"
+		service.runtimeStatus, service.runtimeMessage = domain.StateError, "Tunnel could not be stopped cleanly"
 	} else {
 		service.runtimeStatus, service.runtimeAddress, service.runtimeMessage = domain.StateStopped, "", ""
 	}
@@ -169,7 +169,7 @@ func (service *Service) Stop(ctx context.Context) error {
 }
 func (service *Service) RotateToken(ctx context.Context) (string, error) {
 	service.mu.RLock()
-	if service.snapshot.State != domain.StateStopped && service.snapshot.State != domain.StateError {
+	if !configurable(service.snapshot) {
 		service.mu.RUnlock()
 		return "", ErrRunning
 	}
@@ -184,6 +184,10 @@ func (service *Service) RotateToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return token, nil
+}
+
+func configurable(snapshot domain.Snapshot) bool {
+	return snapshot.State == domain.StateStopped || (snapshot.State == domain.StateError && snapshot.Address == "")
 }
 func (service *Service) RevealToken() string {
 	service.mu.RLock()

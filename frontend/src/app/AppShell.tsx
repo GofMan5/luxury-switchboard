@@ -21,6 +21,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
     (provider) => provider.id === providersState.catalog.activeId,
   )
   const live = relayState.snapshot.state === 'live'
+  const needsStop = live || (relayState.snapshot.state === 'error' && Boolean(relayState.snapshot.address))
   const configuredPort = settingsState.settings?.listenerPort || relayState.snapshot.port
 
   return (
@@ -52,7 +53,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
         </nav>
         <div className={styles.sidebarFooter}>
           <PanelLeftClose size={17} aria-hidden="true" />
-          <span>v1.0.1</span>
+          <span>v1.0.2</span>
         </div>
       </aside>
 
@@ -60,7 +61,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
         <header className={styles.runtimeBar}>
           <div className={styles.runtimeState}>
             <StatusDot state={live ? 'live' : relayState.snapshot.state === 'error' ? 'error' : 'stopped'} />
-            <strong>{live ? 'Live' : relayState.snapshot.state === 'starting' ? 'Starting' : 'Stopped'}</strong>
+            <strong>{live ? 'Live' : relayState.snapshot.state === 'starting' ? 'Starting' : relayState.snapshot.state === 'error' ? 'Error' : 'Stopped'}</strong>
             <span className={styles.divider} aria-hidden="true" />
             <span className={styles.address}>
               {relayState.snapshot.address || (configuredPort ? `127.0.0.1:${configuredPort}` : 'Loopback listener')}
@@ -69,12 +70,12 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <span className={styles.route}>Active route: {activeProvider?.name ?? '—'}</span>
           </div>
           <Button
-            variant={live ? 'danger' : 'primary'}
+            variant={needsStop ? 'danger' : 'primary'}
             disabled={relayState.pending}
             onClick={() => void relay.toggle()}
           >
             <Square size={13} fill="currentColor" aria-hidden="true" />
-            {relayState.pending ? 'Applying…' : live ? 'Stop relay' : 'Start relay'}
+            {relayState.pending ? 'Applying…' : live ? 'Stop relay' : needsStop ? 'Retry stop' : 'Start relay'}
           </Button>
         </header>
         <main className={styles.content}>{children}</main>

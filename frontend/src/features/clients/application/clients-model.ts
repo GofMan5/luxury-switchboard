@@ -30,8 +30,11 @@ export class ClientsModel {
 
   async connect() {
     this.#unsubscribe ??= this.#port.subscribe(() => {
-      clearTimeout(this.#timer)
-      this.#timer = setTimeout(() => void this.refresh(), 200)
+      if (this.#timer !== undefined) return
+      this.#timer = setTimeout(() => {
+        this.#timer = undefined
+        void this.refresh()
+      }, 200)
     })
     await this.refresh()
   }
@@ -52,6 +55,7 @@ export class ClientsModel {
 
   async select(ip: string) {
     const generation = ++this.#generation
+    this.#set({ ...this.#state, selectedIp: ip, events: ip === this.#state.selectedIp ? this.#state.events : [], error: '' })
     try {
       const events = await this.#port.events(ip)
       if (generation === this.#generation) this.#set({ ...this.#state, selectedIp: ip, events, error: '' })
@@ -68,6 +72,7 @@ export class ClientsModel {
   dispose() {
     this.#unsubscribe?.()
     clearTimeout(this.#timer)
+    this.#timer = undefined
     this.#listeners.clear()
   }
 

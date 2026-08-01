@@ -76,4 +76,17 @@ describe('TauriSidecarSession', () => {
     expect(mocks.writes.some((frame) => frame.method === 'models.test')).toBe(false)
     await session.stop()
   })
+
+  it('rejects an in-flight command as soon as its signal is aborted', async () => {
+    const session = new TauriSidecarSession()
+    await session.start()
+    const controller = new AbortController()
+    const call = session.call('models.test', {}, controller.signal)
+    await vi.waitFor(() => expect(mocks.writes.some((frame) => frame.method === 'models.test')).toBe(true))
+    const command = mocks.writes.find((frame) => frame.method === 'models.test')
+    controller.abort()
+    await expect(call).rejects.toMatchObject({ name: 'AbortError' })
+    expect(mocks.writes).toContainEqual(expect.objectContaining({ method: 'system.cancel', payload: { id: command?.id } }))
+    await session.stop()
+  })
 })

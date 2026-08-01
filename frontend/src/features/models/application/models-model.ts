@@ -15,7 +15,7 @@ export interface ModelsState {
 
 export class ModelsModel {
   readonly #port: ModelsPort
-  #state: ModelsState = { phase: 'idle', providerId: '', models: [], selected: [], results: {}, testing: false, error: '' }
+  #state: ModelsState = { phase: 'idle', providerId: '', models: [], selected: [], results: resultMap(), testing: false, error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #discoverController: AbortController | null = null
@@ -23,6 +23,7 @@ export class ModelsModel {
   #resultTimer: ReturnType<typeof setTimeout> | undefined
   #pendingResults = new Map<string, ModelTestResult>()
   #generation = 0
+  #activeRun = ''
 
   constructor(port: ModelsPort) {
     this.#port = port
@@ -39,16 +40,17 @@ export class ModelsModel {
     this.#discoverController?.abort()
     this.#testController?.abort()
     this.#testController = null
+    this.#activeRun = ''
     clearTimeout(this.#resultTimer)
     this.#resultTimer = undefined
     this.#pendingResults.clear()
     const controller = new AbortController()
     this.#discoverController = controller
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', providerId, models: [], selected: [], results: {}, testing: false, error: '' })
+    this.#set({ ...this.#state, phase: 'loading', providerId, models: [], selected: [], results: resultMap(), testing: false, error: '' })
     try {
       const models = await this.#port.discover(providerId, controller.signal)
-      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', providerId, models, selected: [], results: {}, error: '' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', providerId, models, selected: [], results: resultMap(), error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', models: [], selected: [], error: 'Provider model catalog is unavailable' })
     } finally {
@@ -70,32 +72,39 @@ export class ModelsModel {
   async test(models: readonly string[]) {
     if (this.#state.testing || models.length === 0) return false
     const providerId = this.#state.providerId
+    const generation = this.#generation
+    const runId = `models_${crypto.randomUUID().replaceAll('-', '')}`
+    this.#activeRun = runId
     const controller = new AbortController()
     this.#testController = controller
-    const results = { ...this.#state.results }
-    for (const model of models) results[model] = { providerId, model, state: 'testing', status: 0, latencyMs: 0 }
+    const results = resultMap(this.#state.results)
+    for (const model of models) results[model] = { runId, providerId, model, state: 'testing', status: 0, latencyMs: 0 }
     this.#set({ ...this.#state, testing: true, results, error: '' })
     try {
       for (let offset = 0; offset < models.length; offset += MODEL_TEST_BATCH) {
         const batch = models.slice(offset, offset + MODEL_TEST_BATCH)
-        if (await this.#port.test(providerId, batch, controller.signal) !== batch.length) throw new Error('incomplete model test batch')
+        if (await this.#port.test(providerId, runId, batch, controller.signal) !== batch.length) throw new Error('incomplete model test batch')
+        if (generation !== this.#generation || this.#state.providerId !== providerId) return false
         this.#flushResults()
       }
       this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'result_missing') })
       return true
     } catch {
+      if (generation !== this.#generation || this.#state.providerId !== providerId) return false
       this.#flushResults()
-      const sameProvider = this.#state.providerId === providerId
-      this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'interrupted'), error: sameProvider ? 'Model tests were interrupted' : this.#state.error })
+      this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'interrupted'), error: 'Model tests were interrupted' })
       return false
     } finally {
       if (this.#testController === controller) this.#testController = null
+      if (this.#activeRun === runId) this.#activeRun = ''
     }
   }
 
-  cancelTest() { this.#testController?.abort() }
+  cancelTest() { this.#activeRun = ''; this.#testController?.abort() }
 
   dispose() {
+    this.#generation++
+    this.#activeRun = ''
     this.#discoverController?.abort()
     this.#testController?.abort()
     clearTimeout(this.#resultTimer)
@@ -105,7 +114,7 @@ export class ModelsModel {
   }
 
   #accept(result: ModelTestResult) {
-    if (result.providerId !== this.#state.providerId) return
+    if (result.providerId !== this.#state.providerId || result.runId !== this.#activeRun) return
     this.#pendingResults.set(result.model, result)
     this.#resultTimer ??= setTimeout(() => this.#flushResults(), 16)
   }
@@ -114,7 +123,7 @@ export class ModelsModel {
     clearTimeout(this.#resultTimer)
     this.#resultTimer = undefined
     if (this.#pendingResults.size === 0) return
-    const results = { ...this.#state.results }
+    const results = resultMap(this.#state.results)
     for (const [model, result] of this.#pendingResults) {
       if (result.providerId === this.#state.providerId) results[model] = result
     }
@@ -123,10 +132,10 @@ export class ModelsModel {
   }
 
   #settle(models: readonly string[], providerId: string, errorCode: string) {
-    const results = { ...this.#state.results }
+    const results = resultMap(this.#state.results)
     if (this.#state.providerId !== providerId) return results
     for (const model of models) {
-      if (results[model]?.state === 'testing') results[model] = { providerId, model, state: 'unavailable', status: 0, latencyMs: 0, errorCode }
+      if (results[model]?.state === 'testing') results[model] = { runId: results[model].runId, providerId, model, state: 'unavailable', status: 0, latencyMs: 0, errorCode }
     }
     return results
   }
@@ -135,4 +144,8 @@ export class ModelsModel {
     this.#state = state
     for (const listener of this.#listeners) listener()
   }
+}
+
+function resultMap(source?: Readonly<Record<string, ModelTestResult>>): Record<string, ModelTestResult> {
+  return Object.assign(Object.create(null) as Record<string, ModelTestResult>, source)
 }

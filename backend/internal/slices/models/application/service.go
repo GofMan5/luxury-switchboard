@@ -55,10 +55,13 @@ func (service *Service) Discover(ctx context.Context, providerID string) ([]stri
 	return models, nil
 }
 
-func (service *Service) Test(ctx context.Context, providerID string, models []string) (int, error) {
+func (service *Service) Test(ctx context.Context, providerID, runID string, models []string) (int, error) {
 	provider, exists := service.providers.Get(strings.TrimSpace(providerID))
 	if !exists {
 		return 0, ErrProviderUnavailable
+	}
+	if !validRunID(runID) {
+		return 0, errors.New("invalid model test run")
 	}
 	if len(models) > maxTestModels {
 		return 0, errors.New("too many models")
@@ -82,7 +85,12 @@ func (service *Service) Test(ctx context.Context, providerID string, models []st
 				if ctx.Err() != nil {
 					return
 				}
-				service.publish(service.gateway.Test(ctx, provider, model))
+				result := service.gateway.Test(ctx, provider, model)
+				if ctx.Err() != nil {
+					return
+				}
+				result.RunID = runID
+				service.publish(result)
 			}
 		}()
 	}
@@ -98,6 +106,19 @@ func (service *Service) Test(ctx context.Context, providerID string, models []st
 	close(jobs)
 	workers.Wait()
 	return len(models), ctx.Err()
+}
+
+func validRunID(value string) bool {
+	if len(value) < 1 || len(value) > 80 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func (service *Service) OnTested(listener func(domain.TestResult)) {

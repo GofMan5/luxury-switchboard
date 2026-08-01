@@ -1,4 +1,5 @@
 export interface ModelTestResult {
+  readonly runId: string
   readonly providerId: string
   readonly model: string
   readonly state: 'testing' | 'available' | 'unavailable' | 'timeout'

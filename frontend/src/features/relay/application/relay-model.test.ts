@@ -7,14 +7,18 @@ class FakeRelayPort implements RelayPort {
   snapshot: RelaySnapshot = { state: 'live', address: 'http://127.0.0.1:8798', port: 8798 }
   listener: ((snapshot: RelaySnapshot) => void) | null = null
   statusPromise: Promise<RelaySnapshot> | null = null
+  startCalls = 0
+  stopCalls = 0
 
   async status() { return this.statusPromise ?? this.snapshot }
   async start() {
+    this.startCalls++
     this.snapshot = { state: 'live', address: 'http://127.0.0.1:8798', port: 8798 }
     this.listener?.(this.snapshot)
     return this.snapshot
   }
   async stop() {
+    this.stopCalls++
     this.snapshot = { state: 'stopped', address: '', port: 0 }
     this.listener?.(this.snapshot)
     return this.snapshot
@@ -46,6 +50,17 @@ describe('RelayModel', () => {
     resolveStatus({ state: 'stopped', address: '', port: 0 })
     await connecting
     expect(model.snapshot().snapshot).toMatchObject({ state: 'live', port: 9000 })
+    model.dispose()
+  })
+
+  it('retries cleanup after a failed stop instead of starting a second listener', async () => {
+    const port = new FakeRelayPort()
+    port.snapshot = { state: 'error', address: 'http://127.0.0.1:8798', port: 8798, error: 'Relay could not stop cleanly' }
+    const model = new RelayModel(port)
+    await model.connect()
+    await model.toggle()
+    expect(port.stopCalls).toBe(1)
+    expect(port.startCalls).toBe(0)
     model.dispose()
   })
 })

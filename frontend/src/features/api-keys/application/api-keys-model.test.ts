@@ -8,7 +8,7 @@ const key: ApiKey = { id: 'key-1', providerId: 'echo', label: 'Primary', priorit
 class Port implements ApiKeysPort {
   listener: ((providerId: string) => void) | undefined
   finishAdd: ((value: ApiKey) => void) | undefined
-  list = async () => []
+  list: ApiKeysPort['list'] = async () => []
   add = async (_value: AddApiKey) => new Promise<ApiKey>((resolve) => { this.finishAdd = resolve; this.listener?.('echo') })
   update = async (_value: UpdateApiKey) => key
   remove = async () => undefined
@@ -29,5 +29,17 @@ describe('ApiKeysModel', () => {
     port.finishAdd?.(key)
     expect(await mutation).toBe(true)
     expect(model.snapshot().pendingId).toBe('')
+  })
+
+  it('does not show keys from the previous provider while switching', async () => {
+    let finishSwitch!: (value: readonly ApiKey[]) => void
+    const port = new Port()
+    port.list = async (providerId: string) => providerId === 'echo' ? [key] : await new Promise<readonly ApiKey[]>((resolve) => { finishSwitch = resolve })
+    const model = new ApiKeysModel(port)
+    await model.load('echo')
+    const switching = model.load('other')
+    expect(model.snapshot()).toMatchObject({ providerId: 'other', phase: 'loading', keys: [] })
+    finishSwitch([])
+    await switching
   })
 })

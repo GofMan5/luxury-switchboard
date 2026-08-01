@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TunnelClientEvent } from '../domain/client'
 import type { ClientsPort } from './clients-port'
 import { ClientsModel } from './clients-model'
@@ -6,10 +6,14 @@ import { ClientsModel } from './clients-model'
 class FakeClientsPort implements ClientsPort {
   eventsForClient: readonly TunnelClientEvent[] = []
   eventPromises = new Map<string, Promise<readonly TunnelClientEvent[]>>()
-  async list() { return [{ ip: '127.0.0.2', actualRpm: 1, count: 2, active: 0, queued: 0, lastSeen: new Date(0).toISOString(), state: 'idle' }] }
+  listCalls = 0
+  listener: (() => void) | undefined
+  async list() { this.listCalls++; return [{ ip: '127.0.0.2', actualRpm: 1, count: 2, active: 0, queued: 0, lastSeen: new Date(0).toISOString(), state: 'idle' }] }
   async events(ip: string) { return this.eventPromises.get(ip) ?? this.eventsForClient }
-  subscribe() { return () => undefined }
+  subscribe(listener: () => void) { this.listener = listener; return () => { this.listener = undefined } }
 }
+
+afterEach(() => vi.useRealTimers())
 
 describe('ClientsModel', () => {
   it('keeps an open client inspector live during refresh', async () => {
@@ -36,6 +40,20 @@ describe('ClientsModel', () => {
     resolveA([{ id: 'event-a', ip: 'client-a', time: new Date(0).toISOString(), state: 'completed', method: 'POST', path: '/v1/responses', model: 'public', status: 200, latencyMs: 1, bytesIn: 1, bytesOut: 1 }])
     await refreshing
     expect(model.snapshot()).toMatchObject({ selectedIp: 'client-b', events: [{ id: 'event-b' }] })
+    model.dispose()
+  })
+
+  it('refreshes during sustained activity instead of waiting for a quiet gap', async () => {
+    vi.useFakeTimers()
+    const port = new FakeClientsPort()
+    const model = new ClientsModel(port)
+    await model.connect()
+    for (let index = 0; index < 5; index++) {
+      port.listener?.()
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    expect(port.listCalls).toBeGreaterThan(1)
+    expect(port.listCalls).toBeLessThanOrEqual(4)
     model.dispose()
   })
 })

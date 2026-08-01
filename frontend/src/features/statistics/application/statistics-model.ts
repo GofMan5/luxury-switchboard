@@ -18,7 +18,7 @@ export class StatisticsModel {
   subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
   async load(period: StatisticsPeriod): Promise<void> {
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', period, error: '' })
+    this.#set({ ...this.#state, phase: 'loading', period, snapshot: period === this.#state.period ? this.#state.snapshot : null, error: '' })
     try {
       const snapshot = await this.#port.load(period)
       if (generation === this.#generation) this.#set({ phase: 'ready', period, snapshot, error: '' })

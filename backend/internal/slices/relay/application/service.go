@@ -63,11 +63,18 @@ func (service *Service) Stop(ctx context.Context) error {
 		service.mu.Unlock()
 		return nil
 	}
+	previous := service.snapshot
 	service.mu.Unlock()
 	service.runtime.CancelActive()
 	err := service.runtime.Stop(ctx)
 	service.mu.Lock()
-	service.snapshot = domain.Snapshot{State: domain.StateStopped}
+	if err != nil {
+		previous.State = domain.StateError
+		previous.Error = "Relay could not stop cleanly"
+		service.snapshot = previous
+	} else {
+		service.snapshot = domain.Snapshot{State: domain.StateStopped}
+	}
 	service.mu.Unlock()
 	service.publish()
 	return err

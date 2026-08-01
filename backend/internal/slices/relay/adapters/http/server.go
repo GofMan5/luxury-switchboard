@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	absoluteMaxRequestBytes = 256 * 1024 * 1024
-	maxProxyClients         = 64
+	absoluteMaxRequestBytes  = 256 * 1024 * 1024
+	maxBufferedResponseBytes = 32 * 1024 * 1024
+	maxProxyClients          = 64
 )
 
 var hopHeaders = map[string]struct{}{
@@ -36,6 +37,7 @@ var hopHeaders = map[string]struct{}{
 var (
 	errIncompleteSSE      = errors.New("upstream SSE ended without a terminal event")
 	errClientDisconnected = errors.New("client disconnected")
+	errResponseTooLarge   = errors.New("upstream response exceeds the buffer limit")
 )
 
 type Server struct {
@@ -147,8 +149,6 @@ func (server *Server) Start() (domain.Snapshot, error) {
 func (server *Server) Stop(ctx context.Context) error {
 	server.mu.Lock()
 	httpServer := server.server
-	server.server = nil
-	server.listener = nil
 	server.mu.Unlock()
 	if httpServer == nil {
 		return nil
@@ -158,6 +158,12 @@ func (server *Server) Stop(ctx context.Context) error {
 			return errors.Join(err, closeErr)
 		}
 	}
+	server.mu.Lock()
+	if server.server == httpServer {
+		server.server = nil
+		server.listener = nil
+	}
+	server.mu.Unlock()
 	return nil
 }
 
@@ -371,7 +377,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		return relayapp.DispatchResponse{}, err
 	}
 	defer response.Body.Close()
-	limit := min(max(server.config.MaxRequestBytes*4, 8*1024*1024), int64(absoluteMaxRequestBytes))
+	limit := responseBufferLimit(server.config)
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil || int64(len(responseBody)) > limit {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{Status: response.StatusCode, ErrorCode: "stream_incomplete"})
@@ -456,6 +462,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if errors.Is(bufferErr, errClientDisconnected) || errors.Is(bufferErr, context.Canceled) {
 						return nil, bufferErr
 					}
+					if errors.Is(bufferErr, errResponseTooLarge) {
+						return nil, bufferErr
+					}
 					if !canRetry(attempt, attemptLimit) {
 						return nil, bufferErr
 					}
@@ -496,6 +505,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				buffered, bufferErr := bufferJSONResponse(ctx, response, server.config)
 				if bufferErr != nil {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+					if errors.Is(bufferErr, errResponseTooLarge) {
+						return nil, bufferErr
+					}
 					if !canRetry(attempt, attemptLimit) {
 						return nil, bufferErr
 					}
@@ -854,8 +866,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	}()
 	idle := time.NewTimer(config.StreamIdleTimeout)
 	defer idle.Stop()
-	limit := max(config.MaxRequestBytes*4, 8*1024*1024)
-	limit = min(limit, int64(absoluteMaxRequestBytes))
+	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
 	inspector := sseInspector{path: strings.TrimRight(path, "/")}
 	for {
@@ -870,7 +881,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			if len(result.chunk) > 0 {
 				if int64(len(buffered))+int64(len(result.chunk)) > limit {
 					response.Body.Close()
-					return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+					return "", nil, relayapp.TokenUsage{}, errResponseTooLarge
 				}
 				buffered = append(buffered, result.chunk...)
 				if terminal := inspector.Feed(result.chunk); terminal != "" {
@@ -925,7 +936,7 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 	}()
 	idle := time.NewTimer(config.StreamIdleTimeout)
 	defer idle.Stop()
-	limit := min(max(config.MaxRequestBytes*4, 8*1024*1024), int64(absoluteMaxRequestBytes))
+	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
 	for {
 		select {
@@ -938,7 +949,7 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 		case result := <-reads:
 			if int64(len(buffered))+int64(len(result.chunk)) > limit {
 				response.Body.Close()
-				return nil, errIncompleteSSE
+				return nil, errResponseTooLarge
 			}
 			buffered = append(buffered, result.chunk...)
 			if len(result.chunk) > 0 {
@@ -1363,6 +1374,10 @@ func parseIntHeader(header http.Header, name string) int64 {
 		return 0
 	}
 	return value
+}
+
+func responseBufferLimit(config Config) int64 {
+	return min(max(config.MaxRequestBytes*4, 8*1024*1024), int64(maxBufferedResponseBytes))
 }
 
 func removeUsageHeaders(header http.Header) {

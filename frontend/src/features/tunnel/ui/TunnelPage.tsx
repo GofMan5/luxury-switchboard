@@ -30,7 +30,8 @@ function TunnelForm({ snapshot, pending, error, onSave, onStart, onStop, onRevea
   const [brand, setBrand] = useState(snapshot.brandResponse)
   const [publisherProfile, setPublisherProfile] = useState(snapshot.publisherProfile)
   const [notice, setNotice] = useState('')
-  const running = snapshot.state === 'online' || snapshot.state === 'starting' || snapshot.state === 'paused'
+  const retryStop = snapshot.state === 'error' && Boolean(snapshot.address)
+  const running = snapshot.state === 'online' || snapshot.state === 'starting' || snapshot.state === 'paused' || retryStop
   const parsedPort = Number(port)
   const parsedRPM = Number(rpm)
   const parsedContext = Number(contextMiB)
@@ -59,7 +60,7 @@ function TunnelForm({ snapshot, pending, error, onSave, onStart, onStop, onRevea
   }
 
   return <form className={styles.page} onSubmit={submit}>
-    <header className="page-header"><div><h1>Tunnel</h1><p>Fail-closed public model gateway</p></div><div className={styles.actions}>{running ? <Button type="button" variant="danger" disabled={pending} onClick={() => void onStop()}><Square size={13} fill="currentColor" />Stop</Button> : <Button type="button" variant="primary" disabled={pending || !valid} onClick={() => void start()}><Play size={15} />{dirty ? 'Save & start' : 'Start'}</Button>}</div></header>
+    <header className="page-header"><div><h1>Tunnel</h1><p>Fail-closed public model gateway</p></div><div className={styles.actions}>{running ? <Button type="button" variant="danger" disabled={pending} onClick={() => void onStop()}><Square size={13} fill="currentColor" />{retryStop ? 'Retry stop' : 'Stop'}</Button> : <Button type="button" variant="primary" disabled={pending || !valid} onClick={() => void start()}><Play size={15} />{dirty ? 'Save & start' : 'Start'}</Button>}</div></header>
     {error ? <div className={styles.error} role="alert">{error}</div> : null}{notice ? <div className={styles.notice} aria-live="polite">{notice}</div> : null}
     <div className={styles.content}>
       <section className={styles.status}><div className={styles.statusMain}><StatusDot state={snapshot.state === 'online' ? 'healthy' : snapshot.state === 'error' ? 'error' : snapshot.state === 'starting' ? 'active' : snapshot.state === 'paused' ? 'degraded' : 'stopped'} /><div><h2>{snapshot.state === 'online' ? 'Online' : snapshot.state === 'starting' ? 'Connecting' : snapshot.state === 'paused' ? 'Paused' : snapshot.state === 'error' ? 'Unavailable' : 'Stopped'}</h2><p>{snapshot.address || 'Gateway is closed to public traffic.'}</p></div></div><div className={styles.statusActions}><Button type="button" disabled={snapshot.state !== 'online'} onClick={() => void copy(snapshot.address, 'Tunnel URL')}><Copy size={14} />Copy URL</Button><Button type="button" onClick={async () => void copy(await onReveal(), 'Access key')}><KeyRound size={14} />Copy key</Button><Button type="button" disabled={running || pending} onClick={async () => { const token = await onRotate(); if (token) void copy(token, 'New access key') }}><RotateCw size={14} />Rotate</Button></div></section>

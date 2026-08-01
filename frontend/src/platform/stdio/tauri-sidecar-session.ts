@@ -57,6 +57,15 @@ export class TauriSidecarSession implements ControlPlaneSession {
       method,
       ...(payload === undefined ? {} : { payload }),
     }
+    const cancel = () => {
+      void this.#write({
+        v: PROTOCOL_VERSION,
+        id: requestID(),
+        type: 'command',
+        method: 'system.cancel',
+        payload: { id },
+      }).catch(() => undefined)
+    }
     const result = new Promise<T>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.#pending.delete(id)
@@ -70,14 +79,13 @@ export class TauriSidecarSession implements ControlPlaneSession {
         timeout,
       })
     })
-    const cancel = () => {
-      void this.#write({
-        v: PROTOCOL_VERSION,
-        id: requestID(),
-        type: 'command',
-        method: 'system.cancel',
-        payload: { id },
-      }).catch(() => undefined)
+    const abort = () => {
+      const pending = this.#pending.get(id)
+      if (!pending) return
+      this.#pending.delete(id)
+      window.clearTimeout(pending.timeout)
+      cancel()
+      pending.reject(new DOMException('Sidecar command aborted', 'AbortError'))
     }
     try {
       try {
@@ -90,11 +98,11 @@ export class TauriSidecarSession implements ControlPlaneSession {
         }
         throw error
       }
-      if (signal?.aborted) cancel()
-      else signal?.addEventListener('abort', cancel, { once: true })
+      if (signal?.aborted) abort()
+      else signal?.addEventListener('abort', abort, { once: true })
       return await result
     } finally {
-      signal?.removeEventListener('abort', cancel)
+      signal?.removeEventListener('abort', abort)
     }
   }
 

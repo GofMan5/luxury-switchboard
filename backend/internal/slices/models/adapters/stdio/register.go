@@ -26,12 +26,13 @@ func Register(server *platform.Server, service *application.Service) {
 	server.Handle("models.test", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
 			ProviderID string   `json:"providerId"`
+			RunID      string   `json:"runId"`
 			Models     []string `json:"models"`
 		}
 		if platform.DecodePayload(payload, &command) != nil {
 			return nil, invalid()
 		}
-		count, err := service.Test(ctx, command.ProviderID, command.Models)
+		count, err := service.Test(ctx, command.ProviderID, command.RunID, command.Models)
 		if err != nil {
 			return nil, platform.MethodError{Code: "model_test_failed", Message: "Model tests could not complete"}
 		}

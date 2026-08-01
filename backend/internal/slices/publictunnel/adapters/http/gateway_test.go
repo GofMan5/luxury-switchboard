@@ -366,7 +366,11 @@ func TestIPLimiterCancellationDoesNotLeaveAReservedHole(t *testing.T) {
 		_, _, err := limiter.Acquire(ctx, "203.0.113.11", 2, func() { close(queued) })
 		result <- err
 	}()
-	<-queued
+	select {
+	case <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("rate-limited request was not queued")
+	}
 	cancel()
 	if !errors.Is(<-result, context.Canceled) {
 		t.Fatal("cancelled request remained in the limiter queue")
@@ -385,20 +389,13 @@ func TestIPLimiterCancellationDoesNotLeaveAReservedHole(t *testing.T) {
 func TestIPLimiterBoundsPendingRequests(t *testing.T) {
 	limiter := newIPLimiter()
 	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
-	releases := make([]func(), 0, maxQueuedPerIP)
-	for range maxQueuedPerIP {
-		release, _, err := limiter.Acquire(context.Background(), "203.0.113.10", 0, nil)
-		if err != nil {
-			t.Fatal("in-capacity request was rejected")
-		}
-		releases = append(releases, release)
-	}
+	limiter.next["203.0.113.10"] = &ipLimit{pending: maxQueuedPerIP, notify: make(chan struct{})}
+	limiter.pending = maxQueuedPerIP
 	if _, _, err := limiter.Acquire(context.Background(), "203.0.113.10", 0, nil); !errors.Is(err, errIPQueueFull) {
 		t.Fatal("per-IP request queue grew without a bound")
 	}
-	for _, release := range releases {
-		release()
-	}
+	limiter.next = make(map[string]*ipLimit)
+	limiter.pending = 0
 	if release, _, err := limiter.Acquire(context.Background(), "203.0.113.10", 0, nil); err != nil {
 		t.Fatal("released queue capacity was not reusable")
 	} else {
@@ -423,18 +420,86 @@ func TestIPLimiterBoundsUnlimitedAndGlobalTraffic(t *testing.T) {
 func TestIPLimiterBoundsDistinctIdentityState(t *testing.T) {
 	limiter := newIPLimiter()
 	limiter.now = func() time.Time { return time.Unix(1_000, 0) }
-	releases := make([]func(), 0, maxQueuedTotal)
 	for index := range maxQueuedTotal {
-		release, _, err := limiter.Acquire(context.Background(), fmt.Sprintf("203.0.%d.%d", index/256, index%256), 0, nil)
+		release, _, err := limiter.Acquire(context.Background(), fmt.Sprintf("203.0.%d.%d", index/256, index%256), 1, nil)
 		if err != nil {
 			t.Fatalf("identity %d was rejected below the bound", index)
 		}
-		releases = append(releases, release)
+		release()
 	}
 	if _, _, err := limiter.Acquire(context.Background(), "198.51.100.1", 0, nil); !errors.Is(err, errIPQueueFull) || len(limiter.next) != maxQueuedTotal {
 		t.Fatalf("distinct IP state exceeded its bound: %d", len(limiter.next))
 	}
-	for _, release := range releases {
+}
+
+func TestIPLimiterBoundsActiveWorkPerIP(t *testing.T) {
+	limiter := newIPLimiter()
+	releases := make([]func(), 0, maxActivePerIP)
+	for range maxActivePerIP {
+		release, _, err := limiter.Acquire(context.Background(), "203.0.113.30", 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	queued := make(chan struct{})
+	next := make(chan func(), 1)
+	go func() {
+		release, _, _ := limiter.Acquire(context.Background(), "203.0.113.30", 0, func() { close(queued) })
+		next <- release
+	}()
+	select {
+	case <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("per-IP overflow request was not queued")
+	}
+	releases[0]()
+	select {
+	case release := <-next:
+		if release == nil {
+			t.Fatal("queued request was not admitted")
+		}
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("per-IP active capacity was not released")
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+}
+
+func TestIPLimiterWakesAnotherIPWhenGlobalCapacityReturns(t *testing.T) {
+	limiter := newIPLimiter()
+	releases := make([]func(), 0, maxActiveTotal)
+	for index := range maxActiveTotal {
+		release, _, err := limiter.Acquire(context.Background(), fmt.Sprintf("198.51.100.%d", index+1), 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	queued := make(chan struct{})
+	next := make(chan func(), 1)
+	go func() {
+		release, _, _ := limiter.Acquire(context.Background(), "203.0.113.40", 0, func() { close(queued) })
+		next <- release
+	}()
+	select {
+	case <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("global overflow request was not queued")
+	}
+	releases[0]()
+	select {
+	case release := <-next:
+		if release == nil {
+			t.Fatal("queued request was not admitted")
+		}
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("global active capacity did not wake another IP")
+	}
+	for _, release := range releases[1:] {
 		release()
 	}
 }

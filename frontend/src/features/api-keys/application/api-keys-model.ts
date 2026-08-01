@@ -34,7 +34,7 @@ export class ApiKeysModel {
   async load(providerId: string, clearPending = false): Promise<void> {
     if (!providerId) return
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', providerId, error: '' })
+    this.#set({ ...this.#state, phase: 'loading', providerId, keys: providerId === this.#state.providerId ? this.#state.keys : [], error: '' })
     try {
       const keys = await this.#port.list(providerId)
       if (generation !== this.#generation) return

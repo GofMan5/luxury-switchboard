@@ -27,10 +27,13 @@ func (repository *Repository) Transaction(ctx context.Context, operation func(*d
 		return errors.New("hub state unavailable")
 	}
 	defer lock.Close()
-	if err := lockFile(lock); err != nil {
+	if err := lockFile(ctx, lock); err != nil {
 		return errors.New("hub state unavailable")
 	}
 	defer unlockFile(lock)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state, migrated, err := repository.load()
 	if err != nil {
 		return err

@@ -99,4 +99,4 @@ $env:GOOS='linux'; $env:GOARCH='amd64'
 go -C backend build -trimpath -o tunnel-hub ./cmd/tunnel-hub
 ```
 
-After the final installer and `SHA256SUMS.txt` are verified, create the friend archive with `scripts/package-friend.ps1`. The packager fails closed on a stale checksum and rejects SSH identities, DPAPI files, databases and private-key formats.
+After the final installer and `SHA256SUMS.txt` are verified, commit only the checksum file on top of the exact source commit used for the build, then create the friend archive with `scripts/package-friend.ps1`. The packager rejects dirty or post-checksum source, records both commits, and excludes SSH identities, DPAPI files, databases and private-key formats.

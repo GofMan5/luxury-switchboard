@@ -26,13 +26,22 @@ func (repo *memoryRepo) Save(_ context.Context, config domain.Config) error {
 	return nil
 }
 
-type fakeRuntime struct{ running bool }
+type fakeRuntime struct {
+	running bool
+	stopErr error
+}
 
 func (runtime *fakeRuntime) Start(context.Context, domain.Config) (string, error) {
 	runtime.running = true
 	return "http://127.0.0.1:8797/v1", nil
 }
-func (runtime *fakeRuntime) Stop(context.Context) error { runtime.running = false; return nil }
+func (runtime *fakeRuntime) Stop(context.Context) error {
+	if runtime.stopErr != nil {
+		return runtime.stopErr
+	}
+	runtime.running = false
+	return nil
+}
 
 type routeCount int
 
@@ -78,6 +87,29 @@ func TestTunnelPersistsConfigAndLifecycle(t *testing.T) {
 	next, err := service.RotateToken(context.Background())
 	if err != nil || old == next {
 		t.Fatal("token not rotated")
+	}
+}
+
+func TestTunnelStopFailureKeepsTheRetryableAddress(t *testing.T) {
+	runtime := &fakeRuntime{stopErr: errors.New("injected stop failure")}
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Stop(context.Background()); err == nil {
+		t.Fatal("injected stop failure was hidden")
+	}
+	if snapshot := service.Snapshot(); snapshot.State != domain.StateError || snapshot.Address == "" {
+		t.Fatalf("failed stop lost its retryable runtime: %+v", snapshot)
+	}
+	if err := service.Configure(context.Background(), service.Config()); !errors.Is(err, ErrRunning) {
+		t.Fatalf("active failed-stop runtime accepted configuration: %v", err)
+	}
+	if _, err := service.RotateToken(context.Background()); !errors.Is(err, ErrRunning) {
+		t.Fatalf("active failed-stop runtime accepted token rotation: %v", err)
+	}
+	if err := service.Start(context.Background()); !errors.Is(err, ErrRunning) {
+		t.Fatalf("active failed-stop runtime accepted a second start: %v", err)
 	}
 }
 

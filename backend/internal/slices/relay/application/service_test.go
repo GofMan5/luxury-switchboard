@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -13,6 +14,14 @@ type blockingRuntime struct {
 	release chan struct{}
 	stopped chan struct{}
 }
+
+type stopErrorRuntime struct{}
+
+func (stopErrorRuntime) Start() (domain.Snapshot, error) {
+	return domain.Snapshot{State: domain.StateLive, Address: "http://127.0.0.1:1", Port: 1}, nil
+}
+func (stopErrorRuntime) Stop(context.Context) error { return errors.New("injected stop failure") }
+func (stopErrorRuntime) CancelActive()              {}
 
 func (runtime *blockingRuntime) Start() (domain.Snapshot, error) {
 	close(runtime.started)
@@ -40,5 +49,18 @@ func TestStopWaitsForConcurrentStartAndWins(t *testing.T) {
 	<-stopDone
 	if service.Snapshot().State != domain.StateStopped {
 		t.Fatalf("unexpected final relay state: %+v", service.Snapshot())
+	}
+}
+
+func TestStopFailureIsNotReportedAsStopped(t *testing.T) {
+	service := NewService(stopErrorRuntime{})
+	if _, err := service.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Stop(context.Background()); err == nil {
+		t.Fatal("injected stop failure was hidden")
+	}
+	if snapshot := service.Snapshot(); snapshot.State != domain.StateError || snapshot.Error == "" || snapshot.Address == "" {
+		t.Fatalf("stop failure was reported as stopped: %+v", snapshot)
 	}
 }

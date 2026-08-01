@@ -239,25 +239,20 @@ async fn forward_events(
     generation: u64,
 ) {
     let mut buffer = Vec::with_capacity(8 * 1024);
+    let mut lifecycle_state = "stopped";
     while let Some(event) = receiver.recv().await {
         match event {
             CommandEvent::Stdout(bytes) => {
                 if append_frames(&app, &mut buffer, &bytes).is_err() {
-                    let _ = app.emit(
-                        LIFECYCLE_EVENT,
-                        LifecycleEvent {
-                            state: "protocol-error",
-                        },
-                    );
+                    lifecycle_state = "protocol-error";
                     break;
                 }
             }
             CommandEvent::Terminated(_) => {
-                let _ = app.emit(LIFECYCLE_EVENT, LifecycleEvent { state: "stopped" });
                 break;
             }
             CommandEvent::Error(_) => {
-                let _ = app.emit(LIFECYCLE_EVENT, LifecycleEvent { state: "error" });
+                lifecycle_state = "error";
                 break;
             }
             CommandEvent::Stderr(_) => {
@@ -267,18 +262,41 @@ async fn forward_events(
         }
     }
     let state = app.state::<SidecarState>();
-    let active_generation = state.generation.load(Ordering::Acquire);
-    if let Ok(mut child) = state.child.lock()
-        && matching_process(
+    let mut lifecycle = None;
+    if let Ok(mut child) = state.child.lock() {
+        let active_generation = state.generation.load(Ordering::Acquire);
+        lifecycle = lifecycle_for_process(
             child.as_ref().map(CommandChild::pid),
             active_generation,
             pid,
             generation,
-        )
-        && let Some(child) = child.take()
-    {
-        let _ = child.kill();
+            lifecycle_state,
+        );
+        if lifecycle.is_some()
+            && let Some(child) = child.take()
+        {
+            let _ = child.kill();
+        }
     }
+    if let Some(state) = lifecycle {
+        let _ = app.emit(LIFECYCLE_EVENT, LifecycleEvent { state });
+    }
+}
+
+fn lifecycle_for_process(
+    active_pid: Option<u32>,
+    active_generation: u64,
+    completed_pid: u32,
+    completed_generation: u64,
+    state: &'static str,
+) -> Option<&'static str> {
+    matching_process(
+        active_pid,
+        active_generation,
+        completed_pid,
+        completed_generation,
+    )
+    .then_some(state)
 }
 
 fn matching_process(
@@ -376,5 +394,10 @@ mod tests {
         assert!(!matching_process(Some(10), 2, 10, 1));
         assert!(!matching_process(Some(11), 1, 10, 1));
         assert!(!matching_process(None, 1, 10, 1));
+        assert_eq!(
+            lifecycle_for_process(Some(10), 1, 10, 1, "protocol-error"),
+            Some("protocol-error")
+        );
+        assert_eq!(lifecycle_for_process(Some(10), 2, 10, 1, "stopped"), None);
     }
 }

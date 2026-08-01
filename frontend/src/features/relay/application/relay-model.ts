@@ -51,8 +51,9 @@ export class RelayModel {
     if (this.#state.pending) return
     this.#set({ ...this.#state, pending: true, error: '' })
     try {
+      const needsStop = this.#state.snapshot.state === 'live' || (this.#state.snapshot.state === 'error' && Boolean(this.#state.snapshot.address))
       const snapshot =
-        this.#state.snapshot.state === 'live' ? await this.#port.stop() : await this.#port.start()
+        needsStop ? await this.#port.stop() : await this.#port.start()
       this.#set({ phase: 'ready', snapshot, pending: false, error: '' })
     } catch {
       try {

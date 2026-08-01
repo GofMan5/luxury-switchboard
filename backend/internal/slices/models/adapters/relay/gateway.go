@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
+
+const maxDiscoveredModels = 5_000
 
 type Gateway struct {
 	dispatcher relayapp.Dispatcher
@@ -135,7 +138,7 @@ func (gateway *Gateway) dispatch(ctx context.Context, providerID, model, path st
 
 func extractModelIDs(body []byte) ([]string, error) {
 	var payload any
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, errors.New("invalid model catalog")
@@ -174,6 +177,9 @@ func extractModelIDs(body []byte) ([]string, error) {
 		}
 		if _, exists := seen[model]; exists {
 			continue
+		}
+		if len(models) == maxDiscoveredModels {
+			return nil, errors.New("model catalog exceeds the safety limit")
 		}
 		seen[model] = struct{}{}
 		models = append(models, model)

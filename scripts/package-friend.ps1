@@ -28,12 +28,25 @@ if ($actualHash -ne $expectedHash) {
     throw "Installer does not match SHA256SUMS.txt"
 }
 
-$commit = (git -C $workspace rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') {
+$releaseCommit = (git -C $workspace rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $releaseCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Git source commit is unavailable"
 }
+$dirty = @(git -C $workspace status --porcelain --untracked-files=no)
+if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+    throw "Tracked source changes are not committed"
+}
+$checksumCommit = (git -C $workspace log -1 --format=%H -- SHA256SUMS.txt).Trim()
+if ($LASTEXITCODE -ne 0 -or $checksumCommit -ne $releaseCommit) {
+    throw "Source changed after the release checksum was recorded"
+}
+$sourceCommit = (git -C $workspace rev-parse "$releaseCommit^").Trim()
+$releaseFiles = @(git -C $workspace diff --name-only $sourceCommit $releaseCommit)
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$' -or $releaseFiles.Count -ne 1 -or $releaseFiles[0] -ne "SHA256SUMS.txt") {
+    throw "Release checksum commit contains source changes"
+}
 if (-not $OutputPath) {
-    $OutputPath = Join-Path $workspace ("artifacts\Switchboard-friend-{0}.zip" -f $commit.Substring(0, 8))
+    $OutputPath = Join-Path $workspace ("artifacts\Switchboard-friend-{0}.zip" -f $releaseCommit.Substring(0, 8))
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = Split-Path -Parent $output
@@ -54,7 +67,7 @@ try {
     Copy-Item -LiteralPath $checksumPath -Destination (Join-Path $package "SHA256SUMS.txt")
     Copy-Item -LiteralPath (Join-Path $workspace "README.md") -Destination (Join-Path $package "README.md")
     Copy-Item -LiteralPath (Join-Path $workspace "FRIEND-SETUP.md") -Destination (Join-Path $package "FRIEND-SETUP.md")
-    @("source_commit=$commit", "installer_sha256=$actualHash") | Set-Content -LiteralPath (Join-Path $package "BUILD.txt") -Encoding utf8
+    @("source_commit=$sourceCommit", "release_commit=$releaseCommit", "installer_sha256=$actualHash") | Set-Content -LiteralPath (Join-Path $package "BUILD.txt") -Encoding utf8
     Compress-Archive -LiteralPath $package -DestinationPath $output -CompressionLevel Optimal
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem

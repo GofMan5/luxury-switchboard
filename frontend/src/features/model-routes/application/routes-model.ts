@@ -34,7 +34,7 @@ export class RoutesModel {
 
   async load(target: RouteTarget, clearPending = false): Promise<void> {
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', target, error: '' })
+    this.#set({ ...this.#state, phase: 'loading', target, routes: target === this.#state.target ? this.#state.routes : [], error: '' })
     try {
       const routes = await this.#port.list(target)
       if (generation === this.#generation) {

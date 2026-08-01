@@ -48,15 +48,17 @@ func control(service *application.Service, args []string) int {
 	command := os.Getenv("SSH_ORIGINAL_COMMAND")
 	var snapshot application.Snapshot
 	var err error
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if command == "v1 list" {
-		snapshot, err = service.List(context.Background(), *owner)
+		snapshot, err = service.List(ctx, *owner)
 	} else if match := actionPattern.FindStringSubmatch(command); len(match) == 4 {
 		revision, revisionErr := strconv.ParseInt(match[2], 10, 64)
 		position, positionErr := strconv.Atoi(match[3])
 		if revisionErr != nil || positionErr != nil {
 			err = fmt.Errorf("invalid request")
 		} else {
-			snapshot, err = service.Control(context.Background(), *owner, match[1], revision, position)
+			snapshot, err = service.Control(ctx, *owner, match[1], revision, position)
 		}
 	} else {
 		err = fmt.Errorf("invalid request")

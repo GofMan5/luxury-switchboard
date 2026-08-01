@@ -8,7 +8,7 @@ const route: ModelRoute = { target: 'relay', publicModel: 'public-model', upstre
 class Port implements RoutesPort {
   listener: ((target: RouteTarget) => void) | undefined
   finishUpsert: ((value: ModelRoute) => void) | undefined
-  list = async () => []
+  list: RoutesPort['list'] = async () => []
   upsert = async (_value: ModelRoute) => new Promise<ModelRoute>((resolve) => { this.finishUpsert = resolve; this.listener?.('relay') })
   batches: number[] = []
   upsertMany = async (routes: readonly ModelRoute[]) => { this.batches.push(routes.length); return routes.length }
@@ -37,5 +37,17 @@ describe('RoutesModel', () => {
     const routes = Array.from({ length: 1_201 }, (_, index) => ({ ...route, publicModel: `public-${index}`, upstreamModel: `upstream-${index}` }))
     expect(await model.upsertMany(routes)).toBe(true)
     expect(port.batches).toEqual([500, 500, 201])
+  })
+
+  it('does not expose actions for the previous target while switching', async () => {
+    let finishSwitch!: (value: readonly ModelRoute[]) => void
+    const port = new Port()
+    port.list = async (target: RouteTarget) => target === 'relay' ? [route] : await new Promise<readonly ModelRoute[]>((resolve) => { finishSwitch = resolve })
+    const model = new RoutesModel(port)
+    await model.load('relay')
+    const switching = model.load('tunnel')
+    expect(model.snapshot()).toMatchObject({ target: 'tunnel', phase: 'loading', routes: [] })
+    finishSwitch([])
+    await switching
   })
 })

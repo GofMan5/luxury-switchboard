@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +30,21 @@ func TestExtractModelIDsAcceptsCommonCatalogShapes(t *testing.T) {
 	models, err = extractModelIDs([]byte(`["model-b",{"id":"model-a"}]`))
 	if err != nil || len(models) != 2 || models[0] != "model-a" {
 		t.Fatalf("unexpected array catalog: %v err=%v", models, err)
+	}
+}
+
+func TestExtractModelIDsRejectsAnUnboundedCatalog(t *testing.T) {
+	var body strings.Builder
+	body.WriteString(`{"data":[`)
+	for index := 0; index <= maxDiscoveredModels; index++ {
+		if index > 0 {
+			body.WriteByte(',')
+		}
+		fmt.Fprintf(&body, `{"id":"model-%d"}`, index)
+	}
+	body.WriteString(`]}`)
+	if _, err := extractModelIDs([]byte(body.String())); err == nil {
+		t.Fatal("oversized model catalog reached the UI")
 	}
 }
 

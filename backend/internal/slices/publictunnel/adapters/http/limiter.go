@@ -12,6 +12,8 @@ const (
 	// them only if measured legitimate traffic reaches either limit.
 	maxQueuedPerIP = 1_000
 	maxQueuedTotal = 10_000
+	maxActivePerIP = 4
+	maxActiveTotal = 8
 )
 
 var errIPQueueFull = errors.New("tunnel request queue is full")
@@ -21,11 +23,14 @@ type ipLimiter struct {
 	next    map[string]*ipLimit
 	now     func() time.Time
 	pending int
+	active  int
+	notify  chan struct{}
 }
 
 type ipLimit struct {
 	next    time.Time
 	pending int
+	active  int
 	waiters []*ipWaiter
 	notify  chan struct{}
 }
@@ -33,7 +38,7 @@ type ipLimit struct {
 type ipWaiter struct{}
 
 func newIPLimiter() *ipLimiter {
-	return &ipLimiter{next: make(map[string]*ipLimit), now: time.Now}
+	return &ipLimiter{next: make(map[string]*ipLimit), now: time.Now, notify: make(chan struct{})}
 }
 
 func (limiter *ipLimiter) Acquire(ctx context.Context, ip string, rpm int, onQueued func()) (func(), bool, error) {
@@ -83,8 +88,11 @@ func (limiter *ipLimiter) Acquire(ctx context.Context, ip string, rpm int, onQue
 		}
 		first := len(state.waiters) > 0 && state.waiters[0] == waiter
 		wait := max(state.next.Sub(now), 0)
-		if first && (rpm == 0 || wait == 0) {
+		capacityAvailable := state.active < maxActivePerIP && limiter.active < maxActiveTotal
+		if first && capacityAvailable && (rpm == 0 || wait == 0) {
 			state.waiters = state.waiters[1:]
+			state.active++
+			limiter.active++
 			if rpm > 0 {
 				state.next = maxTime(state.next, now).Add(time.Minute / time.Duration(rpm))
 			}
@@ -98,13 +106,17 @@ func (limiter *ipLimiter) Acquire(ctx context.Context, ip string, rpm int, onQue
 					return
 				}
 				released = true
+				state.active--
+				limiter.active--
 				state.pending--
 				limiter.pending--
 				limiter.wakeLocked(state)
+				limiter.wakeGlobalLocked()
 				limiter.deleteExpiredLocked(ip, state, limiter.now())
 			}, queued, nil
 		}
 		notify := state.notify
+		globalNotify := limiter.notify
 		limiter.mu.Unlock()
 		if !queued {
 			queued = true
@@ -136,6 +148,10 @@ func (limiter *ipLimiter) Acquire(ctx context.Context, ip string, rpm int, onQue
 			if timer != nil {
 				timer.Stop()
 			}
+		case <-globalNotify:
+			if timer != nil {
+				timer.Stop()
+			}
 		case <-timerC:
 		}
 		limiter.mu.Lock()
@@ -157,6 +173,11 @@ func (limiter *ipLimiter) deleteExpiredLocked(ip string, state *ipLimit, now tim
 func (limiter *ipLimiter) wakeLocked(state *ipLimit) {
 	close(state.notify)
 	state.notify = make(chan struct{})
+}
+
+func (limiter *ipLimiter) wakeGlobalLocked() {
+	close(limiter.notify)
+	limiter.notify = make(chan struct{})
 }
 
 func removeWaiter(state *ipLimit, target *ipWaiter) bool {

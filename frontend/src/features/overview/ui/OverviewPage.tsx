@@ -99,7 +99,7 @@ export default function OverviewPage() {
           </div>
           <div className={styles.relayFoot}>
             <span>Listener</span>
-            <strong>{relay.snapshot.state === 'live' ? relay.snapshot.address : 'Stopped'}</strong>
+            <strong>{relay.snapshot.state === 'live' ? relay.snapshot.address : relay.snapshot.state === 'error' ? 'Error' : 'Stopped'}</strong>
           </div>
         </section>
       </div>

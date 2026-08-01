@@ -3,11 +3,27 @@
 package jsonfile
 
 import (
+	"context"
 	"os"
-	"sync"
 )
 
-var processLock sync.Mutex
+var processLock = make(chan struct{}, 1)
 
-func lockFile(*os.File) error   { processLock.Lock(); return nil }
-func unlockFile(*os.File) error { processLock.Unlock(); return nil }
+func init() { processLock <- struct{}{} }
+
+func lockFile(ctx context.Context, _ *os.File) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-processLock:
+		return nil
+	}
+}
+
+func unlockFile(*os.File) error {
+	processLock <- struct{}{}
+	return nil
+}

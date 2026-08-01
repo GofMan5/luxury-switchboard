@@ -16,14 +16,22 @@ class FakeModelsPort implements ModelsPort {
     }
     return ['model-a', 'model-b']
   }
-  async test(_providerId: string, models: readonly string[], signal?: AbortSignal) {
+  async test(_providerId: string, runId: string, models: readonly string[], signal?: AbortSignal) {
     this.testBatches.push(models.length)
     if (this.fail) throw new Error('injected')
     if (this.waitForAbort) await new Promise<void>((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
-    for (const model of models) this.listener?.({ providerId: _providerId, model, state: 'available', status: 200, latencyMs: 1 })
+    for (const model of models) this.listener?.({ runId, providerId: _providerId, model, state: 'available', status: 200, latencyMs: 1 })
     return models.length
   }
   subscribe(listener: (result: ModelTestResult) => void) { this.listener = listener; return () => { this.listener = undefined } }
+}
+
+class DeferredModelsPort extends FakeModelsPort {
+  resolvers: Array<(count: number) => void> = []
+  override async test(_providerId: string, _runId: string, models: readonly string[]) {
+    this.testBatches.push(models.length)
+    return await new Promise<number>((resolve) => this.resolvers.push(resolve))
+  }
 }
 
 describe('ModelsModel', () => {
@@ -79,6 +87,36 @@ describe('ModelsModel', () => {
     await stale
     expect(port.discoveryAborted).toBe(true)
     expect(model.snapshot()).toMatchObject({ providerId: 'provider-b', phase: 'ready' })
+    model.dispose()
+  })
+
+  it('does not let an old test completion clear a newer test', async () => {
+    const port = new DeferredModelsPort()
+    const model = new ModelsModel(port)
+    model.connect()
+    await model.discover('provider-a')
+    const stale = model.test(['model-a'])
+    await Promise.resolve()
+    await model.discover('provider-a')
+    const current = model.test(['model-b'])
+    await Promise.resolve()
+    port.resolvers[0](1)
+    expect(await stale).toBe(false)
+    expect(model.snapshot().testing).toBe(true)
+    port.resolvers[1](1)
+    expect(await current).toBe(true)
+    expect(model.snapshot().testing).toBe(false)
+    model.dispose()
+  })
+
+  it('stores hostile model names without changing the results prototype', async () => {
+    const model = new ModelsModel(new FakeModelsPort())
+    model.connect()
+    await model.discover('provider-a')
+    expect(await model.test(['__proto__'])).toBe(true)
+    const results = model.snapshot().results
+    expect(Object.getPrototypeOf(results)).toBeNull()
+    expect(results.__proto__).toMatchObject({ model: '__proto__', state: 'available' })
     model.dispose()
   })
 })

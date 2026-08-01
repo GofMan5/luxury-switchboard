@@ -582,6 +582,25 @@ func TestChatStreamAcceptsFinishReasonWhenProviderOmitsDoneSentinel(t *testing.T
 	}
 }
 
+func TestBufferedResponsesHaveAnIndependentMemoryCeiling(t *testing.T) {
+	limit := responseBufferLimit(Config{MaxRequestBytes: absoluteMaxRequestBytes})
+	if limit != maxBufferedResponseBytes {
+		t.Fatalf("buffered response limit followed the request limit: %d", limit)
+	}
+	if small := responseBufferLimit(Config{MaxRequestBytes: 1024}); small != 8*1024*1024 {
+		t.Fatalf("small responses lost the compatibility floor: %d", small)
+	}
+}
+
+func TestOversizedSuccessfulResponseIsPermanent(t *testing.T) {
+	body := bytes.Repeat([]byte{'x'}, 8*1024*1024+1)
+	response := &http.Response{Body: io.NopCloser(bytes.NewReader(body))}
+	_, err := bufferJSONResponse(context.Background(), response, Config{MaxRequestBytes: 1024, StreamIdleTimeout: time.Second})
+	if !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("oversized response was treated as retryable: %v", err)
+	}
+}
+
 func TestTerminalSSEAcceptsIncorrectProviderContentTypeOnlyAfterValidation(t *testing.T) {
 	response := &http.Response{
 		Header: http.Header{"Content-Type": []string{"text/plain"}},

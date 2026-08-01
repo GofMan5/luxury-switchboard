@@ -58,8 +58,6 @@ func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string
 func (runtime *Runtime) Stop(ctx context.Context) error {
 	runtime.mu.Lock()
 	server := runtime.server
-	runtime.server = nil
-	runtime.listener = nil
 	runtime.mu.Unlock()
 	if server == nil {
 		return nil
@@ -69,5 +67,11 @@ func (runtime *Runtime) Stop(ctx context.Context) error {
 			return errors.Join(err, closeErr)
 		}
 	}
+	runtime.mu.Lock()
+	if runtime.server == server {
+		runtime.server = nil
+		runtime.listener = nil
+	}
+	runtime.mu.Unlock()
 	return nil
 }

@@ -349,6 +349,9 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if err != nil {
 		return relayapp.DispatchResponse{}, err
 	}
+	if request.UseStoredCredential && route.AuthMode == "passthrough" {
+		route.AuthMode = "bearer"
+	}
 	path, body, imageCompat, err := prepareImageRequest(request.Method, request.Path, request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel, route.ImageCompat)
 	if err != nil {
 		return relayapp.DispatchResponse{}, err

@@ -172,6 +172,29 @@ func TestDispatchCarriesTheExactSelectedCredentialMarkers(t *testing.T) {
 	}
 }
 
+func TestInternalPassthroughDispatchUsesTheEnteredKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer entered-key" {
+			t.Fatalf("entered key was not used: %q", authorization)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"model"}]}`))
+	}))
+	defer upstream.Close()
+	base, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "local", BaseURL: base, AuthMode: "passthrough"}},
+		Credentials: &credentialSource{values: []string{"entered-key"}},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodGet, Path: "/v1/models", ProviderID: "local", UpstreamModel: "__model_catalog__",
+		Headers: http.Header{"Accept": []string{"application/json"}}, AttemptLimit: 1, UseStoredCredential: true,
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("internal passthrough dispatch failed: status=%d err=%v", response.Status, err)
+	}
+}
+
 func TestProxyClientCacheIsBounded(t *testing.T) {
 	server := NewServer("127.0.0.1:0", Dependencies{})
 	for index := range maxProxyClients + 1 {

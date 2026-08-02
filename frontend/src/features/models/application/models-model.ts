@@ -52,7 +52,7 @@ export class ModelsModel {
       const models = await this.#port.discover(providerId, controller.signal)
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', providerId, models, selected: [], results: resultMap(), error: '' })
     } catch {
-      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', models: [], selected: [], error: 'Provider model catalog is unavailable' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', models: [], selected: [], error: 'Provider model catalog is unavailable. Add its key in API Keys if authorization is required.' })
     } finally {
       if (this.#discoverController === controller) this.#discoverController = null
     }

@@ -3,7 +3,6 @@ package relay
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,16 +17,15 @@ import (
 const maxDiscoveredModels = 5_000
 
 type Gateway struct {
-	dispatcher         relayapp.Dispatcher
-	timeout            time.Duration
-	probeAuthorization string
+	dispatcher relayapp.Dispatcher
+	timeout    time.Duration
 }
 
 func NewGateway(dispatcher relayapp.Dispatcher, timeout time.Duration) *Gateway {
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	return &Gateway{dispatcher: dispatcher, timeout: timeout, probeAuthorization: "Bearer " + rand.Text()}
+	return &Gateway{dispatcher: dispatcher, timeout: timeout}
 }
 
 func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) ([]string, error) {
@@ -36,7 +34,8 @@ func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) 
 	response, err := gateway.dispatcher.Dispatch(ctx, relayapp.DispatchRequest{
 		Method: http.MethodGet, Path: provider.ModelsPath, ProviderID: provider.ID,
 		UpstreamModel: "__model_catalog__", AttemptLimit: 1,
-		Headers: http.Header{"Accept": []string{"application/json"}, "Authorization": []string{gateway.probeAuthorization}},
+		UseStoredCredential: true,
+		Headers:             http.Header{"Accept": []string{"application/json"}},
 	})
 	if err != nil || response.Status < 200 || response.Status >= 300 {
 		return nil, errors.New("model catalog is unavailable")
@@ -134,7 +133,8 @@ func (gateway *Gateway) dispatch(ctx context.Context, providerID, model, path st
 	return gateway.dispatcher.Dispatch(ctx, relayapp.DispatchRequest{
 		Method: http.MethodPost, Path: path, ProviderID: providerID,
 		PublicModel: model, UpstreamModel: model, Body: body, AttemptLimit: 1,
-		Headers: http.Header{"Content-Type": []string{"application/json"}, "Accept": []string{"application/json"}, "Authorization": []string{gateway.probeAuthorization}},
+		UseStoredCredential: true,
+		Headers:             http.Header{"Content-Type": []string{"application/json"}, "Accept": []string{"application/json"}},
 	})
 }
 

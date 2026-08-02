@@ -33,10 +33,10 @@ func TestExtractModelIDsAcceptsCommonCatalogShapes(t *testing.T) {
 	}
 }
 
-func TestInternalModelCallsUseEphemeralPassthroughAuthorization(t *testing.T) {
-	seen := make([]string, 0, 2)
+func TestInternalModelCallsRequestAStoredCredential(t *testing.T) {
+	seen := make([]relayapp.DispatchRequest, 0, 2)
 	gateway := NewGateway(dispatcherFunc(func(_ context.Context, request relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
-		seen = append(seen, request.Headers.Get("Authorization"))
+		seen = append(seen, request)
 		if request.Method == http.MethodGet {
 			return relayapp.DispatchResponse{Status: http.StatusOK, Body: []byte(`{"data":[{"id":"model"}]}`)}, nil
 		}
@@ -49,8 +49,8 @@ func TestInternalModelCallsUseEphemeralPassthroughAuthorization(t *testing.T) {
 	if result := gateway.Test(context.Background(), provider, "model"); result.State != "available" {
 		t.Fatalf("model test failed: %+v", result)
 	}
-	if len(seen) != 2 || !strings.HasPrefix(seen[0], "Bearer ") || seen[0] != seen[1] || len(seen[0]) < 20 {
-		t.Fatalf("internal model calls did not share an ephemeral authorization header: %v", seen)
+	if len(seen) != 2 || !seen[0].UseStoredCredential || !seen[1].UseStoredCredential || seen[0].Headers.Get("Authorization") != "" || seen[1].Headers.Get("Authorization") != "" {
+		t.Fatalf("internal model calls did not request a stored credential: %+v", seen)
 	}
 }
 

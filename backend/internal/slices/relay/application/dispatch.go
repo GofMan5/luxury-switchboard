@@ -6,14 +6,15 @@ import (
 )
 
 type DispatchRequest struct {
-	Method        string
-	Path          string
-	Headers       http.Header
-	Body          []byte
-	ProviderID    string
-	PublicModel   string
-	UpstreamModel string
-	AttemptLimit  int
+	Method              string
+	Path                string
+	Headers             http.Header
+	Body                []byte
+	ProviderID          string
+	PublicModel         string
+	UpstreamModel       string
+	AttemptLimit        int
+	UseStoredCredential bool
 }
 
 type DispatchResponse struct {

@@ -33,6 +33,27 @@ func TestExtractModelIDsAcceptsCommonCatalogShapes(t *testing.T) {
 	}
 }
 
+func TestInternalModelCallsUseEphemeralPassthroughAuthorization(t *testing.T) {
+	seen := make([]string, 0, 2)
+	gateway := NewGateway(dispatcherFunc(func(_ context.Context, request relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
+		seen = append(seen, request.Headers.Get("Authorization"))
+		if request.Method == http.MethodGet {
+			return relayapp.DispatchResponse{Status: http.StatusOK, Body: []byte(`{"data":[{"id":"model"}]}`)}, nil
+		}
+		return relayapp.DispatchResponse{Status: http.StatusOK, Body: []byte(`{"status":"completed"}`)}, nil
+	}), time.Second)
+	provider := domain.Provider{ID: "local", ModelsPath: "/v1/models", Dialect: "openai"}
+	if _, err := gateway.Discover(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if result := gateway.Test(context.Background(), provider, "model"); result.State != "available" {
+		t.Fatalf("model test failed: %+v", result)
+	}
+	if len(seen) != 2 || !strings.HasPrefix(seen[0], "Bearer ") || seen[0] != seen[1] || len(seen[0]) < 20 {
+		t.Fatalf("internal model calls did not share an ephemeral authorization header: %v", seen)
+	}
+}
+
 func TestExtractModelIDsRejectsAnUnboundedCatalog(t *testing.T) {
 	var body strings.Builder
 	body.WriteString(`{"data":[`)

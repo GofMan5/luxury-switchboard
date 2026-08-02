@@ -7,7 +7,7 @@ import (
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 )
 
-const AppVersion = "1.0.4"
+const AppVersion = "1.0.5"
 
 func Register(server *platform.Server) {
 	server.Handle("system.handshake", func(_ context.Context, _ json.RawMessage) (any, error) {

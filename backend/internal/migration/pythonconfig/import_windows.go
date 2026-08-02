@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/userenv"
 	keydomain "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 	providerdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
 	routedomain "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
@@ -95,19 +94,10 @@ func LoadDefault() (State, bool, error) {
 			return State{}, false, errors.New("legacy provider is invalid")
 		}
 		state.Providers = append(state.Providers, provider)
-		priority := 0
-		if item.EnvironmentKeyRPM != nil && item.ID == "echo" && userenv.Get("FREEMODEL_API_KEY") != "" {
-			metadata, err := keydomain.NewKey(keydomain.Params{ProviderID: item.ID, Label: "Environment key", Secret: "environment-managed", RPM: *item.EnvironmentKeyRPM, Pinned: true})
-			if err != nil {
-				return State{}, false, errors.New("legacy environment key metadata is invalid")
-			}
-			state.Keys = append(state.Keys, metadata)
-			priority = 1
-		}
 		for index, oldKey := range item.Keys {
 			value, err := keydomain.NewKey(keydomain.Params{
 				ProviderID: item.ID, Label: "Migrated key " + strconv.Itoa(index+1),
-				Secret: oldKey.Secret, RPM: oldKey.RPM, ProxyURL: oldKey.Proxy, Priority: priority + index,
+				Secret: oldKey.Secret, RPM: oldKey.RPM, ProxyURL: oldKey.Proxy, Priority: index,
 			})
 			if err != nil {
 				return State{}, false, errors.New("legacy key is invalid")

@@ -34,15 +34,9 @@ pnpm build
 
 Provider switches, active endpoint/auth/cache changes and local Relay route changes cancel old in-flight work. Standby-provider and Tunnel-route edits apply to new requests without aborting unrelated local generations. Retryable transport errors, truncated JSON/SSE, `429`, `504` and other `5xx` responses are retried before client commit. RPM and model/balance cooldowns remain in FIFO queues until capacity returns or the client cancels.
 
-## FREEMODEL_API_KEY
+## API keys
 
-The built-in EchoGate Lite key is read first from the process, then from `HKCU\Environment`. Setting it once from PowerShell is enough for future desktop launches:
-
-```powershell
-[Environment]::SetEnvironmentVariable('FREEMODEL_API_KEY', 'your-key', 'User')
-```
-
-The real environment secret is not copied to Switchboard storage. Only editable Primary metadata such as its RPM is persisted. Additional keys are encrypted with current-user DPAPI.
+Switchboard never imports API credentials from process or user environment variables. Add every provider key explicitly in **API Keys**; it is encrypted with current-user DPAPI and remains write-only after saving.
 
 ## Public tunnel
 

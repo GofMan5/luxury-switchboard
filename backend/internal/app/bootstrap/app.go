@@ -12,14 +12,12 @@ import (
 	"time"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
-	"github.com/luxuryprivate/switchboard/backend/internal/platform/userenv"
 	activitysqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/sqlite"
 	activitystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/stdio"
 	activityapp "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
 	keydpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/dpapi"
 	keystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/stdio"
 	keyapp "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/application"
-	keydomain "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 	modelproviders "github.com/luxuryprivate/switchboard/backend/internal/slices/models/adapters/providers"
 	modelrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/models/adapters/relay"
 	modelstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/models/adapters/stdio"
@@ -262,26 +260,9 @@ func defaultProviders() ([]providerdomain.Provider, string, error) {
 
 func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*keyapp.Scheduler, *keyapp.Manager, error, error) {
 	scheduler := keyapp.NewScheduler(maxQueued)
-	builtins := make([]keydomain.Key, 0, 1)
 	rates := make(map[string]int, len(providers))
 	for _, provider := range providers {
 		rates[provider.ID] = provider.RPM
-		if provider.ID == "echo" {
-			if secret := userenv.Get("FREEMODEL_API_KEY"); secret != "" {
-				key, err := keydomain.NewKey(keydomain.Params{
-					ProviderID: provider.ID,
-					Label:      "Environment key",
-					Secret:     secret,
-					Priority:   0,
-					RPM:        environmentBounded("SWITCHBOARD_LITE_RPM", 30, keydomain.MaxRPM),
-					Pinned:     true,
-				})
-				if err != nil {
-					return nil, nil, nil, err
-				}
-				builtins = append(builtins, key)
-			}
-		}
 	}
 	path := os.Getenv("SWITCHBOARD_KEYS_PATH")
 	var pathErr error
@@ -291,7 +272,7 @@ func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*key
 		return nil, nil, nil, errors.New("key settings path must be absolute")
 	}
 	repository := keydpapi.New(path)
-	manager, err := keyapp.NewManager(scheduler, repository, rates, builtins)
+	manager, err := keyapp.NewManager(scheduler, repository, rates, nil)
 	if err != nil {
 		return nil, nil, nil, err
 	}

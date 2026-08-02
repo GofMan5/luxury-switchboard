@@ -94,9 +94,9 @@ describe('App navigation', () => {
     view.unmount()
   })
 
-  it('does not offer a no-op move above the pinned environment key', async () => {
+  it('does not offer a no-op move above a pinned managed key', async () => {
     const keys = [
-      { id: 'pinned', providerId: 'local', label: 'Environment', priority: 0, rpm: 30, pinned: true, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 0 },
+      { id: 'pinned', providerId: 'local', label: 'Managed', priority: 0, rpm: 30, pinned: true, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 0 },
       { id: 'user', providerId: 'local', label: 'User', priority: 1, rpm: 120, pinned: false, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 0 },
     ]
     createSession.mockResolvedValue(fakeSession(undefined, settings, { 'keys.list': { keys } }))

@@ -298,7 +298,7 @@ func (manager *Manager) persistState(ctx context.Context, builtins, candidate []
 
 func persistedBuiltinMetadata(keys []domain.Key) []domain.Key {
 	result := slices.Clone(keys)
-	placeholder, _ := domain.NewCredential("environment-managed")
+	placeholder, _ := domain.NewCredential("managed-credential")
 	for index := range result {
 		result[index].Credential = placeholder
 		result[index].ProxyURL = ""

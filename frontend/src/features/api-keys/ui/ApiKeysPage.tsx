@@ -64,7 +64,7 @@ export default function ApiKeysPage() {
                 <tr key={key.id}>
                   <td className={styles.priority}>{index + 1}</td>
                   <td>
-                    <span className={styles.keyLabel}><KeyRound size={15} aria-hidden="true" /><span><strong>{key.label}</strong><small>{key.pinned ? 'Environment · direct IP' : 'Encrypted local key'}</small></span></span>
+                    <span className={styles.keyLabel}><KeyRound size={15} aria-hidden="true" /><span><strong>{key.label}</strong><small>{key.pinned ? 'Managed · direct IP' : 'Encrypted local key'}</small></span></span>
                   </td>
                   <td>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
                   <td>{key.startsInWindow} / min</td>
@@ -178,7 +178,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, operationError, onClos
         <div className={styles.formBody}>
           <label><span>Label</span><input value={label} maxLength={80} data-autofocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
           <label><span>Requests per minute</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited.</small></label>
-          {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} maxLength={8192} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Environment key material stays managed by the local account; RPM can still be changed.</div>}
+          {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} maxLength={8192} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Managed key material is write-only; RPM can still be changed.</div>}
           {!keyValue?.pinned ? <div className={styles.proxyField}><span>Proxy</span>{mode === 'edit' ? <label className={styles.check}><input type="checkbox" checked={replaceProxy} onChange={(event) => setReplaceProxy(event.currentTarget.checked)} />Replace current proxy setting</label> : null}<input aria-label="Proxy URL" type="password" disabled={!replaceProxy} value={proxyUrl} maxLength={8192} placeholder="Optional http(s) or socks5 URL" autoComplete="new-password" onChange={(event) => setProxyURL(event.currentTarget.value)} /><small>Leave empty to use the native IP.</small></div> : null}
           {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
         </div>

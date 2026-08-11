@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrRunning  = errors.New("tunnel must be stopped")
-	ErrNoRoutes = errors.New("tunnel has no public routes")
+	ErrRunning            = errors.New("tunnel must be stopped")
+	ErrNoRoutes           = errors.New("tunnel has no public routes")
+	ErrPrivacyUnavailable = errors.New("tunnel privacy test is unavailable")
 )
 
 type Repository interface {
@@ -27,6 +28,9 @@ type RuntimeEvents interface {
 	OnState(func(domain.State, string, string))
 }
 type Routes interface{ Count() int }
+type PrivacyAuditor interface {
+	Audit(context.Context, string, string) (domain.PrivacyReport, error)
+}
 type Service struct {
 	opMu              sync.Mutex
 	controlMu         sync.Mutex
@@ -37,6 +41,7 @@ type Service struct {
 	repository        Repository
 	runtime           Runtime
 	routes            Routes
+	privacyAuditor    PrivacyAuditor
 	config            domain.Config
 	snapshot          domain.Snapshot
 	runtimeStatus     domain.State
@@ -46,8 +51,8 @@ type Service struct {
 	listeners         []func(domain.Snapshot)
 }
 
-func NewService(repository Repository, runtime Runtime, routes Routes) (*Service, error) {
-	if repository == nil || runtime == nil || routes == nil {
+func NewService(repository Repository, runtime Runtime, routes Routes, privacyAuditor PrivacyAuditor) (*Service, error) {
+	if repository == nil || runtime == nil || routes == nil || privacyAuditor == nil {
 		return nil, errors.New("tunnel dependencies invalid")
 	}
 	token, err := newToken()
@@ -55,7 +60,7 @@ func NewService(repository Repository, runtime Runtime, routes Routes) (*Service
 		return nil, err
 	}
 	config := domain.Config{Port: 8797, Token: token, BrandResponse: "Luxury Private лучший приватный софт для абузов - @Luxuryprivate_bot"}
-	service := &Service{repository: repository, runtime: runtime, routes: routes, config: config, snapshot: publicSnapshot(domain.StateStopped, "", config), runtimeStatus: domain.StateStopped}
+	service := &Service{repository: repository, runtime: runtime, routes: routes, privacyAuditor: privacyAuditor, config: config, snapshot: publicSnapshot(domain.StateStopped, "", config), runtimeStatus: domain.StateStopped}
 	if events, ok := runtime.(RuntimeEvents); ok {
 		events.OnState(service.runtimeState)
 	}
@@ -193,6 +198,16 @@ func (service *Service) RevealToken() string {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
 	return service.config.Token
+}
+func (service *Service) TestPrivacy(ctx context.Context) (domain.PrivacyReport, error) {
+	service.mu.RLock()
+	address := service.snapshot.Address
+	token := service.config.Token
+	service.mu.RUnlock()
+	if address == "" || token == "" {
+		return domain.PrivacyReport{}, ErrPrivacyUnavailable
+	}
+	return service.privacyAuditor.Audit(ctx, address, token)
 }
 func (service *Service) Config() domain.Config {
 	service.mu.RLock()

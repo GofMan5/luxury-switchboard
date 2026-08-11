@@ -102,6 +102,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           clients: new ClientsModel(new StdioClientsPort(session)),
           models: new ModelsModel(new StdioModelsPort(session)),
           shared: new SharedModel(new StdioSharedPort(session)),
+          appVersion: session.appVersion ?? '',
         }
         if (disposed) { shutdown(); return }
         setState({ phase: 'ready', services })

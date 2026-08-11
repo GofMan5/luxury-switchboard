@@ -21,12 +21,13 @@ type Runtime struct {
 	markers  tunnelapp.Markers
 	relay    relayapp.Dispatcher
 	activity tunnelapp.ClientActivity
+	bans     tunnelapp.Bans
 	server   *http.Server
 	listener net.Listener
 }
 
-func NewRuntime(routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity) *Runtime {
-	return &Runtime{routes: routes, markers: markers, relay: relay, activity: activity}
+func NewRuntime(routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity, bans tunnelapp.Bans) *Runtime {
+	return &Runtime{routes: routes, markers: markers, relay: relay, activity: activity, bans: bans}
 }
 func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string, error) {
 	runtime.mu.Lock()
@@ -37,7 +38,7 @@ func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string
 	if runtime.server != nil {
 		return "", errors.New("tunnel already running")
 	}
-	gateway, err := gatewayhttp.NewGateway(tunneldomain.Config{Token: config.Token, RPMPerIP: config.RPMPerIP, ContextLimitKiB: config.ContextLimitKiB, BrandResponse: config.BrandResponse}, runtime.routes, runtime.markers, runtime.relay, runtime.activity)
+	gateway, err := gatewayhttp.NewGateway(tunneldomain.Config{Token: config.Token, RPMPerIP: config.RPMPerIP, ContextLimitKiB: config.ContextLimitKiB, BrandResponse: config.BrandResponse}, runtime.routes, runtime.markers, runtime.relay, runtime.activity, runtime.bans)
 	if err != nil {
 		return "", err
 	}

@@ -1,4 +1,5 @@
-import type { TunnelClient, TunnelClientEvent } from '../domain/client'
+import type { TunnelClient, TunnelClientEvent, TunnelClientProfile } from '../domain/client'
+import { MAX_CLIENT_NOTE } from '../domain/client'
 import type { ClientsPort } from './clients-port'
 
 export interface ClientsState {
@@ -6,12 +7,13 @@ export interface ClientsState {
   readonly clients: readonly TunnelClient[]
   readonly events: readonly TunnelClientEvent[]
   readonly selectedIp: string
+  readonly pendingIp: string
   readonly error: string
 }
 
 export class ClientsModel {
   readonly #port: ClientsPort
-  #state: ClientsState = { phase: 'loading', clients: [], events: [], selectedIp: '', error: '' }
+  #state: ClientsState = { phase: 'loading', clients: [], events: [], selectedIp: '', pendingIp: '', error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #timer: ReturnType<typeof setTimeout> | undefined
@@ -67,6 +69,29 @@ export class ClientsModel {
   close() {
     this.#generation++
     this.#set({ ...this.#state, selectedIp: '', events: [] })
+  }
+
+  /** Bans, unbans or annotates one address. Bans only affect new requests. */
+  async saveProfile(profile: TunnelClientProfile): Promise<boolean> {
+    if (this.#state.pendingIp) return false
+    const note = profile.note.trim()
+    if (!profile.ip || note.length > MAX_CLIENT_NOTE) {
+      this.#set({ ...this.#state, error: `A client note is limited to ${MAX_CLIENT_NOTE} characters` })
+      return false
+    }
+    this.#set({ ...this.#state, pendingIp: profile.ip, error: '' })
+    try {
+      const clients = await this.#port.saveProfile({ ...profile, note })
+      this.#set({ ...this.#state, phase: 'ready', clients, pendingIp: '', error: '' })
+      return true
+    } catch {
+      this.#set({ ...this.#state, pendingIp: '', error: 'Client decision could not be saved' })
+      return false
+    }
+  }
+
+  clearError() {
+    if (this.#state.error) this.#set({ ...this.#state, error: '' })
   }
 
   dispose() {

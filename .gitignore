@@ -43,7 +43,7 @@ dist/
 frontend/dist/
 frontend/coverage/
 src-tauri/target/
-src-tauri/binaries/*.exe
+src-tauri/binaries/switchboard-sidecar-*
 backend/bin/
 .coverage
 htmlcov/

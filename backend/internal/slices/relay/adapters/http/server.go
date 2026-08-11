@@ -37,9 +37,10 @@ var hopHeaders = map[string]struct{}{
 }
 
 var (
-	errIncompleteSSE      = errors.New("upstream SSE ended without a terminal event")
-	errClientDisconnected = errors.New("client disconnected")
-	errResponseTooLarge   = errors.New("upstream response exceeds the buffer limit")
+	errIncompleteSSE       = errors.New("upstream SSE ended without a terminal event")
+	errClientDisconnected  = errors.New("client disconnected")
+	errResponseTooLarge    = errors.New("upstream response exceeds the buffer limit")
+	errRetryableSSEFailure = errors.New("upstream SSE failed before output")
 )
 
 type Server struct {
@@ -100,6 +101,8 @@ func NewServer(address string, dependencies Dependencies) *Server {
 	}
 	if config.PermanentAttempts < 1 {
 		config.PermanentAttempts = 2
+	} else if config.PermanentAttempts > 3 {
+		config.PermanentAttempts = 3
 	}
 	if config.HeartbeatInterval <= 0 {
 		config.HeartbeatInterval = 15 * time.Second
@@ -184,6 +187,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusRequestEntityTooLarge, "Request body is too large")
 		return
 	}
+	body, clientTools := normalizeResponsesTools(request.Method, request.URL.Path, request.Header.Get("Content-Type"), body)
 	model := requestModel(body, request.Header.Get("Content-Type"))
 	route, err := server.routes.Current(ctx, model)
 	if err != nil {
@@ -242,7 +246,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		committed = true
 		heartbeat = func() error {
-			if _, err := writer.Write([]byte(": switchboard keep-alive\n\n")); err != nil {
+			payload := []byte(": switchboard keep-alive\n\n")
+			if strings.TrimRight(request.URL.Path, "/") == "/v1/responses" {
+				payload = []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{}}\n\n")
+			}
+			if _, err := writer.Write(payload); err != nil {
 				return errClientDisconnected
 			}
 			if flusher != nil {
@@ -314,6 +322,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 		response.Header.Del("Content-Encoding")
 	}
+	restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
 	if !committed {
 		copyResponseHeaders(writer.Header(), response.Header)
 		writer.WriteHeader(response.StatusCode)
@@ -352,6 +361,8 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if request.UseStoredCredential && route.AuthMode == "passthrough" {
 		route.AuthMode = "bearer"
 	}
+	normalizedBody, clientTools := normalizeResponsesTools(request.Method, request.Path, request.Headers.Get("Content-Type"), request.Body)
+	request.Body = normalizedBody
 	path, body, imageCompat, err := prepareImageRequest(request.Method, request.Path, request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel, route.ImageCompat)
 	if err != nil {
 		return relayapp.DispatchResponse{}, err
@@ -403,6 +414,10 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	generation := durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
 	removeUsageHeaders(response.Header)
 	response.Header.Del("X-Switchboard-Terminal")
+	responseBody = restoreClientToolCalls(responseBody, clientTools, urlValue.Path, strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "event-stream"))
+	if response.Header.Get("Content-Length") != "" {
+		response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
+	}
 	dispatchError := ""
 	if response.StatusCode >= 400 {
 		dispatchError = "request_rejected"
@@ -463,12 +478,35 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if terminalStream {
 				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, incoming.URL.Path, server.config)
 				if bufferErr != nil {
-					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+					outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport}
+					if errors.Is(bufferErr, errRetryableSSEFailure) {
+						outcome.Kind = relayapp.AttemptRequestError
+					}
+					finishLease(lease, outcome)
 					if errors.Is(bufferErr, errClientDisconnected) || errors.Is(bufferErr, context.Canceled) {
 						return nil, bufferErr
 					}
 					if errors.Is(bufferErr, errResponseTooLarge) {
 						return nil, bufferErr
+					}
+					if errors.Is(bufferErr, errRetryableSSEFailure) {
+						requestFailures++
+						if requestFailures >= server.config.PermanentAttempts || !canRetry(attempt, attemptLimit) {
+							response.Body = io.NopCloser(bytes.NewReader(buffered))
+							response.ContentLength = -1
+							response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+							response.Header.Del("Content-Length")
+							response.Header.Del("Content-Encoding")
+							response.Header.Set("X-Switchboard-Terminal", terminal)
+							setUsageHeaders(response.Header, streamUsage, time.Since(attemptStarted))
+							return response, nil
+						}
+						delay := retryDelay(attempt, nil, server.config)
+						server.observeRetry(activityID, attempt, http.StatusOK, delay)
+						if err := waitRetry(ctx, delay); err != nil {
+							return nil, err
+						}
+						continue
 					}
 					if !canRetry(attempt, attemptLimit) {
 						return nil, bufferErr
@@ -483,15 +521,6 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				failed := terminal == "response.failed"
 				if failed {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
-					requestFailures++
-					if requestFailures < server.config.PermanentAttempts && canRetry(attempt, attemptLimit) {
-						delay := retryDelay(attempt, nil, server.config)
-						server.observeRetry(activityID, attempt, http.StatusOK, delay)
-						if err := waitRetry(ctx, delay); err != nil {
-							return nil, err
-						}
-						continue
-					}
 				} else if terminal == "response.incomplete" {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 				} else {
@@ -873,7 +902,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	defer idle.Stop()
 	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
-	inspector := sseInspector{path: strings.TrimRight(path, "/")}
+	inspector := &sseInspector{path: strings.TrimRight(path, "/")}
 	for {
 		select {
 		case <-ctx.Done():
@@ -889,9 +918,13 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 					return "", nil, relayapp.TokenUsage{}, errResponseTooLarge
 				}
 				buffered = append(buffered, result.chunk...)
-				if terminal := inspector.Feed(result.chunk); terminal != "" {
+				previousTerminal := inspector.terminal
+				if terminal := inspector.Feed(result.chunk); terminal != "" && previousTerminal == "" {
 					if terminal == "response.invalid" {
 						return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+					}
+					if inspector.retryableFailure() {
+						return terminal, buffered, inspector.usage, errRetryableSSEFailure
 					}
 					return terminal, buffered, inspector.usage, nil
 				}
@@ -904,9 +937,13 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				idle.Reset(config.StreamIdleTimeout)
 			}
 			if result.err != nil {
-				if terminal := inspector.Finish(); terminal != "" {
+				previousTerminal := inspector.terminal
+				if terminal := inspector.Finish(); terminal != "" && previousTerminal == "" {
 					if terminal == "response.invalid" {
 						return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+					}
+					if inspector.retryableFailure() {
+						return terminal, buffered, inspector.usage, errRetryableSSEFailure
 					}
 					return terminal, buffered, inspector.usage, nil
 				}
@@ -988,6 +1025,7 @@ type sseInspector struct {
 	event    []byte
 	terminal string
 	finished bool
+	output   bool
 	usage    relayapp.TokenUsage
 }
 
@@ -1055,6 +1093,9 @@ func (inspector *sseInspector) finishEvent() {
 	}
 	inspector.mergeUsage(payload)
 	eventType, _ := payload["type"].(string)
+	if inspector.path == "/v1/responses" && (strings.HasSuffix(eventType, ".delta") || strings.HasSuffix(eventType, ".partial_image")) {
+		inspector.output = true
+	}
 	if eventType == "response.completed" {
 		response, ok := payload["response"].(map[string]any)
 		if !ok {
@@ -1083,6 +1124,10 @@ func (inspector *sseInspector) finishEvent() {
 			}
 		}
 	}
+}
+
+func (inspector *sseInspector) retryableFailure() bool {
+	return inspector.path == "/v1/responses" && inspector.terminal == "response.failed" && !inspector.output
 }
 
 func (inspector *sseInspector) mergeUsage(payload map[string]any) {

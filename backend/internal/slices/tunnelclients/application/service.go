@@ -3,30 +3,35 @@ package application
 import (
 	"context"
 	"fmt"
-	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/domain"
 	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/domain"
 )
 
 const (
-	clientIdleTTL     = time.Hour
-	maxTrackedClients = 10_000
+	clientIdleTTL        = time.Hour
+	maxTrackedClients    = 10_000
+	rejectNotifyInterval = time.Second
 )
 
 var serviceSequence atomic.Uint64
 
 type Service struct {
-	mu        sync.RWMutex
-	clients   map[string]*clientState
-	requests  map[string]domain.Start
-	namespace string
-	sequence  atomic.Uint64
-	now       func() time.Time
-	listeners []func()
-	history   History
+	mu             sync.RWMutex
+	clients        map[string]*clientState
+	requests       map[string]domain.Start
+	profiles       map[string]domain.Profile
+	namespace      string
+	sequence       atomic.Uint64
+	now            func() time.Time
+	listeners      []func()
+	history        History
+	store          Profiles
+	rejectNotified time.Time
 }
 type clientState struct {
 	client domain.Client
@@ -35,12 +40,105 @@ type clientState struct {
 }
 
 func NewService(history History) *Service {
-	return &Service{
+	service := &Service{
 		clients: make(map[string]*clientState), requests: make(map[string]domain.Start),
+		profiles:  make(map[string]domain.Profile),
 		namespace: fmt.Sprintf("tun_%016x_%x", uint64(time.Now().UnixNano()), serviceSequence.Add(1)),
 		now:       time.Now, history: history,
 	}
+	if store, ok := history.(Profiles); ok {
+		service.store = store
+	}
+	return service
 }
+
+// LoadProfiles restores owner decisions so a restart keeps every ban in force.
+func (service *Service) LoadProfiles(ctx context.Context) error {
+	if service.store == nil {
+		return nil
+	}
+	stored, err := service.store.Profiles(ctx)
+	if err != nil {
+		return err
+	}
+	service.mu.Lock()
+	for _, profile := range stored {
+		canonical, err := profile.Canonical()
+		if err != nil || canonical.Empty() {
+			continue
+		}
+		service.profiles[canonical.IP] = canonical
+	}
+	service.mu.Unlock()
+	return nil
+}
+
+// SetProfile bans, unbans or annotates one client address. Bans apply to new
+// requests; generations already in flight finish normally.
+func (service *Service) SetProfile(ctx context.Context, profile domain.Profile) error {
+	canonical, err := profile.Canonical()
+	if err != nil {
+		return err
+	}
+	if service.store != nil {
+		if canonical.Empty() {
+			err = service.store.DeleteProfile(ctx, canonical.IP)
+		} else {
+			err = service.store.SaveProfile(ctx, canonical)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	service.mu.Lock()
+	if canonical.Empty() {
+		delete(service.profiles, canonical.IP)
+	} else {
+		service.profiles[canonical.IP] = canonical
+	}
+	service.mu.Unlock()
+	service.publish()
+	return nil
+}
+
+func (service *Service) Banned(ip string) bool {
+	if ip == "" {
+		return false
+	}
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	return service.profiles[ip].Banned
+}
+
+// Reject counts a refused attempt. Refusals must stay cheaper than the requests
+// they replace, so they never allocate history, per-minute samples or an event per
+// attempt, and an address the owner never decided about is not tracked at all.
+func (service *Service) Reject(ip string) {
+	if ip == "" {
+		return
+	}
+	now := service.now().UTC()
+	service.mu.Lock()
+	state := service.clients[ip]
+	if state == nil {
+		if _, known := service.profiles[ip]; !known {
+			service.mu.Unlock()
+			return
+		}
+		state = service.ensure(ip)
+	}
+	state.client.Refused++
+	state.client.LastSeen = now
+	notify := service.rejectNotified.IsZero() || now.Sub(service.rejectNotified) >= rejectNotifyInterval
+	if notify {
+		service.rejectNotified = now
+	}
+	service.mu.Unlock()
+	if notify {
+		service.publish()
+	}
+}
+
 func (service *Service) Queue(ip string, delta int) {
 	if ip == "" || delta == 0 {
 		return
@@ -113,14 +211,31 @@ func (service *Service) List() []domain.Client {
 	defer service.mu.Unlock()
 	now := service.now().UTC()
 	service.evictIdleLocked(now)
-	result := make([]domain.Client, 0, len(service.clients))
+	result := make([]domain.Client, 0, len(service.clients)+len(service.profiles))
 	for _, state := range service.clients {
 		state.starts = prune(state.starts, now)
 		value := state.client
 		value.ActualRPM = len(state.starts)
+		profile := service.profiles[value.IP]
+		value.Banned, value.Note = profile.Banned, profile.Note
 		result = append(result, value)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].LastSeen.After(result[j].LastSeen) })
+	// Owner decisions stay visible after the client goes idle, otherwise a ban
+	// could never be lifted from the interface.
+	for ip, profile := range service.profiles {
+		if _, live := service.clients[ip]; live {
+			continue
+		}
+		result = append(result, domain.Client{IP: ip, State: "idle", Banned: profile.Banned, Note: profile.Note})
+	}
+	// Idle profiles share one zero timestamp, so the address breaks the tie and the
+	// rows the owner is acting on stay put between refreshes.
+	sort.Slice(result, func(first, second int) bool {
+		if !result[first].LastSeen.Equal(result[second].LastSeen) {
+			return result[first].LastSeen.After(result[second].LastSeen)
+		}
+		return result[first].IP < result[second].IP
+	})
 	return result
 }
 func (service *Service) Events(ctx context.Context, ip string) []domain.Event {
@@ -208,6 +323,9 @@ func prune(starts []time.Time, now time.Time) []time.Time {
 	index := 0
 	for index < len(starts) && !starts[index].After(cutoff) {
 		index++
+	}
+	if index == 0 {
+		return starts
 	}
 	return slices.Clone(starts[index:])
 }

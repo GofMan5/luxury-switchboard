@@ -21,6 +21,7 @@ export function formatBytes(value: number): string {
 
 export function formatClock(value: string): string {
   const date = new Date(value)
-  if (Number.isNaN(date.valueOf())) return '—'
+  // A zero timestamp means "never seen", not the year 1: never invent a clock for it.
+  if (Number.isNaN(date.valueOf()) || date.valueOf() <= 0) return '—'
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }

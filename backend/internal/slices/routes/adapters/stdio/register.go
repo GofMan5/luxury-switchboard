@@ -3,6 +3,9 @@ package routestdio
 import (
 	"context"
 	"encoding/json"
+	"errors"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/routes/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
@@ -16,6 +19,9 @@ func Register(server *platform.Server, service *application.Service) {
 		if platform.DecodePayload(payload, &query) != nil {
 			return nil, invalid()
 		}
+		if err := service.Availability(); err != nil {
+			return nil, operationError(err, "route_list_failed", "Model routes could not be loaded")
+		}
 		return map[string]any{"routes": service.List(query.Target)}, nil
 	})
 	server.Handle("routes.upsert", func(ctx context.Context, payload json.RawMessage) (any, error) {
@@ -24,7 +30,7 @@ func Register(server *platform.Server, service *application.Service) {
 			return nil, invalid()
 		}
 		if err := service.Upsert(ctx, assignment); err != nil {
-			return nil, platform.MethodError{Code: "route_update_failed", Message: "Route could not be saved"}
+			return nil, operationError(err, "route_update_failed", "Route could not be saved")
 		}
 		return assignment, nil
 	})
@@ -36,7 +42,7 @@ func Register(server *platform.Server, service *application.Service) {
 			return nil, invalid()
 		}
 		if err := service.UpsertMany(ctx, command.Routes); err != nil {
-			return nil, platform.MethodError{Code: "route_update_failed", Message: "Routes could not be saved"}
+			return nil, operationError(err, "route_update_failed", "Routes could not be saved")
 		}
 		return map[string]int{"saved": len(command.Routes)}, nil
 	})
@@ -49,7 +55,7 @@ func Register(server *platform.Server, service *application.Service) {
 			return nil, invalid()
 		}
 		if err := service.Delete(ctx, command.Target, command.PublicModel); err != nil {
-			return nil, platform.MethodError{Code: "route_delete_failed", Message: "Route could not be deleted"}
+			return nil, operationError(err, "route_delete_failed", "Route could not be deleted")
 		}
 		return map[string]bool{"deleted": true}, nil
 	})
@@ -59,4 +65,14 @@ func Register(server *platform.Server, service *application.Service) {
 }
 func invalid() platform.MethodError {
 	return platform.MethodError{Code: "invalid_payload", Message: "Invalid route settings"}
+}
+
+func operationError(err error, code, message string) platform.MethodError {
+	if errors.Is(err, secretstore.ErrUnavailable) {
+		return platform.MethodError{
+			Code:    "secure_storage_unavailable",
+			Message: "Secure storage is unavailable. Start or unlock Linux Secret Service, run Switchboard without sudo, then restart it.",
+		}
+	}
+	return platform.MethodError{Code: code, Message: message}
 }

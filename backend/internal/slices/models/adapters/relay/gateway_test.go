@@ -54,6 +54,19 @@ func TestInternalModelCallsRequestAStoredCredential(t *testing.T) {
 	}
 }
 
+func TestModelProbeTimeoutIsCappedWithoutShorteningDiscovery(t *testing.T) {
+	gateway := NewGateway(dispatcherFunc(func(context.Context, relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
+		return relayapp.DispatchResponse{}, nil
+	}), 5*time.Minute)
+	if gateway.timeout != 5*time.Minute || gateway.probeTimeout != maxProbeTimeout {
+		t.Fatalf("unexpected timeouts: discovery=%s probe=%s", gateway.timeout, gateway.probeTimeout)
+	}
+	short := NewGateway(gateway.dispatcher, 5*time.Second)
+	if short.probeTimeout != 5*time.Second {
+		t.Fatalf("configured shorter timeout was expanded: %s", short.probeTimeout)
+	}
+}
+
 func TestExtractModelIDsRejectsAnUnboundedCatalog(t *testing.T) {
 	var body strings.Builder
 	body.WriteString(`{"data":[`)

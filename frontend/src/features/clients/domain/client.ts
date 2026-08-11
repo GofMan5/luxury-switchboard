@@ -4,9 +4,21 @@ export interface TunnelClient {
   readonly count: number
   readonly active: number
   readonly queued: number
+  readonly refused: number
   readonly lastSeen: string
   readonly state: string
+  readonly banned: boolean
+  readonly note: string
 }
+
+/** Owner-only governance record for one client address. Never leaves this app. */
+export interface TunnelClientProfile {
+  readonly ip: string
+  readonly banned: boolean
+  readonly note: string
+}
+
+export const MAX_CLIENT_NOTE = 500
 
 export interface TunnelClientEvent {
   readonly id: string

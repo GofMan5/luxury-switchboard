@@ -15,7 +15,7 @@ const SHUTDOWN_CALL_TIMEOUT_MS = 2_000
 const SHUTDOWN_EXIT_TIMEOUT_MS = 10_000
 const TUNNEL_START_TIMEOUT_MS = 60_000
 const MODEL_DISCOVERY_TIMEOUT_MS = 2 * 60_000
-const MODEL_TEST_TIMEOUT_MS = 30 * 60_000
+const MODEL_TEST_TIMEOUT_MS = 3 * 60_000
 
 interface PendingCall {
   readonly method: string
@@ -34,6 +34,12 @@ export class TauriSidecarSession implements ControlPlaneSession {
   #restartTimer: number | undefined
   #connectedOnce = false
   #disconnectWaiters = new Set<() => void>()
+  #appVersion = ''
+
+  /** Reported by the handshake, so the interface never states a version of its own. */
+  get appVersion(): string {
+    return this.#appVersion
+  }
 
   start(): Promise<void> {
     if (this.#started) return Promise.resolve()
@@ -152,7 +158,9 @@ export class TauriSidecarSession implements ControlPlaneSession {
     try {
       await invoke('sidecar_start')
       this.#started = true
-      await this.call('system.handshake')
+      const handshake = await this.call<{ appVersion?: unknown }>('system.handshake')
+      const version = handshake?.appVersion
+      this.#appVersion = typeof version === 'string' && /^\d{1,4}(\.\d{1,4}){1,3}$/u.test(version) ? version : ''
       if (this.#connectedOnce) {
         this.#publish({ v: PROTOCOL_VERSION, type: 'event', topic: 'system.reconnected', seq: 0 })
       }

@@ -9,12 +9,32 @@ import (
 )
 
 type memoryRepository struct {
-	values []domain.Assignment
-	fail   bool
+	values  []domain.Assignment
+	loadErr error
+	fail    bool
 }
 
 func (repository *memoryRepository) Load(context.Context) ([]domain.Assignment, error) {
+	if repository.loadErr != nil {
+		return nil, repository.loadErr
+	}
 	return slices.Clone(repository.values), nil
+}
+
+func TestFailedLoadBlocksFallbackAndOverwrite(t *testing.T) {
+	loadErr := errors.New("encrypted route store unavailable")
+	repository := &memoryRepository{loadErr: loadErr}
+	service, _ := NewService(repository, providers{"echo": true})
+	if err := service.Load(context.Background()); !errors.Is(err, loadErr) {
+		t.Fatalf("load failure was hidden: %v", err)
+	}
+	if _, ok := service.Resolve(domain.TargetRelay, "public"); ok {
+		t.Fatal("route resolved after its durable state failed to load")
+	}
+	err := service.Upsert(context.Background(), domain.Assignment{Target: domain.TargetRelay, PublicModel: "public", UpstreamModel: "private", ProviderID: "echo", Enabled: true})
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("unreadable route store could be overwritten: %v", err)
+	}
 }
 func (repository *memoryRepository) Save(_ context.Context, values []domain.Assignment) error {
 	if repository.fail {

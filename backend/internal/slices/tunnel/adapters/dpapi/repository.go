@@ -1,14 +1,13 @@
-//go:build windows
-
 package dpapi
 
 import (
 	"context"
 	"errors"
+	"path/filepath"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/domain"
-	"os"
-	"path/filepath"
 )
 
 var magic = []byte("SWTUN2\n")
@@ -29,11 +28,11 @@ type storedConfig struct {
 
 func New(path string) *Repository { return &Repository{path: path} }
 func DefaultPath() (string, error) {
-	root := os.Getenv("LOCALAPPDATA")
-	if root == "" {
-		return "", errors.New("LOCALAPPDATA unavailable")
+	root, err := appdata.Root()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(root, "ProviderSwitchboard", "tunnel.v2.dpapi"), nil
+	return filepath.Join(root, "tunnel.v2.dpapi"), nil
 }
 func (repository *Repository) Load(ctx context.Context) (domain.Config, bool, error) {
 	if err := ctx.Err(); err != nil {

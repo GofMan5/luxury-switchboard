@@ -57,6 +57,15 @@ func Register(server *platform.Server, service *application.Service) {
 	server.Handle("tunnel.reveal", func(_ context.Context, _ json.RawMessage) (any, error) {
 		return map[string]string{"token": service.RevealToken()}, nil
 	})
+	server.Handle("tunnel.privacy_test", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		testCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+		report, err := service.TestPrivacy(testCtx)
+		if err != nil {
+			return nil, failed()
+		}
+		return report, nil
+	})
 	service.OnChanged(func(snapshot domain.Snapshot) { _ = server.Emit("tunnel.changed", snapshot) })
 }
 func invalid() platform.MethodError {

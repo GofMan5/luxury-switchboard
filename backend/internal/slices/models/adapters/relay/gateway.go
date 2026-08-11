@@ -14,18 +14,22 @@ import (
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
-const maxDiscoveredModels = 5_000
+const (
+	maxDiscoveredModels = 5_000
+	maxProbeTimeout     = 30 * time.Second
+)
 
 type Gateway struct {
-	dispatcher relayapp.Dispatcher
-	timeout    time.Duration
+	dispatcher   relayapp.Dispatcher
+	timeout      time.Duration
+	probeTimeout time.Duration
 }
 
 func NewGateway(dispatcher relayapp.Dispatcher, timeout time.Duration) *Gateway {
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	return &Gateway{dispatcher: dispatcher, timeout: timeout}
+	return &Gateway{dispatcher: dispatcher, timeout: timeout, probeTimeout: min(timeout, maxProbeTimeout)}
 }
 
 func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) ([]string, error) {
@@ -45,7 +49,7 @@ func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) 
 
 func (gateway *Gateway) Test(ctx context.Context, provider domain.Provider, model string) domain.TestResult {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, gateway.timeout)
+	ctx, cancel := context.WithTimeout(ctx, gateway.probeTimeout)
 	defer cancel()
 	response, err := gateway.testRequest(ctx, provider, model)
 	result := domain.TestResult{ProviderID: provider.ID, Model: model, LatencyMS: float64(time.Since(started).Microseconds()) / 1000}

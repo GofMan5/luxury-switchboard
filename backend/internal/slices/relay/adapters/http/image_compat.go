@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	codexImageModel      = "gpt-image-2"
 	defaultImageUpstream = "gpt-5.6-sol"
 	maxImageResponse     = 16 * 1024 * 1024
 )
@@ -38,11 +37,11 @@ func prepareImageRequest(method, path string, body []byte, contentType, upstream
 	if requestedModel == "" || !ok || prompt == "" {
 		return path, body, true, errInvalidImageRequest
 	}
-	if upstreamModel == "" || (requestedModel == codexImageModel && upstreamModel == requestedModel) {
+	if upstreamModel == "" || strings.HasPrefix(upstreamModel, "gpt-image-") {
 		upstreamModel = defaultImageUpstream
 	}
 	tool := map[string]any{"type": "image_generation", "action": "generate"}
-	for _, field := range []string{"background", "quality", "size"} {
+	for _, field := range []string{"background", "quality", "size", "output_format", "output_compression"} {
 		if value, exists := payload[field]; exists && value != nil {
 			tool[field] = value
 		}

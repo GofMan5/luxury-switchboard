@@ -9,10 +9,13 @@ import (
 type Resolver struct{ service *application.Service }
 
 func NewResolver(service *application.Service) *Resolver { return &Resolver{service: service} }
-func (resolver *Resolver) Relay(model string) (relayapp.ModelRoute, bool) {
+func (resolver *Resolver) Relay(model string) (relayapp.ModelRoute, bool, error) {
+	if err := resolver.service.Availability(); err != nil {
+		return relayapp.ModelRoute{}, false, err
+	}
 	assignment, ok := resolver.service.Resolve(domain.TargetRelay, model)
 	if !ok {
-		return relayapp.ModelRoute{}, false
+		return relayapp.ModelRoute{}, false, nil
 	}
-	return relayapp.ModelRoute{ProviderID: assignment.ProviderID, UpstreamModel: assignment.UpstreamModel}, true
+	return relayapp.ModelRoute{ProviderID: assignment.ProviderID, UpstreamModel: assignment.UpstreamModel}, true, nil
 }

@@ -29,13 +29,13 @@ export default function ProvidersPage() {
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
       <div className={styles.layout}>
         <section className={styles.listPane} aria-label="Configured providers">
-          <div className={styles.listHeader}><span>Name</span><span>Health</span><span>RPM</span><span>Route</span></div>
+          <div className={styles.listHeader}><span>Name</span><span>State</span><span>RPM</span><span>Route</span></div>
           {state.catalog.providers.map((provider) => {
             const active = provider.id === state.catalog.activeId
             return (
               <button key={provider.id} type="button" className={styles.providerRow} data-selected={provider.id === effectiveID} onClick={() => setSelectedID(provider.id)}>
                 <span className={styles.providerName}><strong>{provider.name}</strong><small>{provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
-                <span className={styles.health}><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Ready' : 'Disabled'}</span>
+                <span className={styles.health}><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Enabled' : 'Disabled'}</span>
                 <span className={styles.rpm}>{provider.rpm === 0 ? '∞' : provider.rpm}</span>
                 <span className={active ? styles.active : styles.standby}>{active ? 'Active' : 'Standby'}</span>
               </button>

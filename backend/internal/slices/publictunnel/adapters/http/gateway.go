@@ -34,13 +34,14 @@ type Gateway struct {
 	relay    relayapp.Dispatcher
 	limiter  *ipLimiter
 	activity tunnelapp.ClientActivity
+	bans     tunnelapp.Bans
 }
 
-func NewGateway(config domain.Config, routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity) (*Gateway, error) {
+func NewGateway(config domain.Config, routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity, bans tunnelapp.Bans) (*Gateway, error) {
 	if len(config.Token) < 32 || len(config.Token) > 512 || routes == nil || markers == nil || relay == nil || config.RPMPerIP < 0 || config.RPMPerIP > maxTunnelRPM || config.ContextLimitKiB < 0 || config.ContextLimitKiB > 2*1024*1024 {
 		return nil, errors.New("invalid tunnel gateway settings")
 	}
-	return &Gateway{config: config, routes: routes, markers: markers, relay: relay, limiter: newIPLimiter(), activity: activity}, nil
+	return &Gateway{config: config, routes: routes, markers: markers, relay: relay, limiter: newIPLimiter(), activity: activity, bans: bans}, nil
 }
 
 func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -49,6 +50,16 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	path := request.URL.Path
+	ip := clientIP(request)
+	// Banned addresses are refused before the model list, any queue slot, route
+	// lookup or body read, and get the same neutral body as every other rejection.
+	if gateway.bans != nil && gateway.bans.Banned(ip) {
+		if gateway.activity != nil {
+			gateway.activity.Reject(ip)
+		}
+		gateway.error(writer, http.StatusForbidden, "Request rejected")
+		return
+	}
 	if request.Method == http.MethodGet && path == "/v1/models" {
 		gateway.models(writer)
 		return
@@ -61,7 +72,6 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		gateway.error(writer, http.StatusNotFound, "Request rejected")
 		return
 	}
-	ip := clientIP(request)
 	release, queued, err := gateway.limiter.Acquire(request.Context(), ip, gateway.config.RPMPerIP, func() {
 		if gateway.activity != nil {
 			gateway.activity.Queue(ip, 1)
@@ -131,9 +141,6 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			errorCode = "client_disconnected"
 		}
 		return
-	}
-	if payload != nil {
-		body = applyBrandPolicy(payload, path, gateway.config.BrandResponse)
 	}
 	response, err := gateway.relay.Dispatch(request.Context(), relayapp.DispatchRequest{Method: request.Method, Path: path, Headers: forwardHeaders(request.Header), Body: body, ProviderID: route.ProviderID, PublicModel: route.PublicModel, UpstreamModel: route.UpstreamModel})
 	if err != nil {
@@ -264,37 +271,4 @@ func forwardHeaders(source http.Header) http.Header {
 		}
 	}
 	return target
-}
-func applyBrandPolicy(payload map[string]any, path, brand string) []byte {
-	if brand == "" {
-		encoded, _ := json.Marshal(payload)
-		return encoded
-	}
-	instruction := "When asked about the provider or source, answer exactly: " + brand
-	switch path {
-	case "/v1/responses":
-		if existing, ok := payload["instructions"].(string); ok && existing != "" {
-			payload["instructions"] = existing + "\n\n" + instruction
-		} else {
-			payload["instructions"] = instruction
-		}
-	case "/v1/chat/completions":
-		messages, _ := payload["messages"].([]any)
-		payload["messages"] = append([]any{map[string]any{"role": "system", "content": instruction}}, messages...)
-	case "/v1/messages":
-		switch existing := payload["system"].(type) {
-		case string:
-			if existing != "" {
-				payload["system"] = existing + "\n\n" + instruction
-			} else {
-				payload["system"] = instruction
-			}
-		case []any:
-			payload["system"] = append([]any{map[string]string{"type": "text", "text": instruction}}, existing...)
-		default:
-			payload["system"] = instruction
-		}
-	}
-	encoded, _ := json.Marshal(payload)
-	return encoded
 }

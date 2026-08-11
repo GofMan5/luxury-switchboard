@@ -2,6 +2,7 @@ import type { ModelTestResult } from '../domain/model'
 import type { ModelsPort } from './models-port'
 
 const MODEL_TEST_BATCH = 500
+const MODEL_TEST_RUN_TIMEOUT_MS = 2 * 60_000
 
 export interface ModelsState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'error'
@@ -69,6 +70,14 @@ export class ModelsModel {
     this.#set({ ...this.#state, selected: this.#state.selected.length === this.#state.models.length ? [] : [...this.#state.models] })
   }
 
+  /** Replaces the selection with the discovered models of the given list. */
+  select(models: readonly string[]) {
+    const discovered = new Set(this.#state.models)
+    const selected = models.filter((model) => discovered.has(model))
+    if (selected.length === this.#state.selected.length && selected.every((model, index) => model === this.#state.selected[index])) return
+    this.#set({ ...this.#state, selected })
+  }
+
   async test(models: readonly string[]) {
     if (this.#state.testing || models.length === 0) return false
     const providerId = this.#state.providerId
@@ -76,6 +85,8 @@ export class ModelsModel {
     const runId = `models_${crypto.randomUUID().replaceAll('-', '')}`
     this.#activeRun = runId
     const controller = new AbortController()
+    let timedOut = false
+    const runTimer = setTimeout(() => { timedOut = true; controller.abort() }, MODEL_TEST_RUN_TIMEOUT_MS)
     this.#testController = controller
     const results = resultMap(this.#state.results)
     for (const model of models) results[model] = { runId, providerId, model, state: 'testing', status: 0, latencyMs: 0 }
@@ -92,9 +103,10 @@ export class ModelsModel {
     } catch {
       if (generation !== this.#generation || this.#state.providerId !== providerId) return false
       this.#flushResults()
-      this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, 'interrupted'), error: 'Model tests were interrupted' })
+      this.#set({ ...this.#state, testing: false, results: this.#settle(models, providerId, timedOut ? 'timeout' : 'interrupted'), error: timedOut ? 'Model tests reached the 2 minute safety limit' : 'Model tests were interrupted' })
       return false
     } finally {
+      clearTimeout(runTimer)
       if (this.#testController === controller) this.#testController = null
       if (this.#activeRun === runId) this.#activeRun = ''
     }

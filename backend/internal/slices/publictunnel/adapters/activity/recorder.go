@@ -16,3 +16,4 @@ func (recorder *Recorder) Begin(value tunnelapp.ClientStart) string {
 func (recorder *Recorder) Finish(id string, value tunnelapp.ClientFinish) {
 	recorder.service.Finish(id, clientdomain.Finish{Status: value.Status, BytesOut: value.BytesOut, ErrorCode: value.ErrorCode, Duration: value.Duration})
 }
+func (recorder *Recorder) Reject(ip string) { recorder.service.Reject(ip) }

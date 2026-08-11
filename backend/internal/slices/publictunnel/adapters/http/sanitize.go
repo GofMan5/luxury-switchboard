@@ -2,9 +2,13 @@ package tunnelhttp
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"unicode"
@@ -20,8 +24,12 @@ func sanitizeResponse(response relayapp.DispatchResponse, path, publicModel stri
 	}
 	contentType := strings.ToLower(response.Headers.Get("Content-Type"))
 	redactor := newMarkerRedactor(markers, brand)
+	safeBrand := brand
+	if strings.TrimSpace(safeBrand) == "" {
+		safeBrand = ""
+	}
 	if strings.Contains(contentType, "text/event-stream") {
-		body, err := sanitizeSSE(response.Body, path, publicModel, redactor)
+		body, err := sanitizeSSE(response.Body, path, publicModel, redactor, safeBrand)
 		return body, "text/event-stream; charset=utf-8", err
 	}
 	var value any
@@ -30,24 +38,26 @@ func sanitizeResponse(response relayapp.DispatchResponse, path, publicModel stri
 	if decoder.Decode(&value) != nil {
 		return nil, "", errors.New("invalid upstream JSON")
 	}
-	clean, err := sanitizeJSON(value, publicModel, redactor, 0)
+	clean, err := sanitizeJSONPath(value, publicModel, redactor, path, 0)
 	if err != nil {
 		return nil, "", err
 	}
 	if failedValue(clean) {
 		return nil, "", errors.New("failed upstream response")
 	}
+	neutralizeResponseID(clean, path)
+	if containsSensitiveJSON(clean, redactor, path) {
+		return nil, "", errors.New("sensitive response marker remains")
+	}
+	prefixResponseBrand(clean, path, safeBrand)
 	body, err := json.Marshal(clean)
 	if err != nil {
 		return nil, "", errors.New("response serialization failed")
 	}
-	if redactor.contains(body) {
-		return nil, "", errors.New("sensitive response marker remains")
-	}
 	return body, "application/json", nil
 }
 
-func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth int) (any, error) {
+func sanitizeJSONPath(value any, publicModel string, redactor markerRedactor, path string, depth int) (any, error) {
 	if depth > 64 {
 		return nil, errors.New("response nesting rejected")
 	}
@@ -62,7 +72,15 @@ func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth 
 				clean[key] = publicModel
 				continue
 			}
-			sanitized, err := sanitizeJSON(item, publicModel, redactor, depth+1)
+			if opaqueImageField(path, key, value) {
+				encoded, ok := item.(string)
+				if !ok || !validImageBase64(encoded) {
+					return nil, errors.New("invalid image data")
+				}
+				clean[key] = encoded
+				continue
+			}
+			sanitized, err := sanitizeJSONPath(item, publicModel, redactor, path, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -72,7 +90,7 @@ func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth 
 	case []any:
 		clean := make([]any, len(value))
 		for index, item := range value {
-			sanitized, err := sanitizeJSON(item, publicModel, redactor, depth+1)
+			sanitized, err := sanitizeJSONPath(item, publicModel, redactor, path, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -84,6 +102,62 @@ func sanitizeJSON(value any, publicModel string, redactor markerRedactor, depth 
 	default:
 		return value, nil
 	}
+}
+
+func opaqueImageField(path, key string, object map[string]any) bool {
+	if key == "b64_json" && (path == "/v1/images/generations" || path == "/v1/images/edits") {
+		return true
+	}
+	eventType, _ := object["type"].(string)
+	if eventType != "image_generation_call" && !strings.Contains(eventType, "image_generation") {
+		return false
+	}
+	return key == "result" || key == "b64_json" || key == "partial_image" || key == "partial_image_b64"
+}
+
+func validImageBase64(value string) bool {
+	if value == "" || len(value)%4 != 0 {
+		return false
+	}
+	decoder := base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(value))
+	header := make([]byte, 12)
+	count, err := io.ReadFull(decoder, header)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false
+	}
+	if _, err = io.Copy(io.Discard, decoder); err != nil {
+		return false
+	}
+	header = header[:count]
+	return bytes.HasPrefix(header, []byte("\x89PNG\r\n\x1a\n")) ||
+		bytes.HasPrefix(header, []byte("\xff\xd8\xff")) ||
+		(len(header) >= 12 && bytes.Equal(header[:4], []byte("RIFF")) && bytes.Equal(header[8:12], []byte("WEBP")))
+}
+
+func containsSensitiveJSON(value any, redactor markerRedactor, path string) bool {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			if redactor.contains([]byte(key)) {
+				return true
+			}
+			if opaqueImageField(path, key, value) {
+				continue
+			}
+			if containsSensitiveJSON(item, redactor, path) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range value {
+			if containsSensitiveJSON(item, redactor, path) {
+				return true
+			}
+		}
+	case string:
+		return redactor.contains([]byte(value))
+	}
+	return false
 }
 
 func privateField(key string) bool {
@@ -135,11 +209,12 @@ func mapValue(value any) map[string]any {
 	return result
 }
 
-func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor) ([]byte, error) {
+func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor, brand string) ([]byte, error) {
 	blocks := splitSSE(body)
 	output := bytes.Buffer{}
 	terminal := false
 	finished := false
+	brandState := streamBrandState{choices: make(map[int]bool)}
 	for _, block := range blocks {
 		data := eventData(block)
 		if len(data) == 0 {
@@ -156,10 +231,15 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor)
 		if json.Unmarshal(data, &value) != nil {
 			return nil, errors.New("invalid SSE event")
 		}
-		clean, err := sanitizeJSON(value, publicModel, redactor, 0)
+		clean, err := sanitizeJSONPath(value, publicModel, redactor, path, 0)
 		if err != nil || failedValue(clean) {
 			return nil, errors.New("unsafe SSE event")
 		}
+		neutralizeResponseID(clean, path)
+		if containsSensitiveJSON(clean, redactor, path) {
+			return nil, errors.New("sensitive SSE marker remains")
+		}
+		prefixStreamBrand(clean, path, brand, &brandState)
 		object, _ := clean.(map[string]any)
 		eventType, _ := object["type"].(string)
 		if eventType == "response.completed" && path == "/v1/responses" {
@@ -186,10 +266,175 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor)
 	if !terminal {
 		return nil, errors.New("SSE terminal event missing")
 	}
-	if redactor.contains(output.Bytes()) {
-		return nil, errors.New("sensitive SSE marker remains")
-	}
 	return output.Bytes(), nil
+}
+
+func prefixResponseBrand(value any, path, brand string) {
+	if brand == "" {
+		return
+	}
+	object, _ := value.(map[string]any)
+	if object == nil {
+		return
+	}
+	switch path {
+	case "/v1/chat/completions":
+		choices, _ := object["choices"].([]any)
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]any)
+			message, _ := choice["message"].(map[string]any)
+			prefixTextField(message, "content", brand)
+		}
+	case "/v1/completions":
+		choices, _ := object["choices"].([]any)
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]any)
+			prefixTextField(choice, "text", brand)
+		}
+	case "/v1/responses":
+		prefixResponsesBrand(object, brand)
+	case "/v1/messages":
+		prefixTextField(object, "content", brand)
+	}
+}
+
+func prefixResponsesBrand(response map[string]any, brand string) {
+	output, _ := response["output"].([]any)
+	for _, rawItem := range output {
+		item, _ := rawItem.(map[string]any)
+		if prefixTextField(item, "content", brand) {
+			break
+		}
+	}
+	prefixTextField(response, "output_text", brand)
+}
+
+func prefixTextField(target map[string]any, field, brand string) bool {
+	if target == nil {
+		return false
+	}
+	switch value := target[field].(type) {
+	case string:
+		if value == "" {
+			return false
+		}
+		target[field] = prefixedText(value, brand)
+		return true
+	case []any:
+		for index, rawPart := range value {
+			switch part := rawPart.(type) {
+			case string:
+				if part != "" {
+					value[index] = prefixedText(part, brand)
+					return true
+				}
+			case map[string]any:
+				if text, ok := part["text"].(string); ok && text != "" {
+					part["text"] = prefixedText(text, brand)
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func prefixedText(text, brand string) string {
+	if brand == "" || strings.HasPrefix(text, brand) {
+		return text
+	}
+	return brand + "\n\n" + text
+}
+
+type streamBrandState struct {
+	text    bool
+	choices map[int]bool
+}
+
+func prefixStreamBrand(value any, path, brand string, state *streamBrandState) {
+	if brand == "" || state == nil {
+		return
+	}
+	object, _ := value.(map[string]any)
+	if object == nil {
+		return
+	}
+	switch path {
+	case "/v1/chat/completions":
+		prefixStreamChoices(object, "content", brand, state)
+	case "/v1/completions":
+		prefixStreamChoices(object, "text", brand, state)
+	case "/v1/responses":
+		eventType, _ := object["type"].(string)
+		if eventType == "response.output_text.delta" && !state.text {
+			if delta, ok := object["delta"].(string); ok && delta != "" {
+				object["delta"] = prefixedText(delta, brand)
+				state.text = true
+			}
+		}
+		if eventType == "response.output_text.done" {
+			prefixTextField(object, "text", brand)
+		}
+		if eventType == "response.completed" {
+			response, _ := object["response"].(map[string]any)
+			prefixResponsesBrand(response, brand)
+		}
+	case "/v1/messages":
+		eventType, _ := object["type"].(string)
+		if eventType == "content_block_start" && !state.text {
+			block, _ := object["content_block"].(map[string]any)
+			state.text = prefixTextField(block, "text", brand)
+		}
+		if eventType == "content_block_delta" && !state.text {
+			delta, _ := object["delta"].(map[string]any)
+			state.text = prefixTextField(delta, "text", brand)
+		}
+	}
+}
+
+func prefixStreamChoices(object map[string]any, field, brand string, state *streamBrandState) {
+	choices, _ := object["choices"].([]any)
+	for position, rawChoice := range choices {
+		if state.choices[position] {
+			continue
+		}
+		choice, _ := rawChoice.(map[string]any)
+		target := choice
+		if field == "content" {
+			target, _ = choice["delta"].(map[string]any)
+		}
+		if prefixTextField(target, field, brand) {
+			state.choices[position] = true
+		}
+	}
+}
+
+func neutralizeResponseID(value any, path string) {
+	object, _ := value.(map[string]any)
+	if object == nil {
+		return
+	}
+	neutralizeIDField(object)
+	if path == "/v1/responses" {
+		response, _ := object["response"].(map[string]any)
+		neutralizeIDField(response)
+	}
+	if path == "/v1/messages" {
+		message, _ := object["message"].(map[string]any)
+		neutralizeIDField(message)
+	}
+}
+
+func neutralizeIDField(object map[string]any) {
+	if object == nil {
+		return
+	}
+	id, _ := object["id"].(string)
+	if id == "" || strings.HasPrefix(id, "luxury_") {
+		return
+	}
+	digest := sha256.Sum256([]byte(id))
+	object["id"] = "luxury_" + hex.EncodeToString(digest[:12])
 }
 
 func chatFinished(payload map[string]any) bool {

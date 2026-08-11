@@ -597,6 +597,183 @@ func TestResponsesStreamRetriesTruncatedAttemptBeforeForwarding(t *testing.T) {
 	}
 }
 
+func TestResponsesLifecycleEventsKeepStreamOpenUntilCompleted(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		flusher := writer.(http.Flusher)
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"status\":\"queued\"}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"))
+		flusher.Flush()
+		<-release
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024},
+	})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		done <- response
+	}()
+	select {
+	case response := <-done:
+		t.Fatalf("relay stopped on non-terminal lifecycle event: %s", response.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	response := <-done
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "response.in_progress") || !strings.Contains(response.Body.String(), "response.completed") {
+		t.Fatalf("lifecycle stream did not complete: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestResponsesEmptyFailureAfterInProgressRetriesUntilCompleted(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"status\":\"queued\"}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"))
+		if attempts == 1 {
+			_, _ = writer.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null,\"output\":[]}}\n\n"))
+			return
+		}
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: credentialsRoute(parsed), Credentials: credentials,
+		Config: Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024, PermanentAttempts: 2},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if attempts != 2 || credentials.calls != 2 || response.Code != http.StatusOK || strings.Contains(response.Body.String(), "response.failed") || strings.Count(response.Body.String(), "response.created") != 1 || !strings.Contains(response.Body.String(), "response.in_progress") || !strings.Contains(response.Body.String(), "response.completed") {
+		t.Fatalf("empty lifecycle failure was not retried cleanly: attempts=%d credentials=%d status=%d body=%s", attempts, credentials.calls, response.Code, response.Body.String())
+	}
+}
+
+func TestResponsesFailureAfterOutputIsNotRetried(t *testing.T) {
+	inspector := &sseInspector{path: "/v1/responses"}
+	terminal := inspector.Feed([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n"))
+	if terminal != "response.failed" || !inspector.output || inspector.retryableFailure() {
+		t.Fatalf("output-aware failure classification is wrong: terminal=%q output=%v retryable=%v", terminal, inspector.output, inspector.retryableFailure())
+	}
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: credentialsRoute(parsed), Credentials: &credentialSource{values: []string{"key"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024, PermanentAttempts: 3},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if attempts != 1 || !strings.Contains(response.Body.String(), "partial") || !strings.Contains(response.Body.String(), "response.failed") {
+		t.Fatalf("committed output was replayed or lost: attempts=%d body=%s", attempts, response.Body.String())
+	}
+}
+
+func TestResponsesEmptyFailureRetriesAreBounded(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null,\"output\":[]}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: credentialsRoute(parsed), Credentials: &credentialSource{values: []string{"key-a", "key-b", "key-c", "key-d"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024, PermanentAttempts: 100},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if attempts != 3 || strings.Count(response.Body.String(), "response.failed") != 1 {
+		t.Fatalf("empty failure retries were not bounded: attempts=%d body=%s", attempts, response.Body.String())
+	}
+}
+
+func TestResponsesInspectorReadsPastInProgressChunk(t *testing.T) {
+	first := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
+	second := []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n")
+	response := &http.Response{Body: io.NopCloser(io.MultiReader(bytes.NewReader(first), &delayedReader{delay: 25 * time.Millisecond, body: second}))}
+	terminal, body, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024})
+	if err != nil || terminal != "response.completed" || !bytes.Contains(body, []byte("response.in_progress")) || !bytes.Contains(body, []byte("response.completed")) {
+		t.Fatalf("inspector stopped on an in-progress chunk: terminal=%q body=%s err=%v", terminal, body, err)
+	}
+}
+
+type delayedReader struct {
+	delay  time.Duration
+	body   []byte
+	offset int
+}
+
+func (reader *delayedReader) Read(target []byte) (int, error) {
+	if reader.offset == 0 {
+		time.Sleep(reader.delay)
+	}
+	if reader.offset >= len(reader.body) {
+		return 0, io.EOF
+	}
+	count := copy(target, reader.body[reader.offset:])
+	reader.offset += count
+	return count, nil
+}
+
+func TestResponsesInProgressWithoutUpstreamBytesKeepsClientAlive(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		flusher := writer.(http.Flusher)
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"status\":\"queued\"}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"))
+		flusher.Flush()
+		time.Sleep(60 * time.Millisecond)
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: credentialsRoute(parsed), Credentials: &credentialSource{values: []string{"key"}},
+		Config: Config{HeartbeatInterval: 10 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || strings.Contains(body, ": switchboard keep-alive") || strings.Count(body, `"type":"response.in_progress"`) < 2 || !strings.Contains(body, "response.completed") {
+		t.Fatalf("Responses lifecycle heartbeat was not emitted: status=%d body=%s", response.Code, body)
+	}
+}
+
+func credentialsRoute(base *url.URL) fixedRoute {
+	return fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: base, AuthMode: "bearer"}}
+}
+
 func TestChatStreamAcceptsFinishReasonWhenProviderOmitsDoneSentinel(t *testing.T) {
 	inspector := sseInspector{path: "/v1/chat/completions"}
 	inspector.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\n"))
@@ -672,7 +849,7 @@ func TestStreamHeartbeatCoversCredentialQueue(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
-	if !strings.Contains(response.Body.String(), ": switchboard keep-alive") || !strings.Contains(response.Body.String(), "response.completed") {
+	if !strings.Contains(response.Body.String(), "response.in_progress") || !strings.Contains(response.Body.String(), "response.completed") {
 		t.Fatalf("stream was idle while queued or lost its terminal event: %s", response.Body.String())
 	}
 }

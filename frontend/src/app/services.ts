@@ -23,6 +23,8 @@ export interface AppServices {
   readonly clients: ClientsModel
   readonly models: ModelsModel
   readonly shared: SharedModel
+  /** Version the control plane reported during the handshake. */
+  readonly appVersion: string
 }
 
 export const ServicesContext = createContext<AppServices | null>(null)

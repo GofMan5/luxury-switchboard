@@ -21,7 +21,11 @@ func (source *Source) Current(_ context.Context, model string) (relayapp.Route, 
 	provider, err := source.catalog.Active()
 	upstreamModel := model
 	if source.routes != nil {
-		if assignment, ok := source.routes.Relay(model); ok {
+		assignment, ok, routeErr := source.routes.Relay(model)
+		if routeErr != nil {
+			return relayapp.Route{}, routeErr
+		}
+		if ok {
 			routed, exists := source.catalog.Get(assignment.ProviderID)
 			if !exists {
 				return relayapp.Route{}, providerapp.ErrProviderUnavailable

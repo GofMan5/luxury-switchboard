@@ -233,8 +233,10 @@ fn allowed_method(method: &str) -> bool {
             | "tunnel.stop"
             | "tunnel.rotate"
             | "tunnel.reveal"
+            | "tunnel.privacy_test"
             | "clients.list"
             | "clients.events"
+            | "clients.profile"
             | "shared.list"
             | "shared.control"
     )
@@ -377,6 +379,12 @@ mod tests {
         assert!(
             validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"system.shutdown"}"#)
                 .is_ok()
+        );
+        assert!(
+            validate_outgoing(
+                r#"{"v":1,"id":"x","type":"command","method":"tunnel.privacy_test"}"#
+            )
+            .is_ok()
         );
     }
 

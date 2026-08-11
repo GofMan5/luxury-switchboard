@@ -1,19 +1,23 @@
-import type { ModelRoute, RouteTarget } from '../domain/route'
+import { selectionChanges, type ModelRoute, type RouteTarget } from '../domain/route'
 import type { RoutesPort } from './routes-port'
+import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
 const ROUTE_BATCH = 500
+const MAX_SELECTION_REMOVALS = 2_000
 
 export interface RoutesState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'error'
   readonly target: RouteTarget
   readonly routes: readonly ModelRoute[]
+  /** Routes of both targets, so the catalog can show where a model is published. */
+  readonly published: Readonly<Record<RouteTarget, readonly ModelRoute[]>>
   readonly pending: string
   readonly error: string
 }
 
 export class RoutesModel {
   readonly #port: RoutesPort
-  #state: RoutesState = { phase: 'idle', target: 'relay', routes: [], pending: '', error: '' }
+  #state: RoutesState = { phase: 'idle', target: 'relay', routes: [], published: { relay: [], tunnel: [] }, pending: '', error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null
   #generation = 0
@@ -38,12 +42,29 @@ export class RoutesModel {
     try {
       const routes = await this.#port.list(target)
       if (generation === this.#generation) {
-        this.#set({ phase: 'ready', target, routes, pending: clearPending ? '' : this.#state.pending, error: '' })
+        this.#set({
+          phase: 'ready', target, routes, published: { ...this.#state.published, [target]: routes },
+          pending: clearPending ? '' : this.#state.pending, error: '',
+        })
+      }
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#set({ ...this.#state, phase: 'error', error: error instanceof ControlPlaneError ? error.message : 'Model routes are unavailable' })
+      }
+      return
+    }
+    // The other target only feeds catalog badges, so it never delays this list.
+    void this.#loadPublished(target === 'relay' ? 'tunnel' : 'relay', generation)
+  }
+
+  async #loadPublished(target: RouteTarget, generation: number): Promise<void> {
+    try {
+      const routes = await this.#port.list(target)
+      if (generation === this.#generation) {
+        this.#set({ ...this.#state, published: { ...this.#state.published, [target]: routes } })
       }
     } catch {
-      if (generation === this.#generation) {
-        this.#set({ ...this.#state, phase: 'error', error: 'Model routes are unavailable' })
-      }
+      // Badges stay as they were; the active target already reported its state.
     }
   }
 
@@ -53,10 +74,24 @@ export class RoutesModel {
 
   async upsertMany(routes: readonly ModelRoute[]): Promise<boolean> {
     if (routes.length === 0) return false
+    return this.#mutate('*', () => this.#publishAll(routes))
+  }
+
+  /**
+   * Makes the published routes of the active target match the catalog selection for
+   * one provider: missing models are added, cleared models are removed.
+   */
+  async applySelection(providerId: string, selected: readonly string[]): Promise<boolean> {
+    const target = this.#state.target
+    const { additions, removals } = selectionChanges(this.#state.routes, target, providerId, selected)
+    if (additions.length === 0 && removals.length === 0) return false
+    if (removals.length > MAX_SELECTION_REMOVALS) {
+      this.#set({ ...this.#state, error: `Clear at most ${MAX_SELECTION_REMOVALS} routes at once` })
+      return false
+    }
     return this.#mutate('*', async () => {
-      for (let offset = 0; offset < routes.length; offset += ROUTE_BATCH) {
-        await this.#port.upsertMany(routes.slice(offset, offset + ROUTE_BATCH))
-      }
+      if (additions.length > 0) await this.#publishAll(additions)
+      for (const publicModel of removals) await this.#port.delete(target, publicModel)
     })
   }
 
@@ -73,6 +108,12 @@ export class RoutesModel {
     this.#listeners.clear()
   }
 
+  async #publishAll(routes: readonly ModelRoute[]): Promise<void> {
+    for (let offset = 0; offset < routes.length; offset += ROUTE_BATCH) {
+      await this.#port.upsertMany(routes.slice(offset, offset + ROUTE_BATCH))
+    }
+  }
+
   async #mutate(pending: string, operation: () => Promise<unknown>): Promise<boolean> {
     if (this.#state.pending) return false
     this.#set({ ...this.#state, pending, error: '' })
@@ -80,9 +121,9 @@ export class RoutesModel {
       await operation()
       await this.load(this.#state.target, true)
       return true
-    } catch {
+    } catch (error) {
       await this.load(this.#state.target, true)
-      this.#set({ ...this.#state, pending: '', error: 'Route could not be saved' })
+      this.#set({ ...this.#state, pending: '', error: error instanceof ControlPlaneError ? error.message : 'Route could not be saved' })
       return false
     }
   }

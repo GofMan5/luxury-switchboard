@@ -54,10 +54,20 @@ type fakeDispatcher struct {
 	calls    int
 }
 
-type fakeClientActivity struct{ finish tunnelapp.ClientFinish }
+type fakeClientActivity struct {
+	start    tunnelapp.ClientStart
+	finish   tunnelapp.ClientFinish
+	begins   int
+	rejected int
+}
 
-func (*fakeClientActivity) Queue(string, int)                  {}
-func (*fakeClientActivity) Begin(tunnelapp.ClientStart) string { return "activity" }
+func (*fakeClientActivity) Queue(string, int)      {}
+func (activity *fakeClientActivity) Reject(string) { activity.rejected++ }
+func (activity *fakeClientActivity) Begin(value tunnelapp.ClientStart) string {
+	activity.start = value
+	activity.begins++
+	return "activity"
+}
 func (activity *fakeClientActivity) Finish(_ string, value tunnelapp.ClientFinish) {
 	activity.finish = value
 }
@@ -70,7 +80,7 @@ func (dispatcher *fakeDispatcher) Dispatch(_ context.Context, request relayapp.D
 
 func gatewayForTest(t *testing.T, dispatcher *fakeDispatcher) *Gateway {
 	t.Helper()
-	gateway, err := NewGateway(domain.Config{Token: testToken, RPMPerIP: 0, BrandResponse: brand}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{[]string{"SecretProvider", "https://private.invalid/v1", "fixture-secret"}}, dispatcher, nil)
+	gateway, err := NewGateway(domain.Config{Token: testToken, RPMPerIP: 0, BrandResponse: brand}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{[]string{"SecretProvider", "https://private.invalid/v1", "fixture-secret"}}, dispatcher, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,11 +133,103 @@ func TestJSONResponseRewritesModelAndRedactsProviderMarkers(t *testing.T) {
 	if json.Unmarshal(dispatcher.request.Body, &forwarded) != nil {
 		t.Fatal("forwarded body invalid")
 	}
-	if !strings.Contains(forwarded["instructions"].(string), brand) {
-		t.Fatal("branding policy not injected")
+	if _, injected := forwarded["instructions"]; injected {
+		t.Fatal("branding prompt was injected into the model request")
 	}
 	if dispatcher.request.UpstreamModel != "private-gpt" || dispatcher.request.ProviderID != "private-provider" {
 		t.Fatal("typed route lost")
+	}
+}
+
+func TestImageBase64IsOpaqueToProviderMarkerRedaction(t *testing.T) {
+	const image = "iVBORw0KGgoAechocGF5bG9hZA=="
+	response := relayapp.DispatchResponse{
+		Status:  http.StatusOK,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"status":"completed","output":[{"type":"image_generation_call","result":"` + image + `"},{"type":"message","content":[{"type":"output_text","text":"echo"}]}]}`),
+	}
+	body, _, err := sanitizeResponse(response, "/v1/responses", "public-gpt", []string{"echo"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Output []struct {
+			Result  string `json:"result"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if json.Unmarshal(body, &result) != nil || len(result.Output) != 2 {
+		t.Fatalf("invalid sanitized image response: %s", body)
+	}
+	if result.Output[0].Result != image || result.Output[1].Content[0].Text == "echo" {
+		t.Fatalf("image data or ordinary redaction was corrupted: %s", body)
+	}
+
+	imageAPI := relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"data":[{"b64_json":"` + image + `"}]}`)}
+	body, _, err = sanitizeResponse(imageAPI, "/v1/images/generations", "public-image", []string{"echo"}, "")
+	if err != nil || !bytes.Contains(body, []byte(`"b64_json":"`+image+`"`)) {
+		t.Fatalf("Images API base64 was corrupted: %s err=%v", body, err)
+	}
+	invalid := relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"data":[{"b64_json":"echo"}]}`)}
+	if _, _, err := sanitizeResponse(invalid, "/v1/images/generations", "public-image", []string{"echo"}, ""); err == nil {
+		t.Fatal("non-image marker was accepted as opaque base64")
+	}
+}
+
+func TestResponsesImageStreamKeepsOpaqueBase64(t *testing.T) {
+	const image = "iVBORw0KGgoAechocGF5bG9hZA=="
+	response := relayapp.DispatchResponse{
+		Status:  http.StatusOK,
+		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"" + image + "\"}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + image + "\"}]}}\n\n"),
+	}
+	body, _, err := sanitizeResponse(response, "/v1/responses", "public-gpt", []string{"echo"}, "")
+	if err != nil || bytes.Count(body, []byte(image)) != 2 {
+		t.Fatalf("streamed image base64 was corrupted: %s err=%v", body, err)
+	}
+}
+
+func TestBrandIsPrefixedAfterTheModelAnswersWithoutChangingItsPrompt(t *testing.T) {
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{
+		Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{"id":"provider-specific-id","model":"private-gpt","choices":[{"index":0,"message":{"role":"assistant","content":"MODEL_OUTPUT"},"finish_reason":"stop"}]}`),
+	}}
+	gateway := gatewayForTest(t, dispatcher)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/chat/completions", `{"model":"public-gpt","messages":[{"role":"user","content":"PROMPT_CANARY"}]}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", response.Code, response.Body.String())
+	}
+	var result struct {
+		ID      string `json:"id"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &result) != nil || len(result.Choices) != 1 {
+		t.Fatalf("invalid chat response: %s", response.Body.String())
+	}
+	if result.Choices[0].Message.Content != brand+"\n\nMODEL_OUTPUT" {
+		t.Fatalf("model answer was replaced instead of branded: %q", result.Choices[0].Message.Content)
+	}
+	if bytes.Contains(dispatcher.request.Body, []byte(brand)) || !bytes.Contains(dispatcher.request.Body, []byte("PROMPT_CANARY")) {
+		t.Fatalf("forwarded model prompt was changed: %s", dispatcher.request.Body)
+	}
+	if !strings.HasPrefix(result.ID, "luxury_") || strings.Contains(result.ID, "provider") {
+		t.Fatalf("provider-specific response id was exposed: %q", result.ID)
+	}
+}
+
+func TestTrustedOwnerBrandDoesNotDisableUpstreamMarkerRedaction(t *testing.T) {
+	response := relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"choices":[{"message":{"role":"assistant","content":"Private provider output"}}]}`)}
+	body, _, err := sanitizeResponse(response, "/v1/chat/completions", "public-gpt", []string{"Private"}, "Luxury Private")
+	if err != nil || !bytes.HasPrefix(body, []byte(`{"choices":[{"message":{"content":"Luxury Private\n\n`)) || bytes.Count(body, []byte("Private")) != 1 || !bytes.Contains(body, []byte("[hidden] provider output")) {
+		t.Fatalf("trusted brand or upstream redaction was lost: %s err=%v", body, err)
 	}
 }
 
@@ -140,7 +242,7 @@ func TestGatewayRedactsMarkersAcrossConcurrentCredentialChanges(t *testing.T) {
 	gateway, err := NewGateway(
 		domain.Config{Token: testToken},
 		fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}},
-		markers, dispatcher, nil,
+		markers, dispatcher, nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -156,10 +258,10 @@ func TestGatewayRedactsMarkersAcrossConcurrentCredentialChanges(t *testing.T) {
 }
 
 func TestSanitizerDropsPrivateFieldsAcrossNamingStyles(t *testing.T) {
-	clean, err := sanitizeJSON(map[string]any{
+	clean, err := sanitizeJSONPath(map[string]any{
 		"providerId": "private", "provider-name": "private", "upstreamUrl": "https://private.invalid",
 		"systemFingerprint": "private", "internal.metadata": "private", "modelId": "private-model", "output": "safe",
-	}, "public-model", newMarkerRedactor(nil, "Luxury Private"), 0)
+	}, "public-model", newMarkerRedactor(nil, "Luxury Private"), "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,11 +300,27 @@ func TestChatSSEWithoutDoneIsCanonicalizedAfterFinishReason(t *testing.T) {
 	response := relayapp.DispatchResponse{
 		Status:  200,
 		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:    []byte("data: {\"model\":\"private-gpt\",\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\n"),
+		Body:    []byte("data: {\"id\":\"provider-stream-id\",\"model\":\"private-gpt\",\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\n"),
 	}
 	body, _, err := sanitizeResponse(response, "/v1/chat/completions", "public-gpt", []string{"private-gpt"}, brand)
-	if err != nil || !bytes.Contains(body, []byte("data: [DONE]")) || bytes.Contains(body, []byte("private-gpt")) {
+	if err != nil || !bytes.Contains(body, []byte("data: [DONE]")) || bytes.Contains(body, []byte("private-gpt")) || bytes.Contains(body, []byte("provider-stream-id")) || !bytes.Contains(body, []byte(brand+`\n\nOK`)) || bytes.Count(body, []byte(brand)) != 1 {
 		t.Fatalf("compatible chat stream was not canonicalized: %s err=%v", body, err)
+	}
+}
+
+func TestBrandPrefixDoesNotInventTextForToolCalls(t *testing.T) {
+	response := relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"id":"provider-id","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_keep","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`)}
+	body, _, err := sanitizeResponse(response, "/v1/chat/completions", "public-gpt", nil, brand)
+	if err != nil || bytes.Contains(body, []byte(brand)) || !bytes.Contains(body, []byte("call_keep")) || bytes.Contains(body, []byte("provider-id")) {
+		t.Fatalf("tool-only response was changed incorrectly: %s err=%v", body, err)
+	}
+}
+
+func TestCompletionTextReceivesTheBrandPrefix(t *testing.T) {
+	response := relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"choices":[{"text":"MODEL_OUTPUT","finish_reason":"stop"}]}`)}
+	body, _, err := sanitizeResponse(response, "/v1/completions", "public-gpt", nil, brand)
+	if err != nil || !bytes.Contains(body, []byte(brand+`\n\nMODEL_OUTPUT`)) {
+		t.Fatalf("completion answer was not branded: %s err=%v", body, err)
 	}
 }
 
@@ -311,7 +429,7 @@ func TestStreamingProviderProbeUsesDialectTerminalSequence(t *testing.T) {
 func TestContextLimitRecordsTheCommittedStatus(t *testing.T) {
 	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: http.StatusOK}}
 	activity := &fakeClientActivity{}
-	gateway, err := NewGateway(domain.Config{Token: testToken, ContextLimitKiB: 1}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{}, dispatcher, activity)
+	gateway, err := NewGateway(domain.Config{Token: testToken, ContextLimitKiB: 1}, fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "private-gpt", ProviderID: "private-provider"}}}, fakeMarkers{}, dispatcher, activity, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,34 +642,20 @@ func TestMultipartImageEditIsAcceptedWithoutExposingRoute(t *testing.T) {
 	}
 }
 
-func TestAnthropicBrandPolicyPreservesSystemBlocks(t *testing.T) {
-	payload := map[string]any{
-		"model":  "public-claude",
-		"system": []any{map[string]any{"type": "text", "text": "Keep this instruction"}},
-	}
-	encoded := applyBrandPolicy(payload, "/v1/messages", brand)
-	var result map[string]any
-	if json.Unmarshal(encoded, &result) != nil {
-		t.Fatal("brand policy produced invalid JSON")
-	}
-	blocks, ok := result["system"].([]any)
-	if !ok || len(blocks) != 2 {
-		t.Fatalf("system blocks were discarded: %#v", result["system"])
-	}
-	first, _ := blocks[0].(map[string]any)
-	second, _ := blocks[1].(map[string]any)
-	if !strings.Contains(first["text"].(string), brand) || second["text"] != "Keep this instruction" {
-		t.Fatalf("system block order is wrong: %#v", blocks)
+func TestAnthropicBrandPrefixPreservesContentBlocks(t *testing.T) {
+	response := relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"id":"msg_provider","type":"message","content":[{"type":"text","text":"MODEL_OUTPUT"}]}`)}
+	body, _, err := sanitizeResponse(response, "/v1/messages", "public-claude", nil, brand)
+	if err != nil || !bytes.Contains(body, []byte(brand+`\n\nMODEL_OUTPUT`)) || bytes.Contains(body, []byte("msg_provider")) {
+		t.Fatalf("Anthropic answer was not branded safely: %s err=%v", body, err)
 	}
 }
 
-func TestTunnelBrandPolicyPreservesLargeNumericFields(t *testing.T) {
-	model, payload, err := requestPayload([]byte(`{"model":"public-gpt","seed":9007199254740993,"input":"hello"}`), "application/json", "/v1/responses")
-	if err != nil || model != "public-gpt" {
-		t.Fatal(err)
-	}
-	encoded := applyBrandPolicy(payload, "/v1/responses", brand)
-	if !bytes.Contains(encoded, []byte(`"seed":9007199254740993`)) {
-		t.Fatalf("tunnel policy changed a provider field: %s", encoded)
+func TestTunnelForwardsLargeNumericFieldsWithoutABrandPrompt(t *testing.T) {
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}`)}}
+	gateway := gatewayForTest(t, dispatcher)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/responses", `{"model":"public-gpt","seed":9007199254740993,"input":"hello"}`))
+	if response.Code != http.StatusOK || !bytes.Contains(dispatcher.request.Body, []byte(`"seed":9007199254740993`)) || bytes.Contains(dispatcher.request.Body, []byte(brand)) || !bytes.Contains(response.Body.Bytes(), []byte(brand+`\n\nOK`)) {
+		t.Fatalf("tunnel changed the model request: status=%d body=%s", response.Code, dispatcher.request.Body)
 	}
 }

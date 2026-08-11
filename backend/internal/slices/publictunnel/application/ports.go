@@ -22,6 +22,9 @@ type ClientActivity interface {
 	Queue(string, int)
 	Begin(ClientStart) string
 	Finish(string, ClientFinish)
+	// Reject reports an attempt refused at the gateway. It must stay cheaper than a
+	// served request so a refused client cannot cost more than an accepted one.
+	Reject(string)
 }
 
 type Routes interface {
@@ -31,4 +34,9 @@ type Routes interface {
 
 type Markers interface {
 	SensitiveMarkers(string) []string
+}
+
+// Bans reports owner blocklist decisions for a client address.
+type Bans interface {
+	Banned(string) bool
 }

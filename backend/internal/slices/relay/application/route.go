@@ -29,5 +29,5 @@ type ModelRoute struct {
 }
 
 type ModelRouteResolver interface {
-	Relay(string) (ModelRoute, bool)
+	Relay(string) (ModelRoute, bool, error)
 }

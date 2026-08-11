@@ -1,13 +1,11 @@
-//go:build windows
-
 package dpapi
 
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 )
@@ -43,11 +41,11 @@ func New(path string) *Repository {
 }
 
 func DefaultPath() (string, error) {
-	root := os.Getenv("LOCALAPPDATA")
-	if root == "" {
-		return "", errors.New("LOCALAPPDATA is unavailable")
+	root, err := appdata.Root()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(root, "ProviderSwitchboard", fileName), nil
+	return filepath.Join(root, fileName), nil
 }
 
 func (repository *Repository) Load(ctx context.Context) ([]domain.Key, error) {

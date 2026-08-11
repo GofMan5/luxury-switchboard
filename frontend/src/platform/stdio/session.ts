@@ -7,4 +7,6 @@ export interface ControlPlaneSession {
   call<T>(method: string, payload?: unknown, signal?: AbortSignal): Promise<T>
   subscribe<T>(topic: string, listener: EventListener<T>): () => void
   stop(): Promise<void>
+  /** Version reported by the handshake, so the interface never states its own. */
+  readonly appVersion?: string
 }

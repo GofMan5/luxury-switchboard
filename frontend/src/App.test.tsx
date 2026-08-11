@@ -52,6 +52,7 @@ function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://
       return responses[method] as T
     },
     subscribe<T>(_topic: string, _listener: EventListener<T>) { return () => undefined },
+    appVersion: '9.9.9',
   }
 }
 
@@ -87,6 +88,13 @@ describe('App navigation', () => {
     ])
   })
 
+  it('shows the version reported by the control plane, never a hardcoded one', async () => {
+    createSession.mockResolvedValue(fakeSession())
+    const view = render(<App />)
+    expect(await screen.findByText('v9.9.9')).toBeTruthy()
+    view.unmount()
+  })
+
   it('shows the configured listener instead of a hardcoded stopped address', async () => {
     createSession.mockResolvedValue(fakeSession({ state: 'stopped', address: '', port: 0 }, { ...settings, listenerPort: 19001 }))
     const view = render(<App />)
@@ -103,6 +111,60 @@ describe('App navigation', () => {
     const view = render(<App />)
     fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }))
     expect((await screen.findByRole('button', { name: 'Move User up' }) as HTMLButtonElement).disabled).toBe(true)
+    view.unmount()
+  })
+
+  it('renders a large model catalog in bounded chunks', async () => {
+    const models = Array.from({ length: 5_000 }, (_, index) => `model-${String(index).padStart(4, '0')}`)
+    createSession.mockResolvedValue(fakeSession(undefined, settings, { 'models.discover': { models } }))
+    const view = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Model Routes' }))
+
+    expect(await screen.findByText('Showing 180 of 5000 models')).toBeTruthy()
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(180)
+    fireEvent.click(screen.getByRole('button', { name: 'Show 180 more' }))
+    expect(await screen.findByText('Showing 360 of 5000 models')).toBeTruthy()
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(360)
+    view.unmount()
+  })
+
+  it('mirrors the published relay routes in the model catalog selection', async () => {
+    const routes = [{ target: 'relay', publicModel: 'model-a', upstreamModel: 'model-a', providerId: 'local', contextLimitKiB: 0, enabled: true }]
+    createSession.mockResolvedValue(fakeSession(undefined, settings, {
+      'models.discover': { models: ['model-a', 'model-b'] },
+      'routes.list': { routes },
+    }))
+    const view = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Model Routes' }))
+
+    expect(await screen.findByText('2 discovered · 1 on relay · 1 selected')).toBeTruthy()
+    expect(screen.getByText('Selection matches the published routes')).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Apply to relay' }) as HTMLButtonElement).disabled).toBe(true)
+
+    const checkboxes = document.querySelectorAll<HTMLInputElement>('.modelList input[type="checkbox"], label input[type="checkbox"]')
+    fireEvent.click(checkboxes[1])
+    expect(await screen.findByText('+1 new · −0 removed')).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Apply to relay' }) as HTMLButtonElement).disabled).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Not published' }))
+    expect(await screen.findByText('Showing 1 of 1 models')).toBeTruthy()
+    view.unmount()
+  })
+
+  it('offers ban and note controls for a tunnel client', async () => {
+    const clients = [{ ip: '203.0.113.7', actualRpm: 0, count: 3, active: 0, queued: 0, refused: 12, lastSeen: '0001-01-01T00:00:00Z', state: 'idle', banned: false, note: 'known tester' }]
+    createSession.mockResolvedValue(fakeSession(undefined, settings, { 'clients.list': { clients } }))
+    const view = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Clients' }))
+
+    expect(await screen.findByText('known tester')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Ban 203.0.113.7' })).toBeTruthy()
+    expect(screen.queryByText('00:00:00')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Open logs and notes for 203.0.113.7' }))
+    expect(await screen.findByRole('dialog', { name: '203.0.113.7' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Ban client' })).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Save note' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('12')).toBeTruthy()
     view.unmount()
   })
 })

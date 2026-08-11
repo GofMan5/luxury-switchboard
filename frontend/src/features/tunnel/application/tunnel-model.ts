@@ -58,6 +58,7 @@ export class TunnelModel {
       return ''
     }
   }
+  privacyTest(signal?: AbortSignal) { return this.#port.privacyTest(signal) }
   dispose() { this.#unsubscribe?.(); this.#listeners.clear() }
 
   async #mutate(operation: () => Promise<TunnelSnapshot>) {

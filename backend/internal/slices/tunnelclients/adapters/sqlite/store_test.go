@@ -32,3 +32,44 @@ func TestTunnelHistoryPersistsSanitizedEvent(t *testing.T) {
 	}
 	t.Fatal("event was not flushed")
 }
+
+func TestClientProfilesPersistAndSurviveRetentionPruning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tunnel.db")
+	store, err := Open(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	profile := domain.Profile{IP: "203.0.113.10", Banned: true, Note: "abuse"}
+	if err := store.SaveProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProfile(ctx, domain.Profile{IP: "203.0.113.10", Banned: false, Note: "watched"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(ctx)
+	stored, err := reopened.Profiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Banned || stored[0].Note != "watched" {
+		t.Fatalf("profile was not updated in place: %+v", stored)
+	}
+	if err := reopened.DeleteProfile(ctx, "203.0.113.10"); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err = reopened.Profiles(ctx); err != nil || len(stored) != 0 {
+		t.Fatalf("profile was not removed: %+v %v", stored, err)
+	}
+}

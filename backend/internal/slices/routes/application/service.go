@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -25,6 +26,7 @@ type Service struct {
 	repository  Repository
 	providers   ProviderCatalog
 	assignments []domain.Assignment
+	loadErr     error
 	listeners   []func(domain.Target)
 }
 
@@ -36,30 +38,47 @@ func NewService(repository Repository, providers ProviderCatalog) (*Service, err
 }
 
 func (service *Service) Load(ctx context.Context) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
 	assignments, err := service.repository.Load(ctx)
 	if err != nil {
+		service.setLoadError(err)
 		return err
 	}
 	seen := make(map[string]struct{}, len(assignments))
 	for _, assignment := range assignments {
 		if assignment.Validate() != nil {
-			return errors.New("saved routes are invalid")
+			err := errors.New("saved routes are invalid")
+			service.setLoadError(err)
+			return err
 		}
 		key := assignmentKey(assignment)
 		if _, duplicate := seen[key]; duplicate {
-			return errors.New("saved routes are invalid")
+			err := errors.New("saved routes are invalid")
+			service.setLoadError(err)
+			return err
 		}
 		seen[key] = struct{}{}
 	}
 	service.mu.Lock()
 	service.assignments = slices.Clone(assignments)
+	service.loadErr = nil
 	service.mu.Unlock()
 	return nil
+}
+
+func (service *Service) Availability() error {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	return service.loadErr
 }
 
 func (service *Service) List(target domain.Target) []domain.Assignment {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
+	if service.loadErr != nil {
+		return nil
+	}
 	result := make([]domain.Assignment, 0)
 	for _, assignment := range service.assignments {
 		if assignment.Target == target {
@@ -73,6 +92,9 @@ func (service *Service) List(target domain.Target) []domain.Assignment {
 func (service *Service) Resolve(target domain.Target, model string) (domain.Assignment, bool) {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
+	if service.loadErr != nil {
+		return domain.Assignment{}, false
+	}
 	for _, assignment := range service.assignments {
 		if assignment.Target == target && assignment.Enabled && assignment.PublicModel == model {
 			return assignment, true
@@ -84,6 +106,9 @@ func (service *Service) Resolve(target domain.Target, model string) (domain.Assi
 func (service *Service) referencesProvider(providerID string) bool {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
+	if service.loadErr != nil {
+		return true
+	}
 	return slices.ContainsFunc(service.assignments, func(assignment domain.Assignment) bool {
 		return assignment.ProviderID == providerID
 	})
@@ -100,6 +125,9 @@ func (service *Service) Upsert(ctx context.Context, assignment domain.Assignment
 	}
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return err
+	}
 	if !service.providers.Exists(assignment.ProviderID) {
 		return ErrProviderUnavailable
 	}
@@ -135,6 +163,9 @@ func (service *Service) UpsertMany(ctx context.Context, assignments []domain.Ass
 	}
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return err
+	}
 	for _, assignment := range assignments {
 		if !service.providers.Exists(assignment.ProviderID) {
 			return ErrProviderUnavailable
@@ -162,6 +193,9 @@ func (service *Service) Delete(ctx context.Context, target domain.Target, public
 	}
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return err
+	}
 	service.mu.RLock()
 	candidate := slices.Clone(service.assignments)
 	service.mu.RUnlock()
@@ -188,7 +222,7 @@ func (service *Service) OnChanged(listener func(domain.Target)) {
 
 func (service *Service) persist(ctx context.Context, candidate []domain.Assignment, target domain.Target) error {
 	if err := service.repository.Save(ctx, candidate); err != nil {
-		return errors.New("routes could not be saved")
+		return fmt.Errorf("routes could not be saved: %w", err)
 	}
 	service.mu.Lock()
 	service.assignments = slices.Clone(candidate)
@@ -198,4 +232,11 @@ func (service *Service) persist(ctx context.Context, candidate []domain.Assignme
 		listener(target)
 	}
 	return nil
+}
+
+func (service *Service) setLoadError(err error) {
+	service.mu.Lock()
+	service.assignments = nil
+	service.loadErr = err
+	service.mu.Unlock()
 }

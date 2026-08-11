@@ -275,6 +275,17 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 		if tunnelAddress == "" || len(token) < 32 {
 			t.Fatal("local tunnel did not expose owner credentials")
 		}
+		privacyResult := call("tunnel_privacy", "tunnel.privacy_test")
+		privacyPayload, _ := privacyResult["payload"].(map[string]any)
+		privacyModels, _ := privacyPayload["models"].([]any)
+		privacyHeaders, _ := privacyPayload["headers"].([]any)
+		privacyEncoded, _ := json.Marshal(privacyPayload)
+		if privacyResult["ok"] != true || privacyPayload["status"] != float64(http.StatusOK) || len(privacyModels) == 0 || len(privacyHeaders) == 0 {
+			t.Fatalf("owner privacy report is incomplete: %+v", privacyResult)
+		}
+		if bytes.Contains(privacyEncoded, []byte(token)) || !bytes.Contains(privacyEncoded, []byte("/v1/models")) {
+			t.Fatal("owner privacy report leaked the key or omitted its tested URL")
+		}
 		tunnelClient := &http.Client{Timeout: 10 * time.Second}
 		modelsRequest, _ := http.NewRequest(http.MethodGet, tunnelAddress+"/models?cachebust=1", nil)
 		modelsRequest.Header.Set("Authorization", "Bearer "+token)

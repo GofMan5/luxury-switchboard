@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/atomicfile"
 )
 
@@ -38,11 +39,11 @@ func Prepare(identityName string) (Client, error) {
 			return Client{}, errors.New("SSH client is not installed")
 		}
 	}
-	root := os.Getenv("LOCALAPPDATA")
-	if root == "" {
+	root, err := appdata.Root()
+	if err != nil {
 		return Client{}, errors.New("SSH identity directory is unavailable")
 	}
-	identity := filepath.Join(root, "ProviderSwitchboard", "ssh", identityName)
+	identity := filepath.Join(root, "ssh", identityName)
 	if info, err := os.Stat(identity); err != nil || info.IsDir() {
 		return Client{}, errors.New("SSH identity is not installed")
 	}

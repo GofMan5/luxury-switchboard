@@ -51,6 +51,7 @@ import (
 	systemstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/system/adapters/stdio"
 	tunneldpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/dpapi"
 	tunnelhttp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/http"
+	tunnelprivacy "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/privacyaudit"
 	tunnelroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/routes"
 	tunnelssh "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/ssh"
 	tunnelstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/stdio"
@@ -152,7 +153,10 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		logger.Printf("tunnel history is unavailable; live client activity will continue")
 	}
 	clients := clientapp.NewService(tunnelHistory)
-	localTunnelRuntime := tunnelhttp.NewRuntime(publicRouteSource, publicProviderPolicy, httpRuntime, publicactivity.NewRecorder(clients))
+	if err := clients.LoadProfiles(context.Background()); err != nil {
+		logger.Printf("tunnel client bans could not be restored")
+	}
+	localTunnelRuntime := tunnelhttp.NewRuntime(publicRouteSource, publicProviderPolicy, httpRuntime, publicactivity.NewRecorder(clients), clients)
 	tunnelRuntime := tunnelssh.NewRuntime(localTunnelRuntime, publicRouteSource, func(ctx context.Context) error {
 		_, err := sharedControl.EnsureSelfRunning(ctx)
 		return err
@@ -328,7 +332,13 @@ func defaultHistory(retentionDays int) (activityapp.History, error) {
 	if err != nil {
 		return nil, err
 	}
-	return activitysqlite.Open(path, retentionDays)
+	// The concrete store is unwrapped so a failure returns a truly nil interface;
+	// otherwise every downstream nil guard would pass on a nil pointer.
+	store, err := activitysqlite.Open(path, retentionDays)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 func defaultTunnelHistory(retentionHours int) (clientapp.History, error) {
@@ -342,7 +352,11 @@ func defaultTunnelHistory(retentionHours int) (clientapp.History, error) {
 	if err != nil {
 		return nil, err
 	}
-	return clientsqlite.Open(path, retentionHours)
+	store, err := clientsqlite.Open(path, retentionHours)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, error, error) {
@@ -372,7 +386,7 @@ func defaultTunnelService(runtime tunnelapp.Runtime, routes tunnelapp.Routes) (*
 	} else if !filepath.IsAbs(path) {
 		return nil, nil, errors.New("tunnel path must be absolute")
 	}
-	service, err := tunnelapp.NewService(tunneldpapi.New(path), runtime, routes)
+	service, err := tunnelapp.NewService(tunneldpapi.New(path), runtime, routes, tunnelprivacy.NewClient())
 	if err != nil {
 		return nil, nil, err
 	}

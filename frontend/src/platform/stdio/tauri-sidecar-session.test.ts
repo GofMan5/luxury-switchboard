@@ -27,7 +27,7 @@ describe('TauriSidecarSession', () => {
       const frame = JSON.parse(args.frame) as { id: string; method: string; payload?: { id?: string } }
       mocks.writes.push(frame)
       if (frame.method === 'system.handshake') {
-        queueMicrotask(() => mocks.listeners.get('sidecar-frame')?.({ payload: JSON.stringify({ v: 1, id: frame.id, type: 'result', ok: true, payload: {} }) }))
+        queueMicrotask(() => mocks.listeners.get('sidecar-frame')?.({ payload: JSON.stringify({ v: 1, id: frame.id, type: 'result', ok: true, payload: { appVersion: '9.9.9' } }) }))
       }
       if (frame.method === 'system.shutdown') {
         queueMicrotask(() => {
@@ -37,6 +37,26 @@ describe('TauriSidecarSession', () => {
       }
       return undefined
     })
+  })
+
+  it('takes its version from the handshake and refuses anything else', async () => {
+    const session = new TauriSidecarSession()
+    expect(session.appVersion).toBe('')
+    await session.start()
+    expect(session.appVersion).toBe('9.9.9')
+    await session.stop()
+
+    mocks.invoke.mockImplementation(async (command: string, args?: { frame?: string }) => {
+      if (command !== 'sidecar_write' || !args?.frame) return undefined
+      const frame = JSON.parse(args.frame) as { id: string; method: string }
+      if (frame.method === 'system.handshake') {
+        queueMicrotask(() => mocks.listeners.get('sidecar-frame')?.({ payload: JSON.stringify({ v: 1, id: frame.id, type: 'result', ok: true, payload: { appVersion: '<script>1.0.0' } }) }))
+      }
+      return undefined
+    })
+    const hostile = new TauriSidecarSession()
+    await hostile.start()
+    expect(hostile.appVersion).toBe('')
   })
 
   it('allows tunnel startup time and cancels the backend command on timeout', async () => {
@@ -49,6 +69,20 @@ describe('TauriSidecarSession', () => {
     await rejection
     const start = mocks.writes.find((frame) => frame.method === 'tunnel.start')
     expect(mocks.writes).toContainEqual(expect.objectContaining({ method: 'system.cancel', payload: { id: start?.id } }))
+    await session.stop()
+    vi.useRealTimers()
+  })
+
+  it('does not leave a model-test command pending indefinitely', async () => {
+    const session = new TauriSidecarSession()
+    await session.start()
+    vi.useFakeTimers()
+    const call = session.call('models.test')
+    const rejection = expect(call).rejects.toMatchObject({ code: 'timeout' })
+    await vi.advanceTimersByTimeAsync(3 * 60_000)
+    await rejection
+    const command = mocks.writes.find((frame) => frame.method === 'models.test')
+    expect(mocks.writes).toContainEqual(expect.objectContaining({ method: 'system.cancel', payload: { id: command?.id } }))
     await session.stop()
     vi.useRealTimers()
   })

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/batchqueue"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/activity/domain"
@@ -32,11 +33,11 @@ type Store struct {
 }
 
 func DefaultPath() (string, error) {
-	root := os.Getenv("LOCALAPPDATA")
-	if root == "" {
-		return "", errors.New("LOCALAPPDATA is unavailable")
+	root, err := appdata.Root()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(root, "ProviderSwitchboard", "history.v2.db"), nil
+	return filepath.Join(root, "history.v2.db"), nil
 }
 
 func Open(path string, retentionDays int) (*Store, error) {

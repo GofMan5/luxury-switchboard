@@ -28,6 +28,7 @@ describe('SettingsForm', () => {
         restartRequired={false}
         error=""
         onSave={vi.fn(async () => true)}
+        onRestart={vi.fn(async () => undefined)}
       />,
     )
     fireEvent.change(screen.getByLabelText(/Listener port/u), { target: { value: '8898' } })
@@ -35,5 +36,21 @@ describe('SettingsForm', () => {
     expect((screen.getByLabelText(/Listener port/u) as HTMLInputElement).valueAsNumber).toBe(8898)
     expect((screen.getByLabelText(/Maximum queued/u) as HTMLInputElement).valueAsNumber).toBe(12000)
     expect((screen.getByRole('button', { name: 'Save settings' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('restarts from the saved-settings notice', () => {
+    const onRestart = vi.fn(async () => undefined)
+    render(
+      <SettingsForm
+        initial={initial}
+        pending={false}
+        restartRequired
+        error=""
+        onSave={vi.fn(async () => true)}
+        onRestart={onRestart}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Restart now' }))
+    expect(onRestart).toHaveBeenCalledOnce()
   })
 })

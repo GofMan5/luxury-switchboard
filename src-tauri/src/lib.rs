@@ -1,5 +1,10 @@
 mod sidecar;
 
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.request_restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -9,6 +14,7 @@ pub fn run() {
             sidecar::sidecar_start,
             sidecar::sidecar_write,
             sidecar::sidecar_stop,
+            restart_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

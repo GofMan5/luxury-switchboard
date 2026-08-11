@@ -46,8 +46,21 @@ func (runtime *fakeRuntime) Stop(context.Context) error {
 type routeCount int
 
 func (count routeCount) Count() int { return int(count) }
+
+type fakePrivacyAuditor struct {
+	address string
+	token   string
+	report  domain.PrivacyReport
+	err     error
+}
+
+func (auditor *fakePrivacyAuditor) Audit(_ context.Context, address, token string) (domain.PrivacyReport, error) {
+	auditor.address, auditor.token = address, token
+	return auditor.report, auditor.err
+}
+
 func TestTunnelRequiresRoutesAndHidesTokenFromSnapshot(t *testing.T) {
-	service, _ := NewService(&memoryRepo{}, &fakeRuntime{}, routeCount(0))
+	service, _ := NewService(&memoryRepo{}, &fakeRuntime{}, routeCount(0), &fakePrivacyAuditor{})
 	if err := service.Start(context.Background()); !errors.Is(err, ErrNoRoutes) {
 		t.Fatalf("missing routes not rejected: %v", err)
 	}
@@ -61,7 +74,7 @@ func TestTunnelRequiresRoutesAndHidesTokenFromSnapshot(t *testing.T) {
 func TestTunnelPersistsConfigAndLifecycle(t *testing.T) {
 	repo := &memoryRepo{}
 	runtime := &fakeRuntime{}
-	service, _ := NewService(repo, runtime, routeCount(1))
+	service, _ := NewService(repo, runtime, routeCount(1), &fakePrivacyAuditor{})
 	config := service.Config()
 	config.Port = 18888
 	config.RPMPerIP = 45
@@ -92,7 +105,7 @@ func TestTunnelPersistsConfigAndLifecycle(t *testing.T) {
 
 func TestTunnelStopFailureKeepsTheRetryableAddress(t *testing.T) {
 	runtime := &fakeRuntime{stopErr: errors.New("injected stop failure")}
-	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1), &fakePrivacyAuditor{})
 	if err := service.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +145,7 @@ func (runtime *blockingTunnelRuntime) Stop(context.Context) error { close(runtim
 
 func TestTunnelStopWaitsForConcurrentStartAndWins(t *testing.T) {
 	runtime := &blockingTunnelRuntime{started: make(chan struct{}), release: make(chan struct{}), stopped: make(chan struct{})}
-	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1), &fakePrivacyAuditor{})
 	startDone := make(chan struct{})
 	go func() { _ = service.Start(context.Background()); close(startDone) }()
 	<-runtime.started
@@ -153,7 +166,7 @@ func TestTunnelStopWaitsForConcurrentStartAndWins(t *testing.T) {
 
 func TestTunnelStartupHonorsCancellation(t *testing.T) {
 	runtime := &blockingTunnelRuntime{started: make(chan struct{}), release: make(chan struct{}), stopped: make(chan struct{})}
-	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1), &fakePrivacyAuditor{})
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() { result <- service.Start(ctx) }()
@@ -187,7 +200,7 @@ func (runtime *publicationRuntime) OnState(handler func(domain.State, string, st
 
 func TestSharedControlStopAndResumeReconcileRuntime(t *testing.T) {
 	runtime := &publicationRuntime{started: make(chan struct{}, 2), stopped: make(chan struct{}, 1)}
-	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1), &fakePrivacyAuditor{})
 	config := service.Config()
 	config.PublisherProfile = "v1.23456.0123456789abcdef0123456789abcdef0123456789abcdef"
 	if err := service.Configure(context.Background(), config); err != nil {
@@ -216,7 +229,7 @@ func TestSharedControlStopAndResumeReconcileRuntime(t *testing.T) {
 
 func TestSharedPauseSurvivesPublisherReconnectEvents(t *testing.T) {
 	runtime := &publicationRuntime{started: make(chan struct{}, 1), stopped: make(chan struct{}, 1)}
-	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1))
+	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1), &fakePrivacyAuditor{})
 	config := service.Config()
 	config.PublisherProfile = "v1.23456.0123456789abcdef0123456789abcdef0123456789abcdef"
 	if err := service.Configure(context.Background(), config); err != nil {
@@ -234,5 +247,23 @@ func TestSharedPauseSurvivesPublisherReconnectEvents(t *testing.T) {
 	service.SetPublicationState("running")
 	if snapshot := service.Snapshot(); snapshot.State != domain.StateOnline {
 		t.Fatalf("shared resume did not restore the runtime state: %+v", snapshot)
+	}
+}
+
+func TestPrivacyAuditUsesTheRunningAddressWithoutReturningTheToken(t *testing.T) {
+	auditor := &fakePrivacyAuditor{report: domain.PrivacyReport{Status: 200}}
+	service, _ := NewService(&memoryRepo{}, &fakeRuntime{}, routeCount(1), auditor)
+	if _, err := service.TestPrivacy(context.Background()); !errors.Is(err, ErrPrivacyUnavailable) {
+		t.Fatalf("stopped privacy test was accepted: %v", err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.TestPrivacy(context.Background())
+	if err != nil || report.Status != 200 {
+		t.Fatalf("privacy test failed: report=%+v err=%v", report, err)
+	}
+	if auditor.address != service.Snapshot().Address || auditor.token != service.RevealToken() {
+		t.Fatal("privacy auditor did not receive the active owner-only credentials")
 	}
 }

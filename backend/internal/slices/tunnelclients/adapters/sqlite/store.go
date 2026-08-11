@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/batchqueue"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/domain"
 	_ "modernc.org/sqlite"
@@ -30,11 +31,11 @@ type Store struct {
 }
 
 func DefaultPath() (string, error) {
-	root := os.Getenv("LOCALAPPDATA")
-	if root == "" {
-		return "", errors.New("LOCALAPPDATA is unavailable")
+	root, err := appdata.Root()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(root, "ProviderSwitchboard", "tunnel_history.v1.db"), nil
+	return filepath.Join(root, "tunnel_history.v1.db"), nil
 }
 
 func Open(path string, retentionHours int) (*Store, error) {
@@ -97,6 +98,48 @@ func (store *Store) Recent(ctx context.Context, ip string, limit int) ([]domain.
 	return result, rows.Err()
 }
 
+// Profiles returns every stored owner decision. Profiles are governance state, so
+// they are never pruned with the request history.
+func (store *Store) Profiles(ctx context.Context) ([]domain.Profile, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT client_ip, banned, note FROM tunnel_client_profiles ORDER BY client_ip`)
+	if err != nil {
+		return nil, errors.New("tunnel client profile query failed")
+	}
+	defer rows.Close()
+	result := make([]domain.Profile, 0, 16)
+	for rows.Next() {
+		var profile domain.Profile
+		var banned int
+		if err := rows.Scan(&profile.IP, &banned, &profile.Note); err != nil {
+			return nil, errors.New("tunnel client profile row is invalid")
+		}
+		profile.Banned = banned != 0
+		result = append(result, profile)
+	}
+	return result, rows.Err()
+}
+
+func (store *Store) SaveProfile(ctx context.Context, profile domain.Profile) error {
+	banned := 0
+	if profile.Banned {
+		banned = 1
+	}
+	_, err := store.db.ExecContext(ctx, `INSERT INTO tunnel_client_profiles (client_ip, banned, note, updated_ms) VALUES (?,?,?,?)
+ON CONFLICT(client_ip) DO UPDATE SET banned=excluded.banned, note=excluded.note, updated_ms=excluded.updated_ms`,
+		profile.IP, banned, profile.Note, time.Now().UTC().UnixMilli())
+	if err != nil {
+		return errors.New("tunnel client profile could not be saved")
+	}
+	return nil
+}
+
+func (store *Store) DeleteProfile(ctx context.Context, ip string) error {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM tunnel_client_profiles WHERE client_ip=?`, ip); err != nil {
+		return errors.New("tunnel client profile could not be removed")
+	}
+	return nil
+}
+
 func (store *Store) Close(ctx context.Context) error {
 	store.closed.Store(true)
 	if err := store.queue.Close(ctx); err != nil {
@@ -149,7 +192,10 @@ state TEXT NOT NULL CHECK(state IN ('completed','error')), method TEXT NOT NULL,
 path TEXT NOT NULL, model_id TEXT NOT NULL, status_code INTEGER NOT NULL,
 latency_ms REAL NOT NULL, bytes_in INTEGER NOT NULL, bytes_out INTEGER NOT NULL,
 error_code TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS tunnel_events_client_time ON tunnel_events(client_ip, time_ms DESC);`)
+CREATE INDEX IF NOT EXISTS tunnel_events_client_time ON tunnel_events(client_ip, time_ms DESC);
+CREATE TABLE IF NOT EXISTS tunnel_client_profiles (
+client_ip TEXT PRIMARY KEY, banned INTEGER NOT NULL CHECK(banned IN (0,1)),
+note TEXT NOT NULL, updated_ms INTEGER NOT NULL);`)
 	if err != nil {
 		return errors.New("tunnel history migration failed")
 	}

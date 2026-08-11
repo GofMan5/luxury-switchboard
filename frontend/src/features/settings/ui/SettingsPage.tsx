@@ -1,5 +1,6 @@
 import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 import { Database, Gauge, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
+import { restartApp } from '../../../platform/lifecycle/restart-app'
 import { Button } from '../../../shared/ui/Button'
 import type { Settings } from '../domain/settings'
 import { useSettings } from './useSettings'
@@ -10,17 +11,29 @@ export default function SettingsPage() {
   if (!state.settings) {
     return <section className={styles.page}><header className="page-header"><div><h1>Settings</h1><p>Loading validated runtime configuration…</p></div></header></section>
   }
-  return <SettingsForm key={JSON.stringify(state.settings)} initial={state.settings} pending={state.pending} restartRequired={state.restartRequired} error={state.error} onSave={(value) => model.save(value)} />
+  return <SettingsForm key={JSON.stringify(state.settings)} initial={state.settings} pending={state.pending} restartRequired={state.restartRequired} error={state.error} onSave={(value) => model.save(value)} onRestart={restartApp} />
 }
 
-export function SettingsForm({ initial, pending, restartRequired, error, onSave }: { initial: Settings; pending: boolean; restartRequired: boolean; error: string; onSave: (value: Settings) => Promise<boolean> }) {
+export function SettingsForm({ initial, pending, restartRequired, error, onSave, onRestart }: { initial: Settings; pending: boolean; restartRequired: boolean; error: string; onSave: (value: Settings) => Promise<boolean>; onRestart: () => Promise<void> }) {
   const [settings, setSettings] = useState(initial)
+  const [restarting, setRestarting] = useState(false)
+  const [restartError, setRestartError] = useState('')
   const dirty = JSON.stringify(settings) !== JSON.stringify(initial)
   const number = (field: keyof Settings) => (event: ChangeEvent<HTMLInputElement>) => {
     const value = Number(event.currentTarget.value)
     setSettings((current) => ({ ...current, [field]: value }))
   }
   const submit = (event: FormEvent) => { event.preventDefault(); void onSave(settings) }
+  const restart = async () => {
+    setRestarting(true)
+    setRestartError('')
+    try {
+      await onRestart()
+    } catch {
+      setRestarting(false)
+      setRestartError('Switchboard could not restart. Close and reopen it to apply the saved settings.')
+    }
+  }
 
   return (
     <form className={styles.page} onSubmit={submit}>
@@ -28,8 +41,8 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave 
         <div><h1>Settings</h1><p>Safe defaults for relay, reliability and storage</p></div>
         <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={15} />{pending ? 'Saving…' : 'Save settings'}</Button>
       </header>
-      {restartRequired ? <div className={styles.restart}><RotateCw size={17} /><div><strong>Restart Switchboard to apply runtime changes</strong><span>Saved values are already encrypted; current requests keep their existing runtime snapshot.</span></div></div> : null}
-      {error ? <div className={styles.error} role="alert">{error}</div> : null}
+      {restartRequired ? <div className={styles.restart} aria-live="polite" aria-busy={restarting}><RotateCw size={17} /><div><strong>Restart Switchboard to apply runtime changes</strong><span>Saved values are already encrypted; active requests are cancelled cleanly during restart.</span></div><Button type="button" disabled={restarting} onClick={() => void restart()}>{restarting ? 'Restarting…' : 'Restart now'}</Button></div> : null}
+      {error || restartError ? <div className={styles.error} role="alert">{error || restartError}</div> : null}
 
       <div className={styles.content}>
         <SettingsSection icon={<Gauge />} title="Local relay" description="Listener and bounded request admission.">

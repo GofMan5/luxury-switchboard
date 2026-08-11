@@ -68,3 +68,13 @@
 - UI проверен кликами и скриншотами на заявленных размерах; визуальный концепт и финальный render сравнены напрямую.
 - Live relay gate включает sequential + parallel large-context запросы, long reasoning/SSE terminal completion, cancellation/provider switch и image path на соседнем loopback-порту.
 - Перед commit проверяются diff, секреты, артефакты, package manifest и отсутствие оставшихся test listeners/processes.
+
+## Release version
+
+- Любое изменение, которое уходит пользователю, поднимает версию продукта. Патч — только фиксы, minor — новые сценарии или изменённый контракт клиента.
+- Версия живёт ровно в пяти местах и обязана совпадать: `src-tauri/tauri.conf.json` (источник для bundle и имён артефактов), `src-tauri/Cargo.toml`, `package.json`, `frontend/package.json` и `AppVersion` в `backend/internal/slices/system/adapters/stdio/register.go`.
+- UI никогда не хардкодит версию. Sidebar показывает то, что вернул `system.handshake`, то есть Go `AppVersion`; новые места отображения берут её оттуда же.
+- `pnpm build` и `pnpm build:linux` падают до сборки, если пять значений разошлись (`assertVersionsAgree` в `scripts/build-release.mjs`). Не обходить проверку, а выравнивать версии.
+- Новая версия попадает в commit вместе с изменениями, а `artifacts/release/SHA256SUMS.txt` перезаписывается сборкой этой же версии; чужие артефакты в папке удаляются автоматически.
+- Новая stdio-команда добавляется одновременно в Go handler и в allowlist `src-tauri/src/sidecar.rs`; расхождение ловит `TestEveryControlPlaneCommandIsAllowedByTheDesktopShell`.
+

@@ -1,14 +1,15 @@
 {
   "name": "provider-switchboard",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.1.0",
   "packageManager": "pnpm@10.26.2",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "node scripts/build-release.mjs",
+    "build:linux": "docker buildx build --file scripts/linux-build.Dockerfile --output type=local,dest=artifacts/release . && node scripts/build-release.mjs --checksums-only",
     "dev:prepare": "pnpm sidecar:build && pnpm --dir frontend dev",
     "build:prepare": "pnpm sidecar:build && pnpm --dir frontend build",
-    "sidecar:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1",
+    "sidecar:build": "node scripts/build-sidecar.mjs",
     "check": "pnpm frontend:check && pnpm backend:check && cargo check --manifest-path src-tauri/Cargo.toml",
     "frontend:check": "pnpm --dir frontend check",
     "frontend:test": "pnpm --dir frontend test",

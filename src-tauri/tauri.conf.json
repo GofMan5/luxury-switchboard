@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Switchboard",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "identifier": "one.luxuryprivate.switchboard",
   "build": {
     "frontendDist": "../frontend/dist",
@@ -29,7 +29,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
     "externalBin": ["binaries/switchboard-sidecar"],
     "icon": [
       "icons/32x32.png",

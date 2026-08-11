@@ -3,6 +3,7 @@ import { PanelLeftClose, Square } from 'lucide-react'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
 import { useSettings } from '../features/settings/ui/useSettings'
+import { useAppServices } from './services'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
 import { navigation, type AppRoute } from './navigation'
@@ -17,6 +18,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   const { model: relay, state: relayState } = useRelay()
   const { state: providersState } = useProviders()
   const { state: settingsState } = useSettings()
+  const { appVersion } = useAppServices()
   const activeProvider = providersState.catalog.providers.find(
     (provider) => provider.id === providersState.catalog.activeId,
   )
@@ -53,7 +55,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
         </nav>
         <div className={styles.sidebarFooter}>
           <PanelLeftClose size={17} aria-hidden="true" />
-          <span>v1.0.6</span>
+          <span>{appVersion ? `v${appVersion}` : 'Switchboard'}</span>
         </div>
       </aside>
 

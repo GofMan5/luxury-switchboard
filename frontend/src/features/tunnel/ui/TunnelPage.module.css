@@ -32,9 +32,59 @@
 .suffixed input { min-width: 0; flex: 1; }
 .suffixed small { padding: 0 10px; }
 .settings > footer { display: flex; justify-content: flex-end; padding: 11px 18px; background: #1d1d1d; }
-.privacy { display: flex; align-items: flex-start; gap: 12px; padding: 16px 18px; color: var(--status-success); }
+.privacy { overflow: hidden; }
+.privacyHeader { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 18px; }
+.privacyHeader > button { flex-shrink: 0; white-space: nowrap; }
+.privacyIntro { display: flex; align-items: flex-start; gap: 12px; min-width: 0; color: var(--status-success); }
+.privacyIntro > div { min-width: 0; }
 .privacy p { line-height: 1.5; }
 .privacy code { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; }
+.privacyHint,
+.privacyError { margin: 0; border-top: 1px solid var(--border-subtle); padding: 11px 18px; font-size: 12px; }
+.privacyHint { color: var(--text-muted); background: #1d1d1d; }
+.privacyError { color: #f2aaa5; background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
+.privacyResult { display: grid; gap: 12px; border-top: 1px solid var(--border-subtle); padding: 14px 18px 18px; background: #1b1b1b; }
+.verdict { display: flex; align-items: center; gap: 10px; border: 1px solid color-mix(in srgb, var(--status-success) 34%, var(--border-subtle)); border-radius: var(--radius-control); padding: 10px 12px; color: #9bd3a2; background: color-mix(in srgb, var(--status-success) 6%, #1b1b1b); }
+.verdict[data-risk='review'] { border-color: color-mix(in srgb, var(--status-warning) 38%, var(--border-subtle)); color: #e4c98e; background: color-mix(in srgb, var(--status-warning) 6%, #1b1b1b); }
+.verdict div { display: grid; gap: 2px; }
+.verdict strong { color: inherit; font-size: 12px; }
+.verdict span { color: var(--text-muted); font-size: 11px; }
+.warningList { display: grid; gap: 5px; margin: 0; padding: 0 0 0 18px; color: #e4c98e; font-size: 11px; }
+.metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); overflow: hidden; }
+.metrics > div { display: grid; gap: 4px; border-right: 1px solid var(--border-subtle); padding: 10px 12px; }
+.metrics > div:last-child { border-right: 0; }
+.metrics dt { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.metrics dd { margin: 0; color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
+.connection { border: 1px solid var(--border-subtle); border-radius: var(--radius-control); overflow: hidden; }
+.connection h3,
+.reportSection h3 { color: var(--text-primary); font-size: 12px; font-weight: 640; }
+.connection > h3 { border-bottom: 1px solid var(--border-subtle); padding: 9px 11px; background: #202020; }
+.connection dl { display: grid; grid-template-columns: 1fr 1fr; margin: 0; }
+.connection dl > div { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 8px; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); padding: 8px 11px; }
+.connection dl > div:nth-child(even) { border-right: 0; }
+.connection dt { color: var(--text-muted); font-size: 10px; }
+.connection dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text-secondary); font-family: var(--font-mono); font-size: 10px; }
+.reportGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.reportSection { min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); overflow: hidden; }
+.reportSection > header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-subtle); padding: 9px 11px; background: #202020; }
+.reportSection > header span { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
+.dataRows { max-height: 270px; overflow: auto; scrollbar-gutter: stable; }
+.dataRow,
+.modelRow { display: grid; gap: 4px; border-bottom: 1px solid var(--border-subtle); padding: 9px 11px; }
+.dataRow:last-child,
+.modelRow:last-child { border-bottom: 0; }
+.dataRow span { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 10px; }
+.modelRow strong { overflow-wrap: anywhere; color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
+.modelRow span { color: var(--text-muted); font-size: 10px; }
+.modelRow code { overflow-wrap: anywhere; }
+.empty { margin: 0 !important; padding: 16px 11px; }
+.raw { border: 1px solid var(--border-subtle); border-radius: var(--radius-control); overflow: hidden; }
+.raw summary { cursor: pointer; padding: 9px 11px; color: var(--text-secondary); background: #202020; font-size: 11px; user-select: none; }
+.raw > div { display: grid; gap: 8px; border-top: 1px solid var(--border-subtle); padding: 10px 11px; color: var(--text-muted); font-size: 10px; }
+.raw pre { max-height: 260px; margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); font-family: var(--font-mono); font-size: 10px; line-height: 1.5; }
+.spin { animation: privacy-spin .9s linear infinite; }
+@keyframes privacy-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 @media (max-width: 1050px) {
   .fields { grid-template-columns: repeat(2, 1fr); }
   .fields > label:nth-child(3) { border-right: 1px solid var(--border-subtle); }
@@ -45,4 +95,18 @@
   .statusActions { flex-wrap: wrap; justify-content: flex-end; }
   .fields { grid-template-columns: 1fr 1fr; }
   .page :global(.page-header) { align-items: center; }
+  .metrics { grid-template-columns: repeat(3, 1fr); }
+  .metrics > div:nth-child(3) { border-right: 0; }
+  .metrics > div:nth-child(-n + 3) { border-bottom: 1px solid var(--border-subtle); }
+  .reportGrid { grid-template-columns: 1fr; }
+}
+@media (max-width: 680px) {
+  .privacyHeader { align-items: flex-start; flex-direction: column; }
+  .privacyHeader > button { width: 100%; }
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+  .metrics > div { border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
+  .metrics > div:nth-child(2n) { border-right: 0; }
+  .metrics > div:nth-last-child(-n + 2) { border-bottom: 0; }
+  .connection dl { grid-template-columns: 1fr; }
+  .connection dl > div { border-right: 0; }
 }

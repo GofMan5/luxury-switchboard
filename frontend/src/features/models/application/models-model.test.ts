@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ModelTestResult } from '../domain/model'
 import type { ModelsPort } from './models-port'
 import { ModelsModel } from './models-model'
@@ -75,6 +75,23 @@ describe('ModelsModel', () => {
     expect(await testing).toBe(false)
     expect(model.snapshot()).toMatchObject({ providerId: 'provider-b', testing: false, error: '' })
     model.dispose()
+  })
+
+  it('terminates a stalled model test run at the safety limit', async () => {
+    vi.useFakeTimers()
+    const port = new FakeModelsPort()
+    port.waitForAbort = true
+    const model = new ModelsModel(port)
+    model.connect()
+    await model.discover('provider-a')
+    const testing = model.test(['model-a'])
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(2 * 60_000)
+    expect(await testing).toBe(false)
+    expect(model.snapshot()).toMatchObject({ testing: false, error: 'Model tests reached the 2 minute safety limit' })
+    expect(model.snapshot().results['model-a']).toMatchObject({ state: 'unavailable', errorCode: 'timeout' })
+    model.dispose()
+    vi.useRealTimers()
   })
 
   it('cancels stale discovery before loading another provider', async () => {

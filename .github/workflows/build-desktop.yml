@@ -1,0 +1,93 @@
+name: Build desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            artifact: switchboard-windows-x64
+          - name: Linux x64
+            os: ubuntu-22.04
+            artifact: switchboard-linux-x64
+    steps:
+      - uses: actions/checkout@v5
+      - if: runner.os == 'Linux'
+        name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - name: Check source
+        run: |
+          pnpm --dir frontend lint
+          pnpm --dir frontend test
+          go -C backend test ./...
+          go -C backend vet ./...
+          go -C backend mod verify
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            artifacts/release/*.exe
+            artifacts/release/*.AppImage
+            artifacts/release/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  collect:
+    name: One release folder
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: switchboard-*
+          path: artifacts/release
+          merge-multiple: true
+      - run: node scripts/build-release.mjs --checksums-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Switchboard-Windows-Linux
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 30

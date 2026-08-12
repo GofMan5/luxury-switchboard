@@ -26,9 +26,6 @@ import (
 	providerstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/stdio"
 	providerapp "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 	providerdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
-	publicactivity "github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/adapters/activity"
-	publicmarkers "github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/adapters/providers"
-	publicroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/adapters/routes"
 	relayactivity "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/activity"
 	relayhttp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/http"
 	relaykeypool "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/keypool"
@@ -44,30 +41,15 @@ import (
 	settingsdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/adapters/dpapi"
 	settingsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/adapters/stdio"
 	settingsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/application"
-	sharedssh "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/adapters/ssh"
-	sharedstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/adapters/stdio"
-	sharedapp "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/application"
-	shareddomain "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/domain"
 	systemstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/system/adapters/stdio"
-	tunneldpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/dpapi"
-	tunnelhttp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/http"
-	tunnelprivacy "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/privacyaudit"
-	tunnelroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/routes"
-	tunnelssh "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/ssh"
-	tunnelstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/stdio"
-	tunnelapp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/application"
-	clientsqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/adapters/sqlite"
-	clientstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/adapters/stdio"
-	clientapp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/application"
 )
 
 type App struct {
-	protocol      *platform.Server
-	relay         *relayapp.Service
-	history       activityapp.History
-	tunnelHistory clientapp.History
-	tunnel        *tunnelapp.Service
-	logger        *log.Logger
+	protocol *platform.Server
+	relay    *relayapp.Service
+	history  activityapp.History
+	edition  editionRuntime
+	logger   *log.Logger
 }
 
 func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
@@ -142,40 +124,6 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	publicProviderPolicy := publicmarkers.NewMarkers(catalog, keyManager)
-	publicRouteSource := publicroutes.NewSource(routeService, publicProviderPolicy)
-	sharedControl, err := sharedapp.NewService(sharedssh.NewClient())
-	if err != nil {
-		return nil, err
-	}
-	tunnelHistory, tunnelHistoryErr := defaultTunnelHistory(settings.TunnelRetentionHours)
-	if tunnelHistoryErr != nil {
-		logger.Printf("tunnel history is unavailable; live client activity will continue")
-	}
-	clients := clientapp.NewService(tunnelHistory)
-	if err := clients.LoadProfiles(context.Background()); err != nil {
-		logger.Printf("tunnel client bans could not be restored")
-	}
-	localTunnelRuntime := tunnelhttp.NewRuntime(publicRouteSource, publicProviderPolicy, httpRuntime, publicactivity.NewRecorder(clients), clients)
-	tunnelRuntime := tunnelssh.NewRuntime(localTunnelRuntime, publicRouteSource, func(ctx context.Context) error {
-		_, err := sharedControl.EnsureSelfRunning(ctx)
-		return err
-	})
-	tunnelService, tunnelLoadErr, err := defaultTunnelService(tunnelRuntime, tunnelroutes.NewSource(publicRouteSource))
-	if err != nil {
-		return nil, err
-	}
-	if tunnelLoadErr != nil {
-		logger.Printf("encrypted tunnel settings could not be loaded; tunnel remains stopped")
-	}
-	sharedControl.OnChanged(func(snapshot shareddomain.Snapshot) {
-		for _, tunnel := range snapshot.Tunnels {
-			if tunnel.Name == sharedapp.SelfName {
-				tunnelService.SetPublicationState(tunnel.State)
-				return
-			}
-		}
-	})
 	relay := relayapp.NewService(httpRuntime)
 	catalog.OnActivated(func(string) { relay.CancelActive() })
 	routeService.OnChanged(func(target routedomain.Target) {
@@ -193,16 +141,19 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	settingsstdio.Register(protocol, settingsService)
 	routestdio.Register(protocol, routeService)
 	modelstdio.Register(protocol, modelService)
-	sharedstdio.Register(protocol, sharedControl)
-	tunnelstdio.Register(protocol, tunnelService)
-	clientstdio.Register(protocol, clients)
+	edition, err := registerEdition(protocol, editionDependencies{
+		catalog: catalog, keys: keyManager, routes: routeService,
+		relay: httpRuntime, settings: settings, logger: logger,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &App{
-		protocol:      protocol,
-		relay:         relay,
-		history:       history,
-		tunnelHistory: tunnelHistory,
-		tunnel:        tunnelService,
-		logger:        logger,
+		protocol: protocol,
+		relay:    relay,
+		history:  history,
+		edition:  edition,
+		logger:   logger,
 	}, nil
 }
 
@@ -211,11 +162,11 @@ func (app *App) Run(ctx context.Context) error {
 		app.logger.Printf("relay start failed")
 	}
 	err := app.protocol.Serve(ctx)
-	if app.tunnel != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = app.tunnel.Stop(stopCtx)
-		cancel()
+	editionCtx, cancelEdition := context.WithTimeout(context.Background(), 5*time.Second)
+	if stopErr := app.edition.Stop(editionCtx); stopErr != nil {
+		app.logger.Printf("edition runtime did not stop cleanly")
 	}
+	cancelEdition()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if stopErr := app.relay.Stop(stopCtx); stopErr != nil {
 		app.logger.Printf("relay shutdown was not clean")
@@ -228,13 +179,11 @@ func (app *App) Run(ctx context.Context) error {
 		}
 		cancelHistory()
 	}
-	if app.tunnelHistory != nil {
-		historyCtx, cancelHistory := context.WithTimeout(context.Background(), 5*time.Second)
-		if historyErr := app.tunnelHistory.Close(historyCtx); historyErr != nil {
-			app.logger.Printf("tunnel history did not close cleanly")
-		}
-		cancelHistory()
+	editionHistoryCtx, cancelEditionHistory := context.WithTimeout(context.Background(), 5*time.Second)
+	if historyErr := app.edition.Close(editionHistoryCtx); historyErr != nil {
+		app.logger.Printf("edition history did not close cleanly")
 	}
+	cancelEditionHistory()
 	return err
 }
 
@@ -341,24 +290,6 @@ func defaultHistory(retentionDays int) (activityapp.History, error) {
 	return store, nil
 }
 
-func defaultTunnelHistory(retentionHours int) (clientapp.History, error) {
-	path := os.Getenv("SWITCHBOARD_TUNNEL_HISTORY_PATH")
-	var err error
-	if path == "" {
-		path, err = clientsqlite.DefaultPath()
-	} else if !filepath.IsAbs(path) {
-		return nil, errors.New("tunnel history path must be absolute")
-	}
-	if err != nil {
-		return nil, err
-	}
-	store, err := clientsqlite.Open(path, retentionHours)
-	if err != nil {
-		return nil, err
-	}
-	return store, nil
-}
-
 func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, error, error) {
 	path := os.Getenv("SWITCHBOARD_ROUTES_PATH")
 	var pathErr error
@@ -368,25 +299,6 @@ func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, error
 		return nil, nil, errors.New("routes path must be absolute")
 	}
 	service, err := routeapp.NewService(routedpapi.New(path), routeproviders.NewCatalog(catalog))
-	if err != nil {
-		return nil, nil, err
-	}
-	loadErr := pathErr
-	if loadErr == nil {
-		loadErr = service.Load(context.Background())
-	}
-	return service, loadErr, nil
-}
-
-func defaultTunnelService(runtime tunnelapp.Runtime, routes tunnelapp.Routes) (*tunnelapp.Service, error, error) {
-	path := os.Getenv("SWITCHBOARD_TUNNEL_PATH")
-	var pathErr error
-	if path == "" {
-		path, pathErr = tunneldpapi.DefaultPath()
-	} else if !filepath.IsAbs(path) {
-		return nil, nil, errors.New("tunnel path must be absolute")
-	}
-	service, err := tunnelapp.NewService(tunneldpapi.New(path), runtime, routes, tunnelprivacy.NewClient())
 	if err != nil {
 		return nil, nil, err
 	}

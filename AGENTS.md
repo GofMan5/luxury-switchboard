@@ -69,12 +69,22 @@
 - Live relay gate включает sequential + parallel large-context запросы, long reasoning/SSE terminal completion, cancellation/provider switch и image path на соседнем loopback-порту.
 - Перед commit проверяются diff, секреты, артефакты, package manifest и отсутствие оставшихся test listeners/processes.
 
+## Editions
+
+- Продукт собирается в двух изданиях из одного дерева: `owner` (полное) и `public` (для обычных пользователей). Публичное издание не содержит public tunnel, tunnel clients и shared control.
+- Вырезание обязано быть физическим, а не косметическим. Go-код владельца живёт за build tag `public` (`edition_owner.go` / `edition_public.go`), поэтому в публичном бинаре нет ни handler'ов, ни SSH-publisher, ни hub-клиента: запуск sidecar вручную не открывает эти команды.
+- Frontend режется тем же принципом: ветки, которые должны исчезнуть из бандла, проверяют литерал `__OWNER_EDITION__` прямо на месте (`App.tsx`, `ServicesProvider`), иначе bundler не удалит модуль. Читаемый `OWNER_EDITION` из `app/edition.ts` используется там, где нужен только runtime-выбор.
+- `system.handshake` возвращает `edition` и capabilities этого издания. UI не должен предлагать сценарий, которого нет в ответе handshake.
+- Новый owner-only сценарий добавляется сразу в оба места: за build tag в Go и за `__OWNER_EDITION__` во frontend; иначе публичная сборка получит мёртвую вкладку или живую команду.
+- `pnpm build` и `pnpm build:linux` собирают оба издания: owner в `artifacts/release`, public в `artifacts/release-public`, у каждого свой `SHA256SUMS.txt`. Релиз падает, если в публичном бандле остались owner-чанки или в публичном sidecar нашлись owner-команды.
+- `pnpm backend:check` прогоняет тесты обоих изданий. `TestEditionAnswersOnlyItsOwnCommands` спрашивает у реального протокола, что издание умеет, и обязан оставаться правдой для обеих сборок.
+
 ## Release version
 
 - Любое изменение, которое уходит пользователю, поднимает версию продукта. Патч — только фиксы, minor — новые сценарии или изменённый контракт клиента.
 - Версия живёт ровно в пяти местах и обязана совпадать: `src-tauri/tauri.conf.json` (источник для bundle и имён артефактов), `src-tauri/Cargo.toml`, `package.json`, `frontend/package.json` и `AppVersion` в `backend/internal/slices/system/adapters/stdio/register.go`.
 - UI никогда не хардкодит версию. Sidebar показывает то, что вернул `system.handshake`, то есть Go `AppVersion`; новые места отображения берут её оттуда же.
 - `pnpm build` и `pnpm build:linux` падают до сборки, если пять значений разошлись (`assertVersionsAgree` в `scripts/build-release.mjs`). Не обходить проверку, а выравнивать версии.
-- Новая версия попадает в commit вместе с изменениями, а `artifacts/release/SHA256SUMS.txt` перезаписывается сборкой этой же версии; чужие артефакты в папке удаляются автоматически.
+- Новая версия попадает в commit вместе с изменениями. Корневой `SHA256SUMS.txt` содержит ровно одну строку — контрольную сумму собранного owner-инсталлятора из `artifacts/release`, её проверяет `scripts/package-friend.ps1`. Папки изданий получают свои `SHA256SUMS.txt` от сборки; чужие артефакты удаляются автоматически.
 - Новая stdio-команда добавляется одновременно в Go handler и в allowlist `src-tauri/src/sidecar.rs`; расхождение ловит `TestEveryControlPlaneCommandIsAllowedByTheDesktopShell`.
 

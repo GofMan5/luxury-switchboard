@@ -28,9 +28,9 @@ The debug desktop uses relay port `18798`, so it does not take over the normal `
 pnpm build
 ```
 
-Windows produces an NSIS installer; Linux produces AppImage and deb packages. All current-version outputs and their `SHA256SUMS.txt` are collected under `artifacts/release`. The **Build desktop** GitHub workflow builds both native hosts and publishes one `Switchboard-Windows-Linux` artifact containing the same flat release folder.
+Windows produces an NSIS installer; Linux produces AppImage and deb packages. Every run builds both editions: the owner outputs and their `SHA256SUMS.txt` land in `artifacts/release`, the public ones in `artifacts/release-public`. The **Build desktop** GitHub workflow builds both native hosts and publishes one `Switchboard-Windows-Linux` artifact containing the same flat release folders.
 
-From Windows with Docker Desktop, `pnpm build:linux` performs the isolated Linux build and merges AppImage/deb into that same folder without changing the Windows toolchain or `node_modules`.
+From Windows with Docker Desktop, `pnpm build:linux` performs the isolated Linux build of both editions and merges the AppImage/deb of each into the matching folder without changing the Windows toolchain or `node_modules`.
 
 ## Core workflow
 
@@ -41,6 +41,14 @@ From Windows with Docker Desktop, `pnpm build:linux` performs the isolated Linux
 5. Inspect live requests, HTTP status, queue/retries, context, cached/reasoning/processed tokens and generation speed in **Live Activity**. Tunnel users and their sanitized persistent events are separate under **Clients**, where every address can also be banned or annotated with an owner-only note.
 
 Provider switches, active endpoint/auth/cache changes and local Relay route changes cancel old in-flight work. Standby-provider and Tunnel-route edits apply to new requests without aborting unrelated local generations. Retryable transport errors, truncated JSON/SSE, `429`, `504` and other `5xx` responses are retried before client commit. RPM and model/balance cooldowns remain in FIFO queues until capacity returns or the client cancels.
+
+## Editions
+
+Two editions build from the same tree. The **owner** edition is the full product. The **public** edition is what ordinary users get: it has no Tunnel, no Tunnel Clients and no Shared Control, and Model Routes serves the local relay only.
+
+The public edition is cut, not hidden. Its sidecar is compiled without the publishing stack, so the tunnel gateway, per-client governance, the SSH publisher and the hub client are absent from the binary and cannot be reached even by driving the sidecar directly. Its interface bundle contains no owner workspace chunks, and `system.handshake` reports the edition and the capabilities that binary actually serves.
+
+`pnpm build` and `pnpm build:linux` produce both editions in one run: the owner build lands in `artifacts/release`, the public build in `artifacts/release-public`, each with its own `SHA256SUMS.txt`. The release fails if an owner workspace or an owner command is found in the public output.
 
 ## Client compatibility
 

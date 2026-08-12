@@ -6,14 +6,14 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "node scripts/build-release.mjs",
-    "build:linux": "docker buildx build --file scripts/linux-build.Dockerfile --output type=local,dest=artifacts/release . && node scripts/build-release.mjs --checksums-only",
+    "build:linux": "docker buildx build --file scripts/linux-build.Dockerfile --output type=local,dest=artifacts . && node scripts/build-release.mjs --checksums-only",
     "dev:prepare": "pnpm sidecar:build && pnpm --dir frontend dev",
     "build:prepare": "pnpm sidecar:build && pnpm --dir frontend build",
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "check": "pnpm frontend:check && pnpm backend:check && cargo check --manifest-path src-tauri/Cargo.toml",
     "frontend:check": "pnpm --dir frontend check",
     "frontend:test": "pnpm --dir frontend test",
-    "backend:check": "go -C backend test ./...",
+    "backend:check": "go -C backend test ./... && go -C backend test -tags public ./...",
     "backend:race": "go -C backend test -race ./..."
   },
   "devDependencies": {

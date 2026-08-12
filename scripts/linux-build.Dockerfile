@@ -53,4 +53,4 @@ COPY . .
 RUN pnpm build
 
 FROM scratch AS release
-COPY --from=build /src/artifacts/release/ /
+COPY --from=build /src/artifacts/ /

@@ -21,9 +21,12 @@ export class RoutesModel {
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null
   #generation = 0
+  readonly #tracksBothTargets: boolean
 
-  constructor(port: RoutesPort) {
+  /** A build without the public tunnel has a single target and nothing to compare. */
+  constructor(port: RoutesPort, options: { readonly tracksBothTargets?: boolean } = {}) {
     this.#port = port
+    this.#tracksBothTargets = options.tracksBothTargets ?? true
     this.#unsubscribe = port.subscribe((target) => {
       if (target === this.#state.target) void this.load(target)
     })
@@ -54,7 +57,7 @@ export class RoutesModel {
       return
     }
     // The other target only feeds catalog badges, so it never delays this list.
-    void this.#loadPublished(target === 'relay' ? 'tunnel' : 'relay', generation)
+    if (this.#tracksBothTargets) void this.#loadPublished(target === 'relay' ? 'tunnel' : 'relay', generation)
   }
 
   async #loadPublished(target: RouteTarget, generation: number): Promise<void> {

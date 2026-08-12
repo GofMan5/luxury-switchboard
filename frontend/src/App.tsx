@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState, type ComponentType } from 'react'
 import { AppShell } from './app/AppShell'
 import { ServicesProvider } from './app/ServicesProvider'
 import { navigation, type AppRoute } from './app/navigation'
@@ -10,9 +10,14 @@ const ApiKeysPage = lazy(() => import('./features/api-keys/ui/ApiKeysPage'))
 const SettingsPage = lazy(() => import('./features/settings/ui/SettingsPage'))
 const StatisticsPage = lazy(() => import('./features/statistics/ui/StatisticsPage'))
 const ModelRoutesPage = lazy(() => import('./features/model-routes/ui/ModelRoutesPage'))
-const TunnelPage = lazy(() => import('./features/tunnel/ui/TunnelPage'))
-const ClientsPage = lazy(() => import('./features/clients/ui/ClientsPage'))
-const SharedControlPage = lazy(() => import('./features/shared-control/ui/SharedControlPage'))
+
+// The public build never references these modules, so the bundler drops the
+// publishing workspaces instead of shipping unreachable code.
+const TunnelPage: ComponentType | null = __OWNER_EDITION__ ? lazy(() => import('./features/tunnel/ui/TunnelPage')) : null
+const ClientsPage: ComponentType | null = __OWNER_EDITION__ ? lazy(() => import('./features/clients/ui/ClientsPage')) : null
+const SharedControlPage: ComponentType | null = __OWNER_EDITION__
+  ? lazy(() => import('./features/shared-control/ui/SharedControlPage'))
+  : null
 
 export default function App() {
   return (
@@ -46,9 +51,9 @@ function Switchboard() {
         {route === 'settings' ? <SettingsPage /> : null}
         {route === 'statistics' ? <StatisticsPage /> : null}
         {route === 'routes' ? <ModelRoutesPage /> : null}
-        {route === 'tunnel' ? <TunnelPage /> : null}
-        {route === 'clients' ? <ClientsPage /> : null}
-        {route === 'shared' ? <SharedControlPage /> : null}
+        {route === 'tunnel' && TunnelPage ? <TunnelPage /> : null}
+        {route === 'clients' && ClientsPage ? <ClientsPage /> : null}
+        {route === 'shared' && SharedControlPage ? <SharedControlPage /> : null}
       </Suspense>
     </AppShell>
   )

@@ -56,9 +56,9 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         current.providers.connect(),
         current.activity.connect(),
         current.settings.connect(),
-        current.tunnel.connect(),
-        current.clients.connect(),
-        current.shared.connect(),
+        current.tunnel?.connect() ?? Promise.resolve(),
+        current.clients?.connect() ?? Promise.resolve(),
+        current.shared?.connect() ?? Promise.resolve(),
         keys.providerId ? current.apiKeys.load(keys.providerId) : Promise.resolve(),
         routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
         models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
@@ -76,10 +76,10 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.settings.dispose()
       services?.statistics.dispose()
       services?.routes.dispose()
-      services?.tunnel.dispose()
-      services?.clients.dispose()
+      services?.tunnel?.dispose()
+      services?.clients?.dispose()
       services?.models.dispose()
-      services?.shared.dispose()
+      services?.shared?.dispose()
       if (session && !sessionStopped) {
         sessionStopped = true
         void session.stop().catch(() => undefined)
@@ -97,12 +97,17 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           apiKeys: new ApiKeysModel(new StdioApiKeysPort(session)),
           settings: new SettingsModel(new StdioSettingsPort(session)),
           statistics: new StatisticsModel(new StdioStatisticsPort(session)),
-          routes: new RoutesModel(new StdioRoutesPort(session)),
-          tunnel: new TunnelModel(new StdioTunnelPort(session)),
-          clients: new ClientsModel(new StdioClientsPort(session)),
+          routes: new RoutesModel(new StdioRoutesPort(session), { tracksBothTargets: __OWNER_EDITION__ }),
           models: new ModelsModel(new StdioModelsPort(session)),
-          shared: new SharedModel(new StdioSharedPort(session)),
           appVersion: session.appVersion ?? '',
+          // Owner-only models are constructed only where their commands exist.
+          ...(__OWNER_EDITION__
+            ? {
+                tunnel: new TunnelModel(new StdioTunnelPort(session)),
+                clients: new ClientsModel(new StdioClientsPort(session)),
+                shared: new SharedModel(new StdioSharedPort(session)),
+              }
+            : {}),
         }
         if (disposed) { shutdown(); return }
         setState({ phase: 'ready', services })

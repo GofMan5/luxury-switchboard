@@ -19,10 +19,11 @@ export interface AppServices {
   readonly settings: SettingsModel
   readonly statistics: StatisticsModel
   readonly routes: RoutesModel
-  readonly tunnel: TunnelModel
-  readonly clients: ClientsModel
   readonly models: ModelsModel
-  readonly shared: SharedModel
+  /** Publishing workspaces exist only in the owner edition. */
+  readonly tunnel?: TunnelModel
+  readonly clients?: ClientsModel
+  readonly shared?: SharedModel
   /** Version the control plane reported during the handshake. */
   readonly appVersion: string
 }

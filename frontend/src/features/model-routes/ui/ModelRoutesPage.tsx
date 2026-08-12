@@ -4,6 +4,7 @@ import { formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
+import { OWNER_EDITION } from '../../../app/edition'
 import { useModels } from '../../models/ui/useModels'
 import { useProviders } from '../../providers/ui/useProviders'
 import { publishedModels, selectionChanges, type ModelRoute, type RouteTarget } from '../domain/route'
@@ -101,13 +102,15 @@ export default function ModelRoutesPage() {
         <Button variant="primary" onClick={() => { model.clearError(); setEditor('new') }}><Plus size={16} />Add route</Button>
       </header>
 
-      <div className={styles.toolbar}>
-        <div className={styles.targets}>
-          <button type="button" data-active={state.target === 'relay'} onClick={() => void model.load('relay')}>Local Relay</button>
-          <button type="button" data-active={state.target === 'tunnel'} onClick={() => void model.load('tunnel')}>Public Tunnel</button>
+      {OWNER_EDITION ? (
+        <div className={styles.toolbar}>
+          <div className={styles.targets}>
+            <button type="button" data-active={state.target === 'relay'} onClick={() => void model.load('relay')}>Local Relay</button>
+            <button type="button" data-active={state.target === 'tunnel'} onClick={() => void model.load('tunnel')}>Public Tunnel</button>
+          </div>
+          <span>{state.target === 'relay' ? 'Unassigned models use the active provider.' : 'Only enabled aliases in this list appear in /v1/models.'}</span>
         </div>
-        <span>{state.target === 'relay' ? 'Unassigned models use the active provider.' : 'Only enabled aliases in this list appear in /v1/models.'}</span>
-      </div>
+      ) : null}
 
       {(state.error || models.error) ? <div className={styles.error} role="alert">{state.error || models.error}</div> : null}
 
@@ -183,7 +186,7 @@ const ModelCatalogRow = memo(function ModelCatalogRow({ item, selected, routed, 
       <span title={item}>{item}</span>
       <span className={styles.rowMeta}>
         {routed?.relay ? <em className={styles.badge} data-target="relay" title={`Relay: ${routed.relay}`}>Relay</em> : null}
-        {routed?.tunnel ? <em className={styles.badge} data-target="tunnel" title={`Tunnel alias: ${routed.tunnel}`}>{routed.tunnel === item ? 'Tunnel' : `Tunnel · ${routed.tunnel}`}</em> : null}
+        {OWNER_EDITION && routed?.tunnel ? <em className={styles.badge} data-target="tunnel" title={`Tunnel alias: ${routed.tunnel}`}>{routed.tunnel === item ? 'Tunnel' : `Tunnel · ${routed.tunnel}`}</em> : null}
         <ModelResult result={result} />
       </span>
     </label>

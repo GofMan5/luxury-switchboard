@@ -11,6 +11,7 @@ import {
   Settings,
   UsersRound,
 } from 'lucide-react'
+import { OWNER_EDITION } from './edition'
 
 export type AppRoute =
   | 'overview'
@@ -36,9 +37,16 @@ export const navigation: readonly NavigationItem[] = [
   { id: 'providers', label: 'Providers', icon: Database },
   { id: 'keys', label: 'API Keys', icon: KeyRound },
   { id: 'routes', label: 'Model Routes', icon: Route },
-  { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
-  { id: 'clients', label: 'Clients', icon: UsersRound },
+  // Publishing workspaces exist only in the owner edition.
+  ...(OWNER_EDITION
+    ? ([
+        { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
+        { id: 'clients', label: 'Clients', icon: UsersRound },
+      ] as const satisfies readonly NavigationItem[])
+    : []),
   { id: 'statistics', label: 'Statistics', icon: ChartNoAxesCombined },
-  { id: 'shared', label: 'Shared Control', icon: Network },
+  ...(OWNER_EDITION
+    ? ([{ id: 'shared', label: 'Shared Control', icon: Network }] as const satisfies readonly NavigationItem[])
+    : []),
   { id: 'settings', label: 'Settings', icon: Settings },
 ]

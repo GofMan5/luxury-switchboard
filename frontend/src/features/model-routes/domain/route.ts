@@ -1,5 +1,14 @@
 export type RouteTarget = 'relay' | 'tunnel'
-export interface ModelRoute { readonly target: RouteTarget; readonly publicModel: string; readonly upstreamModel: string; readonly providerId: string; readonly contextLimitKiB: number; readonly enabled: boolean }
+export interface ModelRoute {
+  readonly target: RouteTarget
+  readonly publicModel: string
+  readonly upstreamModel: string
+  readonly providerId: string
+  readonly contextLimitKiB: number
+  /** Older profiles and routes without aliases omit the field on the wire. */
+  readonly aliases?: readonly string[]
+  readonly enabled: boolean
+}
 
 /** Models of one provider that the given routes already publish. */
 export function publishedModels(routes: readonly ModelRoute[], providerId: string): readonly string[] {
@@ -22,7 +31,7 @@ export function selectionChanges(routes: readonly ModelRoute[], target: RouteTar
   const routed = new Set(publishedModels(routes, providerId))
   const additions = selected
     .filter((model) => !routed.has(model) && !aliases.has(model))
-    .map((model) => ({ target, publicModel: model, upstreamModel: model, providerId, contextLimitKiB: 0, enabled: true } satisfies ModelRoute))
+    .map((model) => ({ target, publicModel: model, upstreamModel: model, providerId, contextLimitKiB: 0, aliases: [], enabled: true } satisfies ModelRoute))
   const removals = routes
     .filter((route) => route.providerId === providerId && route.publicModel === route.upstreamModel && !selection.has(route.upstreamModel))
     .map((route) => route.publicModel)

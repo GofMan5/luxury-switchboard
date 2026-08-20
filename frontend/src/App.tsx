@@ -10,6 +10,7 @@ const ApiKeysPage = lazy(() => import('./features/api-keys/ui/ApiKeysPage'))
 const SettingsPage = lazy(() => import('./features/settings/ui/SettingsPage'))
 const StatisticsPage = lazy(() => import('./features/statistics/ui/StatisticsPage'))
 const ModelRoutesPage = lazy(() => import('./features/model-routes/ui/ModelRoutesPage'))
+const GuardrailsPage = lazy(() => import('./features/guardrails/ui/GuardrailsPage'))
 
 // The public build never references these modules, so the bundler drops the
 // publishing workspaces instead of shipping unreachable code.
@@ -51,6 +52,7 @@ function Switchboard() {
         {route === 'settings' ? <SettingsPage /> : null}
         {route === 'statistics' ? <StatisticsPage /> : null}
         {route === 'routes' ? <ModelRoutesPage /> : null}
+        {route === 'guardrails' ? <GuardrailsPage /> : null}
         {route === 'tunnel' && TunnelPage ? <TunnelPage /> : null}
         {route === 'clients' && ClientsPage ? <ClientsPage /> : null}
         {route === 'shared' && SharedControlPage ? <SharedControlPage /> : null}

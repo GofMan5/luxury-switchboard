@@ -11,6 +11,12 @@ import (
 
 type AuthMode string
 type Dialect string
+type APIFormat string
+
+// RateUnit is the period the provider's request limit is counted over. Most
+// providers publish a per-minute quota, but some cap bursts per second, and a
+// per-minute window would let a request storm through the first second.
+type RateUnit string
 
 const (
 	MaxRPM = 1_000_000
@@ -24,6 +30,13 @@ const (
 	DialectAuto      Dialect = "auto"
 	DialectOpenAI    Dialect = "openai"
 	DialectAnthropic Dialect = "anthropic"
+
+	FormatAuto      APIFormat = "auto"
+	FormatResponses APIFormat = "responses"
+	FormatChat      APIFormat = "chat"
+
+	RatePerMinute RateUnit = "minute"
+	RatePerSecond RateUnit = "second"
 )
 
 type Provider struct {
@@ -34,8 +47,11 @@ type Provider struct {
 	AuthHeader  string
 	Dialect     Dialect
 	ModelsPath  string
+	Format      APIFormat
+	ChatPath    string
 	ImageCompat bool
 	RPM         int
+	RateUnit    RateUnit
 	CacheTTL    time.Duration
 	Enabled     bool
 	Builtin     bool
@@ -49,8 +65,11 @@ type Params struct {
 	AuthHeader  string
 	Dialect     Dialect
 	ModelsPath  string
+	Format      APIFormat
+	ChatPath    string
 	ImageCompat bool
 	RPM         int
+	RateUnit    RateUnit
 	CacheTTL    time.Duration
 	Enabled     bool
 	Builtin     bool
@@ -98,12 +117,30 @@ func New(params Params) (Provider, error) {
 	if !strings.HasPrefix(params.ModelsPath, "/") || strings.ContainsAny(params.ModelsPath, "?#\r\n") || len(params.ModelsPath) > 160 {
 		return Provider{}, errors.New("invalid provider models path")
 	}
+	if params.Format == "" {
+		params.Format = FormatAuto
+	}
+	if params.Format != FormatAuto && params.Format != FormatResponses && params.Format != FormatChat {
+		return Provider{}, errors.New("unsupported provider request format")
+	}
+	if params.ChatPath == "" {
+		params.ChatPath = "/v1/chat/completions"
+	}
+	if !strings.HasPrefix(params.ChatPath, "/") || strings.ContainsAny(params.ChatPath, "?#\r\n") || len(params.ChatPath) > 160 {
+		return Provider{}, errors.New("invalid provider chat completions path")
+	}
 	params.AuthHeader = strings.TrimSpace(params.AuthHeader)
 	if params.AuthMode == AuthCustom && !validAuthHeader(params.AuthHeader) {
 		return Provider{}, errors.New("invalid custom auth header")
 	}
 	if params.RPM < 0 || params.RPM > MaxRPM {
 		return Provider{}, errors.New("provider RPM is out of range")
+	}
+	if params.RateUnit == "" {
+		params.RateUnit = RatePerMinute
+	}
+	if params.RateUnit != RatePerMinute && params.RateUnit != RatePerSecond {
+		return Provider{}, errors.New("unsupported provider rate unit")
 	}
 	if params.CacheTTL != 0 && params.CacheTTL != time.Hour {
 		return Provider{}, errors.New("provider cache TTL is unsupported")
@@ -116,12 +153,25 @@ func New(params Params) (Provider, error) {
 		AuthHeader:  params.AuthHeader,
 		Dialect:     params.Dialect,
 		ModelsPath:  params.ModelsPath,
+		Format:      params.Format,
+		ChatPath:    params.ChatPath,
 		ImageCompat: params.ImageCompat,
 		RPM:         params.RPM,
+		RateUnit:    params.RateUnit,
 		CacheTTL:    params.CacheTTL,
 		Enabled:     params.Enabled,
 		Builtin:     params.Builtin,
 	}, nil
+}
+
+// RateWindow returns the period the provider's request limit is counted over.
+// Providers persisted before the unit existed carry an empty value and keep the
+// per-minute behaviour they were configured with.
+func (provider Provider) RateWindow() time.Duration {
+	if provider.RateUnit == RatePerSecond {
+		return time.Second
+	}
+	return time.Minute
 }
 
 func sensitiveQuery(value *url.URL) bool {
@@ -155,8 +205,11 @@ type PublicProvider struct {
 	AuthHeader    string `json:"authHeader,omitempty"`
 	Dialect       string `json:"dialect"`
 	ModelsPath    string `json:"modelsPath"`
+	Format        string `json:"format"`
+	ChatPath      string `json:"chatPath"`
 	ImageCompat   bool   `json:"imageCompat"`
 	RPM           int    `json:"rpm"`
+	RateUnit      string `json:"rateUnit"`
 	CacheTTL      string `json:"cacheTtl"`
 	Enabled       bool   `json:"enabled"`
 	KeyConfigured bool   `json:"keyConfigured"`
@@ -173,8 +226,11 @@ func (provider Provider) Public() PublicProvider {
 		AuthHeader:  provider.AuthHeader,
 		Dialect:     string(provider.Dialect),
 		ModelsPath:  provider.ModelsPath,
+		Format:      string(provider.Format),
+		ChatPath:    provider.ChatPath,
 		ImageCompat: provider.ImageCompat,
 		RPM:         provider.RPM,
+		RateUnit:    string(provider.RateUnit),
 		CacheTTL:    provider.CacheTTL.String(),
 		Enabled:     provider.Enabled,
 		Builtin:     provider.Builtin,

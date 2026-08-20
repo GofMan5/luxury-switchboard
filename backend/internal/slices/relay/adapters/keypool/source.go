@@ -25,6 +25,12 @@ func (source *Source) Acquire(ctx context.Context, providerID, model string, wai
 	return &leaseAdapter{lease: lease}, waited, nil
 }
 
+// Count reports how many keys the provider has so the relay can bound how often
+// a single request rotates through the pool.
+func (source *Source) Count(providerID string) int {
+	return source.scheduler.Count(providerID)
+}
+
 type leaseAdapter struct {
 	lease *keyapp.Lease
 }

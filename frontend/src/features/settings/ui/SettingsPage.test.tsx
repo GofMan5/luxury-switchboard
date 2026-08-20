@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Settings } from '../domain/settings'
 import { SettingsForm } from './SettingsPage'
+
+// Auto-cleanup needs vitest globals, which this project does not enable, so each
+// render is torn down explicitly. Without it a later query matches two forms.
+afterEach(cleanup)
 
 const initial: Settings = {
   listenerPort: 8798,
@@ -17,9 +21,30 @@ const initial: Settings = {
   activityCapacity: 2_000,
   historyRetentionDays: 30,
   tunnelRetentionHours: 72,
+  guardrailMode: 'monitor',
+  guardrailFindings: 500,
 }
 
 describe('SettingsForm', () => {
+  it('carries the guardrail mode through a save it does not edit', async () => {
+    // The control plane replaces the whole record, so a field this form never shows
+    // must still be sent back exactly as it arrived.
+    const onSave = vi.fn(async () => true)
+    render(
+      <SettingsForm
+        initial={{ ...initial, guardrailMode: 'block' }}
+        pending={false}
+        restartRequired={false}
+        error=""
+        onSave={onSave}
+        onRestart={vi.fn(async () => undefined)}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText(/Listener port/u), { target: { value: '8898' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ listenerPort: 8898, guardrailMode: 'block' }))
+  })
+
   it('keeps sequential numeric edits and enables save', () => {
     render(
       <SettingsForm

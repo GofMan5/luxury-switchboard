@@ -34,7 +34,10 @@ type Scheduler struct {
 }
 
 type providerState struct {
-	rpm    int
+	rpm int
+	// window is the period the provider and its keys count requests over: a
+	// minute for the usual quota, a second for providers that cap bursts.
+	window time.Duration
 	starts []time.Time
 	keys   []*keyState
 }
@@ -74,9 +77,14 @@ func NewScheduler(maxQueued int) *Scheduler {
 	}
 }
 
-func (scheduler *Scheduler) Configure(providerID string, rpm int, keys []domain.Key) error {
-	if providerID == "" || rpm < 0 {
+// Configure replaces a provider's rate settings and key set. window is the
+// period the limit is counted over; a zero value keeps the per-minute default.
+func (scheduler *Scheduler) Configure(providerID string, rpm int, window time.Duration, keys []domain.Key) error {
+	if providerID == "" || rpm < 0 || window < 0 {
 		return errors.New("invalid provider rate settings")
+	}
+	if window == 0 {
+		window = rateWindow
 	}
 	states := make([]*keyState, 0, len(keys))
 	seen := make(map[string]struct{}, len(keys))
@@ -107,7 +115,7 @@ func (scheduler *Scheduler) Configure(providerID string, rpm int, keys []domain.
 			}
 		}
 	}
-	provider := &providerState{rpm: rpm, keys: states}
+	provider := &providerState{rpm: rpm, window: window, keys: states}
 	if previous != nil {
 		provider.starts = slices.Clone(previous.starts)
 	}
@@ -317,9 +325,9 @@ func rateAvailable(starts []time.Time, rpm int) bool {
 }
 
 func (scheduler *Scheduler) pruneLocked(provider *providerState, now time.Time) {
-	provider.starts = pruneStarts(provider.starts, now)
+	provider.starts = pruneStarts(provider.starts, now, provider.window)
 	for _, key := range provider.keys {
-		key.starts = pruneStarts(key.starts, now)
+		key.starts = pruneStarts(key.starts, now, provider.window)
 		for model, until := range key.blockedModels {
 			if !now.Before(until) {
 				delete(key.blockedModels, model)
@@ -328,8 +336,11 @@ func (scheduler *Scheduler) pruneLocked(provider *providerState, now time.Time) 
 	}
 }
 
-func pruneStarts(starts []time.Time, now time.Time) []time.Time {
-	cutoff := now.Add(-rateWindow)
+func pruneStarts(starts []time.Time, now time.Time, window time.Duration) []time.Time {
+	if window <= 0 {
+		window = rateWindow
+	}
+	cutoff := now.Add(-window)
 	index := 0
 	for index < len(starts) && !starts[index].After(cutoff) {
 		index++
@@ -340,12 +351,16 @@ func pruneStarts(starts []time.Time, now time.Time) []time.Time {
 func (scheduler *Scheduler) nextWakeLocked(now time.Time) time.Duration {
 	next := now.Add(time.Minute)
 	for _, provider := range scheduler.providers {
+		window := provider.window
+		if window <= 0 {
+			window = rateWindow
+		}
 		if provider.rpm > 0 && len(provider.starts) >= provider.rpm {
-			next = minTime(next, provider.starts[0].Add(rateWindow))
+			next = minTime(next, provider.starts[0].Add(window))
 		}
 		for _, key := range provider.keys {
 			if key.key.RPM > 0 && len(key.starts) >= key.key.RPM {
-				next = minTime(next, key.starts[0].Add(rateWindow))
+				next = minTime(next, key.starts[0].Add(window))
 			}
 			for _, until := range []time.Time{key.cooldownUntil, key.balanceUntil} {
 				if now.Before(until) {

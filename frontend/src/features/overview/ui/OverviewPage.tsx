@@ -90,7 +90,7 @@ export default function OverviewPage() {
                   <StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />
                   <div>
                     <strong>{provider.name}</strong>
-                    <span>{provider.rpm === 0 ? 'Unlimited' : `${provider.rpm} RPM`} · {provider.authMode === 'passthrough' ? 'Passthrough' : provider.keyCount > 0 ? 'Key configured' : 'No key'}</span>
+                    <span>{provider.rpm === 0 ? 'Unlimited' : `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`} · {provider.authMode === 'passthrough' ? 'Passthrough' : provider.keyCount > 0 ? 'Key configured' : 'No key'}</span>
                   </div>
                   <span className={active ? styles.active : styles.standby}>{active ? 'Active' : 'Standby'}</span>
                 </div>

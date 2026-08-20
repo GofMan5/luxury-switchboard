@@ -24,9 +24,17 @@ import (
 // a documented function_call carrying {"input":"..."} arguments, which the client
 // rejects because it declared a freeform tool.
 //
-// The relay therefore normalizes every request into the documented shape and
+// The relay therefore folds every declaration into the documented tools array and
 // converts provider answers back into the shape the client declared. Requests
 // that already use the documented schema are forwarded byte for byte.
+//
+// A freeform tool itself is forwarded exactly as declared. Its "format" is the
+// grammar the payload has to follow, so rewriting the tool into a documented
+// function taking a string throws that contract away: the model then answers
+// `apply_patch` with an empty argument string and `exec` with a JSON object
+// instead of the patch or the script, every call fails, and the assistant falls
+// back to narrating its intentions. Providers that refuse the freeform type are
+// served by downgradeFreeformTools once they say so.
 const (
 	maxToolNamespaceDepth = 8
 	maxToolDefinitions    = 512
@@ -60,10 +68,11 @@ func normalizeResponsesTools(method, path, contentType string, body []byte) ([]b
 	if decoder.Decode(&payload) != nil {
 		return body, toolCompat{}
 	}
-	input, ok := payload["input"].([]any)
-	if !ok {
-		return body, toolCompat{}
-	}
+	// A body may carry input as a bare string. Its tools still have to be read: the
+	// compat map is what turns the provider's function_call back into the freeform
+	// call the client declared, and without it the client is handed a call shape it
+	// has no tool for. Only the input rewriting is skipped.
+	input, inputIsList := payload["input"].([]any)
 	existing, ok := payload["tools"].([]any)
 	if payload["tools"] != nil && !ok {
 		return body, toolCompat{}
@@ -94,7 +103,9 @@ func normalizeResponsesTools(method, path, contentType string, body []byte) ([]b
 	if !changed && compat.empty() {
 		return body, toolCompat{}
 	}
-	payload["input"] = kept
+	if inputIsList {
+		payload["input"] = kept
+	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
 	}
@@ -181,42 +192,51 @@ func providerToolDefinitions(existing []any, declared []declaredTool) ([]any, to
 	return tools, compat
 }
 
-// providerToolDefinition renames a tool definition and expresses freeform tools
-// as a documented function taking a single "input" string, which is exactly how
-// providers report their calls back.
+// providerToolDefinition renames a tool definition. A freeform tool is recorded
+// so provider answers can be matched back to it, but its own definition travels
+// untouched: "format" is the grammar its payload must follow.
 func providerToolDefinition(definition map[string]any, name string, compat toolCompat) map[string]any {
-	freeform := definition["type"] == "custom"
-	if !freeform && name == definitionName(definition) {
+	if definition["type"] == "custom" {
+		compat.freeform[name] = struct{}{}
+	}
+	if name == definitionName(definition) {
 		return definition
 	}
+	clone := make(map[string]any, len(definition))
+	for key, value := range definition {
+		clone[key] = value
+	}
+	clone["name"] = name
+	return clone
+}
+
+// documentedFreeformTool expresses a freeform tool as a documented function
+// taking a single "input" string, which is exactly how providers that do not
+// implement freeform tools report their calls back.
+func documentedFreeformTool(definition map[string]any) map[string]any {
 	clone := make(map[string]any, len(definition)+1)
 	for key, value := range definition {
-		if freeform && (key == "format" || key == "parameters") {
+		if key == "format" || key == "parameters" {
 			continue
 		}
 		clone[key] = value
 	}
-	clone["name"] = name
-	if freeform {
-		compat.freeform[name] = struct{}{}
-		clone["type"] = "function"
-		clone["strict"] = false
-		clone["parameters"] = map[string]any{
-			"type":                 "object",
-			"properties":           map[string]any{"input": map[string]any{"type": "string"}},
-			"required":             []any{"input"},
-			"additionalProperties": false,
-		}
+	clone["type"] = "function"
+	clone["strict"] = false
+	clone["parameters"] = map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"input": map[string]any{"type": "string"}},
+		"required":             []any{"input"},
+		"additionalProperties": false,
 	}
 	return clone
 }
 
-// normalizeInputItems rewrites replayed conversation history into the documented
-// shape: earlier calls match the tool definitions the provider now sees, freeform
-// calls become documented function calls, and every call carries exactly one
-// string output. Clients may report an extra output for the same call (a
-// background notification) or content-part arrays, which documented providers
-// reject outright.
+// normalizeInputItems rewrites replayed conversation history so it matches the
+// tool definitions the provider now sees: earlier calls carry the same names, and
+// every call carries exactly one string output. Clients may report an extra output
+// for the same call (a background notification) or content-part arrays, which
+// documented providers reject outright.
 func normalizeInputItems(input []any, compat toolCompat, serverHistory bool) ([]any, bool) {
 	changed := false
 	calls := make(map[string]struct{}, len(input)/2+1)
@@ -231,18 +251,15 @@ func normalizeInputItems(input []any, compat toolCompat, serverHistory bool) ([]
 		callID, _ := item["call_id"].(string)
 		switch kind, _ := item["type"].(string); kind {
 		case "function_call", "custom_tool_call":
-			if normalizeToolCallItem(item, kind, compat) {
+			name, _ := item["name"].(string)
+			if provider, aliased := compat.toProvider[name]; aliased {
+				item["name"] = provider
 				changed = true
 			}
 			if callID != "" {
 				calls[callID] = struct{}{}
 			}
 		case "function_call_output", "custom_tool_call_output":
-			if kind == "custom_tool_call_output" {
-				item["type"] = "function_call_output"
-				delete(item, "name")
-				changed = true
-			}
 			if text, converted := toolOutputText(item["output"]); converted {
 				item["output"] = text
 				changed = true
@@ -264,31 +281,6 @@ func normalizeInputItems(input []any, compat toolCompat, serverHistory bool) ([]
 		kept = append(kept, entry)
 	}
 	return kept, changed
-}
-
-func normalizeToolCallItem(item map[string]any, kind string, compat toolCompat) bool {
-	changed := false
-	name, _ := item["name"].(string)
-	if provider, aliased := compat.toProvider[name]; aliased {
-		item["name"] = provider
-		name = provider
-		changed = true
-	}
-	if _, freeform := compat.freeform[name]; !freeform && kind != "custom_tool_call" {
-		return changed
-	}
-	text, _ := item["input"].(string)
-	if arguments, ok := item["arguments"].(string); kind == "function_call" && ok {
-		text = arguments
-	}
-	encoded, err := json.Marshal(map[string]any{"input": text})
-	if err != nil {
-		return changed
-	}
-	item["type"] = "function_call"
-	item["arguments"] = string(encoded)
-	delete(item, "input")
-	return true
 }
 
 // toolOutputText flattens the content-part arrays some clients send into the
@@ -336,6 +328,125 @@ func appendToolOutput(target, extra map[string]any) {
 		return
 	}
 	target["output"] = previous + "\n" + text
+}
+
+// downgradeFreeformTools answers a provider that rejected the freeform tool type
+// by re-expressing every freeform tool as a documented function, and by rewriting
+// the replayed freeform history to match. It is only reached after such a refusal,
+// so a provider that implements freeform tools never loses their grammar.
+func downgradeFreeformTools(body []byte) ([]byte, bool) {
+	if len(body) == 0 {
+		return body, false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
+		return body, false
+	}
+	tools, _ := payload["tools"].([]any)
+	freeform := make(map[string]struct{}, len(tools))
+	for index, entry := range tools {
+		definition, _ := entry.(map[string]any)
+		if definition == nil || definition["type"] != "custom" {
+			continue
+		}
+		if name := definitionName(definition); name != "" {
+			freeform[name] = struct{}{}
+		}
+		tools[index] = documentedFreeformTool(definition)
+	}
+	if len(freeform) == 0 {
+		return body, false
+	}
+	input, _ := payload["input"].([]any)
+	for _, entry := range input {
+		item, _ := entry.(map[string]any)
+		if item == nil {
+			continue
+		}
+		switch item["type"] {
+		case "custom_tool_call":
+			name, _ := item["name"].(string)
+			if _, declared := freeform[name]; !declared {
+				continue
+			}
+			text, _ := item["input"].(string)
+			encoded, err := json.Marshal(map[string]any{"input": text})
+			if err != nil {
+				continue
+			}
+			item["type"] = "function_call"
+			item["arguments"] = string(encoded)
+			delete(item, "input")
+		case "custom_tool_call_output":
+			item["type"] = "function_call_output"
+			delete(item, "name")
+		}
+	}
+	downgraded, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return downgraded, true
+}
+
+// stripEncryptedReasoning removes the reasoning history a Responses client
+// replays, together with the include entry that asks for it.
+//
+// Encrypted reasoning is sealed for the account that produced it. The relay
+// rotates keys per attempt and providers pool accounts of their own, so the very
+// next turn is usually presented to a different account, which cannot open the
+// blob and refuses the whole request. The first turn of a conversation carries no
+// reasoning and always succeeds; every follow-up dies, which is why an agent
+// appears to run one tool and then start narrating instead of acting.
+//
+// Dropping it costs the model its private chain of thought from earlier turns; the
+// summaries, the tool calls and their outputs all survive, so the turn continues.
+// That is strictly better than a turn that never happens.
+func stripEncryptedReasoning(body []byte) ([]byte, bool) {
+	if !bytes.Contains(body, []byte("encrypted_content")) {
+		return body, false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
+		return body, false
+	}
+	input, ok := payload["input"].([]any)
+	if !ok {
+		return body, false
+	}
+	kept := make([]any, 0, len(input))
+	for _, entry := range input {
+		item, _ := entry.(map[string]any)
+		if item != nil && item["type"] == "reasoning" {
+			if _, sealed := item["encrypted_content"]; sealed {
+				continue
+			}
+		}
+		kept = append(kept, entry)
+	}
+	if len(kept) == len(input) {
+		return body, false
+	}
+	payload["input"] = kept
+	if include, listed := payload["include"].([]any); listed {
+		remaining := make([]any, 0, len(include))
+		for _, entry := range include {
+			if name, _ := entry.(string); name == "reasoning.encrypted_content" {
+				continue
+			}
+			remaining = append(remaining, entry)
+		}
+		payload["include"] = remaining
+	}
+	stripped, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return stripped, true
 }
 
 func definitionName(entry any) string {

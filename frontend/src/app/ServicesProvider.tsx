@@ -11,6 +11,8 @@ import { StdioSettingsPort } from '../features/settings/adapters/stdio-settings-
 import { SettingsModel } from '../features/settings/application/settings-model'
 import { StdioStatisticsPort } from '../features/statistics/adapters/stdio-statistics-port'
 import { StatisticsModel } from '../features/statistics/application/statistics-model'
+import { StdioGuardrailsPort } from '../features/guardrails/adapters/stdio-guardrails-port'
+import { GuardrailsModel } from '../features/guardrails/application/guardrails-model'
 import { StdioRoutesPort } from '../features/model-routes/adapters/stdio-routes-port'
 import { RoutesModel } from '../features/model-routes/application/routes-model'
 import { StdioTunnelPort } from '../features/tunnel/adapters/stdio-tunnel-port'
@@ -56,6 +58,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         current.providers.connect(),
         current.activity.connect(),
         current.settings.connect(),
+        current.guardrails.connect(),
         current.tunnel?.connect() ?? Promise.resolve(),
         current.clients?.connect() ?? Promise.resolve(),
         current.shared?.connect() ?? Promise.resolve(),
@@ -74,6 +77,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.activity.dispose()
       services?.apiKeys.dispose()
       services?.settings.dispose()
+      services?.guardrails.dispose()
       services?.statistics.dispose()
       services?.routes.dispose()
       services?.tunnel?.dispose()
@@ -99,6 +103,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           statistics: new StatisticsModel(new StdioStatisticsPort(session)),
           routes: new RoutesModel(new StdioRoutesPort(session), { tracksBothTargets: __OWNER_EDITION__ }),
           models: new ModelsModel(new StdioModelsPort(session)),
+          guardrails: new GuardrailsModel(new StdioGuardrailsPort(session)),
           appVersion: session.appVersion ?? '',
           // Owner-only models are constructed only where their commands exist.
           ...(__OWNER_EDITION__
@@ -129,10 +134,10 @@ export function ServicesProvider({ children }: PropsWithChildren) {
   }, [attempt])
 
   if (state.phase === 'connecting') {
-    return <BootstrapView title="Starting Switchboard" detail="Connecting the local relay…" />
+    return <BootstrapView title="Starting Luxury Switchboard" detail="Connecting the local relay…" />
   }
   if (state.phase === 'error') {
-    return <BootstrapView title="Switchboard could not start" detail="The local control plane is unavailable." error onRetry={() => { setState({ phase: 'connecting', services: null }); setAttempt((value) => value + 1) }} />
+    return <BootstrapView title="Luxury Switchboard could not start" detail="The local control plane is unavailable." error onRetry={() => { setState({ phase: 'connecting', services: null }); setAttempt((value) => value + 1) }} />
   }
   return <ServicesContext value={state.services}>{children}</ServicesContext>
 }

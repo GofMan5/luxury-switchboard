@@ -37,3 +37,10 @@ type CredentialLease interface {
 type CredentialSource interface {
 	Acquire(context.Context, string, string, func()) (CredentialLease, time.Duration, error)
 }
+
+// CredentialCounter is the optional half of a CredentialSource that knows how
+// many keys a provider holds. The relay uses it to stop rotating once every key
+// has rejected the request the same way.
+type CredentialCounter interface {
+	Count(providerID string) int
+}

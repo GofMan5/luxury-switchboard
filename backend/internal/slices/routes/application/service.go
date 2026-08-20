@@ -60,6 +60,11 @@ func (service *Service) Load(ctx context.Context) error {
 		}
 		seen[key] = struct{}{}
 	}
+	if aliasesCollide(assignments) {
+		err := errors.New("saved routes are invalid")
+		service.setLoadError(err)
+		return err
+	}
 	service.mu.Lock()
 	service.assignments = slices.Clone(assignments)
 	service.loadErr = nil
@@ -96,7 +101,10 @@ func (service *Service) Resolve(target domain.Target, model string) (domain.Assi
 		return domain.Assignment{}, false
 	}
 	for _, assignment := range service.assignments {
-		if assignment.Target == target && assignment.Enabled && assignment.PublicModel == model {
+		if assignment.Target != target || !assignment.Enabled {
+			continue
+		}
+		if assignment.PublicModel == model || slices.Contains(assignment.Aliases, model) {
 			return assignment, true
 		}
 	}
@@ -142,6 +150,9 @@ func (service *Service) Upsert(ctx context.Context, assignment domain.Assignment
 	} else {
 		candidate[index] = assignment
 	}
+	if aliasesCollide(candidate) {
+		return errors.New("route alias collides with another route")
+	}
 	return service.persist(ctx, candidate, assignment.Target)
 }
 
@@ -184,6 +195,9 @@ func (service *Service) UpsertMany(ctx context.Context, assignments []domain.Ass
 			candidate[index] = assignment
 		}
 	}
+	if aliasesCollide(candidate) {
+		return errors.New("route alias collides with another route")
+	}
 	return service.persist(ctx, candidate, target)
 }
 
@@ -209,6 +223,26 @@ func (service *Service) Delete(ctx context.Context, target domain.Target, public
 
 func assignmentKey(assignment domain.Assignment) string {
 	return string(assignment.Target) + "\x00" + assignment.PublicModel
+}
+
+// aliasesCollide reports whether any public model or alias name is claimed by
+// more than one route on the same target. Ambiguous routing must fail loudly,
+// while the same name on relay and tunnel stays independent.
+func aliasesCollide(assignments []domain.Assignment) bool {
+	owners := make(map[string]string, len(assignments)*2)
+	for _, assignment := range assignments {
+		names := make([]string, 0, 1+len(assignment.Aliases))
+		names = append(names, assignment.PublicModel)
+		names = append(names, assignment.Aliases...)
+		for _, name := range names {
+			key := string(assignment.Target) + "\x00" + name
+			if owner, exists := owners[key]; exists && owner != assignment.PublicModel {
+				return true
+			}
+			owners[key] = assignment.PublicModel
+		}
+	}
+	return false
 }
 
 func (service *Service) OnChanged(listener func(domain.Target)) {

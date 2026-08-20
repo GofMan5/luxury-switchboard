@@ -53,13 +53,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Check source
         run: |
+          pnpm version:check
           pnpm --dir frontend lint
           pnpm --dir frontend test
           go -C backend test ./...
+          # The public build tag is where the edition contract test asserts the
+          # refusals. Without this run CI only ever exercises the owner branch, so
+          # a command that leaked into the public binary would ship unnoticed.
+          go -C backend test -tags public ./...
           go -C backend vet ./...
           go -C backend mod verify
           cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: pnpm build
+      # Both edition folders travel, so the upload root is artifacts/ and the
+      # download below restores release/ and release-public/ as they were built.
+      # Uploading only artifacts/release would silently drop the public
+      # installer, and the collect job writes checksums for both editions.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -67,6 +76,9 @@ jobs:
             artifacts/release/*.exe
             artifacts/release/*.AppImage
             artifacts/release/*.deb
+            artifacts/release-public/*.exe
+            artifacts/release-public/*.AppImage
+            artifacts/release-public/*.deb
           if-no-files-found: error
           retention-days: 14
 
@@ -82,12 +94,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: switchboard-*
-          path: artifacts/release
+          path: artifacts
           merge-multiple: true
       - run: node scripts/build-release.mjs --checksums-only
       - uses: actions/upload-artifact@v4
         with:
-          name: Switchboard-Windows-Linux
-          path: artifacts/release/
+          name: Luxury-Switchboard-Windows-Linux
+          path: artifacts/
           if-no-files-found: error
           retention-days: 30

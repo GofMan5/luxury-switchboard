@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
 )
@@ -19,7 +20,9 @@ var (
 )
 
 type KeyPool interface {
-	EnsureProvider(string, int) error
+	// EnsureProvider registers the provider's request budget: the limit and the
+	// window it is counted over.
+	EnsureProvider(providerID string, rpm int, window time.Duration) error
 	RemoveProvider(string) error
 }
 
@@ -60,7 +63,7 @@ func (manager *Manager) Load(ctx context.Context) error {
 		return err
 	}
 	for _, provider := range state.Providers {
-		if err := manager.keys.EnsureProvider(provider.ID, provider.RPM); err != nil {
+		if err := manager.keys.EnsureProvider(provider.ID, provider.RPM, provider.RateWindow()); err != nil {
 			return err
 		}
 	}
@@ -85,7 +88,7 @@ func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.P
 		return domain.Provider{}, err
 	}
 	providers := append(manager.catalog.List(), provider)
-	if err := manager.keys.EnsureProvider(provider.ID, provider.RPM); err != nil {
+	if err := manager.keys.EnsureProvider(provider.ID, provider.RPM, provider.RateWindow()); err != nil {
 		return domain.Provider{}, err
 	}
 	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
@@ -121,11 +124,11 @@ func (manager *Manager) Update(ctx context.Context, id string, params domain.Par
 		return domain.Provider{}, ErrActiveProvider
 	}
 	providers[index] = updated
-	if err := manager.keys.EnsureProvider(id, updated.RPM); err != nil {
+	if err := manager.keys.EnsureProvider(id, updated.RPM, updated.RateWindow()); err != nil {
 		return domain.Provider{}, err
 	}
 	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
-		_ = manager.keys.EnsureProvider(id, current.RPM)
+		_ = manager.keys.EnsureProvider(id, current.RPM, current.RateWindow())
 		return domain.Provider{}, errors.New("provider settings could not be saved")
 	}
 	if err := manager.catalog.Replace(providers, active.ID); err != nil {
@@ -165,7 +168,7 @@ func (manager *Manager) Delete(ctx context.Context, id string) error {
 	}
 	providers = append(providers[:index], providers[index+1:]...)
 	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
-		_ = manager.keys.EnsureProvider(id, removed.RPM)
+		_ = manager.keys.EnsureProvider(id, removed.RPM, removed.RateWindow())
 		return errors.New("provider settings could not be saved")
 	}
 	return manager.catalog.Replace(providers, active.ID)

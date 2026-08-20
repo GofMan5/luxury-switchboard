@@ -15,6 +15,8 @@ type Route struct {
 	Dialect       string
 	ImageCompat   bool
 	UpstreamModel string
+	Format        string
+	ChatPath      string
 	CacheTTL      time.Duration
 }
 

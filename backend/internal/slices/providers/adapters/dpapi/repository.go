@@ -32,8 +32,11 @@ type storedProvider struct {
 	AuthHeader      string `json:"authHeader,omitempty"`
 	Dialect         string `json:"dialect"`
 	ModelsPath      string `json:"modelsPath"`
+	Format          string `json:"format,omitempty"`
+	ChatPath        string `json:"chatPath,omitempty"`
 	ImageCompat     *bool  `json:"imageCompat,omitempty"`
 	RPM             int    `json:"rpm"`
+	RateUnit        string `json:"rateUnit,omitempty"`
 	CacheTTLSeconds int64  `json:"cacheTtlSeconds"`
 	Enabled         bool   `json:"enabled"`
 	Builtin         bool   `json:"builtin"`
@@ -74,7 +77,9 @@ func (repository *Repository) Load(ctx context.Context) (application.SavedState,
 			ID: saved.ID, Name: saved.Name, BaseURL: saved.BaseURL,
 			AuthMode: domain.AuthMode(saved.AuthMode), AuthHeader: saved.AuthHeader,
 			Dialect: domain.Dialect(saved.Dialect), ModelsPath: saved.ModelsPath, ImageCompat: imageCompat,
+			Format: domain.APIFormat(saved.Format), ChatPath: saved.ChatPath,
 			RPM:      saved.RPM,
+			RateUnit: domain.RateUnit(saved.RateUnit),
 			CacheTTL: time.Duration(saved.CacheTTLSeconds) * time.Second,
 			Enabled:  saved.Enabled, Builtin: saved.Builtin,
 		})
@@ -96,9 +101,13 @@ func (repository *Repository) Save(ctx context.Context, state application.SavedS
 		value.Providers = append(value.Providers, storedProvider{
 			ID: provider.ID, Name: provider.Name, BaseURL: provider.BaseURL.String(),
 			AuthMode: string(provider.AuthMode), RPM: provider.RPM,
-			AuthHeader: provider.AuthHeader, Dialect: string(provider.Dialect),
+			AuthHeader:      provider.AuthHeader,
+			Dialect:         string(provider.Dialect),
 			ModelsPath:      provider.ModelsPath,
+			Format:          string(provider.Format),
+			ChatPath:        provider.ChatPath,
 			ImageCompat:     &imageCompat,
+			RateUnit:        string(provider.RateUnit),
 			CacheTTLSeconds: int64(provider.CacheTTL / time.Second),
 			Enabled:         provider.Enabled, Builtin: provider.Builtin,
 		})

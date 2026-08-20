@@ -8,5 +8,3 @@
  * module it references.
  */
 export const OWNER_EDITION: boolean = __OWNER_EDITION__
-
-export const EDITION: 'owner' | 'public' = OWNER_EDITION ? 'owner' : 'public'

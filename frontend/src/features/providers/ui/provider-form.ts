@@ -15,7 +15,10 @@ export function providerInputError(value: ProviderInput): string {
   const name = value.name.trim()
   if (!name || [...name].length > 80) return 'Use a provider name up to 80 characters.'
   if (!Number.isInteger(value.rpm) || value.rpm < 0 || value.rpm > 1_000_000) return 'Provider RPM must be an integer from 0 to 1,000,000.'
+  if (value.rateUnit !== 'minute' && value.rateUnit !== 'second') return 'Choose whether the request limit is counted per minute or per second.'
   if (!value.modelsPath.startsWith('/') || /[?#\r\n]/u.test(value.modelsPath) || value.modelsPath.length > 160) return 'Models path must start with / and must not contain a query or fragment.'
+  if (value.format !== 'auto' && value.format !== 'responses' && value.format !== 'chat') return 'Choose a supported request format.'
+  if (value.format === 'chat' && (!value.chatPath.trim().startsWith('/') || /[?#\r\n]/u.test(value.chatPath) || value.chatPath.length > 160)) return 'Chat completions path must start with / and must not contain a query or fragment.'
   if (value.authMode === 'custom') {
     const header = value.authHeader.trim()
     if (!authHeaderPattern.test(header) || forbiddenAuthHeaders.has(header.toLowerCase())) return 'Enter a safe custom authentication header name.'

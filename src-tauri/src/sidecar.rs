@@ -196,6 +196,11 @@ fn valid_request_id(value: &str) -> bool {
 }
 
 fn allowed_method(method: &str) -> bool {
+    // One list for both editions, on purpose. The shell only decides which frames
+    // are well formed enough to forward; whether a command exists is the sidecar's
+    // answer, and the public sidecar is compiled without those handlers, so an
+    // owner method reaches it and comes back `method_not_found`. Splitting this
+    // list per edition would buy a different error string, not a boundary.
     matches!(
         method,
         "system.handshake"
@@ -221,6 +226,9 @@ fn allowed_method(method: &str) -> bool {
             | "history.stats"
             | "settings.get"
             | "settings.update"
+            | "guardrails.status"
+            | "guardrails.findings"
+            | "guardrails.clear"
             | "routes.list"
             | "routes.upsert"
             | "routes.upsertMany"

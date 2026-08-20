@@ -15,6 +15,11 @@ import (
 	activitysqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/sqlite"
 	activitystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/stdio"
 	activityapp "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
+	guardrailrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/relay"
+	guardrailruleset "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/ruleset"
+	guardrailstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/stdio"
+	guardrailapp "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/application"
+	guardraildomain "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/domain"
 	keydpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/dpapi"
 	keystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/stdio"
 	keyapp "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/application"
@@ -41,6 +46,7 @@ import (
 	settingsdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/adapters/dpapi"
 	settingsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/adapters/stdio"
 	settingsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/application"
+	settingsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
 	systemstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/system/adapters/stdio"
 )
 
@@ -105,9 +111,14 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		logger.Printf("request history is unavailable; relay will continue")
 	}
 	recorder := relayactivity.NewRecorder(activity)
+	guardrails, err := defaultGuardrails(settings)
+	if err != nil {
+		return nil, err
+	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(settings.ListenerPort)))
 	httpRuntime := relayhttp.NewServer(address, relayhttp.Dependencies{
 		Routes: routes, Credentials: credentials, Activity: recorder,
+		Guardrail: guardrailrelay.New(guardrails),
 		Config: relayhttp.Config{
 			MaxRequestBytes:       int64(settings.MaxRequestMiB) * 1024 * 1024,
 			ResponseHeaderTimeout: time.Duration(settings.HeaderTimeoutSeconds) * time.Second,
@@ -139,6 +150,14 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	relaystdio.Register(protocol, relay)
 	activitystdio.Register(protocol, activity, history)
 	settingsstdio.Register(protocol, settingsService)
+	guardrailstdio.Register(protocol, guardrails)
+	// The mode is a setting, so changing it must take effect on the next request
+	// rather than at the next launch.
+	settingsService.OnApplied(func(applied settingsdomain.Settings) {
+		if mode, err := guardraildomain.ParseMode(applied.Normalized().GuardrailMode); err == nil {
+			_ = guardrails.SetMode(mode)
+		}
+	})
 	routestdio.Register(protocol, routeService)
 	modelstdio.Register(protocol, modelService)
 	edition, err := registerEdition(protocol, editionDependencies{
@@ -187,6 +206,19 @@ func (app *App) Run(ctx context.Context) error {
 	return err
 }
 
+func defaultGuardrails(settings settingsdomain.Settings) (*guardrailapp.Inspector, error) {
+	engine, err := guardraildomain.NewEngine(guardrailruleset.RulesJSON, guardrailruleset.BlocklistJSON)
+	if err != nil {
+		return nil, err
+	}
+	normalized := settings.Normalized()
+	mode, err := guardraildomain.ParseMode(normalized.GuardrailMode)
+	if err != nil {
+		return nil, err
+	}
+	return guardrailapp.NewInspector(engine, mode, normalized.GuardrailFindings)
+}
+
 func defaultProviders() ([]providerdomain.Provider, string, error) {
 	local, err := providerdomain.New(providerdomain.Params{
 		ID: "local", Name: "Local", BaseURL: "http://127.0.0.1:8799",
@@ -213,9 +245,9 @@ func defaultProviders() ([]providerdomain.Provider, string, error) {
 
 func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*keyapp.Scheduler, *keyapp.Manager, error, error) {
 	scheduler := keyapp.NewScheduler(maxQueued)
-	rates := make(map[string]int, len(providers))
+	rates := make(map[string]keyapp.Rate, len(providers))
 	for _, provider := range providers {
-		rates[provider.ID] = provider.RPM
+		rates[provider.ID] = keyapp.Rate{Limit: provider.RPM, Window: provider.RateWindow()}
 	}
 	path := os.Getenv("SWITCHBOARD_KEYS_PATH")
 	var pathErr error

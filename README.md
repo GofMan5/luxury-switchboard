@@ -1,4 +1,4 @@
-# Provider Switchboard
+# Luxury Switchboard
 
 Native Windows and Linux desktop relay for OpenAI- and Anthropic-compatible providers.
 
@@ -28,7 +28,7 @@ The debug desktop uses relay port `18798`, so it does not take over the normal `
 pnpm build
 ```
 
-Windows produces an NSIS installer; Linux produces AppImage and deb packages. Every run builds both editions: the owner outputs and their `SHA256SUMS.txt` land in `artifacts/release`, the public ones in `artifacts/release-public`. The **Build desktop** GitHub workflow builds both native hosts and publishes one `Switchboard-Windows-Linux` artifact containing the same flat release folders.
+Windows produces an NSIS installer; Linux produces AppImage and deb packages. Every run builds both editions: the owner outputs and their `SHA256SUMS.txt` land in `artifacts/release`, the public ones in `artifacts/release-public`. The **Build desktop** GitHub workflow builds both native hosts and publishes one `Luxury-Switchboard-Windows-Linux` artifact holding those same two folders.
 
 From Windows with Docker Desktop, `pnpm build:linux` performs the isolated Linux build of both editions and merges the AppImage/deb of each into the matching folder without changing the Windows toolchain or `node_modules`.
 
@@ -39,6 +39,7 @@ From Windows with Docker Desktop, `pnpm build:linux` performs the isolated Linux
 3. Use **Model Routes** to discover, filter and test models. The catalog shows where each model is already published (**Relay** / **Tunnel** badges with the public alias), the checkboxes start as a mirror of the published routes, and one **Apply** step publishes the newly selected models and clears the deselected ones for the current provider. Hand-made aliases and routes of other providers stay untouched; edit those per row.
 4. Configure the public API key, per-IP RPM, context cap and optional publisher profile in **Tunnel**.
 5. Inspect live requests, HTTP status, queue/retries, context, cached/reasoning/processed tokens and generation speed in **Live Activity**. Tunnel users and their sanitized persistent events are separate under **Clients**, where every address can also be banned or annotated with an owner-only note.
+6. Review what providers actually sent back in **Guardrails**, and decide there whether a suspicious answer is only recorded or refused outright.
 
 Provider switches, active endpoint/auth/cache changes and local Relay route changes cancel old in-flight work. Standby-provider and Tunnel-route edits apply to new requests without aborting unrelated local generations. Retryable transport errors, truncated JSON/SSE, `429`, `504` and other `5xx` responses are retried before client commit. RPM and model/balance cooldowns remain in FIFO queues until capacity returns or the client cancels.
 
@@ -50,11 +51,35 @@ The public edition is cut, not hidden. Its sidecar is compiled without the publi
 
 `pnpm build` and `pnpm build:linux` produce both editions in one run: the owner build lands in `artifacts/release`, the public build in `artifacts/release-public`, each with its own `SHA256SUMS.txt`. The release fails if an owner workspace or an owner command is found in the public output.
 
+## Guardrails
+
+Every provider answer is inspected locally before your client sees a byte of it. A provider that is happy to serve cheap inference is not automatically a provider you want executing ideas inside your terminal: the answer is what your assistant then acts on, and the assistant is running on your machine with your files.
+
+The relay inspects the **final** body, in the dialect your client asked for, after every translation and stream repair — a payload cannot hide in an intermediate shape the relay was still rewriting. Stream deltas are joined before matching, so splitting `curl x | sh` across three events does not get past anything, and neither does splitting it across the `data:` lines of one event. An answer too large to buffer still gets the part that was read inspected: truncated bytes are unsafe to forward, not unsafe to read, and skipping the check there would sell silence for padding. Detection covers shell download-and-execute chains, credential and wallet paths, persistence via scheduled tasks and startup entries, known malicious domains and addresses, and a protocol anomaly of its own: a tool call in an answer to a request that declared no tools. Your client has nothing to run such a call with, so the provider put it there.
+
+Three modes, chosen under **Guardrails** and applied on the next request without a restart:
+
+- **Off** — answers are forwarded without inspection.
+- **Monitor** (default) — everything is inspected and recorded, and every answer is still delivered. This is the default deliberately: the rules match shell and network idiom that an honest coding assistant produces all day, and refusing all of it would destroy legitimate work.
+- **Block** — an answer with a high-severity finding is refused before it reaches your client.
+
+Findings stay on your machine, in memory only, and never travel anywhere. The detection rules themselves are never shown: the workspace reports how many are loaded and what they caught, not the patterns, so a report cannot be turned into an evasion guide. A refused answer leaves the public tunnel as the same neutral error as an unavailable provider — indistinguishable by status, body, headers or client history — so nobody outside can probe the rule set by watching which answers fail.
+
+Both editions inspect. A public user has the same right to know what a provider sent them as the owner does.
+
+Rule and indicator data is vendored from [holone](https://github.com/vanndh/holone) (MIT); attribution and the full licence live in `backend/internal/slices/guardrails/adapters/ruleset/LICENSE-holone.txt`, and both installers place that notice next to the application because the rules themselves are compiled in. The engine is an independent Go implementation with no added dependency. One rule is edited rather than copied: the alternate-data-stream rule matched a bare `ads`, which made any answer about advertising a high-severity finding, and in **Block** mode a refusal.
+
 ## Client compatibility
 
 Recent Responses clients (for example Codex 0.14x and newer) no longer send the documented top-level `tools` array: they declare tools inside the request input as an `additional_tools` item with nested `namespace` groups, and they use freeform `custom` tools. Providers that implement only the documented Responses schema drop those items, the model receives no tool definitions and leaks raw call syntax such as `to=functions.exec {"cmd":"…"}` into its assistant text.
 
-The relay therefore normalizes every `/v1/responses` request into the documented shape — namespaces flattened, nested names given stable provider-safe aliases, freeform tools expressed as functions taking one `input` string, replayed history rewritten to one string output per call — and converts the provider answers back into exactly what the client declared, including freeform `custom_tool_call` items and their argument events. It also repairs streaming lifecycles that clients refuse to consume: items announced as already `completed`, and missing `response.content_part.added` events without which every text delta of the item is discarded. Requests that already use the documented schema are forwarded byte for byte.
+The relay therefore folds every declaration into the documented shape — namespaces flattened, nested names given stable provider-safe aliases, replayed history reduced to one string output per call — and converts the provider answers back into exactly what the client declared, including freeform `custom_tool_call` items and their argument events. It also repairs streaming lifecycles that clients refuse to consume: items announced as already `completed`, and missing `response.content_part.added` events without which every text delta of the item is discarded. Requests that already use the documented schema are forwarded byte for byte.
+
+A freeform `custom` tool travels exactly as declared, grammar included. Rewriting it into a function taking one `input` string discards that grammar, and the model then answers `apply_patch` with an empty argument string or `exec` with a JSON object instead of the script: every call fails and the assistant starts narrating what it meant to do instead of doing it. Replayed freeform history keeps its own item types for the same reason — retyping it against the declared tool is what made providers reject the turn that follows a tool call. A provider that refuses freeform tools gets them re-expressed as documented functions on the retry, tools and history together, and only after it says so.
+
+Providers served through the Chat Completions translation are the one exception, because that dialect has no freeform type at all: there the tool and its replayed history are converted on the way out, so the model still receives a definition for the tool it is about to be asked to use. A provider whose request path is rewritten mid-flight — the endpoint probe that discovers a chat-only gateway — never changes the dialect the caller is answered in.
+
+Two more failures end an agent run after a single tool call, and both are handled on the retry path. A turn that replays reasoning `encrypted_content` is refused whenever the seal was produced for a different account than the one now answering, which key rotation and provider-side account pools make the normal case; the relay retries once without the seal, keeping the tool exchange and the summaries. And a provider stuck on `429` or `5xx` no longer retries without end: the attempt loop has a ceiling, so a request ends instead of holding the caller on keep-alives for hours.
 
 ## Client bans and notes
 
@@ -62,7 +87,7 @@ Each tunnel address can be banned or annotated under **Clients**. A ban is refus
 
 ## API keys
 
-Switchboard never imports API credentials from process or user environment variables. Add every provider key explicitly in **API Keys**; it is encrypted with current-user DPAPI and remains write-only after saving.
+Luxury Switchboard never imports API credentials from process or user environment variables. Add every provider key explicitly in **API Keys**; it is encrypted with current-user DPAPI and remains write-only after saving.
 
 ## Public tunnel
 
@@ -72,7 +97,7 @@ The local gateway listens only on `127.0.0.1`. An optional publisher profile has
 v1.<port 20000-29999>.<48 lowercase hex slug>
 ```
 
-With a profile configured, Switchboard uses the dedicated identity
+With a profile configured, Luxury Switchboard uses the dedicated identity
 `%LOCALAPPDATA%\ProviderSwitchboard\ssh\model-tunnel_ed25519`, ignores the user's SSH config/agent, pins the VPS Ed25519 host key, creates a reverse port, and reports **Online** only after authenticated HTTPS `/v1/models` returns exactly the selected public aliases. Broken sessions reconnect with bounded backoff.
 
 Shared pause/resume/stop uses a separate `model-tunnel_control_ed25519` identity. The UI receives only revision, neutral display name and state; tunnel IDs, owners, ports, slugs and provider data never cross the control response.
@@ -104,7 +129,7 @@ Current-user data lives under `%LOCALAPPDATA%\ProviderSwitchboard` on Windows an
 
 Windows encrypts configuration with current-user DPAPI. Linux stores the AES-256 master key in the desktop Secret Service (for example GNOME Keyring or KWallet) and fails closed when no user keyring is available; credentials are never downgraded to plaintext files.
 
-On Linux, launch Switchboard as the signed-in desktop user, never through `sudo`. If secure storage is reported unavailable, install/start and unlock GNOME Keyring or the KWallet Secret Service bridge, then restart Switchboard; unreadable routes are blocked instead of silently falling back to another provider.
+On Linux, launch Luxury Switchboard as the signed-in desktop user, never through `sudo`. If secure storage is reported unavailable, install/start and unlock GNOME Keyring or the KWallet Secret Service bridge, then restart Luxury Switchboard; unreadable routes are blocked instead of silently falling back to another provider.
 
 No identity or API key belongs in a release archive or git.
 

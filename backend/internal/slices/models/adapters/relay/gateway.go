@@ -17,6 +17,9 @@ import (
 const (
 	maxDiscoveredModels = 5_000
 	maxProbeTimeout     = 30 * time.Second
+	// The Responses API refuses a budget under 16 tokens, so a smaller probe
+	// would report every reasoning model as unavailable.
+	probeTokens = 16
 )
 
 type Gateway struct {
@@ -101,18 +104,18 @@ func mapValue(value any) map[string]any {
 func (gateway *Gateway) testRequest(ctx context.Context, provider domain.Provider, model string) (relayapp.DispatchResponse, error) {
 	if provider.Dialect == "anthropic" {
 		return gateway.dispatch(ctx, provider.ID, model, "/v1/messages", map[string]any{
-			"model": model, "max_tokens": 8,
+			"model": model, "max_tokens": probeTokens,
 			"messages": []map[string]string{{"role": "user", "content": "Reply OK"}},
 		})
 	}
 	response, err := gateway.dispatch(ctx, provider.ID, model, "/v1/responses", map[string]any{
-		"model": model, "input": "Reply OK", "max_output_tokens": 8,
+		"model": model, "input": "Reply OK", "max_output_tokens": probeTokens,
 	})
 	if err == nil && !responsesFallback(response) {
 		return response, nil
 	}
 	return gateway.dispatch(ctx, provider.ID, model, "/v1/chat/completions", map[string]any{
-		"model": model, "max_tokens": 8,
+		"model": model, "max_tokens": probeTokens,
 		"messages": []map[string]string{{"role": "user", "content": "Reply OK"}},
 	})
 }

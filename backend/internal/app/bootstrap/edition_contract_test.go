@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,14 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 	if relay := call(t, toApp, answers, "relay.status"); !relay.OK {
 		t.Fatalf("a shared command broke: %s", relay.Error.Code)
 	}
+	// Guardrails belong to both editions, and the handshake has to admit it: the
+	// interface is told not to offer a workspace the capability list omits.
+	if guardrails := call(t, toApp, answers, "guardrails.status"); !guardrails.OK {
+		t.Fatalf("this edition lost the guardrails: %s", guardrails.Error.Code)
+	}
+	if !slices.Contains(handshake.Payload.Capabilities, "guardrails.manage") {
+		t.Fatalf("the handshake hides a workspace this binary serves: %v", handshake.Payload.Capabilities)
+	}
 }
 
 type protocolAnswer struct {
@@ -97,7 +106,8 @@ type protocolAnswer struct {
 	Type    string `json:"type"`
 	OK      bool   `json:"ok"`
 	Payload struct {
-		Edition string `json:"edition"`
+		Edition      string   `json:"edition"`
+		Capabilities []string `json:"capabilities"`
 	} `json:"payload"`
 	Error struct {
 		Code string `json:"code"`

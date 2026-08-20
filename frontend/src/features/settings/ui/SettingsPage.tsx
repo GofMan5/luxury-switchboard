@@ -31,7 +31,7 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
       await onRestart()
     } catch {
       setRestarting(false)
-      setRestartError('Switchboard could not restart. Close and reopen it to apply the saved settings.')
+      setRestartError('Luxury Switchboard could not restart. Close and reopen it to apply the saved settings.')
     }
   }
 
@@ -41,7 +41,7 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
         <div><h1>Settings</h1><p>Safe defaults for relay, reliability and storage</p></div>
         <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={15} />{pending ? 'Saving…' : 'Save settings'}</Button>
       </header>
-      {restartRequired ? <div className={styles.restart} aria-live="polite" aria-busy={restarting}><RotateCw size={17} /><div><strong>Restart Switchboard to apply runtime changes</strong><span>Saved values are already encrypted; active requests are cancelled cleanly during restart.</span></div><Button type="button" disabled={restarting} onClick={() => void restart()}>{restarting ? 'Restarting…' : 'Restart now'}</Button></div> : null}
+      {restartRequired ? <div className={styles.restart} aria-live="polite" aria-busy={restarting}><RotateCw size={17} /><div><strong>Restart Luxury Switchboard to apply runtime changes</strong><span>Saved values are already encrypted; active requests are cancelled cleanly during restart.</span></div><Button type="button" disabled={restarting} onClick={() => void restart()}>{restarting ? 'Restarting…' : 'Restart now'}</Button></div> : null}
       {error || restartError ? <div className={styles.error} role="alert">{error || restartError}</div> : null}
 
       <div className={styles.content}>
@@ -62,10 +62,14 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
         <SettingsSection icon={<Database />} title="Live data" description="Bounded in-memory activity and persistent history policy.">
           <NumberField label="Live activity rows" value={settings.activityCapacity} min={100} max={20000} onChange={number('activityCapacity')} />
           <NumberField label="History retention" value={settings.historyRetentionDays} min={1} max={365} suffix="days" onChange={number('historyRetentionDays')} />
-          <NumberField label="Tunnel log retention" value={settings.tunnelRetentionHours} min={24} max={720} suffix="hours" onChange={number('tunnelRetentionHours')} />
+          {/* The public sidecar has no tunnel, so it keeps no tunnel log to retain.
+              The literal is tested here rather than a runtime flag so the field
+              leaves the public bundle entirely. */}
+          {__OWNER_EDITION__ ? <NumberField label="Tunnel log retention" value={settings.tunnelRetentionHours} min={24} max={720} suffix="hours" onChange={number('tunnelRetentionHours')} /> : null}
+          <NumberField label="Guardrail findings" value={settings.guardrailFindings} min={50} max={5000} onChange={number('guardrailFindings')} note="Inspection mode is chosen on the Guardrails page." />
         </SettingsSection>
 
-        <section className={styles.invariant}><History size={18} /><div><strong>Security boundaries are fixed</strong><p>Loopback binding, remote HTTPS, secret redaction, body/frame caps and fail-closed tunnel sanitization cannot be disabled from Settings.</p></div></section>
+        <section className={styles.invariant}><History size={18} /><div><strong>Security boundaries are fixed</strong><p>Loopback binding, remote HTTPS, secret redaction, body/frame caps{__OWNER_EDITION__ ? ' and fail-closed tunnel sanitization' : ''} cannot be disabled from Settings.</p></div></section>
       </div>
     </form>
   )

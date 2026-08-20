@@ -4,7 +4,7 @@ import { RoutesModel } from './routes-model'
 import type { RoutesPort } from './routes-port'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
-const route: ModelRoute = { target: 'relay', publicModel: 'public-model', upstreamModel: 'upstream-model', providerId: 'echo', contextLimitKiB: 0, enabled: true }
+const route: ModelRoute = { target: 'relay', publicModel: 'public-model', upstreamModel: 'upstream-model', providerId: 'echo', contextLimitKiB: 0, aliases: [], enabled: true }
 
 class Port implements RoutesPort {
   listener: ((target: RouteTarget) => void) | undefined
@@ -79,7 +79,7 @@ describe('RoutesModel', () => {
 
     expect(publishedModels(model.snapshot().routes, 'echo')).toEqual(['keep', 'drop', 'aliased-upstream'])
     expect(await model.applySelection('echo', ['keep', 'fresh'])).toBe(true)
-    expect(created).toEqual([{ target: 'relay', publicModel: 'fresh', upstreamModel: 'fresh', providerId: 'echo', contextLimitKiB: 0, enabled: true }])
+    expect(created).toEqual([{ target: 'relay', publicModel: 'fresh', upstreamModel: 'fresh', providerId: 'echo', contextLimitKiB: 0, aliases: [], enabled: true }])
     expect(deleted).toEqual(['drop'])
   })
 

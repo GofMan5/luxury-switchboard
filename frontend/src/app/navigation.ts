@@ -9,9 +9,9 @@ import {
   RadioTower,
   Route,
   Settings,
+  ShieldAlert,
   UsersRound,
 } from 'lucide-react'
-import { OWNER_EDITION } from './edition'
 
 export type AppRoute =
   | 'overview'
@@ -19,6 +19,7 @@ export type AppRoute =
   | 'providers'
   | 'keys'
   | 'routes'
+  | 'guardrails'
   | 'tunnel'
   | 'clients'
   | 'statistics'
@@ -37,15 +38,19 @@ export const navigation: readonly NavigationItem[] = [
   { id: 'providers', label: 'Providers', icon: Database },
   { id: 'keys', label: 'API Keys', icon: KeyRound },
   { id: 'routes', label: 'Model Routes', icon: Route },
-  // Publishing workspaces exist only in the owner edition.
-  ...(OWNER_EDITION
+  // Both editions inspect provider answers. A public user has the same right to
+  // know what a provider sent them as the owner does.
+  { id: 'guardrails', label: 'Guardrails', icon: ShieldAlert },
+  // Publishing workspaces exist only in the owner edition. The literal is tested
+  // here rather than the re-export, so the public bundle drops their icons too.
+  ...(__OWNER_EDITION__
     ? ([
         { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
         { id: 'clients', label: 'Clients', icon: UsersRound },
       ] as const satisfies readonly NavigationItem[])
     : []),
   { id: 'statistics', label: 'Statistics', icon: ChartNoAxesCombined },
-  ...(OWNER_EDITION
+  ...(__OWNER_EDITION__
     ? ([{ id: 'shared', label: 'Shared Control', icon: Network }] as const satisfies readonly NavigationItem[])
     : []),
   { id: 'settings', label: 'Settings', icon: Settings },

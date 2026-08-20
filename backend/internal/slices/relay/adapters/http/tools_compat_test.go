@@ -85,13 +85,10 @@ func TestNamespacedClientToolsReachTheProviderAsDocumentedTools(t *testing.T) {
 		t.Fatalf("normalized tool request failed: status=%d", response.Code)
 	}
 	names := strings.Join(toolNamesOf(t, *captured), " ")
-	for _, expected := range []string{"function:exec", "function:wait", "function:collaboration__spawn_agent"} {
+	for _, expected := range []string{"custom:exec", "function:wait", "function:collaboration__spawn_agent"} {
 		if !strings.Contains(names, expected) {
 			t.Fatalf("provider never received %q: %s", expected, names)
 		}
-	}
-	if strings.Contains(names, "custom:") {
-		t.Fatalf("a freeform tool reached the provider undocumented: %s", names)
 	}
 	var payload struct {
 		Tools []struct {
@@ -107,9 +104,63 @@ func TestNamespacedClientToolsReachTheProviderAsDocumentedTools(t *testing.T) {
 		if tool.Name != "exec" {
 			continue
 		}
-		if tool.Format != nil || tool.Parameters == nil {
-			t.Fatalf("freeform tool was not expressed as a documented function: %+v", tool)
+		// The grammar is the contract the payload has to follow. Without it the model
+		// answers with an empty argument string or a JSON object, every call fails and
+		// the assistant starts narrating instead of acting.
+		if tool.Format == nil || tool.Parameters != nil {
+			t.Fatalf("freeform tool lost the grammar it declared: %+v", tool)
 		}
+	}
+}
+
+func TestAFreeformRefusalDowngradesTheToolsAndTheReplayedHistory(t *testing.T) {
+	refusals := 0
+	server, captured := upstreamCapture(t, func(writer http.ResponseWriter) {
+		refusals++
+		if refusals == 1 {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"message":"Unsupported tool type: custom"}}`))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[]}`))
+	})
+	history := strings.Replace(codexToolRequest, `{"type":"message","role":"user"`,
+		`{"type":"custom_tool_call","name":"exec","call_id":"call_0","input":"ls"},{"type":"custom_tool_call_output","call_id":"call_0","output":"probe.txt"},{"type":"message","role":"user"`, 1)
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(history))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("the retry after a freeform refusal did not succeed: status=%d", response.Code)
+	}
+	forwarded := string(*captured)
+	if strings.Contains(forwarded, `"type":"custom"`) || strings.Contains(forwarded, "custom_tool_call") {
+		t.Fatalf("the retry still carried freeform tools: %s", forwarded)
+	}
+	// The downgrade has to reach the history too: a documented tool answered by a
+	// freeform call in the replay is the exact mismatch providers reject.
+	if !strings.Contains(forwarded, `"type":"function_call_output"`) || !strings.Contains(forwarded, `{\"input\":\"ls\"}`) {
+		t.Fatalf("the downgraded history lost its payload: %s", forwarded)
+	}
+	if !strings.Contains(forwarded, `"required":["input"]`) {
+		t.Fatalf("the downgraded tool has no documented schema: %s", forwarded)
+	}
+}
+
+func TestAnUnrelatedRefusalKeepsFreeformToolsIntact(t *testing.T) {
+	// Downgrading on any 400 would silently strip the grammar from a provider that
+	// supports freeform tools and only complained about something else.
+	body, _ := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(codexToolRequest))
+	if freeformToolRejected([]byte(`{"error":{"message":"context length exceeded"}}`)) {
+		t.Fatal("an unrelated refusal was read as a freeform refusal")
+	}
+	if !freeformToolRejected([]byte(`{"error":{"message":"tools[0].format: lark grammar is not supported"}}`)) {
+		t.Fatal("a grammar refusal was not recognised")
+	}
+	if !strings.Contains(string(body), `"type":"custom"`) {
+		t.Fatalf("the freeform tool was downgraded without any refusal: %s", body)
 	}
 }
 
@@ -129,11 +180,13 @@ func TestFreeformToolCallsRoundTripInBothDirections(t *testing.T) {
 	server.ServeHTTP(response, request)
 
 	forwarded := string(*captured)
-	if strings.Contains(forwarded, "custom_tool_call") {
-		t.Fatalf("replayed freeform history was not documented for the provider: %s", forwarded)
+	// The provider declared the tool as freeform, so the replayed call must stay
+	// freeform: converting it here is what made the follow-up turn get rejected.
+	if !strings.Contains(forwarded, `"type":"custom_tool_call"`) || !strings.Contains(forwarded, `"input":"ls"`) {
+		t.Fatalf("replayed freeform call lost its shape or payload: %s", forwarded)
 	}
-	if !strings.Contains(forwarded, `"type":"function_call_output"`) || !strings.Contains(forwarded, `{\"input\":\"ls\"}`) {
-		t.Fatalf("replayed freeform call lost its payload: %s", forwarded)
+	if !strings.Contains(forwarded, `"type":"custom_tool_call_output"`) {
+		t.Fatalf("replayed freeform output was documented against a freeform tool: %s", forwarded)
 	}
 
 	body := response.Body.String()
@@ -145,6 +198,89 @@ func TestFreeformToolCallsRoundTripInBothDirections(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: response.custom_tool_call_input.done") {
 		t.Fatalf("freeform argument event was not translated: %s", body)
+	}
+}
+
+// A Responses body may carry input as a bare string. Its tools still have to be
+// read, or the provider's documented function_call reaches the client as a shape
+// it declared no tool for and cannot execute.
+func TestAFreeformToolIsRegisteredEvenWhenInputIsAString(t *testing.T) {
+	server, _ := upstreamCapture(t, func(writer http.ResponseWriter) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"id":"fc_1","type":"function_call","name":"exec","call_id":"call_1","arguments":"{\"input\":\"git status\"}"}]}`))
+	})
+	body := `{"model":"gpt-test","stream":false,"input":"run git status",` +
+		`"tools":[{"type":"custom","name":"exec","description":"run","format":{"type":"grammar","syntax":"lark","definition":"start: TEXT"}}]}`
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	answer := response.Body.String()
+	if !strings.Contains(answer, `"type":"custom_tool_call"`) {
+		t.Fatalf("client declared a freeform tool and got a documented call back: %s", answer)
+	}
+	if !strings.Contains(answer, `"input":"git status"`) {
+		t.Fatalf("freeform payload was not restored: %s", answer)
+	}
+}
+
+func TestASealedReasoningRefusalIsRetriedWithoutTheSeal(t *testing.T) {
+	// The first turn of a conversation carries no reasoning and always passes; the
+	// follow-up replays a blob sealed for whichever account answered before. This is
+	// the shape that made an agent run one tool and then stop.
+	attempts := 0
+	var second []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := readRequestBody(request, absoluteMaxRequestBytes)
+		attempts++
+		if attempts == 1 {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"message":"Something went wrong"}}`))
+			return
+		}
+		second = body
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "passthrough"}},
+		Credentials: &credentialSource{values: []string{""}},
+	})
+	followUp := `{"model":"gpt-test","stream":false,"include":["reasoning.encrypted_content"],"input":[
+	 {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"planning"}],"encrypted_content":"gAAAAAB"},
+	 {"type":"function_call","name":"exec","call_id":"c1","arguments":"{}"},
+	 {"type":"function_call_output","call_id":"c1","output":"done"}
+	]}`
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(followUp))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("the turn was not recovered: status=%d", response.Code)
+	}
+	retried := string(second)
+	if strings.Contains(retried, "encrypted_content") || strings.Contains(retried, "reasoning.encrypted_content") {
+		t.Fatalf("the retry still carried the sealed reasoning: %s", retried)
+	}
+	// Only the seal goes. The tool exchange is what the turn is about.
+	if !strings.Contains(retried, `"call_id":"c1"`) || !strings.Contains(retried, `"output":"done"`) {
+		t.Fatalf("the retry dropped the tool exchange with the seal: %s", retried)
+	}
+}
+
+func TestATurnWithoutSealedReasoningIsNotRetriedTwice(t *testing.T) {
+	// Nothing to strip means nothing to retry: a plain refusal has to reach the
+	// caller instead of being sent again unchanged.
+	body := []byte(`{"model":"gpt-test","input":[{"type":"reasoning","id":"rs_1","summary":[]}]}`)
+	if _, changed := stripEncryptedReasoning(body); changed {
+		t.Fatal("a reasoning item without a seal was dropped")
+	}
+	if _, changed := stripEncryptedReasoning([]byte(`{"model":"gpt-test","input":"plain prompt"}`)); changed {
+		t.Fatal("a request without replayed items was rewritten")
 	}
 }
 
@@ -231,9 +367,9 @@ func TestClientToolsMergeWithoutDroppingDocumentedDefinitions(t *testing.T) {
 func TestReplayedToolOutputsBecomeOneDocumentedStringPerCall(t *testing.T) {
 	body, _ := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(`{
 	 "model":"gpt-test",
-	 "tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}],
+	 "tools":[{"type":"custom","name":"exec","format":{"type":"grammar","syntax":"lark","definition":"start: TEXT"}}],
 	 "input":[
-	  {"type":"function_call","name":"exec","call_id":"c1","arguments":"{}"},
+	  {"type":"custom_tool_call","name":"exec","call_id":"c1","input":"ls"},
 	  {"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"header"},{"type":"input_text","text":"body"}]},
 	  {"type":"custom_tool_call_output","call_id":"c1","name":"exec","output":"NOTIFY"},
 	  {"type":"function_call_output","call_id":"orphan","output":"lost call"}
@@ -251,8 +387,10 @@ func TestReplayedToolOutputsBecomeOneDocumentedStringPerCall(t *testing.T) {
 	if output != "header\nbody\nNOTIFY" {
 		t.Fatalf("tool output was not merged into one documented string: %q", output)
 	}
-	if payload.Input[1]["type"] != "function_call_output" || payload.Input[1]["name"] != nil {
-		t.Fatalf("tool output item is not documented: %v", payload.Input[1])
+	// The output has to keep answering the kind of call the client made: retyping it
+	// against a freeform tool is the mismatch that killed every follow-up turn.
+	if payload.Input[1]["type"] != "custom_tool_call_output" {
+		t.Fatalf("a freeform output was retyped: %v", payload.Input[1])
 	}
 }
 
@@ -288,7 +426,7 @@ func TestServerSideHistoryKeepsOutputsWithoutALocalCall(t *testing.T) {
 	if json.Unmarshal(body, &payload) != nil {
 		t.Fatalf("normalized request is not valid JSON: %s", body)
 	}
-	if len(payload.Input) != 1 || payload.Input[0]["type"] != "function_call_output" || payload.Input[0]["output"] != "kept" {
+	if len(payload.Input) != 1 || payload.Input[0]["type"] != "custom_tool_call_output" || payload.Input[0]["output"] != "kept" {
 		t.Fatalf("an output of a provider-side call was dropped: %s", body)
 	}
 }

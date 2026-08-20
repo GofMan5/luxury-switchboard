@@ -54,5 +54,6 @@ func providerRoute(provider providerdomain.Provider, upstreamModel string) relay
 		ProviderID: provider.ID, ProviderName: provider.Name, BaseURL: provider.BaseURL,
 		AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader, Dialect: string(provider.Dialect),
 		ImageCompat: provider.ImageCompat, UpstreamModel: upstreamModel, CacheTTL: provider.CacheTTL,
+		Format: string(provider.Format), ChatPath: provider.ChatPath,
 	}
 }

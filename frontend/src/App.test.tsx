@@ -21,11 +21,12 @@ beforeAll(async () => {
     import('./features/statistics/ui/StatisticsPage'),
     import('./features/shared-control/ui/SharedControlPage'),
     import('./features/settings/ui/SettingsPage'),
+    import('./features/guardrails/ui/GuardrailsPage'),
   ])
 }, 20_000)
 
 const provider = { id: 'local', name: 'Local', baseUrl: 'http://127.0.0.1:8799', authMode: 'passthrough', authHeader: '', dialect: 'auto', modelsPath: '/v1/models', imageCompat: false, rpm: 0, cacheTtl: '0s', enabled: true, keyConfigured: false, keyCount: 0, builtin: true }
-const settings = { listenerPort: 8798, maxRequestMiB: 64, headerTimeoutSeconds: 45, streamIdleSeconds: 60, retryBaseMilliseconds: 500, retryMaxSeconds: 30, permanentAttempts: 2, maxQueued: 10_000, activityCapacity: 2_000, historyRetentionDays: 30, tunnelRetentionHours: 72 }
+const settings = { listenerPort: 8798, maxRequestMiB: 64, headerTimeoutSeconds: 45, streamIdleSeconds: 60, retryBaseMilliseconds: 500, retryMaxSeconds: 30, permanentAttempts: 2, maxQueued: 10_000, activityCapacity: 2_000, historyRetentionDays: 30, tunnelRetentionHours: 72, guardrailMode: 'monitor', guardrailFindings: 500 }
 
 function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://127.0.0.1:8798', port: 8798 }, settingsSnapshot = settings, overrides: Record<string, unknown> = {}): ControlPlaneSession {
   return {
@@ -46,6 +47,8 @@ function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://
         'models.discover': { models: [] },
         'history.stats': { requests: 0, completed: 0, failed: 0, cancelled: 0, retries: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, processedTokens: 0, nonCachedTokens: 0, p95Ms: 0, tokensPerSecond: 0 },
         'history.recent': { requests: [] },
+        'guardrails.status': { mode: 'monitor', ruleCount: 105, indicatorCount: 12, ruleSetVersion: 1, findingCount: 0 },
+        'guardrails.findings': { findings: [] },
         ...overrides,
       }
       if (!(method in responses)) throw new Error(`Unexpected method: ${method}`)
@@ -67,6 +70,10 @@ async function renderPages(pages: ReadonlyArray<readonly [string, string]>) {
   view.unmount()
 }
 
+// Every test here mounts the whole shell, and the first one also pays for the
+// lazy workspace modules being evaluated. That is seconds of jsdom work on a cold
+// machine, so the file gets a real budget instead of the 5s default it was
+// tripping over.
 describe('App navigation', () => {
   it('renders the primary workspaces', async () => {
     await renderPages([
@@ -84,8 +91,23 @@ describe('App navigation', () => {
       ['Clients', 'Tunnel Clients'],
       ['Statistics', 'Statistics'],
       ['Shared Control', 'Shared Control'],
+      ['Guardrails', 'Guardrails'],
       ['Settings', 'Settings'],
     ])
+  })
+
+  // Reaching the heading proves only that the route resolves - the page renders one
+  // in its error branch too. This asserts the workspace actually got its status
+  // from the control plane, which is what a missing command would break.
+  it('serves the guardrails workspace with live rule-set state', async () => {
+    window.location.hash = ''
+    createSession.mockResolvedValue(fakeSession())
+    const view = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Guardrails' }))
+    expect(await screen.findByRole('heading', { name: 'Guardrails', level: 1 })).toBeTruthy()
+    expect(await screen.findByText(/105 detection rules and 12 known indicators/u)).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    view.unmount()
   })
 
   it('shows the version reported by the control plane, never a hardcoded one', async () => {
@@ -167,4 +189,4 @@ describe('App navigation', () => {
     expect(screen.getByText('12')).toBeTruthy()
     view.unmount()
   })
-})
+}, 30_000)

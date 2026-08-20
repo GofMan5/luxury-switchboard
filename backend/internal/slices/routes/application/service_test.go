@@ -3,6 +3,8 @@ package application
 import (
 	"context"
 	"errors"
+	"reflect"
+
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
 	"slices"
 	"testing"
@@ -47,6 +49,54 @@ func (repository *memoryRepository) Save(_ context.Context, values []domain.Assi
 type providers map[string]bool
 
 func (value providers) Exists(id string) bool { return value[id] }
+func TestAliasesResolveToTheSameUpstreamModel(t *testing.T) {
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"echo": true})
+	route := domain.Assignment{Target: domain.TargetRelay, PublicModel: "claude-opus-5", UpstreamModel: "claude-5-opus", ProviderID: "echo", Aliases: []string{"claude-opus-5[1m]"}, Enabled: true}
+	if err := service.Upsert(context.Background(), route); err != nil {
+		t.Fatal(err)
+	}
+	for _, requested := range []string{"claude-opus-5", "claude-opus-5[1m]"} {
+		got, ok := service.Resolve(domain.TargetRelay, requested)
+		if !ok || got.UpstreamModel != "claude-5-opus" {
+			t.Fatalf("alias %q did not resolve: %+v", requested, got)
+		}
+	}
+	if _, ok := service.Resolve(domain.TargetRelay, "claude-5-opus"); ok {
+		t.Fatal("an unrelated name resolved through the alias")
+	}
+}
+
+func TestAliasCollisionIsRejected(t *testing.T) {
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"echo": true, "custom": true})
+	first := domain.Assignment{Target: domain.TargetRelay, PublicModel: "model-a", UpstreamModel: "upstream-a", ProviderID: "echo", Enabled: true}
+	if err := service.Upsert(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := domain.Assignment{Target: domain.TargetRelay, PublicModel: "model-b", UpstreamModel: "upstream-b", ProviderID: "custom", Aliases: []string{"model-a"}, Enabled: true}
+	if err := service.Upsert(context.Background(), second); err == nil {
+		t.Fatal("an alias shadowing another route was accepted")
+	}
+	if got, ok := service.Resolve(domain.TargetRelay, "model-a"); !ok || got.ProviderID != "echo" {
+		t.Fatalf("the original route was disturbed by a rejected alias: %+v", got)
+	}
+}
+
+func TestAliasCollisionFailsLoad(t *testing.T) {
+	repository := &memoryRepository{values: []domain.Assignment{
+		{Target: domain.TargetRelay, PublicModel: "model-a", UpstreamModel: "upstream-a", ProviderID: "echo", Enabled: true},
+		{Target: domain.TargetRelay, PublicModel: "model-b", UpstreamModel: "upstream-b", ProviderID: "custom", Aliases: []string{"model-a"}, Enabled: true},
+	}}
+	service, _ := NewService(repository, providers{"echo": true, "custom": true})
+	if err := service.Load(context.Background()); err == nil {
+		t.Fatal("routes with colliding aliases loaded cleanly")
+	}
+	if _, ok := service.Resolve(domain.TargetRelay, "model-a"); ok {
+		t.Fatal("routes resolved after an invalid load")
+	}
+}
+
 func TestRelayAndTunnelRoutesRemainIndependent(t *testing.T) {
 	repository := &memoryRepository{}
 	service, _ := NewService(repository, providers{"echo": true, "custom": true})
@@ -71,6 +121,28 @@ func TestRelayAndTunnelRoutesRemainIndependent(t *testing.T) {
 		t.Fatal("relay deletion changed tunnel route")
 	}
 }
+
+// The same public name on relay and tunnel is normal: the tunnel republishes a
+// model the relay already serves. Only a name claimed twice on one target is
+// ambiguous, so the collision check must be keyed by target.
+func TestSameNameOnRelayAndTunnelIsAllowed(t *testing.T) {
+	routes := []domain.Assignment{
+		{Target: domain.TargetRelay, PublicModel: "claude-opus-5", UpstreamModel: "upstream-a", ProviderID: "echo", Aliases: []string{"opus"}, Enabled: true},
+		{Target: domain.TargetTunnel, PublicModel: "opus", UpstreamModel: "upstream-b", ProviderID: "custom", Aliases: []string{"claude-opus-5"}, ContextLimitKiB: 128 * 1024, Enabled: true},
+	}
+	repository := &memoryRepository{values: routes}
+	service, _ := NewService(repository, providers{"echo": true, "custom": true})
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatalf("a name shared across targets must load: %v", err)
+	}
+	if got, ok := service.Resolve(domain.TargetRelay, "opus"); !ok || got.UpstreamModel != "upstream-a" {
+		t.Fatalf("relay alias resolves to the wrong route: %+v", got)
+	}
+	if got, ok := service.Resolve(domain.TargetTunnel, "claude-opus-5"); !ok || got.UpstreamModel != "upstream-b" {
+		t.Fatalf("tunnel alias resolves to the wrong route: %+v", got)
+	}
+}
+
 func TestFailedSaveDoesNotMutateRoutes(t *testing.T) {
 	repository := &memoryRepository{fail: true}
 	service, _ := NewService(repository, providers{"echo": true})
@@ -104,7 +176,7 @@ func TestLoadKeepsStaleProviderRouteVisibleAndFailClosed(t *testing.T) {
 	if err := service.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if routes := service.List(domain.TargetRelay); len(routes) != 1 || routes[0] != stale {
+	if routes := service.List(domain.TargetRelay); len(routes) != 1 || !reflect.DeepEqual(routes[0], stale) {
 		t.Fatalf("stale route was silently discarded: %+v", routes)
 	}
 	if err := service.Upsert(context.Background(), stale); !errors.Is(err, ErrProviderUnavailable) {

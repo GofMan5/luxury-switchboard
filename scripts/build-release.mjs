@@ -4,9 +4,14 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, statSync
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { assertVersionsAgree, readVersion } from './version.mjs'
+
 const workspace = dirname(dirname(fileURLToPath(import.meta.url)))
-const version = JSON.parse(readFileSync(join(workspace, 'src-tauri', 'tauri.conf.json'), 'utf8')).version
+const version = readVersion(workspace)
 assertVersionsAgree(workspace, version)
+// Artifact names carry the product name, so a rename must land here too or the
+// release folder and the checksums would still advertise the old product.
+const artifactPrefix = 'Luxury-Switchboard'
 const architecture = {
   x64: { windows: 'x64', appImage: 'x86_64', deb: 'amd64' },
   arm64: { windows: 'arm64', appImage: 'aarch64', deb: 'arm64' },
@@ -14,9 +19,15 @@ const architecture = {
 
 // The owner edition publishes gateways; the public one is compiled without that
 // stack. Both ship from one command so they can never drift apart.
+//
+// Only the public edition carries a label in its file name. Both installers share
+// one bundle identifier and one install path, so the public build silently replaces
+// an owner installation - naming them alike would leave nothing but the folder to
+// tell apart the two files once they are downloaded. The owner name stays bare
+// because the root SHA256SUMS.txt and package-friend.ps1 name it.
 const editions = [
-  { id: 'owner', directory: join(workspace, 'artifacts', 'release') },
-  { id: 'public', directory: join(workspace, 'artifacts', 'release-public') },
+  { id: 'owner', label: '', directory: join(workspace, 'artifacts', 'release') },
+  { id: 'public', label: 'public-', directory: join(workspace, 'artifacts', 'release-public') },
 ]
 
 for (const edition of editions) {
@@ -30,6 +41,11 @@ function buildEdition(edition) {
   }
   const pnpm = process.env.npm_execpath
   if (!pnpm) throw new Error('Run the release build through pnpm')
+  // The bundle directory keeps every installer ever built here, including ones from
+  // earlier product names that carry this same version. Collecting by name alone
+  // would either find two candidates or, worse, find exactly one and ship a months
+  // old binary as a fresh release, so only files this build wrote are considered.
+  const startedAt = Date.now()
   execFileSync(process.execPath, [pnpm, 'exec', 'tauri', 'build', '--ci'], {
     cwd: workspace,
     stdio: 'inherit',
@@ -39,10 +55,10 @@ function buildEdition(edition) {
   mkdirSync(edition.directory, { recursive: true })
 
   const artifacts = process.platform === 'win32'
-    ? [{ bundle: 'nsis', suffix: '.exe', name: `Switchboard-${version}-windows-${architecture.windows}-setup.exe` }]
+    ? [{ bundle: 'nsis', suffix: '.exe', name: `${artifactPrefix}-${version}-${edition.label}windows-${architecture.windows}-setup.exe` }]
     : [
-        { bundle: 'appimage', suffix: '.AppImage', name: `Switchboard-${version}-linux-${architecture.appImage}.AppImage`, executable: true },
-        { bundle: 'deb', suffix: '.deb', name: `Switchboard-${version}-linux-${architecture.deb}.deb` },
+        { bundle: 'appimage', suffix: '.AppImage', name: `${artifactPrefix}-${version}-${edition.label}linux-${architecture.appImage}.AppImage`, executable: true },
+        { bundle: 'deb', suffix: '.deb', name: `${artifactPrefix}-${version}-${edition.label}linux-${architecture.deb}.deb` },
       ]
 
   for (const artifact of artifacts) {
@@ -50,9 +66,12 @@ function buildEdition(edition) {
     const candidates = readdirSync(sourceDirectory)
       .filter((name) => name.endsWith(artifact.suffix) && name.includes(version))
       .map((name) => join(sourceDirectory, name))
-      .filter((path) => statSync(path).isFile())
+      .filter((path) => {
+        const entry = statSync(path)
+        return entry.isFile() && entry.mtimeMs >= startedAt
+      })
     if (candidates.length !== 1) {
-      throw new Error(`Expected one ${artifact.bundle} artifact for ${version}, found ${candidates.length}`)
+      throw new Error(`Expected one freshly built ${artifact.bundle} artifact for ${version}, found ${candidates.length}`)
     }
     const destination = join(edition.directory, artifact.name)
     copyFileSync(candidates[0], destination)
@@ -64,12 +83,12 @@ function buildEdition(edition) {
 function writeChecksums(edition) {
   mkdirSync(edition.directory, { recursive: true })
   for (const name of readdirSync(edition.directory)) {
-    if (/\.(?:AppImage|deb|exe)$/u.test(name) && !name.startsWith(`Switchboard-${version}-`)) {
+    if (/\.(?:AppImage|deb|exe)$/u.test(name) && !name.startsWith(`${artifactPrefix}-${version}-`)) {
       unlinkSync(join(edition.directory, name))
     }
   }
   const releaseFiles = readdirSync(edition.directory)
-    .filter((name) => name.startsWith(`Switchboard-${version}-`) && /\.(?:AppImage|deb|exe)$/u.test(name))
+    .filter((name) => name.startsWith(`${artifactPrefix}-${version}-`) && /\.(?:AppImage|deb|exe)$/u.test(name))
     .sort((left, right) => left.localeCompare(right, 'en'))
   if (releaseFiles.length === 0) throw new Error(`No ${edition.id} release artifacts found`)
 
@@ -100,27 +119,5 @@ function assertPublicBuildIsStripped(root) {
         throw new Error(`Public sidecar ${name} still contains the owner command ${marker}`)
       }
     }
-  }
-}
-
-// Every surface that states the product version must agree with the bundle, or the
-// interface, the installer and the recorded checksums start describing different
-// builds. This fails the release instead of shipping a stale label.
-function assertVersionsAgree(root, expected) {
-  const sources = [
-    { file: 'package.json', read: (text) => JSON.parse(text).version },
-    { file: join('frontend', 'package.json'), read: (text) => JSON.parse(text).version },
-    { file: join('src-tauri', 'Cargo.toml'), read: (text) => text.match(/^version\s*=\s*"([^"]+)"/mu)?.[1] },
-    {
-      file: join('backend', 'internal', 'slices', 'system', 'adapters', 'stdio', 'register.go'),
-      read: (text) => text.match(/AppVersion\s*=\s*"([^"]+)"/u)?.[1],
-    },
-  ]
-  const mismatched = sources
-    .map((source) => ({ file: source.file, found: source.read(readFileSync(join(root, source.file), 'utf8')) }))
-    .filter((source) => source.found !== expected)
-  if (mismatched.length > 0) {
-    const detail = mismatched.map((source) => `${source.file}: ${source.found ?? 'missing'}`).join(', ')
-    throw new Error(`Version ${expected} in src-tauri/tauri.conf.json disagrees with ${detail}`)
   }
 }

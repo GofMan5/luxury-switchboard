@@ -41,7 +41,7 @@ type fakeRouteUsage map[string]bool
 func (usage fakeRouteUsage) LockProvider(id string) (bool, func()) { return usage[id], func() {} }
 
 func (keys *fakeKeyPool) Count(id string) int { return keys.count[id] }
-func (keys *fakeKeyPool) EnsureProvider(id string, rpm int) error {
+func (keys *fakeKeyPool) EnsureProvider(id string, rpm int, _ time.Duration) error {
 	if keys.rates == nil {
 		keys.rates = make(map[string]int)
 	}

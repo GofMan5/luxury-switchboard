@@ -25,7 +25,7 @@ func TestManagerPersistsThroughDPAPIRepository(t *testing.T) {
 	manager, err := application.NewManager(
 		scheduler,
 		dpapi.New(path),
-		map[string]int{"echo": 120},
+		map[string]application.Rate{"echo": {Limit: 120}},
 		[]domain.Key{builtin},
 	)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestManagerPersistsThroughDPAPIRepository(t *testing.T) {
 	restarted, err := application.NewManager(
 		application.NewScheduler(10),
 		dpapi.New(path),
-		map[string]int{"echo": 120},
+		map[string]application.Rate{"echo": {Limit: 120}},
 		[]domain.Key{builtin},
 	)
 	if err != nil {

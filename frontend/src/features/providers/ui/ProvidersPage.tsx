@@ -3,7 +3,7 @@ import { KeyRound, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucid
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
-import type { Provider, ProviderInput } from '../domain/provider'
+import type { Provider, ProviderInput, RateUnit } from '../domain/provider'
 import { useProviders } from './useProviders'
 import { providerInputError } from './provider-form'
 import styles from './ProvidersPage.module.css'
@@ -29,14 +29,14 @@ export default function ProvidersPage() {
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
       <div className={styles.layout}>
         <section className={styles.listPane} aria-label="Configured providers">
-          <div className={styles.listHeader}><span>Name</span><span>State</span><span>RPM</span><span>Route</span></div>
+          <div className={styles.listHeader}><span>Name</span><span>State</span><span>Rate</span><span>Route</span></div>
           {state.catalog.providers.map((provider) => {
             const active = provider.id === state.catalog.activeId
             return (
               <button key={provider.id} type="button" className={styles.providerRow} data-selected={provider.id === effectiveID} onClick={() => setSelectedID(provider.id)}>
                 <span className={styles.providerName}><strong>{provider.name}</strong><small>{provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
                 <span className={styles.health}><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Enabled' : 'Disabled'}</span>
-                <span className={styles.rpm}>{provider.rpm === 0 ? '∞' : provider.rpm}</span>
+                <span className={styles.rpm}>{rateShort(provider)}</span>
                 <span className={active ? styles.active : styles.standby}>{active ? 'Active' : 'Standby'}</span>
               </button>
             )
@@ -104,11 +104,32 @@ function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDe
           <Button variant={active ? 'secondary' : 'primary'} disabled={active || pending || !provider.enabled} onClick={onActivate}>{pending ? 'Switching…' : active ? 'Active route' : 'Activate'}</Button>
         </div>
       </header>
-      <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
-      <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Requests per minute</dt><dd>{provider.rpm === 0 ? 'Unlimited' : provider.rpm}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
+      <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
+      <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Request limit</dt><dd>{rateLabel(provider)}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
       <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>{provider.authMode === 'passthrough' ? 'Keys added in API Keys are used only for model discovery and tests.' : 'Secret material is never returned to the UI.'}</span></div></div></section>
     </aside>
   )
+}
+
+function formatLabel(format: Provider['format']): string {
+  switch (format) {
+    case 'chat': return 'Chat completions (auto-translated)'
+    case 'responses': return 'Responses API'
+    default: return 'Auto-detect'
+  }
+}
+
+// The list column is narrow, so the unit is abbreviated there and spelled out in
+// the inspector. Both have to name it: the same number means a very different
+// budget per minute and per second.
+function rateShort(provider: Provider): string {
+  if (provider.rpm === 0) return '∞'
+  return `${provider.rpm}/${provider.rateUnit === 'second' ? 's' : 'min'}`
+}
+
+function rateLabel(provider: Provider): string {
+  if (provider.rpm === 0) return 'Unlimited'
+  return `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`
 }
 
 function ProviderEditor({ mode, provider, pending, operationError, active, onClose, onSubmit }: {
@@ -122,8 +143,11 @@ function ProviderEditor({ mode, provider, pending, operationError, active, onClo
   const [authHeader, setAuthHeader] = useState(provider?.authHeader ?? '')
   const [dialect, setDialect] = useState<Provider['dialect']>(provider?.dialect ?? 'auto')
   const [modelsPath, setModelsPath] = useState(provider?.modelsPath ?? '/v1/models')
+  const [format, setFormat] = useState<Provider['format']>(provider?.format ?? 'auto')
+  const [chatPath, setChatPath] = useState(provider?.chatPath ?? '/v1/chat/completions')
   const [imageCompat, setImageCompat] = useState(provider?.imageCompat ?? false)
   const [rpm, setRPM] = useState(String(provider?.rpm ?? 0))
+  const [rateUnit, setRateUnit] = useState<RateUnit>(provider?.rateUnit === 'second' ? 'second' : 'minute')
   const [cache1h, setCache1H] = useState(provider?.cacheTtl === '1h0m0s')
   const [enabled, setEnabled] = useState(provider?.enabled ?? true)
   const [error, setError] = useState('')
@@ -132,7 +156,7 @@ function ProviderEditor({ mode, provider, pending, operationError, active, onClo
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const parsedRPM = Number(rpm)
-    const value = { name: name.trim(), baseUrl: baseUrl.trim(), authMode, authHeader: authHeader.trim(), dialect, modelsPath: modelsPath.trim(), imageCompat, rpm: parsedRPM, cache1h, enabled }
+    const value = { name: name.trim(), baseUrl: baseUrl.trim(), authMode, authHeader: authHeader.trim(), dialect, modelsPath: modelsPath.trim(), format, chatPath: chatPath.trim(), imageCompat, rpm: parsedRPM, rateUnit, cache1h, enabled }
     const validationError = providerInputError(value)
     if (validationError || (active && !enabled)) {
       setError(active && !enabled ? 'Switch away from the provider before disabling it.' : validationError)
@@ -151,10 +175,16 @@ function ProviderEditor({ mode, provider, pending, operationError, active, onClo
           <label><span>Base URL</span><input type="url" value={baseUrl} maxLength={2048} required placeholder="https://provider.example/v1" onChange={(event) => setBaseURL(event.currentTarget.value)} /></label>
           <label><span>API dialect</span><select value={dialect} onChange={(event) => setDialect(event.currentTarget.value as Provider['dialect'])}><option value="auto">Auto-detect from request</option><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic compatible</option></select></label>
           <label><span>Models discovery path</span><input value={modelsPath} maxLength={160} required placeholder="/v1/models" onChange={(event) => setModelsPath(event.currentTarget.value)} /></label>
+          <label><span>Request format</span><select value={format} onChange={(event) => setFormat(event.currentTarget.value as Provider['format'])}><option value="auto">Auto-detect (Responses first)</option><option value="responses">Responses API only</option><option value="chat">Chat completions only (translated)</option></select><small>Chat completions providers receive Responses API calls automatically.</small></label>
+          {format === 'chat' ? <label><span>Chat completions path</span><input value={chatPath} maxLength={160} required placeholder="/v1/chat/completions" onChange={(event) => setChatPath(event.currentTarget.value)} /><small>Where the provider actually serves chat completions.</small></label> : null}
           <label className={styles.check}><input type="checkbox" checked={imageCompat} onChange={(event) => setImageCompat(event.currentTarget.checked)} />Bridge image generation through the Responses image tool</label>
           <label><span>Authentication</span><select value={authMode} onChange={(event) => setAuthMode(event.currentTarget.value as Provider['authMode'])}><option value="auto">Auto by API dialect</option><option value="bearer">Bearer token</option><option value="x-api-key">x-api-key</option><option value="custom">Custom header</option><option value="passthrough">Pass through client auth</option></select></label>
           {authMode === 'custom' ? <label><span>Custom auth header</span><input value={authHeader} maxLength={64} required placeholder="Authorization or api-key" onChange={(event) => setAuthHeader(event.currentTarget.value)} /><small>The encrypted key value is sent exactly as stored, including an optional Token or Basic prefix.</small></label> : null}
-          <label><span>Provider RPM</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited. Per-key RPM still applies.</small></label>
+          <div className={styles.ratePair}>
+            <label><span>Request limit</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /></label>
+            <label><span>Counted per</span><select value={rateUnit} onChange={(event) => setRateUnit(event.currentTarget.value as RateUnit)}><option value="minute">Minute</option><option value="second">Second</option></select></label>
+            <small>0 means unlimited. Per-key RPM still applies. Choose seconds for providers that cap bursts, such as 5 requests per second.</small>
+          </div>
           <label className={styles.check}><input type="checkbox" checked={cache1h} onChange={(event) => setCache1H(event.currentTarget.checked)} />Extend existing ephemeral cache controls to 1 hour</label>
           <label className={styles.check}><input type="checkbox" checked={enabled} disabled={active} onChange={(event) => setEnabled(event.currentTarget.checked)} />Provider enabled</label>
           {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}

@@ -1,3 +1,7 @@
+// RateUnit is the period a provider's request limit is counted over. Most
+// publish a per-minute quota, but some cap bursts per second.
+export type RateUnit = 'minute' | 'second'
+
 export interface Provider {
   readonly id: string
   readonly name: string
@@ -6,8 +10,11 @@ export interface Provider {
   readonly authHeader: string
   readonly dialect: 'auto' | 'openai' | 'anthropic'
   readonly modelsPath: string
+  readonly format: 'auto' | 'responses' | 'chat'
+  readonly chatPath: string
   readonly imageCompat: boolean
   readonly rpm: number
+  readonly rateUnit: RateUnit
   readonly cacheTtl: string
   readonly enabled: boolean
   readonly keyConfigured: boolean
@@ -27,8 +34,11 @@ export interface ProviderInput {
   readonly authHeader: string
   readonly dialect: Provider['dialect']
   readonly modelsPath: string
+  readonly format: Provider['format']
+  readonly chatPath: string
   readonly imageCompat: boolean
   readonly rpm: number
+  readonly rateUnit: RateUnit
   readonly cache1h: boolean
   readonly enabled: boolean
 }

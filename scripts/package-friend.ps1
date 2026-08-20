@@ -12,7 +12,7 @@ if (-not $InstallerPath) {
     # The bundle folder holds whichever edition was built last, so the friend package
     # is taken from the collected owner release instead.
     $version = (Get-Content -Raw -LiteralPath (Join-Path $workspace "src-tauri\tauri.conf.json") | ConvertFrom-Json).version
-    $InstallerPath = Join-Path $workspace "artifacts\release\Switchboard-${version}-windows-x64-setup.exe"
+    $InstallerPath = Join-Path $workspace "artifacts\release\Luxury-Switchboard-${version}-windows-x64-setup.exe"
 }
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 $checksumPath = Join-Path $workspace "SHA256SUMS.txt"
@@ -48,7 +48,7 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$' -or $releas
     throw "Release checksum commit contains source changes"
 }
 if (-not $OutputPath) {
-    $OutputPath = Join-Path $workspace ("artifacts\Switchboard-friend-{0}.zip" -f $releaseCommit.Substring(0, 8))
+    $OutputPath = Join-Path $workspace ("artifacts\Luxury-Switchboard-friend-{0}.zip" -f $releaseCommit.Substring(0, 8))
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = Split-Path -Parent $output
@@ -62,7 +62,7 @@ if (Test-Path -LiteralPath $output) {
 
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $staging = Join-Path $tempRoot ("switchboard-package-" + [guid]::NewGuid().ToString("N"))
-$package = Join-Path $staging "Switchboard"
+$package = Join-Path $staging "Luxury Switchboard"
 New-Item -ItemType Directory -Force -Path $package | Out-Null
 try {
     Copy-Item -LiteralPath $installer -Destination (Join-Path $package (Split-Path -Leaf $installer))

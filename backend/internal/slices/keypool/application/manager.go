@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 )
@@ -20,13 +21,20 @@ var (
 )
 
 type Manager struct {
-	opMu        sync.Mutex
-	mu          sync.RWMutex
-	scheduler   *Scheduler
-	repository  Repository
-	providerRPM map[string]int
-	builtins    []domain.Key
-	userKeys    []domain.Key
+	opMu          sync.Mutex
+	mu            sync.RWMutex
+	scheduler     *Scheduler
+	repository    Repository
+	providerRates map[string]Rate
+	builtins      []domain.Key
+	userKeys      []domain.Key
+}
+
+// Rate is a provider's request budget: how many requests fit in one window. A
+// zero window means the scheduler's per-minute default.
+type Rate struct {
+	Limit  int
+	Window time.Duration
 }
 
 type Update struct {
@@ -36,13 +44,13 @@ type Update struct {
 	Secret   *string
 }
 
-func NewManager(scheduler *Scheduler, repository Repository, providerRPM map[string]int, builtins []domain.Key) (*Manager, error) {
-	if scheduler == nil || repository == nil || len(providerRPM) == 0 {
+func NewManager(scheduler *Scheduler, repository Repository, providerRates map[string]Rate, builtins []domain.Key) (*Manager, error) {
+	if scheduler == nil || repository == nil || len(providerRates) == 0 {
 		return nil, errors.New("key manager dependencies are invalid")
 	}
 	manager := &Manager{
 		scheduler: scheduler, repository: repository,
-		providerRPM: cloneRates(providerRPM), builtins: slices.Clone(builtins),
+		providerRates: cloneRates(providerRates), builtins: slices.Clone(builtins),
 	}
 	if err := manager.apply(nil); err != nil {
 		return nil, err
@@ -58,7 +66,7 @@ func (manager *Manager) Load(ctx context.Context) error {
 	loadedBuiltins := slices.Clone(manager.builtins)
 	loadedUsers := make([]domain.Key, 0, len(keys))
 	for _, key := range keys {
-		if _, exists := manager.providerRPM[key.ProviderID]; !exists {
+		if _, exists := manager.providerRates[key.ProviderID]; !exists {
 			return ErrUnknownProvider
 		}
 		if key.Pinned {
@@ -96,14 +104,14 @@ func (manager *Manager) Count(providerID string) int {
 	return manager.scheduler.Count(providerID)
 }
 
-func (manager *Manager) EnsureProvider(providerID string, rpm int) error {
-	if providerID == "" || rpm < 0 {
+func (manager *Manager) EnsureProvider(providerID string, rpm int, window time.Duration) error {
+	if providerID == "" || rpm < 0 || window < 0 {
 		return ErrUnknownProvider
 	}
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
 	manager.mu.Lock()
-	manager.providerRPM[providerID] = rpm
+	manager.providerRates[providerID] = Rate{Limit: rpm, Window: window}
 	manager.mu.Unlock()
 	return manager.apply(nil)
 }
@@ -120,11 +128,11 @@ func (manager *Manager) RemoveProvider(providerID string) error {
 		}
 	}
 	manager.mu.Lock()
-	if _, exists := manager.providerRPM[providerID]; !exists {
+	if _, exists := manager.providerRates[providerID]; !exists {
 		manager.mu.Unlock()
 		return ErrUnknownProvider
 	}
-	delete(manager.providerRPM, providerID)
+	delete(manager.providerRates, providerID)
 	manager.mu.Unlock()
 	manager.scheduler.RemoveProvider(providerID)
 	return nil
@@ -133,7 +141,7 @@ func (manager *Manager) RemoveProvider(providerID string) error {
 func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.PublicKey, error) {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
-	if _, exists := manager.providerRPM[params.ProviderID]; !exists {
+	if _, exists := manager.providerRates[params.ProviderID]; !exists {
 		return domain.PublicKey{}, ErrUnknownProvider
 	}
 	params.Pinned = false
@@ -312,16 +320,16 @@ func (manager *Manager) apply(candidate []domain.Key) error {
 		candidate = manager.userKeys
 	}
 	all := manager.combinedLocked(candidate)
-	rates := cloneRates(manager.providerRPM)
+	rates := cloneRates(manager.providerRates)
 	manager.mu.RUnlock()
-	for providerID, rpm := range rates {
+	for providerID, rate := range rates {
 		keys := make([]domain.Key, 0)
 		for _, key := range all {
 			if key.ProviderID == providerID {
 				keys = append(keys, key)
 			}
 		}
-		if err := manager.scheduler.Configure(providerID, rpm, keys); err != nil {
+		if err := manager.scheduler.Configure(providerID, rate.Limit, rate.Window, keys); err != nil {
 			return err
 		}
 	}
@@ -403,10 +411,10 @@ func publicByID(keys []domain.PublicKey, id string) (domain.PublicKey, error) {
 	return domain.PublicKey{}, ErrKeyNotFound
 }
 
-func cloneRates(source map[string]int) map[string]int {
-	result := make(map[string]int, len(source))
-	for id, rpm := range source {
-		result[id] = rpm
+func cloneRates(source map[string]Rate) map[string]Rate {
+	result := make(map[string]Rate, len(source))
+	for id, rate := range source {
+		result[id] = rate
 	}
 	return result
 }

@@ -28,6 +28,7 @@ const (
 	maxProxyClients          = 64
 	maxRequestModelBytes     = 128
 	maxCacheTraversalDepth   = 64
+	maxRelayAttempts         = 64
 )
 
 var hopHeaders = map[string]struct{}{
@@ -48,10 +49,12 @@ type Server struct {
 	routes       relayapp.RouteSource
 	credentials  relayapp.CredentialSource
 	activity     relayapp.ActivitySink
+	guardrail    relayapp.Guardrail
 	config       Config
 	client       *http.Client
 	transport    *http.Transport
 	proxyClients map[string]*http.Client
+	chatOnly     sync.Map
 	mu           sync.Mutex
 	server       *http.Server
 	listener     net.Listener
@@ -63,6 +66,7 @@ type Dependencies struct {
 	Routes      relayapp.RouteSource
 	Credentials relayapp.CredentialSource
 	Activity    relayapp.ActivitySink
+	Guardrail   relayapp.Guardrail
 	Config      Config
 }
 
@@ -113,11 +117,16 @@ func NewServer(address string, dependencies Dependencies) *Server {
 	if dependencies.Activity != nil {
 		activity = dependencies.Activity
 	}
+	var guardrail relayapp.Guardrail = relayapp.NoopGuardrail{}
+	if dependencies.Guardrail != nil {
+		guardrail = dependencies.Guardrail
+	}
 	return &Server{
 		address:      address,
 		routes:       dependencies.Routes,
 		credentials:  dependencies.Credentials,
 		activity:     activity,
+		guardrail:    guardrail,
 		config:       config,
 		client:       &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
 		transport:    transport,
@@ -188,28 +197,50 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	body, clientTools := normalizeResponsesTools(request.Method, request.URL.Path, request.Header.Get("Content-Type"), body)
+	// Read from the normalized body: the relay has just folded any nested
+	// declaration into the documented tools array.
+	clientDeclaredTools := server.guardrail.ClientDeclaredTools(body)
 	model := requestModel(body, request.Header.Get("Content-Type"))
 	route, err := server.routes.Current(ctx, model)
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "Relay route is unavailable")
 		return
 	}
+	streamRequested := requiresStreamTerminal(request, body)
 	dispatchPath, preparedBody, imageCompat, imageErr := prepareImageRequest(request.Method, request.URL.Path, body, request.Header.Get("Content-Type"), route.UpstreamModel, route.ImageCompat)
 	if imageErr != nil {
 		writeError(writer, http.StatusBadRequest, "Image generation request is invalid")
 		return
 	}
-	upstreamRequest := request
-	if imageCompat {
+	chatMode := route.Format == "chat" || (route.Format == "auto" && server.chatOnlyLoaded(route.ProviderID))
+	chatPath, chatBody, chatCompat, chatErr := prepareChatCompletions(request.Method, request.URL.Path, body, request.Header.Get("Content-Type"), route.ChatPath, chatMode)
+	if chatErr != nil {
+		writeError(writer, http.StatusBadRequest, "Chat completions compatibility request is invalid")
+		return
+	}
+	// The upstream request always gets its own URL. requestWithRetry rewrites the
+	// path in place when a provider turns out to be chat-only, and everything below
+	// - the terminal stream frame, the heartbeat dialect, the tool-call restoration
+	// - keys off request.URL.Path to answer in the dialect the client opened.
+	// Sharing the URL would answer a Responses caller in chat dialect the moment
+	// that rewrite happened.
+	upstreamRequest := new(http.Request)
+	*upstreamRequest = *request
+	targetURL := *request.URL
+	upstreamRequest.URL = &targetURL
+	switch {
+	case imageCompat:
 		body = preparedBody
-		clone := new(http.Request)
-		*clone = *request
-		targetURL := *request.URL
 		targetURL.Path = dispatchPath
 		targetURL.RawPath = ""
-		clone.URL = &targetURL
-		upstreamRequest = clone
-	} else if route.UpstreamModel != "" && route.UpstreamModel != model {
+	case chatCompat:
+		body = chatBody
+		if route.UpstreamModel != "" && route.UpstreamModel != model {
+			body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
+		}
+		targetURL.Path = chatPath
+		targetURL.RawPath = ""
+	case route.UpstreamModel != "" && route.UpstreamModel != model:
 		body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
 	}
 	if route.CacheTTL >= time.Hour {
@@ -234,8 +265,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	committed := false
 	flusher, _ := writer.(http.Flusher)
 	var heartbeat func() error
-	clientStream := requiresStreamTerminal(request, body) && !imageCompat
-	bufferTerminal := clientStream || imageCompat
+	clientStream := streamRequested && !imageCompat
+	bufferTerminal := clientStream || imageCompat || chatCompat
+	chatActive := chatCompat
 	if clientStream {
 		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
@@ -260,7 +292,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 	}
 	requestUpstream := func(requestCtx context.Context) (*http.Response, error) {
-		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, bufferTerminal, 0, nil)
+		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, &bufferTerminal, 0, nil, &chatActive)
 	}
 	var response *http.Response
 	if clientStream {
@@ -307,6 +339,43 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	usage = usageFromHeaders(response.Header)
 	generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
 	removeUsageHeaders(response.Header)
+	// A rejected request already carries a neutral error body; translating it
+	// would replace the reason with an empty "completed" response.
+	if chatActive && status < 400 {
+		limit := responseBufferLimit(server.config)
+		raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
+		if readErr != nil || int64(len(raw)) > limit {
+			status = http.StatusBadGateway
+			errorCode = "chat_compatibility"
+			if committed {
+				writeStreamFailure(writer, request.URL.Path, model)
+			} else {
+				writeError(writer, http.StatusBadGateway, "Chat completions stream could not be converted")
+			}
+			return
+		}
+		converted, convertErr := chatToResponses(raw, clientStream)
+		if convertErr != nil {
+			status = http.StatusBadGateway
+			errorCode = "chat_compatibility"
+			if committed {
+				writeStreamFailure(writer, request.URL.Path, model)
+			} else {
+				writeError(writer, http.StatusBadGateway, "Chat completions response could not be converted")
+			}
+			return
+		}
+		response.Body = io.NopCloser(bytes.NewReader(converted))
+		response.ContentLength = int64(len(converted))
+		if clientStream {
+			response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+			response.Header.Del("Content-Length")
+		} else {
+			response.Header.Set("Content-Type", "application/json")
+			response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+		}
+		response.Header.Del("Content-Encoding")
+	}
 	if imageCompat {
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxImageResponse+1))
 		converted, convertErr := imagesResponse(raw)
@@ -323,6 +392,22 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		response.Header.Del("Content-Encoding")
 	}
 	restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
+	// The guardrails judge exactly what the client is about to read, after every
+	// translation and repair, so a payload cannot hide in a dialect the relay was
+	// still rewriting.
+	if code, blocked := server.reviewResponse(response, relayapp.GuardrailSubject{
+		ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+		ClientDeclaredTools: clientDeclaredTools,
+	}); blocked {
+		status = http.StatusBadGateway
+		errorCode = code
+		if committed {
+			writeStreamFailure(writer, request.URL.Path, model)
+		} else {
+			writeError(writer, http.StatusBadGateway, "Provider response was refused by the local guardrails")
+		}
+		return
+	}
 	if !committed {
 		copyResponseHeaders(writer.Header(), response.Header)
 		writer.WriteHeader(response.StatusCode)
@@ -363,31 +448,50 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	}
 	normalizedBody, clientTools := normalizeResponsesTools(request.Method, request.Path, request.Headers.Get("Content-Type"), request.Body)
 	request.Body = normalizedBody
+	clientDeclaredTools := server.guardrail.ClientDeclaredTools(request.Body)
 	path, body, imageCompat, err := prepareImageRequest(request.Method, request.Path, request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel, route.ImageCompat)
 	if err != nil {
 		return relayapp.DispatchResponse{}, err
-	}
-	if !imageCompat {
-		body = rewriteRequestModel(request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel)
-	}
-	if route.CacheTTL >= time.Hour {
-		body = extendCacheTTL(body, request.Headers.Get("Content-Type"))
 	}
 	urlValue, err := url.Parse(path)
 	if err != nil || !strings.HasPrefix(urlValue.Path, "/") {
 		return relayapp.DispatchResponse{}, errors.New("invalid dispatch path")
 	}
-	incoming := &http.Request{Method: request.Method, URL: urlValue, Header: request.Headers.Clone()}
-	terminalStream := requiresStreamTerminal(incoming, body)
+	// Same ownership rule as ServeHTTP: the upstream request carries its own URL,
+	// because requestWithRetry rewrites the path in place and urlValue.Path is what
+	// tells restoreClientToolCalls which dialect the caller asked for.
+	targetURL := *urlValue
+	incoming := &http.Request{Method: request.Method, URL: &targetURL, Header: request.Headers.Clone()}
+	streamRequested := requiresStreamTerminal(incoming, request.Body)
+	chatMode := route.Format == "chat" || (route.Format == "auto" && server.chatOnlyLoaded(route.ProviderID))
+	chatPath, chatBody, chatCompat, chatErr := prepareChatCompletions(request.Method, request.Path, body, request.Headers.Get("Content-Type"), route.ChatPath, chatMode)
+	if chatErr != nil {
+		return relayapp.DispatchResponse{}, chatErr
+	}
+	if chatCompat {
+		body = chatBody
+		if request.UpstreamModel != "" && request.UpstreamModel != requestModel(request.Body, request.Headers.Get("Content-Type")) {
+			body = rewriteRequestModel(body, request.Headers.Get("Content-Type"), request.UpstreamModel)
+		}
+		targetURL.Path = chatPath
+		targetURL.RawPath = ""
+	} else if !imageCompat {
+		body = rewriteRequestModel(request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel)
+	}
+	if route.CacheTTL >= time.Hour {
+		body = extendCacheTTL(body, request.Headers.Get("Content-Type"))
+	}
+	terminalStream := streamRequested || imageCompat || chatCompat
+	chatActive := chatCompat
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: request.PublicModel, ProviderID: route.ProviderID,
 		ProviderName: route.ProviderName, Method: request.Method,
 		Path: urlValue.Path, BytesIn: int64(len(body)),
 	})
 	markers := make([]string, 0, 4)
-	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
+	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
-	})
+	}, &chatActive)
 	if err != nil {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{Cancelled: errors.Is(err, context.Canceled), ErrorCode: "transport"})
 		return relayapp.DispatchResponse{}, err
@@ -409,12 +513,39 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
 		response.Header.Del("Content-Encoding")
 	}
+	// A rejected request already carries a neutral error body; translating it
+	// would replace the reason with an empty "completed" response.
+	if chatActive && response.StatusCode < 400 {
+		responseBody, err = chatToResponses(responseBody, streamRequested)
+		if err != nil {
+			server.activity.Finish(activityID, relayapp.ActivityFinish{Status: http.StatusBadGateway, ErrorCode: "chat_compatibility"})
+			return relayapp.DispatchResponse{}, err
+		}
+		if streamRequested {
+			response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+			response.Header.Del("Content-Length")
+		} else {
+			response.Header.Set("Content-Type", "application/json")
+			response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
+		}
+		response.Header.Del("Content-Encoding")
+	}
 	terminal := response.Header.Get("X-Switchboard-Terminal")
 	usage := usageFromHeaders(response.Header)
 	generation := durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
 	removeUsageHeaders(response.Header)
 	response.Header.Del("X-Switchboard-Terminal")
 	responseBody = restoreClientToolCalls(responseBody, clientTools, urlValue.Path, strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "event-stream"))
+	// Tunnel traffic reaches the relay through here, so the same review protects it.
+	// A refusal leaves as a plain dispatch error, which every public caller already
+	// receives as one neutral message.
+	if code, blocked := server.reviewBody(responseBody, response.Header.Get("Content-Type"), response.StatusCode, relayapp.GuardrailSubject{
+		ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: request.PublicModel,
+		ClientDeclaredTools: clientDeclaredTools,
+	}); blocked {
+		server.activity.Finish(activityID, relayapp.ActivityFinish{Status: http.StatusBadGateway, ErrorCode: code})
+		return relayapp.DispatchResponse{}, errGuardrailBlocked
+	}
 	if response.Header.Get("Content-Length") != "" {
 		response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
 	}
@@ -432,8 +563,16 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	}, nil
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream bool, attemptLimit int, onCredential func(relayapp.Credential)) (*http.Response, error) {
+// chatOnlyLoaded reports whether the provider was already proven to speak only
+// the chat completions format by an earlier endpoint-missing 404 probe.
+func (server *Server) chatOnlyLoaded(providerID string) bool {
+	_, loaded := server.chatOnly.Load(providerID)
+	return loaded
+}
+
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool) (*http.Response, error) {
 	requestFailures := 0
+	credentialFailures := 0
 	model := requestModel(body, incoming.Header.Get("Content-Type"))
 	for attempt := 0; ; attempt++ {
 		lease, credential, waited, err := server.acquireCredential(ctx, route, model, func() { server.activity.Waiting(activityID) })
@@ -475,8 +614,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				drainResponse(response)
 				return genericErrorResponse(http.StatusBadGateway), nil
 			}
-			if terminalStream {
-				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, incoming.URL.Path, server.config)
+			if *terminalStream {
+				ssePath := incoming.URL.Path
+				if chatActive != nil && *chatActive {
+					ssePath = defaultChatCompletionsPath
+				}
+				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config)
 				if bufferErr != nil {
 					outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport}
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
@@ -612,10 +755,37 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 
 		errorBody := readErrorBody(response)
+		if status == http.StatusBadRequest && canRetry(attempt, attemptLimit) {
+			if repaired, changed := repairRejectedParameters(body, errorBody); changed {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				body = repaired
+				server.observeRetry(activityID, attempt, status, 0)
+				continue
+			}
+			if freeformToolRejected(errorBody) {
+				if downgraded, changed := downgradeFreeformTools(body); changed {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+					body = downgraded
+					server.observeRetry(activityID, attempt, status, 0)
+					continue
+				}
+			}
+			// Last resort, and deliberately not gated on what the provider said: a
+			// refusal of a turn that replays sealed reasoning is almost always about
+			// the seal, and providers phrase it every way imaginable. Retrying without
+			// it loses the earlier chain of thought and keeps the turn alive.
+			if stripped, changed := stripEncryptedReasoning(body); changed {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				body = stripped
+				server.observeRetry(activityID, attempt, status, 0)
+				continue
+			}
+		}
 		switch {
 		case balanceUnavailable(status, errorBody):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted})
-			if !canRetryCredentialFailure(attempt, attemptLimit, lease, server.config.PermanentAttempts) {
+			credentialFailures++
+			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
@@ -624,20 +794,56 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication})
-			if !canRetryCredentialFailure(attempt, attemptLimit, lease, server.config.PermanentAttempts) {
+			credentialFailures++
+			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
 				return nil, err
 			}
 			continue
+		case status == http.StatusNotFound && modelMissing(errorBody, model):
+			// The provider does not host the model at all. Retrying is pointless
+			// and blocking the keys would only stall the next request as well.
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			return genericErrorResponse(status), nil
 		case status == http.StatusNotFound && modelUnavailable(errorBody, model):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model})
-			if !canRetryCredentialFailure(attempt, attemptLimit, lease, server.config.PermanentAttempts) {
+			credentialFailures++
+			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
 				return nil, err
+			}
+			continue
+		case status == http.StatusNotFound && route.Format == "auto" && chatActive != nil && *chatActive:
+			// The provider was already proven chat-only, yet the chat path 404s.
+			// aieva-style gateways (aieva.io, nele.ai) serve chat at a custom
+			// /chat-completion path, so give that one attempt before giving up
+			// and forgetting the probe.
+			if chatPathFallback(incoming.URL.Path, route.ChatPath) {
+				incoming.URL.Path = chatCompletionFallbackPath
+				incoming.URL.RawPath = ""
+				continue
+			}
+			server.chatOnly.Delete(route.ProviderID)
+			return genericErrorResponse(status), nil
+		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model) && endpointMissing404(status, errorBody) && strings.TrimRight(incoming.URL.Path, "/") == responsesPath:
+			server.chatOnly.Store(route.ProviderID, struct{}{})
+			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)
+			if chatErr != nil || !ok {
+				server.chatOnly.Delete(route.ProviderID)
+				return genericErrorResponse(status), nil
+			}
+			body = translated
+			incoming.URL.Path = chatPath
+			incoming.URL.RawPath = ""
+			if terminalStream != nil {
+				*terminalStream = true
+			}
+			if chatActive != nil {
+				*chatActive = true
 			}
 			continue
 		}
@@ -729,12 +935,47 @@ func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error,
 	return response, err
 }
 
+// canRetry reports whether another attempt is allowed.
+//
+// A caller that sets no limit still gets a ceiling. Without one a provider that
+// answers 429 or 5xx indefinitely keeps the attempt loop running, and on a
+// streaming request the keep-alives hold the caller there with it: history holds
+// single requests that retried two thousand times across half a day. The cap is
+// loose enough that a pool-wide rate limit still has room to clear, since the
+// delay tops out at RetryMax, and tight enough that a provider which is simply
+// gone ends the request rather than the day.
 func canRetry(attempt, limit int) bool {
-	return limit <= 0 || attempt+1 < limit
+	if limit > 0 {
+		return attempt+1 < limit
+	}
+	return attempt+1 < maxRelayAttempts
 }
 
-func canRetryCredentialFailure(attempt, limit int, lease relayapp.CredentialLease, permanentAttempts int) bool {
-	return canRetry(attempt, limit) && (lease != nil || attempt+1 < permanentAttempts)
+// canRotateCredential reports whether a credential-level rejection - bad key,
+// spent balance, model the account cannot reach - is worth another key.
+// Passthrough routes have no pool and spend the permanent-attempt budget.
+// A credentialed route gets one attempt per key: every rejection cools the key
+// that produced it, so once the pool has answered the same way throughout,
+// waiting for those cooldowns to lapse would only park the request until the
+// whole request times out.
+func (server *Server) canRotateCredential(attempt, limit int, lease relayapp.CredentialLease, failures int, providerID string) bool {
+	if !canRetry(attempt, limit) {
+		return false
+	}
+	if lease == nil {
+		return attempt+1 < server.config.PermanentAttempts
+	}
+	return failures < server.credentialCount(providerID)
+}
+
+// credentialCount returns how many keys the provider has, falling back to the
+// permanent-attempt budget for sources that do not report a count.
+func (server *Server) credentialCount(providerID string) int {
+	counter, ok := server.credentials.(relayapp.CredentialCounter)
+	if !ok {
+		return max(server.config.PermanentAttempts, 1)
+	}
+	return max(counter.Count(providerID), 1)
 }
 
 func (server *Server) acquireCredential(ctx context.Context, route relayapp.Route, model string, waiting func()) (relayapp.CredentialLease, relayapp.Credential, time.Duration, error) {
@@ -1335,6 +1576,93 @@ func readErrorBody(response *http.Response) []byte {
 	return body
 }
 
+// freeformToolRejected reports a refusal aimed at the freeform ("custom") tool
+// type rather than at the request in general. Only a complaint that names the
+// type or its grammar counts: a wrong guess would downgrade the tools of a
+// provider that supports them, and the model would lose the grammar its payload
+// has to follow.
+func freeformToolRejected(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(errorBody))
+	for _, marker := range []string{"custom", "freeform", "grammar", "lark"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// repairRejectedParameters rewrites a request the provider turned down over a
+// parameter its newer models no longer accept, and reports whether anything
+// changed. GPT-5 and the o-series answer 400 for max_tokens ("use
+// max_completion_tokens instead") and for any temperature or top_p other than
+// the default. The rewrite only happens when the error names the parameter and
+// the body actually carries it, so a genuine 400 still fails at once and the
+// retry cannot cycle: every pass drops a field it can never drop again.
+func repairRejectedParameters(body, errorBody []byte) ([]byte, bool) {
+	if len(body) == 0 || len(errorBody) == 0 {
+		return body, false
+	}
+	text := strings.ToLower(string(errorBody))
+	if !strings.Contains(text, "unsupported") && !strings.Contains(text, "not support") {
+		return body, false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
+		return body, false
+	}
+	changed := false
+	if tokens, carried := payload["max_tokens"]; carried && strings.Contains(text, "max_completion_tokens") {
+		delete(payload, "max_tokens")
+		payload["max_completion_tokens"] = tokens
+		changed = true
+	}
+	for _, field := range []string{"temperature", "top_p"} {
+		if _, carried := payload[field]; carried && strings.Contains(text, field) {
+			delete(payload, field)
+			changed = true
+		}
+	}
+	if !changed {
+		return body, false
+	}
+	repaired, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return repaired, true
+}
+
+// modelMissing reports a 404 that names the requested model and says it simply
+// is not there. No key can conjure a model the provider does not host, so the
+// relay answers straight away instead of rotating the pool and blocking every
+// key for the model cooldown, which would stall later requests too.
+func modelMissing(body []byte, model string) bool {
+	if model == "" || len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	if !strings.Contains(text, strings.ToLower(model)) {
+		return false
+	}
+	for _, marker := range []string{
+		"does not exist", "doesn't exist", "no such model",
+		"unknown model", "model not found", "invalid model",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// modelUnavailable reports a 404 the account, not the catalogue, is responsible
+// for: the model exists but this key may not call it. Another key can succeed,
+// so the request rotates through the pool.
 func modelUnavailable(body []byte, model string) bool {
 	if model == "" || len(body) == 0 {
 		return false
@@ -1342,7 +1670,6 @@ func modelUnavailable(body []byte, model string) bool {
 	text := strings.ToLower(string(body))
 	return strings.Contains(text, strings.ToLower(model)) &&
 		(strings.Contains(text, "not available on your plan") ||
-			strings.Contains(text, "does not exist") ||
 			strings.Contains(text, "not available for your account"))
 }
 

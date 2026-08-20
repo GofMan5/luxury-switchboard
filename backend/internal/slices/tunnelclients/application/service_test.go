@@ -1,6 +1,7 @@
 package application
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -51,5 +52,49 @@ func TestTunnelEventIDsDoNotCollideAcrossServiceRestarts(t *testing.T) {
 	second := NewService(nil).Begin(domain.Start{IP: "203.0.113.1"})
 	if first == second {
 		t.Fatalf("tunnel event id was reused across service instances: %s", first)
+	}
+}
+
+// The stored error code is an allowlist, not a filter list. Every internal label
+// the gateway or relay might invent — a guardrail refusal above all — has to fall
+// through to empty, because this field is shown in the tunnel client history and
+// tells a story about why one particular answer failed.
+func TestOnlyNeutralErrorCodesAreStored(t *testing.T) {
+	allowed := []string{"upstream_rejected", "unsafe_response", "context_limit", "client_disconnected"}
+	for _, code := range allowed {
+		if safeError(code) != code {
+			t.Fatalf("expected %q to be storable, got %q", code, safeError(code))
+		}
+	}
+	internal := []string{
+		"guardrail_blocked", "guardrail_alert", "proto-tooluse-unsolicited",
+		"dl-curl-pipe-sh", "upstream_status", "chat_compatibility", "transport",
+		"stream_incomplete", "image_generation", "request_rejected", "cancelled",
+		"", "UPSTREAM_REJECTED", "upstream_rejected ",
+	}
+	for _, code := range internal {
+		if safeError(code) != "" {
+			t.Fatalf("internal label %q reached the client history as %q", code, safeError(code))
+		}
+	}
+}
+
+// A refused request must still be visible to the owner as a completed request,
+// without the history naming why it failed.
+func TestARefusalIsRecordedWithoutNamingItself(t *testing.T) {
+	service := NewService(nil)
+	id := service.Begin(domain.Start{IP: "203.0.113.9"})
+	service.Finish(id, domain.Finish{Status: 502, ErrorCode: "guardrail_blocked"})
+	events := service.Events(context.Background(), "203.0.113.9")
+	if len(events) == 0 {
+		t.Fatal("a refusal left no trace for the owner")
+	}
+	for _, event := range events {
+		if event.ErrorCode != "" {
+			t.Fatalf("the refusal named itself in the history: %+v", event)
+		}
+		if event.Status != 502 {
+			t.Fatalf("the recorded status does not match what the caller saw: %+v", event)
+		}
 	}
 }

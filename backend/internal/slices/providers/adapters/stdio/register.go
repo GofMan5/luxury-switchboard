@@ -59,8 +59,11 @@ func Register(server *platform.Server, catalog *application.Catalog, manager *ap
 			AuthHeader  string `json:"authHeader"`
 			Dialect     string `json:"dialect"`
 			ModelsPath  string `json:"modelsPath"`
+			Format      string `json:"format"`
+			ChatPath    string `json:"chatPath"`
 			ImageCompat bool   `json:"imageCompat"`
 			RPM         int    `json:"rpm"`
+			RateUnit    string `json:"rateUnit"`
 			Cache1H     bool   `json:"cache1h"`
 			Enabled     bool   `json:"enabled"`
 		}
@@ -71,7 +74,9 @@ func Register(server *platform.Server, catalog *application.Catalog, manager *ap
 			Name: command.Name, BaseURL: command.BaseURL,
 			AuthMode: domain.AuthMode(command.AuthMode), AuthHeader: command.AuthHeader,
 			Dialect: domain.Dialect(command.Dialect), ModelsPath: command.ModelsPath, ImageCompat: command.ImageCompat,
+			Format: domain.APIFormat(command.Format), ChatPath: command.ChatPath,
 			RPM:      command.RPM,
+			RateUnit: domain.RateUnit(command.RateUnit),
 			CacheTTL: cacheTTL(command.Cache1H), Enabled: command.Enabled,
 		})
 		if err != nil {
@@ -103,8 +108,11 @@ func providerParams(payload json.RawMessage) (domain.Params, error) {
 		AuthHeader  string `json:"authHeader"`
 		Dialect     string `json:"dialect"`
 		ModelsPath  string `json:"modelsPath"`
+		Format      string `json:"format"`
+		ChatPath    string `json:"chatPath"`
 		ImageCompat bool   `json:"imageCompat"`
 		RPM         int    `json:"rpm"`
+		RateUnit    string `json:"rateUnit"`
 		Cache1H     bool   `json:"cache1h"`
 		Enabled     bool   `json:"enabled"`
 	}
@@ -115,7 +123,9 @@ func providerParams(payload json.RawMessage) (domain.Params, error) {
 		Name: command.Name, BaseURL: command.BaseURL,
 		AuthMode: domain.AuthMode(command.AuthMode), AuthHeader: command.AuthHeader,
 		Dialect: domain.Dialect(command.Dialect), ModelsPath: command.ModelsPath, ImageCompat: command.ImageCompat,
+		Format: domain.APIFormat(command.Format), ChatPath: command.ChatPath,
 		RPM:      command.RPM,
+		RateUnit: domain.RateUnit(command.RateUnit),
 		CacheTTL: cacheTTL(command.Cache1H), Enabled: command.Enabled,
 	}, nil
 }

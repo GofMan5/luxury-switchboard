@@ -13,12 +13,13 @@ const (
 )
 
 type Assignment struct {
-	Target          Target `json:"target"`
-	PublicModel     string `json:"publicModel"`
-	UpstreamModel   string `json:"upstreamModel"`
-	ProviderID      string `json:"providerId"`
-	ContextLimitKiB int    `json:"contextLimitKiB"`
-	Enabled         bool   `json:"enabled"`
+	Target          Target   `json:"target"`
+	PublicModel     string   `json:"publicModel"`
+	UpstreamModel   string   `json:"upstreamModel"`
+	ProviderID      string   `json:"providerId"`
+	ContextLimitKiB int      `json:"contextLimitKiB"`
+	Aliases         []string `json:"aliases,omitempty"`
+	Enabled         bool     `json:"enabled"`
 }
 
 func (assignment Assignment) Validate() error {
@@ -33,6 +34,14 @@ func (assignment Assignment) Validate() error {
 	}
 	if assignment.ContextLimitKiB < 0 || assignment.ContextLimitKiB > 2*1024*1024 {
 		return errors.New("route context limit is invalid")
+	}
+	if len(assignment.Aliases) > 16 {
+		return errors.New("route alias list is too long")
+	}
+	for _, alias := range assignment.Aliases {
+		if !validModel(alias) || alias == assignment.PublicModel {
+			return errors.New("route alias is invalid")
+		}
 	}
 	return nil
 }

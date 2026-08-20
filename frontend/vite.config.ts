@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const edition = process.env.SWITCHBOARD_EDITION === 'public' ? 'public' : 'owner'
+const owner = process.env.SWITCHBOARD_EDITION !== 'public'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -9,8 +9,7 @@ export default defineConfig({
   // Replaced at build time so the public bundle drops the owner workspaces instead
   // of shipping them behind a runtime check.
   define: {
-    'import.meta.env.VITE_EDITION': JSON.stringify(edition),
-    __OWNER_EDITION__: JSON.stringify(edition === 'owner'),
+    __OWNER_EDITION__: JSON.stringify(owner),
   },
   clearScreen: false,
   server: {

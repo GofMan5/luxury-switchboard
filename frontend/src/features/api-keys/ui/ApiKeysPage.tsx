@@ -15,6 +15,10 @@ export default function ApiKeysPage() {
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; key?: ApiKey } | null>(null)
   const [removeKey, setRemoveKey] = useState<ApiKey | null>(null)
   const selectedProvider = (providers.catalog.providers.some((provider) => provider.id === providerID) ? providerID : '') || providers.catalog.activeId || providers.catalog.providers[0]?.id || ''
+  // The scheduler counts a key's own limit over its provider's window, so a
+  // per-second provider makes every number on this page a per-second number.
+  const perSecond = providers.catalog.providers.find((provider) => provider.id === selectedProvider)?.rateUnit === 'second'
+  const unit = perSecond ? 'second' : 'minute'
 
   useEffect(() => {
     if (selectedProvider) void model.load(selectedProvider)
@@ -54,7 +58,7 @@ export default function ApiKeysPage() {
         <table className={styles.table}>
           <thead>
             <tr>
-              <th>Priority</th><th>Label</th><th>RPM</th><th>Actual</th><th>Proxy</th><th>Cooldown</th><th>429</th><th>Actions</th>
+              <th>Priority</th><th>Label</th><th>Limit</th><th>Actual</th><th>Proxy</th><th>Cooldown</th><th>429</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -67,7 +71,7 @@ export default function ApiKeysPage() {
                     <span className={styles.keyLabel}><KeyRound size={15} aria-hidden="true" /><span><strong>{key.label}</strong><small>{key.pinned ? 'Managed · direct IP' : 'Encrypted local key'}</small></span></span>
                   </td>
                   <td>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
-                  <td>{key.startsInWindow} / min</td>
+                  <td>{key.startsInWindow} / {perSecond ? 's' : 'min'}</td>
                   <td>{key.pinned ? 'Direct' : key.proxyConfigured ? 'Configured' : 'Direct'}</td>
                   <td>{formatCooldown(key.cooldownMs, key.blockedModels)}</td>
                   <td>{key.retries429}</td>
@@ -95,6 +99,7 @@ export default function ApiKeysPage() {
       {editor ? (
         <KeyEditor
           providerId={selectedProvider}
+          unit={unit}
           mode={editor.mode}
           keyValue={editor.key}
           pending={Boolean(state.pendingId)}
@@ -127,8 +132,9 @@ function IconAction({ label, disabled, danger = false, onClick, children }: { la
   return <button type="button" className={styles.iconAction} data-danger={danger} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>
 }
 
-function KeyEditor({ providerId, mode, keyValue, pending, operationError, onClose, onSubmit }: {
+function KeyEditor({ providerId, unit, mode, keyValue, pending, operationError, onClose, onSubmit }: {
   providerId: string
+  unit: 'minute' | 'second'
   mode: 'add' | 'edit'
   keyValue?: ApiKey
   pending: boolean
@@ -148,7 +154,7 @@ function KeyEditor({ providerId, mode, keyValue, pending, operationError, onClos
     event.preventDefault()
     const parsedRPM = Number(rpm)
     if (!label.trim() || !Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000 || (mode === 'add' && !secret.trim())) {
-      setError('Enter a label, an RPM from 0 to 1,000,000, and the key secret.')
+      setError('Enter a label, a limit from 0 to 1,000,000, and the key secret.')
       return
     }
     if (replaceProxy && !proxyURLIsValid(proxyUrl)) {
@@ -177,8 +183,8 @@ function KeyEditor({ providerId, mode, keyValue, pending, operationError, onClos
         <header><div><h2>{mode === 'add' ? 'Add API key' : 'Edit API key'}</h2><p>The secret is encrypted locally and never shown again.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Label</span><input value={label} maxLength={80} data-autofocus onChange={(event) => setLabel(event.currentTarget.value)} /></label>
-          <label><span>Requests per minute</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited.</small></label>
-          {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} maxLength={8192} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Managed key material is write-only; RPM can still be changed.</div>}
+          <label><span>Requests per {unit}</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited. The window follows the provider's rate unit.</small></label>
+          {!keyValue?.pinned ? <label><span>{mode === 'add' ? 'API key' : 'Replace API key (optional)'}</span><input type="password" value={secret} maxLength={8192} autoComplete="new-password" onChange={(event) => setSecret(event.currentTarget.value)} /></label> : <div className={styles.pinnedNote}>Managed key material is write-only; the request limit can still be changed.</div>}
           {!keyValue?.pinned ? <div className={styles.proxyField}><span>Proxy</span>{mode === 'edit' ? <label className={styles.check}><input type="checkbox" checked={replaceProxy} onChange={(event) => setReplaceProxy(event.currentTarget.checked)} />Replace current proxy setting</label> : null}<input aria-label="Proxy URL" type="password" disabled={!replaceProxy} value={proxyUrl} maxLength={8192} placeholder="Optional http(s) or socks5 URL" autoComplete="new-password" onChange={(event) => setProxyURL(event.currentTarget.value)} /><small>Leave empty to use the native IP.</small></div> : null}
           {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
         </div>

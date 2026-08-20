@@ -31,7 +31,7 @@ func TestManagerPersistsAddedKeyAndPinnedRPM(t *testing.T) {
 	scheduler := NewScheduler(10)
 	builtin := testKey(t, "echo", "Environment key", "environment-secret", 0, 30)
 	builtin.Pinned = true
-	manager, err := NewManager(scheduler, repository, map[string]int{"echo": 120}, []domain.Key{builtin})
+	manager, err := NewManager(scheduler, repository, map[string]Rate{"echo": {Limit: 120}}, []domain.Key{builtin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestManagerPersistsAddedKeyAndPinnedRPM(t *testing.T) {
 		t.Fatal("environment credential was copied into persistent settings")
 	}
 
-	restarted, err := NewManager(NewScheduler(10), repository, map[string]int{"echo": 120}, []domain.Key{builtin})
+	restarted, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {Limit: 120}}, []domain.Key{builtin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestManagerPersistsAddedKeyAndPinnedRPM(t *testing.T) {
 
 func TestManagerDoesNotCommitFailedPersistence(t *testing.T) {
 	repository := &memoryRepository{saveFail: true}
-	manager, err := NewManager(NewScheduler(10), repository, map[string]int{"echo": 0}, nil)
+	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestManagerDoesNotCommitFailedPersistence(t *testing.T) {
 func TestManagerRejectsDuplicatePersistedKeysWithoutMutatingRuntime(t *testing.T) {
 	key := testKey(t, "echo", "Duplicate", "same-secret", 1, 10)
 	repository := &memoryRepository{keys: []domain.Key{key, key}}
-	manager, err := NewManager(NewScheduler(10), repository, map[string]int{"echo": 0}, nil)
+	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

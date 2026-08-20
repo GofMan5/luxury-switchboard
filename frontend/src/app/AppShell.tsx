@@ -30,8 +30,8 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
     <div className={styles.shell}>
       <aside className={styles.sidebar} aria-label="Main navigation">
         <div className={styles.brand}>
-          <span className={styles.brandMark} aria-hidden="true">S</span>
-          <span className={styles.brandName}>Switchboard</span>
+          <span className={styles.brandMark} aria-hidden="true">L</span>
+          <span className={styles.brandName}>Luxury Switchboard</span>
         </div>
         <nav className={styles.navigation}>
           {navigation.map((item) => {
@@ -55,7 +55,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
         </nav>
         <div className={styles.sidebarFooter}>
           <PanelLeftClose size={17} aria-hidden="true" />
-          <span>{appVersion ? `v${appVersion}` : 'Switchboard'}</span>
+          <span>{appVersion ? `v${appVersion}` : 'Luxury Switchboard'}</span>
         </div>
       </aside>
 

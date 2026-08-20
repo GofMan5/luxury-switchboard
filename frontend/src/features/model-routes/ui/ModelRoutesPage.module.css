@@ -50,6 +50,7 @@
 .table th:nth-child(4), .table th:nth-child(5) { width: 120px; }
 .table th:last-child { width: 100px; }
 .table strong { color: var(--text-primary); }
+.aliases { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
 .actions { display: flex; gap: 4px; }
 .actions button { display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 7px; color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), transform var(--motion-fast); }
 .actions button:hover { color: var(--text-primary); background: var(--bg-raised); }

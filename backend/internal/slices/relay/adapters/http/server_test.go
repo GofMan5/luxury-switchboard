@@ -40,6 +40,15 @@ type credentialSource struct {
 	outcomes []relayapp.AttemptOutcome
 }
 
+// countingCredentialSource is a pool that reports its size, the way the keypool
+// adapter does, so the relay can bound how often one request rotates keys.
+type countingCredentialSource struct {
+	credentialSource
+	keys int
+}
+
+func (source *countingCredentialSource) Count(string) int { return source.keys }
+
 type delayedCredentialSource struct {
 	delay time.Duration
 	value string
@@ -420,10 +429,177 @@ func TestRetryAfterHTTPDateIsClamped(t *testing.T) {
 	}
 }
 
+// Newer OpenAI models refuse max_tokens and any non-default temperature. The
+// relay retries once with the parameter the provider named instead of handing
+// the client a 400.
+func TestRejectedParametersAreRepairedOnce(t *testing.T) {
+	var seen []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		body, _ := io.ReadAll(request.Body)
+		_ = json.Unmarshal(body, &payload)
+		seen = append(seen, payload)
+		if _, legacy := payload["max_tokens"]; legacy {
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}`))
+			return
+		}
+		if _, tuned := payload["temperature"]; tuned {
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"message":"Unsupported value: 'temperature' does not support 0.2 with this model."}}`))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"chatcmpl-1","choices":[]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "openai", BaseURL: parsed, AuthMode: "passthrough"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/chat/completions", ProviderID: "openai", UpstreamModel: "gpt-5",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-5","max_tokens":64,"temperature":0.2,"messages":[]}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("rejected parameters were not repaired: status=%d err=%v", response.Status, err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("expected one repair per rejected parameter, saw %d attempts", len(seen))
+	}
+	final := seen[2]
+	if final["max_completion_tokens"] != float64(64) {
+		t.Fatalf("max_tokens was not carried over: %v", final["max_completion_tokens"])
+	}
+	if _, legacy := final["max_tokens"]; legacy {
+		t.Fatal("max_tokens survived the repair")
+	}
+	if _, tuned := final["temperature"]; tuned {
+		t.Fatal("the rejected temperature survived the repair")
+	}
+}
+
+// A 400 the relay cannot explain must reach the client immediately.
+func TestUnrelatedBadRequestIsNotRetried(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":{"message":"Unsupported parameter: 'seed'."}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "openai", BaseURL: parsed, AuthMode: "passthrough"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 1},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/chat/completions", ProviderID: "openai", UpstreamModel: "gpt-5",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-5","max_tokens":64,"messages":[]}`),
+	})
+	if err != nil || response.Status != http.StatusBadRequest || attempts != 1 {
+		t.Fatalf("an unrelated 400 was retried: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+}
+
+func TestAProviderThatOnlyRateLimitsStopsInsteadOfRetryingForever(t *testing.T) {
+	// The local relay path sets no attempt limit, so before the ceiling existed a
+	// provider stuck on 429 kept the loop and its stream keep-alives running for
+	// hours: history holds a request that retried two thousand times over half a day.
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = writer.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "openai", BaseURL: parsed, AuthMode: "passthrough"}},
+		Credentials: &credentialSource{values: []string{""}},
+		Config:      Config{RetryBase: time.Microsecond, RetryMax: time.Microsecond},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-5","messages":[]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if attempts != maxRelayAttempts {
+		t.Fatalf("the attempt ceiling was not applied: attempts=%d want=%d", attempts, maxRelayAttempts)
+	}
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("the caller was not told why the request ended: status=%d", response.Code)
+	}
+}
+
 func TestPlanSpecificModelUnavailableErrorIsClassified(t *testing.T) {
 	body := []byte(`{"error":{"message":"Model 'gpt-5.6-sol' is not available on your plan."}}`)
 	if !modelUnavailable(body, "gpt-5.6-sol") {
 		t.Fatal("plan-specific unavailable model did not fall through to the next key")
+	}
+	if modelMissing(body, "gpt-5.6-sol") {
+		t.Fatal("a plan restriction was mistaken for a missing model")
+	}
+}
+
+// A model the provider does not host cannot appear on another key. The relay
+// used to rotate the pool anyway, and because every rejection cools the key for
+// the model, it kept waiting for those cooldowns until the request timed out.
+func TestMissingModelAnswersWithoutRotatingTheKeyPool(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusNotFound)
+		_, _ = writer.Write([]byte(`{"error":{"message":"The model 'claude-haiku-4-5' does not exist"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "privatka", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "privatka", UpstreamModel: "claude-haiku-4-5",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"claude-haiku-4-5"}`),
+	})
+	if err != nil || response.Status != http.StatusNotFound {
+		t.Fatalf("missing model did not surface as 404: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("missing model was retried %d times", attempts)
+	}
+}
+
+// A credential-level rejection is worth another key, but only until the pool is
+// exhausted; without the bound the request rotated keys until it timed out.
+func TestCredentialRejectionStopsAfterEveryKeyAnswered(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":"invalid credential"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusUnauthorized {
+		t.Fatalf("credential rejection did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected one attempt per key, saw %d", attempts)
 	}
 }
 

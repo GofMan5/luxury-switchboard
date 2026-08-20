@@ -6,6 +6,7 @@ import type { RelayModel } from '../features/relay/application/relay-model'
 import type { SettingsModel } from '../features/settings/application/settings-model'
 import type { StatisticsModel } from '../features/statistics/application/statistics-model'
 import type { RoutesModel } from '../features/model-routes/application/routes-model'
+import type { GuardrailsModel } from '../features/guardrails/application/guardrails-model'
 import type { TunnelModel } from '../features/tunnel/application/tunnel-model'
 import type { ClientsModel } from '../features/clients/application/clients-model'
 import type { ModelsModel } from '../features/models/application/models-model'
@@ -20,6 +21,7 @@ export interface AppServices {
   readonly statistics: StatisticsModel
   readonly routes: RoutesModel
   readonly models: ModelsModel
+  readonly guardrails: GuardrailsModel
   /** Publishing workspaces exist only in the owner edition. */
   readonly tunnel?: TunnelModel
   readonly clients?: ClientsModel

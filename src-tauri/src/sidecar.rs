@@ -216,6 +216,7 @@ fn allowed_method(method: &str) -> bool {
             | "providers.delete"
             | "keys.list"
             | "keys.add"
+            | "keys.addMany"
             | "keys.update"
             | "keys.remove"
             | "keys.move"
@@ -393,6 +394,10 @@ mod tests {
                 r#"{"v":1,"id":"x","type":"command","method":"tunnel.privacy_test"}"#
             )
             .is_ok()
+        );
+        assert!(
+            validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"keys.addMany"}"#)
+                .is_ok()
         );
     }
 

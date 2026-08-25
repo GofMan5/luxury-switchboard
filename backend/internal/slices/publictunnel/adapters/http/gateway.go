@@ -103,7 +103,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		gateway.error(writer, http.StatusForbidden, "Request rejected")
 		return
 	}
-	markers := append([]string(nil), gateway.markers.SensitiveMarkers(route.ProviderID)...)
+	markers := identifyingMarkers(gateway.markers.SensitiveMarkers(route.ProviderID)...)
 	activityID := ""
 	started := time.Now()
 	if gateway.activity != nil {
@@ -148,10 +148,13 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		gateway.error(writer, http.StatusBadGateway, "Request could not be completed")
 		return
 	}
+	// Credential markers first and unfiltered: a secret must refuse the answer at any
+	// length rather than reach a public reader. The identifiers are filtered, and the
+	// provider ones are re-read here on purpose — the catalog can change mid-flight.
 	markers = append(markers, response.SensitiveMarkers...)
-	markers = append(markers, gateway.markers.SensitiveMarkers(route.ProviderID)...)
+	markers = append(markers, identifyingMarkers(gateway.markers.SensitiveMarkers(route.ProviderID)...)...)
 	if route.UpstreamModel != route.PublicModel {
-		markers = append(markers, route.UpstreamModel)
+		markers = append(markers, identifyingMarkers(route.UpstreamModel)...)
 	}
 	clean, contentType, err := sanitizeResponse(response, path, route.PublicModel, markers, gateway.config.BrandResponse)
 	if err != nil {

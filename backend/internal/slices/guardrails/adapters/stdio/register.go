@@ -28,7 +28,7 @@ func Register(server *platform.Server, inspector *application.Inspector) {
 		if query.Limit == 0 {
 			query.Limit = 100
 		}
-		return map[string]any{"findings": inspector.Records(query.Limit)}, nil
+		return map[string]any{"findings": withinOneFrame(inspector.Records(query.Limit))}, nil
 	})
 	server.Handle("guardrails.clear", func(_ context.Context, _ json.RawMessage) (any, error) {
 		inspector.Clear()
@@ -48,4 +48,43 @@ func status(inspector *application.Inspector) map[string]any {
 		"ruleSetVersion": inspector.RuleSetVersion(),
 		"findingCount":   len(inspector.Records(0)),
 	}
+}
+
+// withinOneFrame drops the oldest records until the answer fits one frame.
+//
+// The caller's limit counts records and the shell counts bytes, and one hostile
+// answer carries as many findings as it triggered rules, so the two disagree by an
+// order of magnitude: 200 records of ten findings each - measured, not guessed -
+// came to over 256 KiB, and the workspace answered `response_too_large` every time
+// it was opened. That made the findings page unreachable exactly when a provider
+// was sending the most, and the only way back was to clear the evidence.
+//
+// Newest first, because Records already returns them that way and the recent
+// answers are the ones being acted on. The count the operator compares against is
+// `findingCount` in the status, which is never truncated, so a short list is
+// visible as a short list rather than passing for the whole journal.
+//
+// Every field of a Record is bounded — 32 findings of a 160-byte match and a
+// 200-byte excerpt, a 128-byte model, an 80-byte provider name — so the widest one
+// that can exist is 26 KB and the budget holds 9 of those. That is the floor: a
+// real flood measured 60. No single record can outgrow the budget, so this never
+// answers empty because the newest one alone did not fit.
+func withinOneFrame(records []application.Record) []application.Record {
+	for len(records) > 0 {
+		encoded, err := json.Marshal(records)
+		if err != nil {
+			return nil
+		}
+		// The platform constant, not the frame limit: what is measured here is the
+		// record array, and the frame that carries it adds its envelope on top.
+		if len(encoded) <= platform.MaxPayloadBytes {
+			return records
+		}
+		// Proportional, then verified. Records are within an order of magnitude of
+		// each other in size, so one estimate normally lands; taking at least one off
+		// guarantees this ends. Halving instead would answer 100 where 190 fit.
+		next := len(records) * platform.MaxPayloadBytes / len(encoded)
+		records = records[:min(next, len(records)-1)]
+	}
+	return records
 }

@@ -1,4 +1,4 @@
-import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
+import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
 import type { ApiKeysPort } from './api-keys-port'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
@@ -49,6 +49,15 @@ export class ApiKeysModel {
     return this.#mutate('new', () => this.#port.add(value))
   }
 
+  /**
+   * Imports pasted keys and returns what became of them, so the caller can say how
+   * many were added and which were skipped. Null means the import did not run.
+   */
+  async importKeys(value: ImportApiKeys): Promise<ImportApiKeysReport | null> {
+    if (value.entries.length === 0) return null
+    return this.#run('import', () => this.#port.addMany(value))
+  }
+
   async update(value: UpdateApiKey): Promise<boolean> {
     return this.#mutate(value.keyId, () => this.#port.update(value))
   }
@@ -75,15 +84,19 @@ export class ApiKeysModel {
   }
 
   async #mutate(pendingId: string, operation: () => Promise<unknown>): Promise<boolean> {
-    if (this.#state.pendingId) return false
+    return await this.#run(pendingId, async () => { await operation(); return true }) === true
+  }
+
+  async #run<Result>(pendingId: string, operation: () => Promise<Result>): Promise<Result | null> {
+    if (this.#state.pendingId) return null
     this.#set({ ...this.#state, pendingId, error: '' })
     try {
-      await operation()
+      const result = await operation()
       await this.load(this.#state.providerId, true)
-      return true
+      return result
     } catch (error) {
       this.#set({ ...this.#state, pendingId: '', error: error instanceof ControlPlaneError ? error.message : 'Key settings could not be saved' })
-      return false
+      return null
     }
   }
 

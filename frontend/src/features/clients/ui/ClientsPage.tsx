@@ -101,7 +101,11 @@ function ClientRow({ client, pending, onOpen, onBan }: { client: TunnelClient; p
       }}
     >
       <td><span className={styles.state}><StatusDot state={view.tone} />{view.label}</span></td>
-      <td className={styles.mono}>{client.ip}</td>
+      {/* The address is the row's identity, and it does not fit at the minimum
+          window width: a compressed IPv6 needs about twice this column. The note
+          below already carries its full text in a title; without one here two
+          clients from the same /64 render as the same ellipsis. */}
+      <td className={styles.mono} title={client.ip}>{client.ip}</td>
       <td className={styles.note} title={client.note || undefined}>{client.note || <span className={styles.muted}>—</span>}</td>
       <td>{client.actualRpm}</td>
       <td>{client.active}</td>
@@ -167,7 +171,7 @@ function ClientDialog({ client, ip, events, pending, onClose, onSave }: {
           <span><small>RPM</small><strong>{client?.actualRpm ?? 0}</strong></span>
           <span><small>Active</small><strong>{client?.active ?? 0}</strong></span>
           <span><small>Queued</small><strong>{client?.queued ?? 0}</strong></span>
-          <span><small>Total</small><strong>{client?.count.toLocaleString() ?? '0'}</strong></span>
+          <span><small>Total</small><strong>{(client?.count ?? 0).toLocaleString()}</strong></span>
           <span><small>Refused</small><strong>{(client?.refused ?? 0).toLocaleString()}</strong></span>
         </div>
         <form

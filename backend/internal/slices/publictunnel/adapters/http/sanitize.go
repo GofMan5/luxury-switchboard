@@ -464,10 +464,41 @@ func eventData(block []byte) []byte {
 	return bytes.Join(parts, []byte("\n"))
 }
 
+// identifyingMarkers keeps only the values long enough to be redacted out of an
+// answer. Everything reaching the sanitizer is treated as a secret — a marker that
+// survives redaction refuses the whole answer — and that is right for a credential at
+// any length and wrong for an identifier of two or three characters, which cannot be
+// replaced without mangling ordinary prose and so can only ever reject. Measured:
+// provider validation accepts `https://ai/v1`, `https://llm:8080/v1` and
+// `http://[::1]:8080/v1` (a single-label internal alias and two shapes a Docker
+// service name takes), and `o3` is a real upstream model id — the hostname or model
+// markers those produce refused every answer containing "detail", "email", "again" or
+// "foo3", indistinguishably from an unavailable provider and with nothing on screen
+// saying why. The identity is not lost: the base URL marker still carries it.
+//
+// So the rule lives here, at the one place identifiers are handed to the sanitizer,
+// rather than in each of the producers. It was stated in a producer once and the
+// hostname was the value that slipped past it.
+func identifyingMarkers(values ...string) []string {
+	kept := make([]string, 0, len(values))
+	for _, value := range values {
+		if len(strings.TrimSpace(value)) >= relayapp.MinRedactableMarkerBytes {
+			kept = append(kept, value)
+		}
+	}
+	return kept
+}
+
 func redactMarkers(value string, markers []string, brand string) string {
 	return newMarkerRedactor(markers, brand).replace(value)
 }
 
+// A marker is either a secret or an identity, and this list cannot tell them apart.
+// A credential of any length must fail closed rather than reach a public answer
+// (TestShortCredentialMarkerFailsClosed), while an identifier too short to redact
+// would refuse every answer instead — so the callers filter the identifiers through
+// identifyingMarkers before handing them over, and everything that arrives here is
+// treated as a secret.
 type markerReplacement struct {
 	pattern     *regexp.Regexp
 	replacement string

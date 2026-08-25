@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/application"
@@ -40,6 +41,36 @@ func Register(server *platform.Server, manager *application.Manager) {
 		}
 		_ = server.Emit("keys.changed", map[string]string{"providerId": command.ProviderID})
 		return key, nil
+	})
+	server.Handle("keys.addMany", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var command struct {
+			ProviderID string `json:"providerId"`
+			RPM        int    `json:"rpm"`
+			ProxyURL   string `json:"proxyUrl"`
+			Entries    []struct {
+				Label  string `json:"label"`
+				Secret string `json:"secret"`
+			} `json:"entries"`
+		}
+		if platform.DecodePayload(payload, &command) != nil || command.ProviderID == "" || len(command.Entries) == 0 {
+			return nil, invalidPayload()
+		}
+		entries := make([]application.ImportEntry, 0, len(command.Entries))
+		for _, entry := range command.Entries {
+			entries = append(entries, application.ImportEntry{Label: entry.Label, Secret: entry.Secret})
+		}
+		report, err := manager.AddMany(ctx, application.Import{
+			ProviderID: command.ProviderID, RPM: command.RPM,
+			ProxyURL: command.ProxyURL, Entries: entries,
+		})
+		if err != nil {
+			return nil, managementError(err)
+		}
+		// An import that added nothing changed nothing, so listeners are left alone.
+		if report.Added > 0 {
+			_ = server.Emit("keys.changed", map[string]string{"providerId": command.ProviderID})
+		}
+		return report, nil
 	})
 	server.Handle("keys.update", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
@@ -127,6 +158,8 @@ func managementError(err error) platform.MethodError {
 		return platform.MethodError{Code: "key_duplicate", Message: "Key is already configured"}
 	case errors.Is(err, application.ErrUnknownProvider):
 		return platform.MethodError{Code: "provider_not_found", Message: "Provider was not found"}
+	case errors.Is(err, application.ErrImportTooLarge):
+		return platform.MethodError{Code: "import_too_large", Message: "Import at most " + strconv.Itoa(application.MaxImportBatch) + " keys at once"}
 	default:
 		return platform.MethodError{Code: "key_update_failed", Message: "Key settings could not be saved"}
 	}

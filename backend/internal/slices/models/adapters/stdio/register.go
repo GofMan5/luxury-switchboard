@@ -21,6 +21,17 @@ func Register(server *platform.Server, service *application.Service) {
 		if err != nil {
 			return nil, platform.MethodError{Code: "model_discovery_failed", Message: "Provider models are unavailable"}
 		}
+		// The shell refuses a frame over MaxFrameBytes by killing the sidecar, so the
+		// protocol answers `response_too_large` instead - a code written for a bug,
+		// surfaced here as "Command response is too large" over a catalog that is
+		// simply big. The count cap alone does not bound this: 5000 names of 43 bytes
+		// fills 87% of the frame and 5000 of 50 bytes does not fit at all, which is an
+		// ordinary aggregator catalog, not a hostile one. Refusing rather than
+		// truncating, because the catalog is the list the operator publishes FROM and
+		// a model silently missing from it is a model they cannot publish.
+		if oversizedCatalog(query.ProviderID, models) {
+			return nil, platform.MethodError{Code: "model_catalog_too_large", Message: "Provider model catalog is too large to load"}
+		}
 		return map[string]any{"providerId": query.ProviderID, "models": models}, nil
 	})
 	server.Handle("models.test", func(ctx context.Context, payload json.RawMessage) (any, error) {
@@ -43,4 +54,12 @@ func Register(server *platform.Server, service *application.Service) {
 
 func invalid() platform.MethodError {
 	return platform.MethodError{Code: "invalid_payload", Message: "Invalid model request"}
+}
+
+// oversizedCatalog measures against the platform payload budget rather than the frame
+// limit: what is encoded here is the payload, and the frame that carries it adds its
+// envelope on top.
+func oversizedCatalog(providerID string, models []string) bool {
+	encoded, err := json.Marshal(map[string]any{"providerId": providerID, "models": models})
+	return err != nil || len(encoded) > platform.MaxPayloadBytes
 }

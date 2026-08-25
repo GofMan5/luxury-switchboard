@@ -11,6 +11,7 @@ import (
 
 type memoryRepository struct {
 	keys     []domain.Key
+	saves    int
 	saveFail bool
 }
 
@@ -22,6 +23,7 @@ func (repository *memoryRepository) Save(_ context.Context, keys []domain.Key) e
 	if repository.saveFail {
 		return errors.New("injected save failure")
 	}
+	repository.saves++
 	repository.keys = slices.Clone(keys)
 	return nil
 }
@@ -99,5 +101,96 @@ func TestManagerRejectsDuplicatePersistedKeysWithoutMutatingRuntime(t *testing.T
 	}
 	if keys := manager.List("echo"); len(keys) != 0 {
 		t.Fatalf("failed load mutated the scheduler: %+v", keys)
+	}
+}
+
+func TestAddManyImportsSkippingDuplicatesAndRejectsInOneSave(t *testing.T) {
+	repository := &memoryRepository{}
+	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {Limit: 120}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Add(context.Background(), domain.Params{
+		ProviderID: "echo", Label: "Existing", Secret: "same-secret", RPM: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := repository.saves
+
+	report, err := manager.AddMany(context.Background(), Import{
+		ProviderID: "echo", RPM: 30,
+		Entries: []ImportEntry{
+			{Label: "One", Secret: "one-secret"},
+			{Label: "Existing again", Secret: "same-secret"}, // already configured
+			{Label: "One again", Secret: "one-secret"},       // repeated inside the batch
+			{Label: "Broken", Secret: "   "},                 // blank once trimmed, refused
+			{Label: "Two", Secret: "two-secret"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Added != 2 || len(report.Duplicate) != 2 || len(report.Rejected) != 1 {
+		t.Fatalf("wrong report: %+v", report)
+	}
+	if report.Duplicate[0] != 1 || report.Duplicate[1] != 2 || report.Rejected[0] != 3 {
+		t.Fatalf("wrong positions: %+v", report)
+	}
+	if repository.saves != before+1 {
+		t.Fatalf("import persisted %d times, one save per batch expected", repository.saves-before)
+	}
+	listed := manager.List("echo")
+	if len(listed) != 3 {
+		t.Fatalf("imported keys missing: %+v", listed)
+	}
+	first, second := listed[0], listed[len(listed)-1]
+	if first.RPM != 10 || second.RPM != 30 {
+		t.Fatalf("each key must keep its own limit: %+v", listed)
+	}
+	for index := 1; index < len(listed); index++ {
+		if listed[index].Priority <= listed[index-1].Priority {
+			t.Fatalf("imported keys must queue behind the pool, one priority each: %+v", listed)
+		}
+	}
+}
+
+func TestAddManyAllDuplicatesPersistsNothingAndStillReports(t *testing.T) {
+	repository := &memoryRepository{}
+	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Add(context.Background(), domain.Params{
+		ProviderID: "echo", Label: "Existing", Secret: "same-secret", RPM: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := repository.saves
+	report, err := manager.AddMany(context.Background(), Import{
+		ProviderID: "echo", Entries: []ImportEntry{{Label: "Again", Secret: "same-secret"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Added != 0 || len(report.Duplicate) != 1 {
+		t.Fatalf("wrong report: %+v", report)
+	}
+	if repository.saves != before {
+		t.Fatal("an import that added nothing rewrote the store")
+	}
+}
+
+func TestAddManyRejectsAnOversizedBatch(t *testing.T) {
+	repository := &memoryRepository{}
+	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]ImportEntry, MaxImportBatch+1)
+	for position := range entries {
+		entries[position] = ImportEntry{Label: "K", Secret: "s"}
+	}
+	if _, err := manager.AddMany(context.Background(), Import{ProviderID: "echo", Entries: entries}); !errors.Is(err, ErrImportTooLarge) {
+		t.Fatalf("oversized batch was accepted: %v", err)
 	}
 }

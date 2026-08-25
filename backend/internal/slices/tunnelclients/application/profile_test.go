@@ -128,8 +128,27 @@ func TestInvalidProfilesAreRejectedAndStorageFailuresDoNotApply(t *testing.T) {
 	}
 }
 
-func TestClientListOrderIsStableAcrossRefreshes(t *testing.T) {
+// Same rule, the other way to have no storage. This one used to be the exception:
+// the ban applied in memory, the list showed it in force, and the next launch
+// dropped it - so the tunnel served an address the owner had banned, with nothing
+// on screen having said otherwise.
+func TestWithoutStorageABanIsRefusedRatherThanKeptInMemory(t *testing.T) {
 	service := NewService(nil)
+	if service.SetProfile(context.Background(), domain.Profile{IP: "203.0.113.7", Banned: true}) == nil {
+		t.Fatal("a ban was accepted with nowhere to store it")
+	}
+	if service.Banned("203.0.113.7") || len(service.List()) != 0 {
+		t.Fatal("a ban applied in memory with nowhere to store it")
+	}
+	// The decisions of every earlier session are unreachable, which is not the same
+	// as there having been none, so the caller has to be able to tell.
+	if service.LoadProfiles(context.Background()) == nil {
+		t.Fatal("unreachable profiles were reported as an empty set")
+	}
+}
+
+func TestClientListOrderIsStableAcrossRefreshes(t *testing.T) {
+	service := NewService(newProfileStore())
 	for _, ip := range []string{"10.0.0.5", "10.0.0.1", "10.0.0.4", "10.0.0.2", "10.0.0.3", "10.0.0.6"} {
 		if err := service.SetProfile(context.Background(), domain.Profile{IP: ip, Banned: true}); err != nil {
 			t.Fatal(err)
@@ -173,7 +192,7 @@ func TestRefusedAttemptsStayCheaperThanServedRequests(t *testing.T) {
 }
 
 func TestRefusalsFromUndecidedAddressesTrackNothing(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(newProfileStore())
 	if err := service.SetProfile(context.Background(), domain.Profile{IP: "203.0.113.7", Banned: true}); err != nil {
 		t.Fatal(err)
 	}

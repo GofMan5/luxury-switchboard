@@ -1,5 +1,5 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
-import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
+import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
 import type { ApiKeysPort } from '../application/api-keys-port'
 
 export class StdioApiKeysPort implements ApiKeysPort {
@@ -16,6 +16,10 @@ export class StdioApiKeysPort implements ApiKeysPort {
 
   add(value: AddApiKey, signal?: AbortSignal): Promise<ApiKey> {
     return this.#session.call('keys.add', value, signal)
+  }
+
+  addMany(value: ImportApiKeys, signal?: AbortSignal): Promise<ImportApiKeysReport> {
+    return this.#session.call('keys.addMany', value, signal)
   }
 
   update(value: UpdateApiKey, signal?: AbortSignal): Promise<ApiKey> {

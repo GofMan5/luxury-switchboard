@@ -120,16 +120,20 @@ export class GuardrailsModel {
 
   #prepend(record: GuardrailRecord) {
     if (!record?.id) return
+    const existing = this.#state.findings.find((candidate) => candidate.id === record.id)
     // The same record can arrive twice across a reconnect, and a duplicate would
-    // read as a second attack rather than one.
-    if (this.#state.findings.some((existing) => existing.id === record.id)) return
-    const findings = [record, ...this.#state.findings].slice(0, VISIBLE_FINDINGS)
+    // read as a second attack rather than one. A repeat of one the control plane is
+    // folding together does carry news — a higher count and a newer time — so that
+    // one replaces the row it belongs to instead of adding another.
+    if (existing && (existing.occurrences ?? 1) >= (record.occurrences ?? 1)) return
+    const rest = existing ? this.#state.findings.filter((candidate) => candidate.id !== record.id) : this.#state.findings
+    const findings = [record, ...rest].slice(0, VISIBLE_FINDINGS)
     const status = this.#state.status
     this.#set({
       ...this.#state,
       phase: 'ready',
       findings,
-      status: status ? { ...status, findingCount: status.findingCount + 1 } : status,
+      status: status && !existing ? { ...status, findingCount: status.findingCount + 1 } : status,
     })
   }
 

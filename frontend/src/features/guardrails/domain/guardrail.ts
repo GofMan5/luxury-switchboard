@@ -34,6 +34,10 @@ export interface GuardrailRecord {
   readonly providerName: string
   readonly model: string
   readonly findings: readonly GuardrailFinding[]
+  /** How many answers this row stands for. Real detections are always 1; only a
+   * report about the inspection itself is folded together, so that a provider
+   * cannot bury evidence under its own noise. */
+  readonly occurrences?: number
 }
 
 export interface GuardrailStatus {

@@ -826,3 +826,90 @@ func TestDispatchTranslatesPinnedChatFormat(t *testing.T) {
 		t.Fatalf("expected one chat completion request, saw %d", counter.count("/v1/chat/completions"))
 	}
 }
+
+// A chat provider says three different things in `finish_reason` and `refusal`,
+// and the Responses envelope has a place for each. All three used to be dropped,
+// so a client reading the translated answer could not tell a refusal, a filtered
+// turn, or a truncated one from an ordinary completion — the first two arrived as
+// `"status":"completed"` with nothing in `output`, which reads as a provider that
+// answered with silence, and the third as a half sentence stamped complete.
+func TestAChatProviderThatDidNotFinishSaysSoAfterTranslation(t *testing.T) {
+	const usage = `,"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}`
+	for _, testCase := range []struct {
+		name       string
+		delta      string
+		reason     string
+		status     string
+		incomplete string
+		text       string
+		event      string
+	}{
+		{
+			name: "a refusal is the answer", delta: `"refusal":"I will not do that."`,
+			reason: "stop", status: "completed", text: "I will not do that.",
+			event: "response.completed",
+		},
+		{
+			name: "a filtered turn is not a completed one", delta: `"content":""`,
+			reason: "content_filter", status: "incomplete", incomplete: "content_filter",
+			event: "response.incomplete",
+		},
+		{
+			name: "a truncated turn keeps its text and admits the cut", delta: `"content":"half an answ"`,
+			reason: "length", status: "incomplete", incomplete: "max_output_tokens",
+			text: "half an answ", event: "response.incomplete",
+		},
+		{
+			name: "an ordinary answer is untouched", delta: `"content":"all done"`,
+			reason: "stop", status: "completed", text: "all done", event: "response.completed",
+		},
+		{
+			name: "a tool call is an ordinary answer too", delta: `"content":"calling"`,
+			reason: "tool_calls", status: "completed", text: "calling", event: "response.completed",
+		},
+		{
+			name: "an unfamiliar reason is not guessed at", delta: `"content":"who knows"`,
+			reason: "something_new", status: "completed", text: "who knows", event: "response.completed",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			stream := `data: {"id":"chatcmpl-1","model":"m","choices":[{"index":0,"delta":{"role":"assistant",` +
+				testCase.delta + `},"finish_reason":"` + testCase.reason + `"}]` + usage + "}\n\ndata: [DONE]\n\n"
+			converted, err := chatToResponses([]byte(stream), false)
+			if err != nil {
+				t.Fatalf("conversion failed: %v", err)
+			}
+			response := translatedBody(t, converted)
+			if response["status"] != testCase.status {
+				t.Fatalf("status is %v, want %q: %s", response["status"], testCase.status, converted)
+			}
+			details, _ := response["incomplete_details"].(map[string]any)
+			if testCase.incomplete == "" {
+				if response["incomplete_details"] != nil {
+					t.Fatalf("a finished turn claims it was cut short: %v", response["incomplete_details"])
+				}
+			} else if details["reason"] != testCase.incomplete {
+				t.Fatalf("incomplete reason is %v, want %q", details["reason"], testCase.incomplete)
+			}
+			output, _ := response["output"].([]any)
+			text := ""
+			if len(output) > 0 {
+				item, _ := output[0].(map[string]any)
+				text = outputText(item)
+			}
+			if text != testCase.text {
+				t.Fatalf("the client reads %q, want %q: %s", text, testCase.text, converted)
+			}
+			// The same conclusion has to be reachable from the event type alone: a
+			// client that switches on it must not be told the turn completed.
+			streamed, err := chatToResponses([]byte(stream), true)
+			if err != nil {
+				t.Fatalf("stream conversion failed: %v", err)
+			}
+			types := sseEventTypes(streamed)
+			if len(types) == 0 || types[len(types)-1] != testCase.event {
+				t.Fatalf("the stream closes with %v, want %q", types, testCase.event)
+			}
+		})
+	}
+}

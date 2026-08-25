@@ -58,7 +58,7 @@ type declaredTool struct {
 }
 
 func normalizeResponsesTools(method, path, contentType string, body []byte) ([]byte, toolCompat) {
-	if method != http.MethodPost || strings.TrimRight(path, "/") != "/v1/responses" ||
+	if method != http.MethodPost || canonicalPath(path) != "/v1/responses" ||
 		!strings.Contains(strings.ToLower(contentType), "json") || len(body) == 0 {
 		return body, toolCompat{}
 	}
@@ -514,7 +514,7 @@ func plainToolName(value string) bool {
 // and unrelated events stay untouched. Dialects without Responses items and
 // without renamed tools are returned as they arrived.
 func restoreClientToolCalls(body []byte, compat toolCompat, path string, eventStream bool) []byte {
-	responses := strings.TrimRight(path, "/") == "/v1/responses"
+	responses := canonicalPath(path) == "/v1/responses"
 	if len(body) == 0 || (compat.empty() && !(responses && eventStream)) {
 		return body
 	}
@@ -537,25 +537,41 @@ func restoreClientToolCalls(body []byte, compat toolCompat, path string, eventSt
 	changedAny := false
 	for _, block := range blocks {
 		lines := bytes.Split(block, []byte("\n"))
+		// W3C joins every `data:` line of one event with a newline, and a provider is
+		// free to split its JSON that way. Reading them one at a time parsed as
+		// nothing, so such a block skipped every repair below: the item stayed
+		// announced as `completed` and the client dropped all of its deltas, the tool
+		// kept its provider-side alias so the client rejected a call it never
+		// declared, and the prologue was synthesized a second time because the
+		// announcement it duplicates went unrecognised. sseInspector already reads
+		// these events the same way.
 		data := -1
+		payload := []byte(nil)
+		spacing := []byte(nil)
+		merged := false
 		for position, line := range lines {
 			if !bytes.HasPrefix(line, []byte("data:")) {
 				continue
 			}
-			if data >= 0 {
-				data = -1
-				break
+			fragment := bytes.TrimPrefix(line, []byte("data:"))
+			if data < 0 {
+				data = position
+				if bytes.HasPrefix(fragment, []byte(" ")) {
+					spacing, fragment = []byte(" "), fragment[1:]
+				}
+				payload = fragment
+				continue
 			}
-			data = position
+			// A newline, because that is the separator the spec names and the one the
+			// client will have used. Joining without it would parse a split that falls
+			// inside a string literal, which the client discards as malformed - and the
+			// relay would then synthesize events for content nobody is going to read.
+			merged = true
+			payload = append(append(payload, '\n'), bytes.TrimPrefix(fragment, []byte(" "))...)
 		}
 		if data < 0 {
 			rebuilt = append(rebuilt, block)
 			continue
-		}
-		payload := bytes.TrimPrefix(lines[data], []byte("data:"))
-		spacing := []byte(nil)
-		if bytes.HasPrefix(payload, []byte(" ")) {
-			spacing, payload = []byte(" "), payload[1:]
 		}
 		if prologue := missingStreamPrologue(payload, announcedItems, announcedParts); prologue != nil {
 			rebuilt = append(rebuilt, prologue...)
@@ -567,6 +583,18 @@ func restoreClientToolCalls(body []byte, compat toolCompat, path string, eventSt
 			continue
 		}
 		lines[data] = append(append(append([]byte(nil), []byte("data:")...), spacing...), rewritten...)
+		// The rewrite is one marshalled object with no newline in it, so the
+		// continuation lines it was assembled from are now part of that one line.
+		if merged {
+			joined := make([][]byte, 0, len(lines))
+			for position, line := range lines {
+				if position != data && bytes.HasPrefix(line, []byte("data:")) {
+					continue
+				}
+				joined = append(joined, line)
+			}
+			lines = joined
+		}
 		if eventType := payloadType(rewritten); eventType != "" {
 			for position, line := range lines {
 				if bytes.HasPrefix(line, []byte("event:")) {

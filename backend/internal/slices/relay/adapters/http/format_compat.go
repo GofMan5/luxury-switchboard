@@ -23,7 +23,7 @@ const (
 // retried once against the aieva-style custom /chat-completion endpoint.
 // A profile with an explicit chat path is trusted as-is and never probed.
 func chatPathFallback(path, chatPath string) bool {
-	return strings.TrimRight(path, "/") == defaultChatCompletionsPath &&
+	return canonicalPath(path) == defaultChatCompletionsPath &&
 		(chatPath == "" || chatPath == defaultChatCompletionsPath)
 }
 
@@ -36,7 +36,7 @@ var errInvalidChatCompatibility = errors.New("invalid chat completions compatibi
 // a stream; the relay buffers it and re-emits it in the shape the client asked
 // for.
 func prepareChatCompletions(method, path string, body []byte, contentType, chatPath string, enabled bool) (string, []byte, bool, error) {
-	if !enabled || method != http.MethodPost || strings.TrimRight(path, "/") != responsesPath || !strings.Contains(strings.ToLower(contentType), "json") {
+	if !enabled || method != http.MethodPost || canonicalPath(path) != responsesPath || !strings.Contains(strings.ToLower(contentType), "json") {
 		return path, body, false, nil
 	}
 	translated, err := responsesToChat(body)
@@ -317,6 +317,8 @@ type chatAccumulator struct {
 	model   string
 	created json.Number
 	text    string
+	refusal string
+	reason  string
 	calls   []chatCall
 	usage   map[string]any
 }
@@ -345,6 +347,14 @@ func (state *chatAccumulator) consume(chunk map[string]any) {
 	if usage, ok := choice["usage"].(map[string]any); ok && usage != nil {
 		state.usage = usage
 	}
+	// Why the reason is kept: it is the difference between an answer and the
+	// absence of one. A chat provider says "I stopped because I ran out of
+	// budget" or "the filter took it" in this field and nowhere else, and the
+	// Responses envelope has its own place to say the same thing. Dropping it
+	// used to hand the client a truncated answer stamped `completed`.
+	if reason, ok := choice["finish_reason"].(string); ok && reason != "" {
+		state.reason = reason
+	}
 	delta, ok := choice["delta"].(map[string]any)
 	if !ok {
 		// A buffered completion carries the same fields under "message".
@@ -355,6 +365,14 @@ func (state *chatAccumulator) consume(chunk map[string]any) {
 	}
 	if content, ok := delta["content"].(string); ok {
 		state.text += content
+	}
+	// A refusal is the whole answer when it arrives: the model declined, and
+	// `content` stays empty. Chat keeps it in its own field, Responses has no
+	// such field on a text part, so it is carried as the message text rather
+	// than dropped - an empty answer stamped `completed` tells the client
+	// nothing, and it is text a guardrail can still read.
+	if refusal, ok := delta["refusal"].(string); ok {
+		state.refusal += refusal
 	}
 	calls, _ := delta["tool_calls"].([]any)
 	for position, call := range calls {
@@ -396,6 +414,7 @@ func (state *chatAccumulator) emit(wantsStream bool) ([]byte, error) {
 	createdAt := state.createdAt()
 	output := state.outputItems()
 	if wantsStream {
+		response := state.responseObject(responseID, createdAt, output)
 		blocks := make([][]byte, 0, 2+4*len(output))
 		blocks = append(blocks, streamEvent(map[string]any{
 			"type": "response.created",
@@ -462,11 +481,21 @@ func (state *chatAccumulator) emit(wantsStream bool) ([]byte, error) {
 			}
 		}
 		blocks = append(blocks, streamEvent(map[string]any{
-			"type": "response.completed", "response": state.responseObject(responseID, createdAt, output),
+			"type": terminalEventType(response), "response": response,
 		}))
 		return bytes.Join(blocks, []byte("\n\n")), nil
 	}
 	return json.Marshal(state.responseObject(responseID, createdAt, output))
+}
+
+// terminalEventType names the event that closes the stream. A turn the provider
+// cut short closes with `response.incomplete`, so a client that reads the event
+// type reaches the same conclusion as one that reads the envelope.
+func terminalEventType(response map[string]any) string {
+	if response["status"] == "incomplete" {
+		return "response.incomplete"
+	}
+	return "response.completed"
 }
 
 // outputItems returns the completed Responses output items the accumulated
@@ -474,10 +503,10 @@ func (state *chatAccumulator) emit(wantsStream bool) ([]byte, error) {
 // per tool call.
 func (state *chatAccumulator) outputItems() []map[string]any {
 	items := make([]map[string]any, 0, 1+len(state.calls))
-	if state.text != "" {
+	if text := state.answer(); text != "" {
 		items = append(items, map[string]any{
 			"type": "message", "id": "msg_0", "status": "completed", "role": "assistant",
-			"content": []any{map[string]any{"type": "output_text", "text": state.text, "annotations": []any{}}},
+			"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
 		})
 	}
 	for index, call := range state.calls {
@@ -507,14 +536,47 @@ func outputText(item map[string]any) string {
 	return text
 }
 
+// answer is what the assistant said, which is the refusal when it refused. A
+// provider that sends both is taken at its word and both are kept.
+func (state *chatAccumulator) answer() string {
+	if state.refusal == "" {
+		return state.text
+	}
+	if state.text == "" {
+		return state.refusal
+	}
+	return state.text + "\n\n" + state.refusal
+}
+
+// incompleteReason maps a chat finish reason onto the Responses field that says
+// the turn did not finish. Only the reasons that mean "the answer is missing or
+// cut short" map to one: `stop` and `tool_calls` are ordinary completions, and an
+// unfamiliar reason is left alone rather than guessed at.
+func incompleteReason(reason string) string {
+	switch reason {
+	case "length", "max_tokens":
+		return "max_output_tokens"
+	case "content_filter":
+		return "content_filter"
+	default:
+		return ""
+	}
+}
+
 func (state *chatAccumulator) responseObject(responseID string, createdAt int64, output []map[string]any) map[string]any {
 	items := make([]any, 0, len(output))
 	for _, item := range output {
 		items = append(items, item)
 	}
+	status := "completed"
+	var incomplete any
+	if reason := incompleteReason(state.reason); reason != "" {
+		status = "incomplete"
+		incomplete = map[string]any{"reason": reason}
+	}
 	return map[string]any{
-		"id": responseID, "object": "response", "created_at": createdAt, "status": "completed",
-		"error": nil, "incomplete_details": nil, "instructions": nil,
+		"id": responseID, "object": "response", "created_at": createdAt, "status": status,
+		"error": nil, "incomplete_details": incomplete, "instructions": nil,
 		"max_output_tokens": nil, "model": state.model, "output": items,
 		"parallel_tool_calls": true, "previous_response_id": nil,
 		"reasoning": map[string]any{"effort": nil, "summary": nil},

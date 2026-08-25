@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react'
-import { ArrowDown, ArrowUp, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ClipboardPaste, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
 import { useProviders } from '../../providers/ui/useProviders'
 import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
-import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
+import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
 import { useApiKeys } from './useApiKeys'
-import { proxyURLIsValid } from './key-form'
+import { parsePastedKeys, proxyURLIsValid, MAX_IMPORT_KEYS, type PastedKey } from './key-form'
 import styles from './ApiKeysPage.module.css'
 
 export default function ApiKeysPage() {
@@ -13,6 +13,7 @@ export default function ApiKeysPage() {
   const { model, state } = useApiKeys()
   const [providerID, setProviderID] = useState('')
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; key?: ApiKey } | null>(null)
+  const [importing, setImporting] = useState(false)
   const [removeKey, setRemoveKey] = useState<ApiKey | null>(null)
   const selectedProvider = (providers.catalog.providers.some((provider) => provider.id === providerID) ? providerID : '') || providers.catalog.activeId || providers.catalog.providers[0]?.id || ''
   // The scheduler counts a key's own limit over its provider's window, so a
@@ -47,6 +48,9 @@ export default function ApiKeysPage() {
               {providers.catalog.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
             </select>
           </label>
+          <Button disabled={!selectedProvider} onClick={() => { model.clearError(); setImporting(true) }}>
+            <ClipboardPaste size={16} aria-hidden="true" />Bulk import
+          </Button>
           <Button variant="primary" disabled={!selectedProvider} onClick={() => { model.clearError(); setEditor({ mode: 'add' }) }}>
             <Plus size={16} aria-hidden="true" />Add key
           </Button>
@@ -111,6 +115,16 @@ export default function ApiKeysPage() {
               : await model.update(value as UpdateApiKey)
             if (saved) setEditor(null)
           }}
+        />
+      ) : null}
+      {importing ? (
+        <BulkImport
+          providerId={selectedProvider}
+          unit={unit}
+          pending={Boolean(state.pendingId)}
+          operationError={state.error}
+          onClose={() => setImporting(false)}
+          onImport={(value) => model.importKeys(value)}
         />
       ) : null}
       {removeKey ? (
@@ -192,6 +206,107 @@ function KeyEditor({ providerId, unit, mode, keyValue, pending, operationError, 
       </form>
     </div>
   )
+}
+
+function BulkImport({ providerId, unit, pending, operationError, onClose, onImport }: {
+  providerId: string
+  unit: 'minute' | 'second'
+  pending: boolean
+  operationError: string
+  onClose: () => void
+  onImport: (value: ImportApiKeys) => Promise<ImportApiKeysReport | null>
+}) {
+  const [text, setText] = useState('')
+  const [rpm, setRPM] = useState('0')
+  const [proxyUrl, setProxyURL] = useState('')
+  const [error, setError] = useState('')
+  const [result, setResult] = useState<{ report: ImportApiKeysReport; entries: readonly PastedKey[] } | null>(null)
+  const dialogRef = useModalFocus<HTMLFormElement>(onClose, pending)
+  const parsed = useMemo(() => parsePastedKeys(text), [text])
+  // A short screen scrolls the dialog, and its footer sticks over the last rows, so
+  // the outcome is scrolled to instead of being left behind the buttons.
+  useEffect(() => {
+    if (result) dialogRef.current?.scrollTo({ top: dialogRef.current.scrollHeight })
+  }, [dialogRef, result])
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    const parsedRPM = Number(rpm)
+    if (parsed.length === 0) {
+      setError('Paste at least one key, its label and secret on the same line.')
+      return
+    }
+    if (parsed.length > MAX_IMPORT_KEYS) {
+      setError(`Import at most ${MAX_IMPORT_KEYS} keys at once; split the list.`)
+      return
+    }
+    if (!Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000) {
+      setError('Enter a limit from 0 to 1,000,000.')
+      return
+    }
+    if (!proxyURLIsValid(proxyUrl)) {
+      setError('Enter a valid HTTP(S) or SOCKS5 proxy URL without a fragment.')
+      return
+    }
+    setError('')
+    const report = await onImport({ providerId, rpm: parsedRPM, proxyUrl: proxyUrl.trim(), entries: parsed })
+    if (report) setResult({ report, entries: parsed })
+  }
+
+  return (
+    <div className="ui-scrim" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
+      <form ref={dialogRef} className={`ui-modal ${styles.import}`} role="dialog" aria-modal="true" aria-label="Bulk import API keys" onSubmit={(event) => void submit(event)}>
+        <header><div><h2>Bulk import API keys</h2><p>One key per line, its label first and its secret last. Keys already configured are skipped.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
+        <div className={styles.formBody}>
+          <label>
+            <span>Keys</span>
+            <textarea
+              className={styles.paste}
+              value={text}
+              rows={9}
+              spellCheck={false}
+              data-autofocus
+              placeholder={'team_alpha sk-first-secret\nteam_beta sk-second-secret'}
+              onChange={(event) => setText(event.currentTarget.value)}
+            />
+            <small>{parsed.length === 0 ? 'Label and secret separated by a space, a tab or a comma.' : `${parsed.length} ${parsed.length === 1 ? 'key' : 'keys'} ready · the limit and proxy below apply to all of them.`}</small>
+          </label>
+          <label><span>Requests per {unit}</span><input type="number" min="0" max="1000000" step="1" required value={rpm} onChange={(event) => setRPM(event.currentTarget.value)} /><small>0 means unlimited. Applies to every imported key.</small></label>
+          <div className={styles.proxyField}>
+            <span>Proxy</span>
+            <input aria-label="Proxy URL" type="password" value={proxyUrl} maxLength={8192} placeholder="Optional http(s) or socks5 URL" autoComplete="new-password" onChange={(event) => setProxyURL(event.currentTarget.value)} />
+            <small>Applies to every imported key. Leave empty to use the native IP.</small>
+          </div>
+          {result ? <ImportSummary report={result.report} entries={result.entries} /> : null}
+          {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
+        </div>
+        <footer><Button type="button" disabled={pending} onClick={onClose}>{result ? 'Done' : 'Cancel'}</Button><Button type="submit" variant="primary" disabled={pending || parsed.length === 0}>{pending ? 'Importing…' : parsed.length > 0 ? `Import ${parsed.length} ${parsed.length === 1 ? 'key' : 'keys'}` : 'Import keys'}</Button></footer>
+      </form>
+    </div>
+  )
+}
+
+function ImportSummary({ report, entries }: { report: ImportApiKeysReport; entries: readonly PastedKey[] }) {
+  return (
+    <div className={styles.importSummary} data-added={report.added > 0} role="status">
+      <strong>{report.added === 0 ? 'Nothing new to add' : `Added ${report.added} of ${entries.length} ${entries.length === 1 ? 'key' : 'keys'}`}</strong>
+      {report.duplicate.length > 0 ? <span>{report.duplicate.length} already configured: {names(report.duplicate, entries)}</span> : null}
+      {report.rejected.length > 0 ? <span>{report.rejected.length} could not be read: {lines(report.rejected)}</span> : null}
+    </div>
+  )
+}
+
+// Labels are what the caller typed, so they can be shown back; a long list is cut
+// to a readable head with the rest counted rather than silently dropped.
+function names(positions: readonly number[], entries: readonly PastedKey[]): string {
+  const labels = positions.map((position) => entries[position]?.label ?? `line ${position + 1}`)
+  return labels.length > 6 ? `${labels.slice(0, 6).join(', ')} and ${labels.length - 6} more` : labels.join(', ')
+}
+
+function lines(positions: readonly number[]): string {
+  const shown = positions.slice(0, 6).map((position) => position + 1).join(', ')
+  if (positions.length > 6) return `entries ${shown} and ${positions.length - 6} more`
+  return positions.length === 1 ? `entry ${shown}` : `entries ${shown}`
 }
 
 function ConfirmRemove({ keyValue, pending, error, onCancel, onConfirm }: { keyValue: ApiKey; pending: boolean; error: string; onCancel: () => void; onConfirm: () => Promise<void> }) {

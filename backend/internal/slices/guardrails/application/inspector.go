@@ -37,6 +37,10 @@ type Record struct {
 	ProviderName string           `json:"providerName"`
 	Model        string           `json:"model"`
 	Findings     []domain.Finding `json:"findings"`
+	// Occurrences is how many answers this record stands for. It is 1 for a real
+	// detection — those are never folded together, because two identical payloads
+	// from a provider are two attempts and the operator must see both.
+	Occurrences int `json:"occurrences"`
 }
 
 // Subject is the safe context of the answer being inspected. It carries
@@ -112,8 +116,33 @@ func (inspector *Inspector) Inspect(body []byte, eventStream bool, subject Subje
 	}
 	extraction := Extract(body, eventStream)
 	findings := make([]domain.Finding, 0, 8)
+	// The same payload reaches the engine more than once by design — a tool call is
+	// scanned as raw JSON and again decoded — so identical evidence is reported once.
+	// Deduplication is on rule and match, not on the piece: two different payloads
+	// that trip the same rule are two findings.
+	//
+	// The KIND of place is part of the key, because where the provider put a payload
+	// is the finding. An assistant explaining `curl x | sh` in prose is something
+	// honest models do all day; the same string in the arguments of a tool call is the
+	// client about to run it. Piece order follows the body, so the provider chooses it:
+	// on a key without the place, the attacker would decide which of the two
+	// attributions survives, and would put the prose first.
+	//
+	// The kind is coarse — every tool call counts as one place, not one per name — and
+	// that is the point: keying on the exact name would let a provider restate one
+	// payload across forty differently-named calls and push a genuinely different
+	// detection out of MaxFindings. The operator needs "it was in an executed call",
+	// not the forty names.
+	seen := make(map[string]struct{}, 8)
 	for _, piece := range extraction.Pieces {
-		findings = append(findings, inspector.engine.Inspect(piece.Text, piece.Source)...)
+		for _, finding := range inspector.engine.Inspect(piece.Text, piece.Source) {
+			key := finding.RuleID + "\x00" + finding.Match + "\x00" + sourceKind(finding.Source)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			findings = append(findings, finding)
+		}
 	}
 	// A tool call the client cannot have asked for is an anomaly no pattern can
 	// see: it needs both halves of the exchange.
@@ -121,6 +150,12 @@ func (inspector *Inspector) Inspect(body []byte, eventStream bool, subject Subje
 		for _, name := range extraction.ToolNames {
 			findings = append(findings, domain.UnsolicitedToolFinding(name))
 		}
+	}
+	// An answer that outgrew the budget was partly forwarded unread. Saying so is the
+	// difference between "nothing was found" and "nothing was looked at", and padding
+	// past the ceiling is the cheapest evasion there is.
+	if extraction.Truncated {
+		findings = append(findings, domain.TruncatedInspectionFinding())
 	}
 	// Sort BEFORE capping. Capping first would make the cap a first-come limit, and
 	// a provider could bury the one high-severity finding behind enough low-severity
@@ -170,17 +205,46 @@ func (inspector *Inspector) OnRecord(listener func(Record)) {
 }
 
 func (inspector *Inspector) record(decision Decision, subject Subject) {
+	providerID := truncate(subject.ProviderID, 64)
+	model := truncate(subject.Model, 128)
 	inspector.mu.Lock()
+	// A record whose only finding is "part of this answer was never read" is
+	// bookkeeping, not a detection, and one provider can produce it on every single
+	// answer just by being wordy. Left to accumulate it would push every real finding
+	// out of a bounded store — the cheapest evasion there is: pad each answer past the
+	// budget until the evidence of the one that mattered has fallen off the end. So one
+	// such record is kept per provider, carrying how often it happened and when it last
+	// did, and it competes for exactly one slot instead of all of them.
+	if bookkeepingOnly(decision.Findings) {
+		for index := range inspector.records {
+			existing := inspector.records[index]
+			if existing.ProviderID != providerID || !bookkeepingOnly(existing.Findings) {
+				continue
+			}
+			existing.At = inspector.now().UTC()
+			existing.Occurrences++
+			if existing.Model != model {
+				// It stopped being about one model the moment it stood for several.
+				existing.Model = ""
+			}
+			inspector.records = append(inspector.records[:index], inspector.records[index+1:]...)
+			inspector.records = append([]Record{existing}, inspector.records...)
+			inspector.mu.Unlock()
+			inspector.notify(existing)
+			return
+		}
+	}
 	inspector.sequence++
 	record := Record{
 		ID:           "gr_" + formatUint(inspector.sequence),
 		At:           inspector.now().UTC(),
 		Verdict:      decision.Verdict,
 		Severity:     decision.Severity.String(),
-		ProviderID:   truncate(subject.ProviderID, 64),
+		ProviderID:   providerID,
 		ProviderName: truncate(subject.ProviderName, 80),
-		Model:        truncate(subject.Model, 128),
+		Model:        model,
 		Findings:     decision.Findings,
+		Occurrences:  1,
 	}
 	inspector.records = append([]Record{record}, inspector.records...)
 	if len(inspector.records) > inspector.capacity {
@@ -188,6 +252,24 @@ func (inspector *Inspector) record(decision Decision, subject Subject) {
 	}
 	inspector.mu.Unlock()
 
+	inspector.notify(record)
+}
+
+// bookkeepingOnly reports whether every finding is about the inspection itself
+// rather than about what the provider sent.
+func bookkeepingOnly(findings []domain.Finding) bool {
+	if len(findings) == 0 {
+		return false
+	}
+	for _, finding := range findings {
+		if finding.RuleID != domain.RuleInspectionTruncated {
+			return false
+		}
+	}
+	return true
+}
+
+func (inspector *Inspector) notify(record Record) {
 	inspector.listenersMu.RLock()
 	listeners := inspector.listeners
 	inspector.listenersMu.RUnlock()

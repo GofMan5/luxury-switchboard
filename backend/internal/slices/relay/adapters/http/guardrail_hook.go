@@ -19,17 +19,26 @@ var errGuardrailBlocked = errors.New("provider response was refused by the local
 // reviewResponse inspects the finished answer in the dialect the client will
 // actually read, and reports whether it must be refused.
 //
-// Only JSON and SSE bodies are inspected: nothing else carries assistant text or
-// tool calls. The body is buffered under the same ceiling as every other rewrite
-// on this path — for streams and translated answers it is already a byte slice in
-// memory, so this costs a read, not a second copy of the ceiling.
-func (server *Server) reviewResponse(response *http.Response, subject relayapp.GuardrailSubject) (string, bool) {
+// WHETHER an answer is inspected follows the path the client called and not only the
+// provider's Content-Type: a hostile provider would otherwise label its answer
+// `text/plain`, skip inspection, and still be parsed by any client that reads the body
+// rather than the header. WHICH dialect it is read as follows the Content-Type, and
+// that is sound because by this point the header is no longer the provider's: every
+// answer here has been through the relay's own buffering, stream repair and dialect
+// translation, and each of those sets the header to match the bytes it produced. An
+// answer whose framing contradicted its label never reaches the guardrails at all —
+// the layer that normalises it rejects it first.
+//
+// The body is buffered under the same ceiling as every other rewrite on this path —
+// for streams and translated answers it is already a byte slice in memory, so this
+// costs a read, not a second copy of the ceiling.
+func (server *Server) reviewResponse(response *http.Response, path string, subject relayapp.GuardrailSubject) (string, bool) {
 	if response.Body == nil || response.StatusCode >= 400 {
 		return "", false
 	}
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
 	eventStream := strings.Contains(contentType, "event-stream")
-	if !eventStream && !strings.Contains(contentType, "json") {
+	if !eventStream && !strings.Contains(contentType, "json") && !expectsJSONResponse(path) {
 		return "", false
 	}
 	limit := responseBufferLimit(server.config)
@@ -65,16 +74,13 @@ type readCloser struct {
 	io.Closer
 }
 
-// reviewBody inspects an answer the caller already holds as bytes.
+// reviewBody inspects an answer the caller already holds as bytes. It is the tunnel's
+// path, where the caller has already normalised both the body and its label, so the
+// Content-Type is the relay's own statement about the bytes rather than the provider's.
 func (server *Server) reviewBody(body []byte, contentType string, status int, subject relayapp.GuardrailSubject) (string, bool) {
 	if len(body) == 0 || status >= 400 {
 		return "", false
 	}
-	lowered := strings.ToLower(contentType)
-	eventStream := strings.Contains(lowered, "event-stream")
-	if !eventStream && !strings.Contains(lowered, "json") {
-		return "", false
-	}
-	verdict := server.guardrail.Review(body, eventStream, subject)
+	verdict := server.guardrail.Review(body, strings.Contains(strings.ToLower(contentType), "event-stream"), subject)
 	return verdict.Code, verdict.Blocked
 }

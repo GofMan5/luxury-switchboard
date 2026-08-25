@@ -6,6 +6,7 @@ import { useSettings } from '../features/settings/ui/useSettings'
 import { useAppServices } from './services'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
+import { WorkspaceBoundary } from '../shared/ui/WorkspaceBoundary'
 import { navigation, type AppRoute } from './navigation'
 import styles from './AppShell.module.css'
 
@@ -80,7 +81,12 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             {relayState.pending ? 'Applying…' : live ? 'Stop relay' : needsStop ? 'Retry stop' : 'Start relay'}
           </Button>
         </header>
-        <main className={styles.content}>{children}</main>
+        <main className={styles.content}>
+          {/* Around the workspace, not the shell: a screen that throws must not
+              take the sidebar with it, because navigating away is the recovery.
+              Keyed on the route so that navigation discards a failed boundary. */}
+          <WorkspaceBoundary key={route}>{children}</WorkspaceBoundary>
+        </main>
       </section>
     </div>
   )

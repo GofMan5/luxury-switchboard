@@ -10,6 +10,7 @@ class Port implements ApiKeysPort {
   finishAdd: ((value: ApiKey) => void) | undefined
   list: ApiKeysPort['list'] = async () => []
   add = async (_value: AddApiKey) => new Promise<ApiKey>((resolve) => { this.finishAdd = resolve; this.listener?.('echo') })
+  addMany: ApiKeysPort['addMany'] = async () => ({ added: 0, duplicate: [], rejected: [] })
   update = async (_value: UpdateApiKey) => key
   remove = async () => undefined
   move = async () => undefined
@@ -29,6 +30,22 @@ describe('ApiKeysModel', () => {
     port.finishAdd?.(key)
     expect(await mutation).toBe(true)
     expect(model.snapshot().pendingId).toBe('')
+  })
+
+  it('reports what a bulk import added and skipped, and never sends an empty batch', async () => {
+    const port = new Port()
+    let batches = 0
+    port.addMany = async (value) => { batches += 1; return { added: value.entries.length - 1, duplicate: [1], rejected: [] } }
+    const model = new ApiKeysModel(port)
+    await model.load('echo')
+    const report = await model.importKeys({
+      providerId: 'echo', rpm: 30, proxyUrl: '',
+      entries: [{ label: 'One', secret: 'one' }, { label: 'Again', secret: 'one' }],
+    })
+    expect(report).toEqual({ added: 1, duplicate: [1], rejected: [] })
+    expect(model.snapshot().pendingId).toBe('')
+    expect(await model.importKeys({ providerId: 'echo', rpm: 30, proxyUrl: '', entries: [] })).toBeNull()
+    expect(batches).toBe(1)
   })
 
   it('does not show keys from the previous provider while switching', async () => {

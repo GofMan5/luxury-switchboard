@@ -540,3 +540,74 @@ func TestToolNormalizationIgnoresOtherEndpointsAndPayloads(t *testing.T) {
 		}
 	}
 }
+
+// W3C lets one SSE event carry its data across several `data:` lines, joined with
+// a newline. Every other reader here already does that — sseInspector for the
+// terminal event, the guardrail extractor for the payload — but the tool restore
+// used to give up on such a block and forward it untouched. Three repairs died
+// there at once: the item stayed announced as `completed` so the client discarded
+// every delta of it, the tool kept its provider-side alias so the client rejected
+// a call it never declared, and the prologue was synthesized on top of an
+// announcement that was already there.
+//
+// The assertion is equality with the single-line form rather than a list of
+// expected substrings: whatever the repairs do, the framing must not decide it.
+func TestAnEventSplitAcrossDataLinesIsRepairedLikeAnyOther(t *testing.T) {
+	const item = `{"id":"i1","type":"message","status":"completed","content":null}`
+	const call = `{"id":"c1","type":"function_call","name":"prov_exec","call_id":"c1","arguments":"{\"input\":\"ls\"}"}`
+	compat := toolCompat{
+		toClient: map[string]string{"prov_exec": "exec"},
+		freeform: map[string]struct{}{"prov_exec": {}},
+	}
+	for _, testCase := range []struct {
+		name   string
+		head   string
+		tail   string
+		follow string
+	}{
+		{
+			name: "an item announced as already finished",
+			head: `{"type":"response.output_item.added","output_index":0,`, tail: `"item":` + item + `}`,
+			follow: `data: {"type":"response.output_text.delta","item_id":"i1","output_index":0,"content_index":0,"delta":"hello"}` + "\n\n",
+		},
+		{
+			name: "a freeform call under its provider alias",
+			head: `{"type":"response.output_item.done","output_index":0,`, tail: `"item":` + call + `}`,
+		},
+		{
+			name: "an event split into three lines",
+			head: `{"type":"response.output_item.done",`, tail: `"output_index":0,` + "\n" + `data: "item":` + call + `}`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			single := "data: " + testCase.head + strings.ReplaceAll(testCase.tail, "\ndata: ", "") + "\n\n" + testCase.follow
+			split := "data: " + testCase.head + "\ndata: " + testCase.tail + "\n\n" + testCase.follow
+			want := restoreClientToolCalls([]byte(single), compat, "/v1/responses", true)
+			got := restoreClientToolCalls([]byte(split), compat, "/v1/responses", true)
+			if string(got) != string(want) {
+				t.Fatalf("the framing changed the repair:\n split gave:\n%s\n single gave:\n%s", got, want)
+			}
+			// A sanity floor, so the test cannot pass by both forms being left alone.
+			if !strings.Contains(string(got), `"in_progress"`) && !strings.Contains(string(got), `"name":"exec"`) {
+				t.Fatalf("neither repair happened, so this proves nothing:\n%s", got)
+			}
+		})
+	}
+}
+
+// The separator matters as much as the joining. A split that falls inside a JSON
+// string literal is only valid JSON when the newline the spec names is put back;
+// joining the fragments flush would parse an event the client itself reads as
+// malformed, and the relay would then announce items and content parts for text
+// nobody is ever going to see.
+func TestDataLinesAreJoinedWithTheNewlineTheSpecNames(t *testing.T) {
+	body := "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"i1\",\"delta\":\"one\n" +
+		"data: two\"}\n\n"
+	got := restoreClientToolCalls([]byte(body), toolCompat{}, "/v1/responses", true)
+	if strings.Contains(string(got), "response.output_item.added") {
+		t.Fatalf("an event the client discards as malformed was given a prologue:\n%s", got)
+	}
+	if string(got) != body {
+		t.Fatalf("a block the relay cannot read was rewritten anyway:\n%s", got)
+	}
+}

@@ -18,7 +18,13 @@ var (
 	ErrDuplicateKey    = errors.New("key already exists")
 	ErrUnknownProvider = errors.New("unknown provider")
 	ErrProviderHasKeys = errors.New("provider still has keys")
+	ErrImportTooLarge  = errors.New("import batch is too large")
 )
+
+// MaxImportBatch bounds one bulk import. This many realistic keys still fit the
+// control-plane frame, so an oversized paste meets a readable limit here instead of
+// a frame the transport drops without saying why.
+const MaxImportBatch = 500
 
 type Manager struct {
 	opMu          sync.Mutex
@@ -42,6 +48,30 @@ type Update struct {
 	RPM      int
 	ProxyURL *string
 	Secret   *string
+}
+
+// ImportEntry is one pasted key. Everything else about it comes from the batch.
+type ImportEntry struct {
+	Label  string
+	Secret string
+}
+
+// Import adds several keys under one shared setting: the provider, the request limit
+// and the proxy apply to every entry, and each entry carries only its own label and
+// secret.
+type Import struct {
+	ProviderID string
+	RPM        int
+	ProxyURL   string
+	Entries    []ImportEntry
+}
+
+// ImportReport says what became of each entry, by its position in the submitted
+// batch. Positions rather than labels, so nothing a caller pasted travels back.
+type ImportReport struct {
+	Added     int   `json:"added"`
+	Duplicate []int `json:"duplicate"`
+	Rejected  []int `json:"rejected"`
 }
 
 func NewManager(scheduler *Scheduler, repository Repository, providerRates map[string]Rate, builtins []domain.Key) (*Manager, error) {
@@ -162,6 +192,65 @@ func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.P
 		return domain.PublicKey{}, err
 	}
 	return publicByID(manager.scheduler.Snapshot(key.ProviderID), key.ID)
+}
+
+// AddMany imports a batch of keys in a single save.
+//
+// An entry whose secret is already configured for this provider is skipped instead
+// of failing the import - pasting a list that overlaps the pool is the normal case,
+// not a mistake - and so is an entry repeated inside the batch itself. An entry the
+// domain refuses is skipped the same way, so one malformed line does not cost the
+// caller the rest of the paste. Every skip is reported by position, so nothing is
+// dropped quietly.
+func (manager *Manager) AddMany(ctx context.Context, request Import) (ImportReport, error) {
+	if len(request.Entries) == 0 {
+		return ImportReport{}, errors.New("empty key import")
+	}
+	if len(request.Entries) > MaxImportBatch {
+		return ImportReport{}, ErrImportTooLarge
+	}
+	manager.opMu.Lock()
+	defer manager.opMu.Unlock()
+	if _, exists := manager.providerRates[request.ProviderID]; !exists {
+		return ImportReport{}, ErrUnknownProvider
+	}
+	manager.mu.RLock()
+	candidate := slices.Clone(manager.userKeys)
+	all := manager.combinedLocked(candidate)
+	manager.mu.RUnlock()
+	priority := nextPriority(all, request.ProviderID)
+	configured := make(map[string]struct{}, len(all)+len(request.Entries))
+	for _, key := range all {
+		configured[key.ID] = struct{}{}
+	}
+	report := ImportReport{Duplicate: []int{}, Rejected: []int{}}
+	for position, entry := range request.Entries {
+		key, err := domain.NewKey(domain.Params{
+			ProviderID: request.ProviderID, Label: entry.Label, Secret: entry.Secret,
+			Priority: priority, RPM: request.RPM, ProxyURL: request.ProxyURL,
+		})
+		if err != nil {
+			report.Rejected = append(report.Rejected, position)
+			continue
+		}
+		if _, duplicate := configured[key.ID]; duplicate {
+			report.Duplicate = append(report.Duplicate, position)
+			continue
+		}
+		configured[key.ID] = struct{}{}
+		candidate = append(candidate, key)
+		report.Added++
+		priority++
+	}
+	// A batch that added nothing leaves the pool exactly as it was, so saving it
+	// would rewrite the encrypted store and wake every listener for no change.
+	if report.Added == 0 {
+		return report, nil
+	}
+	if err := manager.persistAndApply(ctx, candidate); err != nil {
+		return ImportReport{}, err
+	}
+	return report, nil
 }
 
 func (manager *Manager) Update(ctx context.Context, providerID, keyID string, update Update) (domain.PublicKey, error) {

@@ -659,3 +659,29 @@ func TestTunnelForwardsLargeNumericFieldsWithoutABrandPrompt(t *testing.T) {
 		t.Fatalf("tunnel changed the model request: status=%d body=%s", response.Code, dispatcher.request.Body)
 	}
 }
+
+// A credential marker travels with the dispatch answer, and unlike a provider
+// identifier it must refuse the answer at any length: the short ones are the ones
+// most likely to appear in prose by accident, and one of those accidents would be the
+// key itself reaching a public reader. The gateway filters identifiers by width before
+// handing them over, so this asserts the credential path is not filtered with them —
+// TestShortCredentialMarkerFailsClosed calls the sanitizer directly and cannot see it.
+func TestAShortCredentialMarkerStillRefusesThroughTheGateway(t *testing.T) {
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{
+		Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{"output":"the key is o3x"}`), SensitiveMarkers: []string{"o3x"},
+	}}
+	gateway, err := NewGateway(
+		domain.Config{Token: testToken},
+		fakeRoutes{[]domain.Route{{PublicModel: "public-gpt", UpstreamModel: "public-gpt", ProviderID: "private-provider"}}},
+		fakeMarkers{}, dispatcher, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, authorizedRequest(http.MethodPost, "http://tunnel/v1/responses", `{"model":"public-gpt"}`))
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "o3x") {
+		t.Fatalf("a short credential marker was committed: status=%d body=%s", response.Code, response.Body.String())
+	}
+}

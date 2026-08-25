@@ -40,10 +40,13 @@ func registerEdition(protocol *platform.Server, dependencies editionDependencies
 	}
 	history, historyErr := defaultTunnelHistory(dependencies.settings.TunnelRetentionHours)
 	if historyErr != nil {
-		logger.Printf("tunnel history is unavailable; live client activity will continue")
+		// Bans live in the same store, so this is not only a telemetry gap: every
+		// decision from an earlier session is unreachable and a new one cannot be
+		// saved. The message says so, because the two are not the same loss.
+		logger.Printf("tunnel client storage is unavailable; earlier bans are not in force and new ones cannot be saved")
 	}
 	clients := clientapp.NewService(history)
-	if err := clients.LoadProfiles(context.Background()); err != nil {
+	if err := clients.LoadProfiles(context.Background()); err != nil && historyErr == nil {
 		logger.Printf("tunnel client bans could not be restored")
 	}
 	gateway := tunnelhttp.NewRuntime(routes, markers, dependencies.relay, publicactivity.NewRecorder(clients), clients)

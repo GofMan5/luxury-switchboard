@@ -10,6 +10,15 @@ type Credential struct {
 	ProxyURL string
 }
 
+// MinRedactableMarkerBytes is the shortest value worth carrying as a sensitive
+// marker. Anything shorter cannot be replaced in an answer without also rewriting
+// ordinary prose, and the public sanitizer refuses any answer a marker survives in —
+// so a marker below this width can only ever reject, and it rejects on words like
+// "constructor" or "detail". Secrets are exempt: leaking a key is worse than
+// refusing everything, so a short credential still refuses. Identifiers are not,
+// which is why this width exists rather than the rule being "refuse on anything".
+const MinRedactableMarkerBytes = 4
+
 type AttemptKind uint8
 
 const (

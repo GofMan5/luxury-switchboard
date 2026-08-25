@@ -72,6 +72,29 @@ func TestOversizedResultBecomesTypedFailureWithoutBreakingProtocol(t *testing.T)
 	}
 }
 
+// Two slices size a bounded answer against MaxPayloadBytes - the guardrail findings
+// list and the model catalog - and both measure the payload alone. Setting the budget
+// ON the frame limit leaves a window where the payload fits and the frame does not,
+// which is the crash both of them exist to avoid: the shell breaks its read loop on an
+// oversized frame and kills the sidecar. This is the cheap invariant; the slices own
+// the measured tests. The room is asserted as real rather than nominal, because a
+// budget one byte under the limit would satisfy `<` and still overflow the envelope.
+func TestThePayloadBudgetLeavesTheEnvelopeItsRoom(t *testing.T) {
+	envelope := len(mustEncode(t, Response{Version: ProtocolVersion, ID: strings.Repeat("i", 80), Type: "result", Method: strings.Repeat("m", 120), OK: true}))
+	if MaxPayloadBytes+envelope > MaxFrameBytes {
+		t.Fatalf("a full payload plus a %d byte envelope is %d, over the %d the shell accepts", envelope, MaxPayloadBytes+envelope, MaxFrameBytes)
+	}
+}
+
+func mustEncode(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func TestShutdownAcknowledgesThenStopsDispatch(t *testing.T) {
 	input := strings.NewReader(
 		`{"v":1,"id":"shutdown","type":"command","method":"system.shutdown"}` + "\n" +

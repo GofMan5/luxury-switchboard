@@ -105,6 +105,26 @@ describe('GuardrailsModel', () => {
     model.dispose()
   })
 
+  it('replaces a row the control plane keeps folding instead of adding another', async () => {
+    // The control plane keeps one row for "part of this answer was never read" per
+    // provider and raises its count. Each update arrives under the same id, so it has
+    // to refresh that row rather than be dropped as a duplicate or stack up beside it.
+    const port = new FakeGuardrailsPort()
+    const model = new GuardrailsModel(port)
+    await model.connect()
+    const partial = { id: 'gr_2', severity: 'low' as const, findings: [{ ruleId: 'proto-inspection-truncated', category: 'protocol', severity: 'low' as const, match: '', excerpt: '', source: 'inspection', description: 'Partly unread' }] }
+    port.emit?.(record('gr_1'))
+    port.emit?.(record('gr_2', { ...partial, occurrences: 1 }))
+    port.emit?.(record('gr_2', { ...partial, occurrences: 2, at: new Date(60_000).toISOString() }))
+    const findings = model.snapshot().findings
+    expect(findings).toHaveLength(2)
+    expect(findings[0]).toMatchObject({ id: 'gr_2', occurrences: 2 })
+    // The real detection is still there, and the count did not double-count one row.
+    expect(findings[1]?.id).toBe('gr_1')
+    expect(model.snapshot().status?.findingCount).toBe(2)
+    model.dispose()
+  })
+
   it('bounds what it holds when a provider keeps sending payloads', async () => {
     const port = new FakeGuardrailsPort()
     const model = new GuardrailsModel(port)

@@ -30,7 +30,9 @@
 .modeNote { border-top: 1px solid var(--border-subtle); padding: 11px 14px; color: var(--text-muted); font-size: 11px; }
 
 .tableWrap { overflow: auto; }
-.findings table { width: 100%; min-width: 900px; border-collapse: collapse; table-layout: fixed; }
+/* The fixed columns come to 862px, so the minimum leaves the one flexible column —
+   what was actually detected — room to be read instead of an ellipsis. */
+.findings table { width: 100%; min-width: 1120px; border-collapse: collapse; table-layout: fixed; }
 .findings th, .findings td { height: 42px; overflow: hidden; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .findings th { color: var(--text-muted); background: #171717; font-size: 11px; font-weight: 620; }
 .findings tbody tr:hover, .findings tbody tr:focus { background: color-mix(in srgb, var(--bg-hover) 76%, transparent); outline: none; }
@@ -45,6 +47,9 @@
 .state { display: inline-flex; min-width: 0; align-items: center; gap: 7px; }
 .mono { font-family: var(--font-mono); font-size: 12px; }
 .muted { color: var(--text-muted); }
+/* Sits before the text it counts, so the cell's ellipsis eats the description and not
+   the count. */
+.repeat { margin-right: 7px; border: 1px solid var(--border-subtle); border-radius: 5px; padding: 1px 5px; color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; font-weight: 620; }
 .truncate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .open { border: 0; padding: 0; color: var(--text-secondary); background: transparent; cursor: pointer; font: inherit; }
 .open:hover { color: var(--text-primary); }
@@ -72,9 +77,14 @@
 .summary small { color: var(--text-muted); font-size: 10px; text-transform: uppercase; }
 .summary strong { margin-top: 5px; color: var(--text-primary); font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 600; }
 
-.detections { display: grid; min-height: 0; gap: 10px; overflow: auto; flex: 1; padding: 14px 16px; }
+/* Rows keep their own height: a short detection stretched to fill the panel reads as
+   evidence that failed to render. */
+.detections { display: grid; min-height: 0; align-content: start; gap: 10px; overflow: auto; flex: 1; padding: 14px 16px; }
 .detection { border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg-canvas); }
 .detection > header { display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--border-subtle); padding: 9px 12px; }
+/* A report about the inspection itself has neither match nor excerpt, so its header is
+   the whole card — the divider would double the card's own bottom edge. */
+.detection > header:last-child { border-bottom: 0; }
 .detection strong { min-width: 0; overflow: hidden; flex: 1; color: var(--text-primary); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .detection small { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
 /* The evidence is provider output, so it wraps rather than being cut: a truncated

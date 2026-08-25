@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strings"
 )
@@ -76,6 +77,13 @@ func ParseSeverity(value string) Severity {
 // expression can see that; it needs both sides of the exchange.
 const RuleUnsolicitedTool = "proto-tooluse-unsolicited"
 
+// RuleInspectionTruncated is the synthetic rule reported when an answer was larger
+// than the inspection budget, so part of it reached the client unread. It is low
+// severity — nothing was found, and nothing can be claimed — but it is reported,
+// because padding an answer past the ceiling is the cheapest way to buy silence and
+// the operator must not read a clean record as full coverage.
+const RuleInspectionTruncated = "proto-inspection-truncated"
+
 // CategoryProtocol groups the synthetic findings that come from comparing the
 // request with the answer rather than from matching text.
 const CategoryProtocol = "protocol-anomaly"
@@ -106,12 +114,16 @@ type compiledRule struct {
 	spec     ruleSpec
 	severity Severity
 	pattern  *regexp.Regexp
+	// literals are lowercased strings of which at least one must appear in any text
+	// this rule can match. Empty means the pattern proved nothing, so it always runs.
+	literals []string
 }
 
 type indicator struct {
-	term  string
-	lower string
-	kind  string
+	term     string
+	lower    string
+	kind     string
+	severity Severity
 }
 
 // Finding is one detection hit. Every field is either fixed rule metadata or a
@@ -160,7 +172,10 @@ func NewEngine(rulesJSON, blocklistJSON []byte) (*Engine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("guardrail rule %q has an invalid pattern: %w", spec.ID, err)
 		}
-		engine.rules = append(engine.rules, compiledRule{spec: spec, severity: ParseSeverity(spec.Severity), pattern: pattern})
+		engine.rules = append(engine.rules, compiledRule{
+			spec: spec, severity: ParseSeverity(spec.Severity), pattern: pattern,
+			literals: requiredLiterals(spec.Pattern),
+		})
 	}
 	if len(blocklistJSON) > 0 {
 		var blocklist blocklistDocument
@@ -168,11 +183,22 @@ func NewEngine(rulesJSON, blocklistJSON []byte) (*Engine, error) {
 			return nil, fmt.Errorf("parse guardrail blocklist: %w", err)
 		}
 		groups := []struct {
-			kind  string
-			terms []string
+			kind     string
+			severity Severity
+			terms    []string
 		}{
-			{"domain", blocklist.Domains}, {"ip", blocklist.IPs}, {"path", blocklist.Paths},
-			{"task", blocklist.TaskNames}, {"process", blocklist.ProcessNames}, {"hash", blocklist.Hashes},
+			{"domain", SeverityHigh, blocklist.Domains},
+			{"ip", SeverityHigh, blocklist.IPs},
+			{"path", SeverityHigh, blocklist.Paths},
+			{"hash", SeverityHigh, blocklist.Hashes},
+			// A task or process name is a bare word, not a locator. The list holds
+			// `proxy.exe`, `CodeAssist` and `StartupOptimizer`: an honest answer about a
+			// local proxy or an IDE assistant contains them, and at high severity Block
+			// mode would refuse it. The campaign that actually creates that task also
+			// carries the schtasks command or the full path, and those still match high,
+			// so nothing is lost but the false refusal.
+			{"task", SeverityMedium, blocklist.TaskNames},
+			{"process", SeverityMedium, blocklist.ProcessNames},
 		}
 		for _, group := range groups {
 			for _, term := range group.terms {
@@ -180,11 +206,109 @@ func NewEngine(rulesJSON, blocklistJSON []byte) (*Engine, error) {
 				if term == "" {
 					continue
 				}
-				engine.indicators = append(engine.indicators, indicator{term: term, lower: strings.ToLower(term), kind: group.kind})
+				engine.indicators = append(engine.indicators, indicator{
+					term: term, lower: strings.ToLower(term), kind: group.kind, severity: group.severity,
+				})
 			}
 		}
 	}
 	return engine, nil
+}
+
+// requiredLiterals returns lowercased strings of which at least one must appear in
+// any text the pattern can match, or nil when the pattern proves no such string.
+//
+// It is a filter, never a decision: a rule keeps its own regular expression as the
+// only thing that reports a finding. The point is that 106 case-folded expressions
+// over half a megabyte cost seconds of CPU inline on the response path, while
+// substring search over the same bytes costs milliseconds — and a rule whose
+// literal is absent cannot match, so it does not have to run at all.
+//
+// Everything unproven yields nil, which means the rule always runs. Being wrong in
+// that direction costs time; being wrong the other way would silently disable a
+// rule.
+func requiredLiterals(pattern string) []string {
+	parsed, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return nil
+	}
+	literals := literalsOf(parsed.Simplify())
+	if len(literals) == 0 {
+		return nil
+	}
+	// A single character was excluded here on the theory that it filters nothing an
+	// ordinary answer does not already contain. Measured, that theory was wrong in the
+	// one case it applied to: `obf-caret-backtick` requires a caret or a backtick, and
+	// prose contains neither, so discarding those two characters left the only rule that
+	// ran on clean text — and it accounted for the entire inspection cost, 81 ms of the
+	// 81 ms at the half-megabyte ceiling. A literal is kept whatever its length; a
+	// character common enough to always hit costs one substring scan to learn that.
+	return literals
+}
+
+// literalsOf walks the parsed pattern. A concatenation may pick any one of its
+// parts, an alternation needs every branch to promise something, and anything
+// optional or open-ended promises nothing.
+func literalsOf(expression *syntax.Regexp) []string {
+	switch expression.Op {
+	case syntax.OpLiteral:
+		text := strings.ToLower(string(expression.Rune))
+		for _, character := range text {
+			// Case folding outside ASCII is not a straight lowercase, so those literals
+			// are not trusted as a filter.
+			if character > 127 {
+				return nil
+			}
+		}
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	case syntax.OpCapture:
+		return literalsOf(expression.Sub[0])
+	case syntax.OpPlus:
+		return literalsOf(expression.Sub[0])
+	case syntax.OpRepeat:
+		if expression.Min < 1 {
+			return nil
+		}
+		return literalsOf(expression.Sub[0])
+	case syntax.OpConcat:
+		// Any single part is a valid requirement for the whole, so the most selective
+		// one wins.
+		var best []string
+		for _, part := range expression.Sub {
+			candidate := literalsOf(part)
+			if len(candidate) == 0 {
+				continue
+			}
+			if len(best) == 0 || shortestLength(candidate) > shortestLength(best) {
+				best = candidate
+			}
+		}
+		return best
+	case syntax.OpAlternate:
+		// One branch that promises nothing makes the whole alternation promise nothing.
+		union := make([]string, 0, len(expression.Sub))
+		for _, branch := range expression.Sub {
+			candidate := literalsOf(branch)
+			if len(candidate) == 0 {
+				return nil
+			}
+			union = append(union, candidate...)
+		}
+		return union
+	default:
+		return nil
+	}
+}
+
+func shortestLength(literals []string) int {
+	shortest := len(literals[0])
+	for _, literal := range literals[1:] {
+		shortest = min(shortest, len(literal))
+	}
+	return shortest
 }
 
 // RuleCount reports how many behavioural rules are loaded. The operator sees
@@ -220,7 +344,23 @@ func (engine *Engine) Inspect(text, source string) []Finding {
 		seen[key] = struct{}{}
 		findings = append(findings, finding)
 	}
+	lowered := strings.ToLower(text)
+	// RE2 folds ſ (U+017F) onto `s` under (?i) and strings.ToLower leaves it alone. It is
+	// the ONLY rune in Unicode where the two disagree about an ASCII letter — enumerated,
+	// not assumed — and the disagreement is a real bypass: `~/.awſ/credentials` matches
+	// cred-aws-read while the prefilter, searching for the literal `~/.aws/credentials`,
+	// skips the rule and reports nothing. That is the one thing the prefilter is not
+	// allowed to do.
+	//
+	// Only the prefilter reads this string. Every match position comes from the pattern
+	// run against the original text, so collapsing a two-byte rune to one byte here
+	// cannot move an excerpt. When the rune is absent — always, in practice — ReplaceAll
+	// returns the same string without allocating.
+	filterable := strings.ReplaceAll(lowered, "ſ", "s")
 	for _, rule := range engine.rules {
+		if !mayContain(filterable, rule.literals) {
+			continue
+		}
 		location := rule.pattern.FindStringIndex(text)
 		if location == nil {
 			continue
@@ -232,26 +372,37 @@ func (engine *Engine) Inspect(text, source string) []Finding {
 			Description: rule.spec.Description,
 		})
 	}
-	if len(engine.indicators) > 0 {
-		lowered := strings.ToLower(text)
-		for _, term := range engine.indicators {
-			index := strings.Index(lowered, term.lower)
-			if index < 0 {
-				continue
-			}
-			add(Finding{
-				RuleID: "ioc-" + term.kind, Category: "ioc", Severity: SeverityHigh.String(),
-				Match:   truncate(term.term, maxMatchBytes),
-				Excerpt: excerpt(text, index, index+len(term.lower)), Source: source,
-				Description: "Known indicator of compromise (" + term.kind + ")",
-			})
+	for _, term := range engine.indicators {
+		index := strings.Index(lowered, term.lower)
+		if index < 0 {
+			continue
 		}
+		add(Finding{
+			RuleID: "ioc-" + term.kind, Category: "ioc", Severity: term.severity.String(),
+			Match:   truncate(term.term, maxMatchBytes),
+			Excerpt: excerpt(text, index, index+len(term.lower)), Source: source,
+			Description: "Known indicator of compromise (" + term.kind + ")",
+		})
 	}
 	SortFindings(findings)
 	if len(findings) > MaxFindings {
 		findings = findings[:MaxFindings]
 	}
 	return findings
+}
+
+// mayContain reports whether text can possibly match a rule with these literals. A
+// rule that promised nothing always runs.
+func mayContain(lowered string, literals []string) bool {
+	if len(literals) == 0 {
+		return true
+	}
+	for _, literal := range literals {
+		if strings.Contains(lowered, literal) {
+			return true
+		}
+	}
+	return false
 }
 
 // UnsolicitedToolFinding reports a tool call in an answer to a request that
@@ -262,6 +413,15 @@ func UnsolicitedToolFinding(toolName string) Finding {
 		RuleID: RuleUnsolicitedTool, Category: CategoryProtocol, Severity: SeverityHigh.String(),
 		Match: truncate(toolName, maxMatchBytes), Source: "tool_call:" + truncate(toolName, 64),
 		Description: "The provider answered with a tool call although the client declared no tools",
+	}
+}
+
+// TruncatedInspectionFinding reports that the answer outgrew the inspection budget.
+func TruncatedInspectionFinding() Finding {
+	return Finding{
+		RuleID: RuleInspectionTruncated, Category: CategoryProtocol, Severity: SeverityLow.String(),
+		Source:      "inspection",
+		Description: "The answer was larger than the inspection budget, so part of it was forwarded unread",
 	}
 }
 

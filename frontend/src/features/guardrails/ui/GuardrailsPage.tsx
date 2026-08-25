@@ -30,6 +30,7 @@ export default function GuardrailsPage() {
     { blocked: 0, high: 0, providers: new Set<string>() },
   )
   const selected = state.findings.find((record) => record.id === openId)
+  const withheld = Math.max((status?.findingCount ?? 0) - state.findings.length, 0)
 
   return (
     <section className={styles.page}>
@@ -55,7 +56,10 @@ export default function GuardrailsPage() {
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
 
       <div className={styles.metrics}>
-        <Metric label="Findings" value={state.findings.length} />
+        {/* The recorded total, not the length of the list below: the list is bounded
+            by what one page shows and what fits one protocol frame, and reading the
+            metric off it would report a cap as if it were the whole journal. */}
+        <Metric label="Findings" value={status?.findingCount ?? state.findings.length} />
         <Metric label="High severity" value={counts.high} tone={counts.high > 0 ? 'high' : undefined} />
         <Metric label="Refused answers" value={counts.blocked} tone={counts.blocked > 0 ? 'blocked' : undefined} />
         <Metric label="Providers involved" value={counts.providers.size} />
@@ -93,7 +97,14 @@ export default function GuardrailsPage() {
       <section className={styles.findings}>
         <header>
           <div><ShieldAlert size={17} aria-hidden="true" /><h2>Findings</h2></div>
-          <span>Newest first. Kept in memory only, and never sent anywhere.</span>
+          {/* A shorter list than the metric is not a bug, but it must not read as the
+              whole journal either: the oldest are held back so one answer's evidence
+              cannot outgrow what the app can hand to this window. */}
+          <span>
+            {withheld > 0
+              ? `Newest ${state.findings.length.toLocaleString()} of ${(status?.findingCount ?? 0).toLocaleString()}. Kept in memory only, and never sent anywhere.`
+              : 'Newest first. Kept in memory only, and never sent anywhere.'}
+          </span>
         </header>
         <div className={styles.tableWrap}>
           <table>
@@ -134,6 +145,7 @@ function verdictView(record: Pick<GuardrailRecord, 'verdict'>) {
 function FindingRow({ record, onOpen }: { record: GuardrailRecord; onOpen: () => void }) {
   const view = verdictView(record)
   const headline = record.findings[0]
+  const repeats = record.occurrences ?? 1
   return (
     <tr
       tabIndex={0}
@@ -148,7 +160,13 @@ function FindingRow({ record, onOpen }: { record: GuardrailRecord; onOpen: () =>
       <td><SeverityTag severity={record.severity} /></td>
       <td title={record.providerName}>{record.providerName || <span className={styles.muted}>—</span>}</td>
       <td title={record.model}>{record.model || <span className={styles.muted}>—</span>}</td>
-      <td title={headline?.description}>{headline?.description || headline?.category || '—'}</td>
+      <td title={headline?.description}>
+        {/* Ahead of the description, not after it: the cell ellipsises, and the one
+          * finding that ever carries a count has an 84-character description that
+          * fills the column on its own — a trailing badge is clipped to nothing. */}
+        {repeats > 1 ? <span className={styles.repeat} title={`Seen ${repeats.toLocaleString()} times`}>×{repeats.toLocaleString()}</span> : null}
+        {headline?.description || headline?.category || '—'}
+      </td>
       <td className={styles.mono} title={headline?.match}>{headline?.match || '—'}</td>
       <td>
         <button type="button" className={styles.open} onClick={onOpen} aria-label={`Open the finding from ${record.providerName || 'this provider'}`}>
@@ -166,6 +184,7 @@ function SeverityTag({ severity }: { severity: GuardrailSeverity }) {
 function FindingDialog({ record, onClose }: { record: GuardrailRecord; onClose: () => void }) {
   const dialogRef = useModalFocus<HTMLElement>(onClose)
   const view = verdictView(record)
+  const repeats = record.occurrences ?? 1
   return (
     <div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section ref={dialogRef} className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="finding-dialog-title">
@@ -179,8 +198,10 @@ function FindingDialog({ record, onClose }: { record: GuardrailRecord; onClose: 
         <div className={styles.summary}>
           <span><small>Severity</small><strong><SeverityTag severity={record.severity} /></strong></span>
           <span><small>Model</small><strong className={styles.truncate} title={record.model}>{record.model || '—'}</strong></span>
-          <span><small>Detections</small><strong>{record.findings.length}</strong></span>
-          <span><small>Time</small><strong>{formatClock(record.at)}</strong></span>
+          {/* A folded row stands for many answers, so it reports how many rather than
+            * leaving "Last seen" to imply a number the operator cannot read. */}
+          <span><small>{repeats > 1 ? 'Answers' : 'Detections'}</small><strong>{repeats > 1 ? repeats.toLocaleString() : record.findings.length}</strong></span>
+          <span><small>{repeats > 1 ? 'Last seen' : 'Time'}</small><strong>{formatClock(record.at)}</strong></span>
         </div>
         <div className={styles.detections}>
           {record.findings.map((finding, index) => (
@@ -200,7 +221,9 @@ function Detection({ finding }: { finding: GuardrailFinding }) {
         <strong>{finding.description || finding.category}</strong>
         <small>{finding.source}</small>
       </header>
-      <code>{finding.match}</code>
+      {/* A report about the inspection itself has nothing matched to show, and an
+        * empty code block reads as evidence that failed to load. */}
+      {finding.match ? <code>{finding.match}</code> : null}
       {finding.excerpt ? <p>{finding.excerpt}</p> : null}
     </article>
   )

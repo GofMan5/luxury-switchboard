@@ -1,5 +1,5 @@
 .page { min-height: 100%; }
-.headerActions { display: flex; align-items: end; gap: 12px; }
+.headerActions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
 .providerSelect { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .providerSelect select { min-width: 180px; height: 36px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 10px; color: var(--text-primary); background: #252525; transition: border-color var(--motion-fast), background var(--motion-fast); }
 .providerSelect select:hover { border-color: #565656; background: #282828; }
@@ -34,6 +34,14 @@
 .formBody input:focus { border-color: var(--border-focus); outline: 0; box-shadow: 0 0 0 3px rgb(112 155 199 / 9%); }
 .formBody input:disabled { color: var(--text-disabled); background: #292929; }
 .formBody small { color: var(--text-muted); font-size: 11px; }
+.import { --dialog-width: 620px; }
+.paste { width: 100%; min-height: 168px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 10px 11px; color: var(--text-primary); background: #252525; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; resize: vertical; transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast); }
+.paste:hover:not(:disabled) { border-color: #565656; background: #282828; }
+.paste:focus { border-color: var(--border-focus); outline: 0; box-shadow: 0 0 0 3px rgb(112 155 199 / 9%); }
+.importSummary { display: grid; gap: 5px; border: 1px solid color-mix(in srgb, var(--status-success) 48%, var(--border-subtle)); border-radius: var(--radius-control); padding: 12px; background: color-mix(in srgb, var(--status-success) 10%, #232323); color: var(--text-secondary); font-size: 12px; }
+.importSummary strong { color: var(--text-primary); font-size: 13px; font-weight: 620; }
+/* An import that added nothing is a plain result, not a success worth the accent. */
+.importSummary[data-added='false'] { border-color: var(--border-strong); background: #232323; }
 .proxyField { display: grid; gap: 7px; border-top: 1px solid var(--border-subtle); padding-top: 16px; color: var(--text-secondary); }
 .check { display: flex !important; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; }
 .check input { width: 15px; height: 15px; accent-color: #79a7d8; }

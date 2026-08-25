@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -53,9 +54,11 @@ func NewService(history History) *Service {
 }
 
 // LoadProfiles restores owner decisions so a restart keeps every ban in force.
+// No store means the decisions of every earlier session are unreachable, not that
+// there were none, so this reports it rather than starting with a clean slate.
 func (service *Service) LoadProfiles(ctx context.Context) error {
 	if service.store == nil {
-		return nil
+		return errors.New("client profiles cannot be read")
 	}
 	stored, err := service.store.Profiles(ctx)
 	if err != nil {
@@ -80,15 +83,22 @@ func (service *Service) SetProfile(ctx context.Context, profile domain.Profile) 
 	if err != nil {
 		return err
 	}
-	if service.store != nil {
-		if canonical.Empty() {
-			err = service.store.DeleteProfile(ctx, canonical.IP)
-		} else {
-			err = service.store.SaveProfile(ctx, canonical)
-		}
-		if err != nil {
-			return err
-		}
+	// A ban is a decision, and a decision nobody wrote down is not one. A write that
+	// failed is already refused below, and storage that never opened is the same
+	// case — it used to be the hole in that rule: the list showed the ban in force,
+	// the next launch quietly dropped it, and every address the owner had banned in
+	// an earlier session was served again. Refusing says so while the tunnel can
+	// still be stopped.
+	if service.store == nil {
+		return errors.New("client profiles cannot be stored")
+	}
+	if canonical.Empty() {
+		err = service.store.DeleteProfile(ctx, canonical.IP)
+	} else {
+		err = service.store.SaveProfile(ctx, canonical)
+	}
+	if err != nil {
+		return err
 	}
 	service.mu.Lock()
 	if canonical.Empty() {

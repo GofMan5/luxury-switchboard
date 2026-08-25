@@ -12,6 +12,16 @@ import (
 const (
 	ProtocolVersion = 1
 	MaxFrameBytes   = 256 * 1024
+	// MaxPayloadBytes is what a handler may return. The frame that carries a payload
+	// adds the version, request id, type, method and ok keys around it, so a handler
+	// that measured its answer against MaxFrameBytes would still overflow the frame.
+	// Callers that build a bounded answer size it against this instead of guessing at
+	// the envelope, and the slack is deliberately far wider than the envelope needs -
+	// 253 bytes at the longest id and method the validator accepts, measured in
+	// TestThePayloadBudgetLeavesTheEnvelopeItsRoom - because being a kilobyte
+	// conservative costs nothing and being one byte over costs the whole app: the
+	// shell breaks its read loop on an oversized frame and kills the sidecar.
+	MaxPayloadBytes = MaxFrameBytes - 4*1024
 )
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)

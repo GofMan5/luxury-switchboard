@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	pathpkg "path"
 	"strconv"
 	"strings"
 	"sync"
@@ -244,7 +245,15 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
 	}
 	if route.CacheTTL >= time.Hour {
-		body = extendCacheTTL(body, request.Header.Get("Content-Type"))
+		extended, carriesHour := extendCacheTTL(body, request.Header.Get("Content-Type"))
+		body = extended
+		if carriesHour {
+			// upstreamRequest was copied from the client's request and still shares its
+			// header map, so the declaration gets its own copy rather than being written
+			// into what the caller sent us.
+			upstreamRequest.Header = request.Header.Clone()
+			declareBetaFeature(upstreamRequest.Header, extendedCacheTTLBeta)
+		}
 	}
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
@@ -263,6 +272,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		})
 	}()
 	committed := false
+	// What the credential of the attempt in flight is, so the answer's headers can be
+	// checked against it before they reach the client.
+	var secrets []string
 	flusher, _ := writer.(http.Flusher)
 	var heartbeat func() error
 	clientStream := streamRequested && !imageCompat
@@ -279,7 +291,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		committed = true
 		heartbeat = func() error {
 			payload := []byte(": switchboard keep-alive\n\n")
-			if strings.TrimRight(request.URL.Path, "/") == "/v1/responses" {
+			if canonicalPath(request.URL.Path) == "/v1/responses" {
 				payload = []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{}}\n\n")
 			}
 			if _, err := writer.Write(payload); err != nil {
@@ -292,113 +304,152 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 	}
 	requestUpstream := func(requestCtx context.Context) (*http.Response, error) {
-		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, &bufferTerminal, 0, nil, &chatActive)
+		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, &bufferTerminal, 0, func(credential relayapp.Credential) {
+			// Kept so the answer's headers can be checked against it: a provider that
+			// echoes the key we sent it must not hand that key to the client.
+			secrets = sensitiveCredentialMarkers(credential)
+		}, &chatActive)
 	}
 	var response *http.Response
-	if clientStream {
-		response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
-	} else {
-		response, err = requestUpstream(ctx)
-	}
-	if err != nil {
-		if committed {
-			cancelled = errors.Is(err, context.Canceled) || errors.Is(err, errClientDisconnected)
-			errorCode = "stream_incomplete"
-			writeStreamFailure(writer, request.URL.Path, model)
-			return
-		}
-		if errors.Is(err, context.Canceled) {
-			status = http.StatusServiceUnavailable
-			cancelled = true
-			errorCode = "cancelled"
-			writeError(writer, http.StatusServiceUnavailable, "Request cancelled")
-		} else {
-			status = http.StatusBadGateway
-			errorCode = "transport"
-			writeError(writer, http.StatusBadGateway, "Provider is unavailable")
-		}
-		return
-	}
-	defer response.Body.Close()
-	status = response.StatusCode
-	if status >= 400 {
-		errorCode = "request_rejected"
-		if committed {
-			writeStreamFailure(writer, request.URL.Path, model)
-			return
-		}
-	}
-	terminal := response.Header.Get("X-Switchboard-Terminal")
-	response.Header.Del("X-Switchboard-Terminal")
-	if terminal == "response.incomplete" {
-		errorCode = "stream_incomplete"
-	}
-	if terminal == "response.failed" {
-		errorCode = "upstream_status"
-	}
-	usage = usageFromHeaders(response.Header)
-	generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
-	removeUsageHeaders(response.Header)
-	// A rejected request already carries a neutral error body; translating it
-	// would replace the reason with an empty "completed" response.
-	if chatActive && status < 400 {
-		limit := responseBufferLimit(server.config)
-		raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
-		if readErr != nil || int64(len(raw)) > limit {
-			status = http.StatusBadGateway
-			errorCode = "chat_compatibility"
-			if committed {
-				writeStreamFailure(writer, request.URL.Path, model)
-			} else {
-				writeError(writer, http.StatusBadGateway, "Chat completions stream could not be converted")
-			}
-			return
-		}
-		converted, convertErr := chatToResponses(raw, clientStream)
-		if convertErr != nil {
-			status = http.StatusBadGateway
-			errorCode = "chat_compatibility"
-			if committed {
-				writeStreamFailure(writer, request.URL.Path, model)
-			} else {
-				writeError(writer, http.StatusBadGateway, "Chat completions response could not be converted")
-			}
-			return
-		}
-		response.Body = io.NopCloser(bytes.NewReader(converted))
-		response.ContentLength = int64(len(converted))
+	// A refused answer is a wasted attempt, not a dead request. The rules match shell
+	// and network idiom an honest assistant produces all day, so in Block mode one
+	// unlucky answer would otherwise end a run the caller cannot restart from here —
+	// and a provider that sampled something ugly once usually does not do it twice.
+	// The attempt is repeated on the same budget as a provider that failed out loud,
+	// and the refusal still stands if every attempt earns one: the client never sees
+	// a payload, it only waits longer. Nothing of the answer has been written yet at
+	// this point, so a committed stream can be retried too — the caller has had
+	// headers and keep-alives, no content.
+	for attempt := 0; ; attempt++ {
+		var err error
+		// Every attempt reports itself from scratch. A terminal event on the attempt that
+		// was refused must not be what the history shows for the attempt that succeeded.
+		// Its COST is the exception: `refused` is a fact about the answer, and a refused
+		// answer was still generated and still billed, so those tokens are kept.
+		errorCode = ""
+		refusedUsage := usage
 		if clientStream {
-			response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
-			response.Header.Del("Content-Length")
+			response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
 		} else {
+			response, err = requestUpstream(ctx)
+		}
+		if err != nil {
+			if committed {
+				cancelled = errors.Is(err, context.Canceled) || errors.Is(err, errClientDisconnected)
+				errorCode = "stream_incomplete"
+				writeStreamFailure(writer, request.URL.Path, model)
+				return
+			}
+			if errors.Is(err, context.Canceled) {
+				status = http.StatusServiceUnavailable
+				cancelled = true
+				errorCode = "cancelled"
+				writeError(writer, http.StatusServiceUnavailable, "Request cancelled")
+			} else {
+				status = http.StatusBadGateway
+				errorCode = "transport"
+				writeError(writer, http.StatusBadGateway, "Provider is unavailable")
+			}
+			return
+		}
+		status = response.StatusCode
+		if status >= 400 {
+			errorCode = "request_rejected"
+			if committed {
+				response.Body.Close()
+				writeStreamFailure(writer, request.URL.Path, model)
+				return
+			}
+		}
+		terminal := response.Header.Get("X-Switchboard-Terminal")
+		response.Header.Del("X-Switchboard-Terminal")
+		if terminal == "response.incomplete" {
+			errorCode = "stream_incomplete"
+		}
+		if terminal == "response.failed" {
+			errorCode = "upstream_status"
+		}
+		usage = usageWith(refusedUsage, usageFromHeaders(response.Header))
+		generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
+		removeUsageHeaders(response.Header)
+		// A rejected request already carries a neutral error body; translating it
+		// would replace the reason with an empty "completed" response.
+		if chatActive && status < 400 {
+			limit := responseBufferLimit(server.config)
+			raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
+			response.Body.Close()
+			if readErr != nil || int64(len(raw)) > limit {
+				status = http.StatusBadGateway
+				errorCode = "chat_compatibility"
+				if committed {
+					writeStreamFailure(writer, request.URL.Path, model)
+				} else {
+					writeError(writer, http.StatusBadGateway, "Chat completions stream could not be converted")
+				}
+				return
+			}
+			converted, convertErr := chatToResponses(raw, clientStream)
+			if convertErr != nil {
+				status = http.StatusBadGateway
+				errorCode = "chat_compatibility"
+				if committed {
+					writeStreamFailure(writer, request.URL.Path, model)
+				} else {
+					writeError(writer, http.StatusBadGateway, "Chat completions response could not be converted")
+				}
+				return
+			}
+			response.Body = io.NopCloser(bytes.NewReader(converted))
+			response.ContentLength = int64(len(converted))
+			if clientStream {
+				response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+				response.Header.Del("Content-Length")
+			} else {
+				response.Header.Set("Content-Type", "application/json")
+				response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+			}
+			response.Header.Del("Content-Encoding")
+		}
+		if imageCompat {
+			raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxImageResponse+1))
+			response.Body.Close()
+			converted, convertErr := imagesResponse(raw)
+			if readErr != nil || len(raw) > maxImageResponse || convertErr != nil {
+				status = http.StatusBadGateway
+				errorCode = "image_generation"
+				writeError(writer, http.StatusBadGateway, "Image generation failed")
+				return
+			}
+			response.Body = io.NopCloser(bytes.NewReader(converted))
+			response.ContentLength = int64(len(converted))
 			response.Header.Set("Content-Type", "application/json")
 			response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+			response.Header.Del("Content-Encoding")
 		}
-		response.Header.Del("Content-Encoding")
-	}
-	if imageCompat {
-		raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxImageResponse+1))
-		converted, convertErr := imagesResponse(raw)
-		if readErr != nil || len(raw) > maxImageResponse || convertErr != nil {
-			status = http.StatusBadGateway
-			errorCode = "image_generation"
-			writeError(writer, http.StatusBadGateway, "Image generation failed")
-			return
+		restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
+		// The guardrails judge exactly what the client is about to read, after every
+		// translation and repair, so a payload cannot hide in a dialect the relay was
+		// still rewriting.
+		code, blocked := server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
+			ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+			ClientDeclaredTools: clientDeclaredTools,
+		})
+		if !blocked {
+			break
 		}
-		response.Body = io.NopCloser(bytes.NewReader(converted))
-		response.ContentLength = int64(len(converted))
-		response.Header.Set("Content-Type", "application/json")
-		response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
-		response.Header.Del("Content-Encoding")
-	}
-	restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
-	// The guardrails judge exactly what the client is about to read, after every
-	// translation and repair, so a payload cannot hide in a dialect the relay was
-	// still rewriting.
-	if code, blocked := server.reviewResponse(response, relayapp.GuardrailSubject{
-		ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
-		ClientDeclaredTools: clientDeclaredTools,
-	}); blocked {
+		// The refused body is dropped here rather than by the deferred close below: this
+		// path returns before the loop ever falls through to it.
+		response.Body.Close()
+		if attempt+1 < server.guardrailAttempts() {
+			delay := retryDelay(attempt, nil, server.config)
+			server.observeRetry(activityID, attempt, status, delay)
+			if waitErr := waitRetry(ctx, delay); waitErr != nil {
+				cancelled = true
+				errorCode = "cancelled"
+				return
+			}
+			continue
+		}
 		status = http.StatusBadGateway
 		errorCode = code
 		if committed {
@@ -408,8 +459,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		return
 	}
+	defer response.Body.Close()
 	if !committed {
-		copyResponseHeaders(writer.Header(), response.Header)
+		copyResponseHeaders(writer.Header(), response.Header, secrets)
 		writer.WriteHeader(response.StatusCode)
 	}
 	buffer := make([]byte, 64*1024)
@@ -479,7 +531,13 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		body = rewriteRequestModel(request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel)
 	}
 	if route.CacheTTL >= time.Hour {
-		body = extendCacheTTL(body, request.Headers.Get("Content-Type"))
+		extended, carriesHour := extendCacheTTL(body, request.Headers.Get("Content-Type"))
+		body = extended
+		if carriesHour {
+			// incoming.Header is already a clone of the caller's, so the declaration that
+			// carries the hour can be added to it directly.
+			declareBetaFeature(incoming.Header, extendedCacheTTLBeta)
+		}
 	}
 	terminalStream := streamRequested || imageCompat || chatCompat
 	chatActive := chatCompat
@@ -573,6 +631,9 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool) (*http.Response, error) {
 	requestFailures := 0
 	credentialFailures := 0
+	// What the attempts before this one cost. A retried answer was still generated and
+	// still billed, so its tokens belong to the request even though nobody read it.
+	discarded := relayapp.TokenUsage{}
 	model := requestModel(body, incoming.Header.Get("Content-Type"))
 	for attempt := 0; ; attempt++ {
 		lease, credential, waited, err := server.acquireCredential(ctx, route, model, func() { server.activity.Waiting(activityID) })
@@ -641,9 +702,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 							response.Header.Del("Content-Length")
 							response.Header.Del("Content-Encoding")
 							response.Header.Set("X-Switchboard-Terminal", terminal)
-							setUsageHeaders(response.Header, streamUsage, time.Since(attemptStarted))
+							addDiscardedUsage(&discarded, streamUsage)
+							setUsageHeaders(response.Header, discarded, time.Since(attemptStarted))
 							return response, nil
 						}
+						// The half-stream is thrown away, but the provider generated it.
+						addDiscardedUsage(&discarded, streamUsage)
 						delay := retryDelay(attempt, nil, server.config)
 						server.observeRetry(activityID, attempt, http.StatusOK, delay)
 						if err := waitRetry(ctx, delay); err != nil {
@@ -675,7 +739,8 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.Header.Del("Content-Length")
 				response.Header.Del("Content-Encoding")
 				response.Header.Set("X-Switchboard-Terminal", terminal)
-				setUsageHeaders(response.Header, streamUsage, time.Since(attemptStarted))
+				addDiscardedUsage(&discarded, streamUsage)
+				setUsageHeaders(response.Header, discarded, time.Since(attemptStarted))
 				return response, nil
 			}
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") || expectsJSONResponse(incoming.URL.Path) {
@@ -696,10 +761,17 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					continue
 				}
 				terminal := jsonTerminal(buffered)
-				if terminal == "response.failed" {
+				// A 200 with no body is not an answer. The client reports it as an
+				// empty or malformed response and the run ends there, so it is retried
+				// on the same budget as a provider that failed out loud. Malformed
+				// JSON already retries through the buffering error above.
+				empty := terminal == "" && emptyUpstreamAnswer(buffered, incoming.URL.Path, response.StatusCode)
+				if terminal == "response.failed" || empty {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 					requestFailures++
 					if requestFailures < server.config.PermanentAttempts && canRetry(attempt, attemptLimit) {
+						// The answer is discarded, but the provider generated and billed it.
+						addDiscardedUsage(&discarded, usageFromJSON(buffered))
 						delay := retryDelay(attempt, nil, server.config)
 						server.observeRetry(activityID, attempt, http.StatusOK, delay)
 						if err := waitRetry(ctx, delay); err != nil {
@@ -707,7 +779,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 						}
 						continue
 					}
-					response.Header.Set("X-Switchboard-Terminal", terminal)
+					// Out of budget the provider's own answer travels, empty as it is:
+					// replacing it with an error of ours would hide which side is
+					// broken, and a client that dislikes it says so already.
+					if !empty {
+						response.Header.Set("X-Switchboard-Terminal", terminal)
+					}
 				} else if terminal != "" {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 					response.Header.Set("X-Switchboard-Terminal", terminal)
@@ -718,7 +795,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.ContentLength = int64(len(buffered))
 				response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
 				response.Header.Del("Content-Encoding")
-				setUsageHeaders(response.Header, usageFromJSON(buffered), time.Since(attemptStarted))
+				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), time.Since(attemptStarted))
 				return response, nil
 			}
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
@@ -822,6 +899,15 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// aieva-style gateways (aieva.io, nele.ai) serve chat at a custom
 			// /chat-completion path, so give that one attempt before giving up
 			// and forgetting the probe.
+			//
+			// The lease is finished on BOTH exits. It used to be finished on neither,
+			// and a lease left open is a credential the pool still believes is in
+			// flight: a provider whose endpoint 404s would leak one key per attempt
+			// until every key it owns was marked busy and the next request had none to
+			// take. The wrong endpoint is a configuration mistake, so it happens on
+			// every request until someone notices — which is exactly how long the pool
+			// had to survive it.
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			if chatPathFallback(incoming.URL.Path, route.ChatPath) {
 				incoming.URL.Path = chatCompletionFallbackPath
 				incoming.URL.RawPath = ""
@@ -830,6 +916,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			server.chatOnly.Delete(route.ProviderID)
 			return genericErrorResponse(status), nil
 		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model) && endpointMissing404(status, errorBody) && strings.TrimRight(incoming.URL.Path, "/") == responsesPath:
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			server.chatOnly.Store(route.ProviderID, struct{}{})
 			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)
 			if chatErr != nil || !ok {
@@ -863,8 +950,23 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	}
 }
 
+// canonicalPath is the spelling every endpoint decision in this package is made
+// against. The relay answers on its own ServeHTTP rather than through a ServeMux, so
+// nothing has cleaned the caller's path by the time it arrives: `/v1//responses`,
+// `/v1/./responses` and `/V1/Responses` all reach the handler verbatim. Compared raw,
+// each of them silently turned the relay into a plain forwarder for that request —
+// no tool folding for a Codex-style declaration, no image or chat compatibility, no
+// stream dialect, and no inspection of an answer whose label contradicts its path.
+// Measured: `/V1/Responses` served a refusable payload with a 200 and zero findings.
+//
+// Only decisions use this. The upstream request keeps its own copy of the caller's
+// URL, so what the provider receives is still exactly what the client sent.
+func canonicalPath(path string) string {
+	return strings.ToLower(pathpkg.Clean("/" + path))
+}
+
 func expectsJSONResponse(path string) bool {
-	switch strings.TrimRight(path, "/") {
+	switch canonicalPath(path) {
 	case "/v1/responses", "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/images/generations", "/v1/images/edits":
 		return true
 	default:
@@ -872,6 +974,40 @@ func expectsJSONResponse(path string) bool {
 	}
 }
 
+// emptyUpstreamAnswer reports whether an inference endpoint answered 200 with no
+// body. Only the inference paths count: an empty list is a legitimate answer from
+// a catalog or an image endpoint, while a chat turn with nothing in it is a
+// generation that never happened.
+//
+// Only a plain 200 counts. A 201 or 202 with no body is how an API says it accepted
+// the work, and that is an answer, not a lost one.
+//
+// A well-formed envelope with no items is deliberately not counted. It carries
+// the provider's own account of the turn - finish reason, filtered content,
+// usage - and retrying it would spend the budget on a decision the provider
+// already made.
+func emptyUpstreamAnswer(body []byte, path string, status int) bool {
+	if status != http.StatusOK {
+		return false
+	}
+	switch canonicalPath(path) {
+	case "/v1/responses", "/v1/chat/completions", "/v1/completions", "/v1/messages":
+		return len(bytes.TrimSpace(body)) == 0
+	default:
+		return false
+	}
+}
+
+// sensitiveCredentialMarkers lists what must never reach a public reader. All of it
+// is secret except one value: the proxy hostname identifies infrastructure the way a
+// provider hostname does, and the public sanitizer refuses any answer a marker
+// survives in, so a short one would refuse every answer instead of being removed from
+// one. Measured — `socks5://tor:9050`, an ordinary container name, produced the marker
+// "tor", which is a substring of constructor, monitor, iterator, vector and editor.
+// The full proxy URL still carries the identity and is always long enough to redact.
+//
+// The secrets stay unfiltered on purpose. A two-character key is unlikely and a
+// leaked one is unrecoverable, so those refuse at any width.
 func sensitiveCredentialMarkers(credential relayapp.Credential) []string {
 	markers := make([]string, 0, 5)
 	if credential.Value != "" {
@@ -885,7 +1021,9 @@ func sensitiveCredentialMarkers(credential relayapp.Credential) []string {
 	if err != nil {
 		return markers
 	}
-	markers = append(markers, proxy.Hostname())
+	if host := proxy.Hostname(); len(host) >= relayapp.MinRedactableMarkerBytes {
+		markers = append(markers, host)
+	}
 	if proxy.User != nil {
 		markers = append(markers, proxy.User.Username())
 		if password, configured := proxy.User.Password(); configured {
@@ -933,6 +1071,14 @@ func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error,
 		return nil, heartbeatErr
 	}
 	return response, err
+}
+
+// guardrailAttempts is how many times a request may be sent again after its answer
+// was refused. A refusal is a wasted attempt, so it spends the same budget as a
+// provider that failed out loud rather than a budget of its own — bounded, because
+// every extra attempt is another roll of the dice for a provider that is trying.
+func (server *Server) guardrailAttempts() int {
+	return max(server.config.PermanentAttempts, 1)
 }
 
 // canRetry reports whether another attempt is allowed.
@@ -1053,7 +1199,7 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 	case "auto":
 		request.Header.Del("Authorization")
 		request.Header.Del("x-api-key")
-		path := strings.TrimRight(request.URL.Path, "/")
+		path := canonicalPath(request.URL.Path)
 		anthropic := route.Dialect == "anthropic" || (route.Dialect != "openai" && (path == "/v1/messages" || strings.HasSuffix(path, "/v1/messages") || strings.Contains(path, "/v1/messages/") || request.Header.Get("Anthropic-Version") != ""))
 		if credential != "" && anthropic {
 			request.Header.Set("x-api-key", credential)
@@ -1101,7 +1247,7 @@ func requiresStreamTerminal(request *http.Request, body []byte) bool {
 	if request.Method != http.MethodPost {
 		return false
 	}
-	path := strings.TrimRight(request.URL.Path, "/")
+	path := canonicalPath(request.URL.Path)
 	if path != "/v1/responses" && path != "/v1/chat/completions" && path != "/v1/completions" && path != "/v1/messages" {
 		return false
 	}
@@ -1143,7 +1289,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	defer idle.Stop()
 	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
-	inspector := &sseInspector{path: strings.TrimRight(path, "/")}
+	inspector := &sseInspector{path: canonicalPath(path)}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1461,7 +1607,7 @@ func positiveInt(value any) int64 {
 }
 
 func writeStreamFailure(writer http.ResponseWriter, path, model string) {
-	path = strings.TrimRight(path, "/")
+	path = canonicalPath(path)
 	if path == "/v1/messages" {
 		body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": "The request could not be completed"}})
 		_, _ = writer.Write(append(append([]byte("event: error\ndata: "), body...), []byte("\n\n")...))
@@ -1499,15 +1645,50 @@ func copyRequestHeaders(target, source http.Header) {
 	}
 }
 
-func copyResponseHeaders(target, source http.Header) {
+// copyResponseHeaders forwards the provider's headers to the client, minus the ones
+// that are ours to decide and the ones that carry the provider's secrets rather than
+// its answer.
+//
+// The whole point of the relay is that the client never learns a provider key: it
+// authenticates to Switchboard and Switchboard authenticates upstream. A provider that
+// echoes the request's `Authorization` back in a response header — carelessly, or on
+// purpose — handed that key straight to the client, because every header that was not a
+// hop header was copied verbatim. Anything whose value contains a credential is dropped
+// rather than masked: a masked header still tells the client a key was there, and the
+// header was never part of the answer to begin with.
+//
+// `Set-Cookie` goes too. It is the provider's session with US, the client has no use
+// for it, and forwarding it lets a provider set state in whatever the client happens to
+// be — a browser-based one included.
+func copyResponseHeaders(target, source http.Header, secrets []string) {
 	for name, values := range source {
-		if _, blocked := hopHeaders[strings.ToLower(name)]; blocked {
+		lower := strings.ToLower(name)
+		if _, blocked := hopHeaders[lower]; blocked {
+			continue
+		}
+		if lower == "set-cookie" || lower == "set-cookie2" {
 			continue
 		}
 		for _, value := range values {
+			if containsSecret(value, secrets) {
+				continue
+			}
 			target.Add(name, value)
 		}
 	}
+}
+
+// containsSecret reports whether a header value quotes something the client must not
+// learn. Comparison is on the raw value: a credential travels verbatim in the header
+// that leaked it, and a marker short enough to appear in ordinary text is not a
+// credential worth protecting.
+func containsSecret(value string, secrets []string) bool {
+	for _, secret := range secrets {
+		if len(secret) >= 8 && strings.Contains(value, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 func joinPath(base, request string) string {
@@ -1719,6 +1900,35 @@ var usageHeaderNames = []string{
 	"X-Switchboard-Generation-Nanoseconds",
 }
 
+// addDiscardedUsage folds the cost of an attempt that was thrown away into the cost
+// of the request as a whole.
+//
+// A provider bills for every answer it generates, including the ones nobody reads: an
+// answer it called `failed`, an empty 200, a stream that died mid-flight, an answer the
+// guardrails refused. All of those are retried, and usage used to be read off the
+// surviving attempt alone — so a request that cost two generations was recorded as one,
+// and the history the owner checks their spend against was quietly short by however many
+// attempts it took.
+//
+// Billing totals add. ContextTokens does not: it is the size of the window the request
+// occupied, the same window each time it was sent, so it takes the largest attempt
+// rather than their sum.
+func addDiscardedUsage(total *relayapp.TokenUsage, attempt relayapp.TokenUsage) {
+	total.InputTokens += attempt.InputTokens
+	total.OutputTokens += attempt.OutputTokens
+	total.CachedTokens += attempt.CachedTokens
+	total.ReasoningTokens += attempt.ReasoningTokens
+	total.TotalTokens += attempt.TotalTokens
+	total.ContextTokens = max(total.ContextTokens, attempt.ContextTokens)
+}
+
+// usageWith is addDiscardedUsage as a value, for the call sites that report a total
+// without keeping one.
+func usageWith(discarded, attempt relayapp.TokenUsage) relayapp.TokenUsage {
+	addDiscardedUsage(&discarded, attempt)
+	return discarded
+}
+
 func setUsageHeaders(header http.Header, usage relayapp.TokenUsage, generation time.Duration) {
 	values := []int64{
 		usage.InputTokens, usage.OutputTokens, usage.CachedTokens,
@@ -1880,55 +2090,105 @@ func rewriteRequestModel(body []byte, contentType, model string) []byte {
 	return body
 }
 
-func extendCacheTTL(body []byte, contentType string) []byte {
+// extendCacheTTL raises every ephemeral cache breakpoint in the body to the hour
+// the provider profile asked for, and reports whether the body it returns carries
+// an hour-long breakpoint at all.
+//
+// The caller needs that second answer because the hour is not only a body field:
+// a client asking for it sends `anthropic-beta: extended-cache-ttl-2025-04-11`
+// alongside, and an upstream that gates the feature reads the header, not the
+// body. What matters is therefore the body being sent, not who wrote it - the
+// relay raising a five-minute breakpoint on the client's behalf has to declare
+// the hour, and so does forwarding an hour the client asked for and forgot to
+// declare. Either way the alternative is a request no client produces.
+//
+// The nesting limit is the one case that reports nothing: there the body is
+// returned exactly as it arrived, so the relay has made no claim about it and the
+// caller's own declaration is left to stand.
+func extendCacheTTL(body []byte, contentType string) ([]byte, bool) {
 	if !strings.Contains(strings.ToLower(contentType), "json") || len(body) == 0 {
-		return body
+		return body, false
 	}
 	var payload any
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if decoder.Decode(&payload) != nil {
-		return body
+		return body, false
 	}
-	changed, withinLimit := extendCacheValue(payload, 0)
-	if !withinLimit || !changed {
-		return body
+	changed, carriesHour, withinLimit := extendCacheValue(payload, 0)
+	if !withinLimit {
+		return body, false
+	}
+	if !changed {
+		return body, carriesHour
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return body
+		return body, false
 	}
-	return encoded
+	return encoded, carriesHour
 }
 
-func extendCacheValue(value any, depth int) (bool, bool) {
+// extendedCacheTTLBeta is the capability token that carries the hour. `cache_control`
+// is an Anthropic construct, so the body shape is the whole gate: a Chat Completions
+// or Responses request has no breakpoint to carry an hour and is never given an
+// Anthropic capability it did not ask for.
+const extendedCacheTTLBeta = "extended-cache-ttl-2025-04-11"
+
+// declareBetaFeature appends a capability to the header the client sent instead of
+// replacing it. The client picks its own beta features - Claude Code sends several
+// - and overwriting the list to add one would switch the others off.
+func declareBetaFeature(header http.Header, feature string) {
+	existing := header.Get("Anthropic-Beta")
+	if existing == "" {
+		header.Set("Anthropic-Beta", feature)
+		return
+	}
+	for _, declared := range strings.Split(existing, ",") {
+		if strings.TrimSpace(declared) == feature {
+			return
+		}
+	}
+	header.Set("Anthropic-Beta", existing+","+feature)
+}
+
+// extendCacheValue reports, in order: whether it raised a breakpoint, whether the
+// value now carries an hour-long one, and whether it stayed inside the nesting
+// limit.
+func extendCacheValue(value any, depth int) (bool, bool, bool) {
 	if depth > maxCacheTraversalDepth {
-		return false, false
+		return false, false, false
 	}
 	changed := false
+	carriesHour := false
 	switch value := value.(type) {
 	case map[string]any:
-		if control, ok := value["cache_control"].(map[string]any); ok && control["type"] == "ephemeral" && control["ttl"] != "1h" {
-			control["ttl"] = "1h"
-			changed = true
+		if control, ok := value["cache_control"].(map[string]any); ok && control["type"] == "ephemeral" {
+			if control["ttl"] != "1h" {
+				control["ttl"] = "1h"
+				changed = true
+			}
+			carriesHour = true
 		}
 		for _, child := range value {
-			childChanged, withinLimit := extendCacheValue(child, depth+1)
+			childChanged, childCarries, withinLimit := extendCacheValue(child, depth+1)
 			if !withinLimit {
-				return false, false
+				return false, false, false
 			}
 			changed = childChanged || changed
+			carriesHour = childCarries || carriesHour
 		}
 	case []any:
 		for _, child := range value {
-			childChanged, withinLimit := extendCacheValue(child, depth+1)
+			childChanged, childCarries, withinLimit := extendCacheValue(child, depth+1)
 			if !withinLimit {
-				return false, false
+				return false, false, false
 			}
 			changed = childChanged || changed
+			carriesHour = childCarries || carriesHour
 		}
 	}
-	return changed, true
+	return changed, carriesHour, true
 }
 
 func snapshot(address net.Addr) domain.Snapshot {

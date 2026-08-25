@@ -1311,10 +1311,103 @@ func TestBuildUpstreamRequestSupportsExactCustomAuthorizationScheme(t *testing.T
 	}
 }
 
+// The one-hour cache policy rewrites the client's request, so it also has to
+// declare the capability that rewrite depends on. A client asking for the hour
+// itself sends `anthropic-beta: extended-cache-ttl-2025-04-11` with it; the relay
+// raising a five-minute breakpoint on the client's behalf used to send the body
+// without the header, which is a request no client produces.
+//
+// What decides it is the body being sent, not who wrote the hour into it: an
+// upstream that gates the feature reads the header, so an hour the client asked
+// for and forgot to declare has to be declared too.
+//
+// The body shape is the whole gate: `cache_control` is Anthropic's, so a Responses
+// or Chat Completions request has no breakpoint to carry an hour and must not be
+// given an Anthropic capability it never asked for.
+func TestTheHourIsDeclaredWheneverTheBodyCarriesIt(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		sent     string
+		expected string
+	}{
+		{
+			name:     "an ephemeral breakpoint declares the hour",
+			body:     `{"model":"m","system":[{"type":"text","text":"t","cache_control":{"type":"ephemeral"}}]}`,
+			expected: extendedCacheTTLBeta,
+		},
+		{
+			name:     "the client's own features survive the addition",
+			body:     `{"model":"m","system":[{"type":"text","text":"t","cache_control":{"type":"ephemeral"}}]}`,
+			sent:     "context-1m-2025-08-07,files-api-2025-04-14",
+			expected: "context-1m-2025-08-07,files-api-2025-04-14," + extendedCacheTTLBeta,
+		},
+		{
+			name:     "a client that already declared it is left alone",
+			body:     `{"model":"m","system":[{"type":"text","text":"t","cache_control":{"type":"ephemeral"}}]}`,
+			sent:     extendedCacheTTLBeta,
+			expected: extendedCacheTTLBeta,
+		},
+		{
+			name:     "a body with nothing to raise declares nothing",
+			body:     `{"model":"m","input":"hello"}`,
+			expected: "",
+		},
+		{
+			name:     "an hour the client asked for and forgot to declare",
+			body:     `{"model":"m","system":[{"type":"text","text":"t","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`,
+			expected: extendedCacheTTLBeta,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var declared, forwarded string
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				declared = request.Header.Get("Anthropic-Beta")
+				raw, _ := io.ReadAll(request.Body)
+				forwarded = string(raw)
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"ok":true}`))
+			}))
+			defer upstream.Close()
+			base, _ := url.Parse(upstream.URL)
+			server := NewServer("127.0.0.1:0", Dependencies{
+				Routes: fixedRoute{route: relayapp.Route{
+					ProviderID: "anthropic", Dialect: "anthropic", AuthMode: "auto",
+					BaseURL: base, CacheTTL: time.Hour,
+				}},
+				Credentials: &credentialSource{values: []string{"sk-upstream"}},
+			})
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(testCase.body))
+			request.Header.Set("Content-Type", "application/json")
+			if testCase.sent != "" {
+				request.Header.Set("Anthropic-Beta", testCase.sent)
+			}
+			server.ServeHTTP(httptest.NewRecorder(), request)
+			if declared != testCase.expected {
+				t.Fatalf("declared %q, expected %q", declared, testCase.expected)
+			}
+			// A body carrying the hour must be declared, and one that declares nothing
+			// must not be carrying it.
+			if strings.Contains(forwarded, `"ttl":"1h"`) != strings.Contains(declared, extendedCacheTTLBeta) {
+				t.Fatalf("body and header disagree about the hour: body=%s header=%q", forwarded, declared)
+			}
+			// The caller's own header must never be edited: the relay answers from it
+			// after the upstream call.
+			if request.Header.Get("Anthropic-Beta") != testCase.sent {
+				t.Fatalf("the caller's header was mutated: %q", request.Header.Get("Anthropic-Beta"))
+			}
+		})
+	}
+}
+
 func TestJSONRewritesPreserveLargeProviderNumbers(t *testing.T) {
 	body := []byte(`{"model":"public","seed":9007199254740993,"input":[{"cache_control":{"type":"ephemeral"}}]}`)
 	rewritten := rewriteRequestModel(body, "application/json", "private")
-	extended := extendCacheTTL(rewritten, "application/json")
+	extended, carriesHour := extendCacheTTL(rewritten, "application/json")
+	if !carriesHour {
+		t.Fatal("the extended body does not carry an hour-long breakpoint")
+	}
 	if !bytes.Contains(extended, []byte(`"seed":9007199254740993`)) || !bytes.Contains(extended, []byte(`"ttl":"1h"`)) {
 		t.Fatalf("JSON mutation changed provider values: %s", extended)
 	}
@@ -1330,7 +1423,112 @@ func TestCacheExtensionStopsAtTheNestingLimit(t *testing.T) {
 		"nested":        nested,
 	}
 	body, _ := json.Marshal(payload)
-	if extended := extendCacheTTL(body, "application/json"); !bytes.Equal(extended, body) {
+	extended, carriesHour := extendCacheTTL(body, "application/json")
+	// Nothing is claimed about a body that was handed back untouched.
+	if carriesHour || !bytes.Equal(extended, body) {
 		t.Fatal("cache traversal crossed its nesting limit")
+	}
+}
+
+// A gateway that answers 200 with nothing is the failure a client reports as an
+// empty or malformed response, and it ends the run. The relay retries it instead
+// of forwarding the silence.
+func TestAnEmptyTwoHundredIsRetriedAndTheRealAnswerWins(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+		if attempts == 1 {
+			return
+		}
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, StreamIdleTimeout: time.Second, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("an empty answer was not retried: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected one retry after the empty answer, got %d attempts", attempts)
+	}
+	if !strings.Contains(string(response.Body), `"done"`) {
+		t.Fatalf("the retried answer never reached the client: %s", response.Body)
+	}
+}
+
+// The retry is bounded like every other provider failure, and what travels at the
+// end is the provider's own answer: an error of ours would hide whose fault it is.
+func TestAProviderThatOnlyAnswersEmptyIsBoundedAndStillForwarded(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, StreamIdleTimeout: time.Second, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/chat/completions", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test","messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("the bounded retry turned into an error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("the empty answer was retried %d times, not the permanent-attempt budget", attempts)
+	}
+	if response.Status != http.StatusOK || len(response.Body) != 0 {
+		t.Fatalf("the provider's own answer was replaced: status=%d body=%q", response.Status, response.Body)
+	}
+	// The relay strips X-Switchboard-Terminal from the headers before they leave, so
+	// asserting on the header would pass whatever the retry ladder decided. The field is
+	// where that decision survives, and it has to stay empty: an empty answer is the
+	// provider's own, not a terminal failure the relay is claiming happened.
+	if response.Terminal != "" {
+		t.Fatalf("an empty answer was reported as a terminal failure: %q", response.Terminal)
+	}
+	if response.Headers.Get("X-Switchboard-Terminal") != "" {
+		t.Fatalf("an internal header reached the client: %q", response.Headers.Get("X-Switchboard-Terminal"))
+	}
+}
+
+// An empty body means nothing on the endpoints that legitimately return an empty
+// collection, and a well-formed envelope with no items is the provider's own
+// account of the turn rather than a lost answer.
+func TestOnlyInferencePathsCountAnEmptyBodyAsALostAnswer(t *testing.T) {
+	for _, testCase := range []struct {
+		path   string
+		body   string
+		status int
+		want   bool
+	}{
+		{"/v1/responses", "", http.StatusOK, true},
+		{"/v1/chat/completions", "   \n\t", http.StatusOK, true},
+		{"/v1/messages", "", http.StatusOK, true},
+		{"/v1/completions/", "", http.StatusOK, true},
+		{"/v1/images/generations", "", http.StatusOK, false},
+		{"/v1/models", "", http.StatusOK, false},
+		{"/v1/responses", `{"status":"completed","output":[]}`, http.StatusOK, false},
+		{"/v1/chat/completions", `{"choices":[]}`, http.StatusOK, false},
+		// An empty 201/202 is an API saying it accepted the work, not one losing it.
+		{"/v1/responses", "", http.StatusAccepted, false},
+		{"/v1/responses", "", http.StatusCreated, false},
+	} {
+		if got := emptyUpstreamAnswer([]byte(testCase.body), testCase.path, testCase.status); got != testCase.want {
+			t.Fatalf("%s %d with body %q read as lost=%v", testCase.path, testCase.status, testCase.body, got)
+		}
 	}
 }

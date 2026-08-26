@@ -3,6 +3,7 @@ package stdio_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -32,7 +33,13 @@ func (fixedCatalog) Test(_ context.Context, provider domain.Provider, model stri
 // measured is the bytes the desktop shell would read rather than an estimate.
 func discover(t *testing.T, models []string) (frame string, code string) {
 	t.Helper()
-	service, err := application.NewService(oneProvider{}, fixedCatalog{models: models})
+	frame, code, _ = answerFor(t, fixedCatalog{models: models})
+	return frame, code
+}
+
+func answerFor(t *testing.T, gateway application.Gateway) (frame string, code string, message string) {
+	t.Helper()
+	service, err := application.NewService(oneProvider{}, gateway)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,16 +56,44 @@ func discover(t *testing.T, models []string) (frame string, code string) {
 	answer := struct {
 		OK    bool `json:"ok"`
 		Error struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}{}
 	if json.Unmarshal([]byte(frame), &answer) != nil {
 		t.Fatalf("unreadable frame: %s", frame)
 	}
 	if answer.OK {
-		return frame, ""
+		return frame, "", ""
 	}
-	return frame, answer.Error.Code
+	return frame, answer.Error.Code, answer.Error.Message
+}
+
+type refusingCatalog struct{ err error }
+
+func (catalog refusingCatalog) Discover(context.Context, domain.Provider) ([]string, error) {
+	return nil, catalog.err
+}
+
+func (refusingCatalog) Test(context.Context, domain.Provider, string) domain.TestResult {
+	return domain.TestResult{}
+}
+
+// A refused key is fixed in API Keys and a wrong discovery path in Providers, so
+// discovery must not answer both with the same sentence: the interface can only
+// repeat what it is told, and it used to send everyone to API Keys.
+func TestDiscoveryTellsARefusedKeyFromAnUnreachableCatalog(t *testing.T) {
+	_, code, refused := answerFor(t, refusingCatalog{err: application.ErrDiscoveryUnauthorized})
+	if code != "model_discovery_unauthorized" {
+		t.Fatalf("a refused credential answered %q", code)
+	}
+	_, code, unreachable := answerFor(t, refusingCatalog{err: errors.New("model catalog is unavailable")})
+	if code != "model_discovery_failed" {
+		t.Fatalf("an unreachable catalog answered %q", code)
+	}
+	if refused == unreachable || !strings.Contains(refused, "API Keys") || !strings.Contains(unreachable, "Providers") {
+		t.Fatalf("both failures read the same: %q and %q", refused, unreachable)
+	}
 }
 
 func namesOf(count, width int) []string {

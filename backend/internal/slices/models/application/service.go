@@ -14,6 +14,10 @@ import (
 var (
 	ErrProviderUnavailable = errors.New("model provider is unavailable")
 	ErrTestsRunning        = errors.New("model tests are already running")
+	// ErrDiscoveryUnauthorized separates the one discovery failure an operator fixes
+	// in API Keys from every other one, which is fixed in Providers. Collapsing them
+	// left the interface guessing out loud at a key that was already configured.
+	ErrDiscoveryUnauthorized = errors.New("model catalog refused the stored credential")
 )
 
 const maxTestModels = 500

@@ -2,12 +2,14 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
@@ -119,5 +121,23 @@ func TestModelTestDoesNotRetryAnotherEndpointAfterAuthenticationFailure(t *testi
 	result := gateway.Test(context.Background(), domain.Provider{ID: "provider", Dialect: "openai"}, "gpt-test")
 	if result.ErrorCode != "authentication" || calls != 1 {
 		t.Fatalf("authentication failure was retried on another endpoint: result=%+v calls=%d", result, calls)
+	}
+}
+
+func TestDiscoveryReportsARefusedCredentialAsItsOwnFailure(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		gateway := NewGateway(dispatcherFunc(func(context.Context, relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
+			return relayapp.DispatchResponse{Status: status}, nil
+		}), time.Second)
+		_, err := gateway.Discover(context.Background(), domain.Provider{ID: "provider", ModelsPath: "/v1/models"})
+		if !errors.Is(err, application.ErrDiscoveryUnauthorized) {
+			t.Fatalf("status %d discovery answered %v", status, err)
+		}
+	}
+	gateway := NewGateway(dispatcherFunc(func(context.Context, relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
+		return relayapp.DispatchResponse{Status: http.StatusNotFound}, nil
+	}), time.Second)
+	if _, err := gateway.Discover(context.Background(), domain.Provider{ID: "provider", ModelsPath: "/v1/models"}); err == nil || errors.Is(err, application.ErrDiscoveryUnauthorized) {
+		t.Fatalf("a wrong discovery path was reported as a refused credential: %v", err)
 	}
 }

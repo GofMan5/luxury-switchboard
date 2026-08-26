@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
@@ -44,7 +45,15 @@ func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) 
 		UseStoredCredential: true,
 		Headers:             http.Header{"Accept": []string{"application/json"}},
 	})
-	if err != nil || response.Status < 200 || response.Status >= 300 {
+	if err != nil {
+		return nil, errors.New("model catalog is unavailable")
+	}
+	// A refused credential is the one cause fixed in API Keys, so it keeps its own
+	// error instead of arriving as the same sentence as a wrong discovery path.
+	if response.Status == http.StatusUnauthorized || response.Status == http.StatusForbidden {
+		return nil, application.ErrDiscoveryUnauthorized
+	}
+	if response.Status < 200 || response.Status >= 300 {
 		return nil, errors.New("model catalog is unavailable")
 	}
 	return extractModelIDs(response.Body)

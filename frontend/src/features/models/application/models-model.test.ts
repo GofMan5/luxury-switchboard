@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ModelTestResult } from '../domain/model'
 import type { ModelsPort } from './models-port'
 import { ModelsModel } from './models-model'
+import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
 class FakeModelsPort implements ModelsPort {
   testBatches: number[] = []
@@ -134,6 +135,19 @@ describe('ModelsModel', () => {
     const results = model.snapshot().results
     expect(Object.getPrototypeOf(results)).toBeNull()
     expect(results.__proto__).toMatchObject({ model: '__proto__', state: 'available' })
+    model.dispose()
+  })
+
+  it('shows why discovery failed instead of one standing guess about the key', async () => {
+    const port = new FakeModelsPort()
+    port.discover = async () => { throw new ControlPlaneError('model_discovery_unauthorized', 'Provider refused the stored key. Replace it in API Keys.') }
+    const model = new ModelsModel(port)
+    await model.discover('echo')
+    expect(model.snapshot().error).toBe('Provider refused the stored key. Replace it in API Keys.')
+
+    port.discover = async () => { throw new Error('socket closed') }
+    await model.discover('echo')
+    expect(model.snapshot().error).toContain('Check the provider address')
     model.dispose()
   })
 })

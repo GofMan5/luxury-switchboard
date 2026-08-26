@@ -3,6 +3,7 @@ package stdio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/application"
@@ -19,7 +20,7 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		models, err := service.Discover(ctx, query.ProviderID)
 		if err != nil {
-			return nil, platform.MethodError{Code: "model_discovery_failed", Message: "Provider models are unavailable"}
+			return nil, discoveryError(err)
 		}
 		// The shell refuses a frame over MaxFrameBytes by killing the sidecar, so the
 		// protocol answers `response_too_large` instead - a code written for a bug,
@@ -54,6 +55,20 @@ func Register(server *platform.Server, service *application.Service) {
 
 func invalid() platform.MethodError {
 	return platform.MethodError{Code: "invalid_payload", Message: "Invalid model request"}
+}
+
+// discoveryError says which of the two places the operator has to go. One sentence
+// for every failure used to send them to API Keys over a key that was already
+// there, while the address or the discovery path was what the provider rejected.
+func discoveryError(err error) platform.MethodError {
+	switch {
+	case errors.Is(err, application.ErrDiscoveryUnauthorized):
+		return platform.MethodError{Code: "model_discovery_unauthorized", Message: "Provider refused the stored key. Replace it in API Keys."}
+	case errors.Is(err, application.ErrProviderUnavailable):
+		return platform.MethodError{Code: "provider_not_found", Message: "Provider was not found"}
+	default:
+		return platform.MethodError{Code: "model_discovery_failed", Message: "Provider models are unavailable. Check its address and model discovery path in Providers."}
+	}
 }
 
 // oversizedCatalog measures against the platform payload budget rather than the frame

@@ -1,5 +1,6 @@
 import type { ModelTestResult } from '../domain/model'
 import type { ModelsPort } from './models-port'
+import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
 const MODEL_TEST_BATCH = 500
 const MODEL_TEST_RUN_TIMEOUT_MS = 2 * 60_000
@@ -52,8 +53,10 @@ export class ModelsModel {
     try {
       const models = await this.#port.discover(providerId, controller.signal)
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', providerId, models, selected: [], results: resultMap(), error: '' })
-    } catch {
-      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', models: [], selected: [], error: 'Provider model catalog is unavailable. Add its key in API Keys if authorization is required.' })
+    } catch (error) {
+      // The control plane already knows whether the key was refused, the catalog was
+      // too large or the path was wrong; repeating one guess here hid all three.
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', models: [], selected: [], error: error instanceof ControlPlaneError ? error.message : 'Provider model catalog is unavailable. Check the provider address and its key.' })
     } finally {
       if (this.#discoverController === controller) this.#discoverController = null
     }

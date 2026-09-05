@@ -55,7 +55,7 @@
 
 ## Backend reliability and privacy
 
-- Retry policy классифицирует transport, 429, 5xx, permanent request errors и terminal stream outcomes. Нельзя бесконечно повторять заведомо permanent ошибку или выдавать оборванный stream без terminal event.
+- Retry policy классифицирует transport, 429, 5xx, permanent request errors и terminal stream outcomes. Нельзя бесконечно повторять заведомо permanent ошибку или выдавать оборванный stream без terminal event. Отказ по content policy — отдельный класс, а не сбой: он завершает запрос на первой же попытке, не проходит через repair-ладдер и не ротирует ключи, потому что повтор не меняет вердикт, а лишь раздаёт один отклонённый payload всему пулу.
 - Очереди RPM справедливые, отменяемые и наблюдаемые; неограниченное ожидание не означает неограниченное потребление памяти.
 - При смене provider все старые запросы получают cancellation и освобождают sockets/leases/queue slots.
 - Трансляция в Chat Completions обязана конвертировать, а не выбрасывать: freeform `custom` tool и его replayed history (`custom_tool_call`, `custom_tool_call_output`) уходят документированной функцией, иначе модель на chat-only провайдере снова начнёт пересказывать вызовы вместо их выполнения. Переписывание пути запроса на лету (проба endpoint'а) меняет цель, но не диалект: клиенту отвечают в том, в котором он открыл соединение, поэтому upstream-запрос всегда получает собственный `*url.URL`.

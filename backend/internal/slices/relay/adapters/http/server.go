@@ -30,6 +30,10 @@ const (
 	maxRequestModelBytes     = 128
 	maxCacheTraversalDepth   = 64
 	maxRelayAttempts         = 64
+	// terminalRefused is the terminal reason for an answer the provider's content
+	// policy declined. It is deliberately not "response.failed": a failure is worth
+	// another attempt, a verdict is not.
+	terminalRefused = "response.refused"
 )
 
 var hopHeaders = map[string]struct{}{
@@ -353,21 +357,24 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		status = response.StatusCode
-		if status >= 400 {
-			errorCode = "request_rejected"
-			if committed {
-				response.Body.Close()
-				writeStreamFailure(writer, request.URL.Path, model)
-				return
-			}
-		}
+		// Read before the rejection exit below: a refusal arrives as a status too, and
+		// that exit used to return while its reason was still sitting in the header.
 		terminal := response.Header.Get("X-Switchboard-Terminal")
 		response.Header.Del("X-Switchboard-Terminal")
-		if terminal == "response.incomplete" {
+		switch {
+		case terminal == terminalRefused:
+			errorCode = "policy_refusal"
+		case terminal == "response.incomplete":
 			errorCode = "stream_incomplete"
-		}
-		if terminal == "response.failed" {
+		case terminal == "response.failed":
 			errorCode = "upstream_status"
+		case status >= 400:
+			errorCode = "request_rejected"
+		}
+		if status >= 400 && committed {
+			response.Body.Close()
+			writeStreamFailure(writer, request.URL.Path, model)
+			return
 		}
 		usage = usageWith(refusedUsage, usageFromHeaders(response.Header))
 		generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
@@ -725,12 +732,10 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					}
 					continue
 				}
-				failed := terminal == "response.failed"
-				if failed {
+				switch terminal {
+				case "response.failed", "response.incomplete", terminalRefused:
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
-				} else if terminal == "response.incomplete" {
-					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
-				} else {
+				default:
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
 				}
 				response.Body = io.NopCloser(bytes.NewReader(buffered))
@@ -832,7 +837,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 
 		errorBody := readErrorBody(response)
-		if status == http.StatusBadRequest && canRetry(attempt, attemptLimit) {
+		// A refusal is the provider's verdict on this exact payload, so none of the
+		// repairs below apply to it and neither does the next key: stripping reasoning
+		// or downgrading tools resends the same content, and the plain retry after
+		// them hands that content to another credential in the pool.
+		refused := policyRefused(string(errorBody))
+		if status == http.StatusBadRequest && !refused && canRetry(attempt, attemptLimit) {
 			if repaired, changed := repairRejectedParameters(body, errorBody); changed {
 				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 				body = repaired
@@ -938,6 +948,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 		if status == http.StatusRequestEntityTooLarge {
 			return genericErrorResponse(status), nil
+		}
+		if refused {
+			rejection := genericErrorResponse(status)
+			rejection.Header.Set("X-Switchboard-Terminal", terminalRefused)
+			return rejection, nil
 		}
 		if status == 400 || status == 404 || status == 409 || status == 422 {
 			requestFailures++
@@ -1313,7 +1328,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 					if inspector.retryableFailure() {
 						return terminal, buffered, inspector.usage, errRetryableSSEFailure
 					}
-					return terminal, buffered, inspector.usage, nil
+					return inspector.reason(), buffered, inspector.usage, nil
 				}
 				if !idle.Stop() {
 					select {
@@ -1332,7 +1347,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 					if inspector.retryableFailure() {
 						return terminal, buffered, inspector.usage, errRetryableSSEFailure
 					}
-					return terminal, buffered, inspector.usage, nil
+					return inspector.reason(), buffered, inspector.usage, nil
 				}
 				return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
 			}
@@ -1413,6 +1428,7 @@ type sseInspector struct {
 	terminal string
 	finished bool
 	output   bool
+	refused  bool
 	usage    relayapp.TokenUsage
 }
 
@@ -1494,6 +1510,9 @@ func (inspector *sseInspector) finishEvent() {
 			return
 		}
 	}
+	if eventType == "response.failed" || eventType == "response.incomplete" {
+		inspector.refused = policyRefused(refusalText(payload))
+	}
 	if eventType == "response.completed" || eventType == "response.failed" || eventType == "response.incomplete" {
 		inspector.terminal = eventType
 	}
@@ -1514,7 +1533,17 @@ func (inspector *sseInspector) finishEvent() {
 }
 
 func (inspector *sseInspector) retryableFailure() bool {
-	return inspector.path == "/v1/responses" && inspector.terminal == "response.failed" && !inspector.output
+	return inspector.path == "/v1/responses" && inspector.terminal == "response.failed" && !inspector.output && !inspector.refused
+}
+
+// reason is the terminal as the rest of the relay files it. A refusal keeps a
+// name of its own so the operator reads what happened instead of "the provider
+// failed", and so the retry ladder above never mistakes a verdict for a fault.
+func (inspector *sseInspector) reason() string {
+	if inspector.refused {
+		return terminalRefused
+	}
+	return inspector.terminal
 }
 
 func (inspector *sseInspector) mergeUsage(payload map[string]any) {
@@ -1594,6 +1623,9 @@ func jsonTerminal(body []byte) string {
 	}
 	if eventType == "response.incomplete" || status == "incomplete" || object["incomplete_details"] != nil || response["incomplete_details"] != nil {
 		return "response.incomplete"
+	}
+	if policyRefused(refusalText(object)) {
+		return terminalRefused
 	}
 	return "response.failed"
 }
@@ -1755,6 +1787,59 @@ func readErrorBody(response *http.Response) []byte {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
 	response.Body.Close()
 	return body
+}
+
+// policyRefusalMarkers name a provider's content policy answering, as opposed to
+// the provider failing to answer. Each is a phrase a moderation layer produces and
+// ordinary faults do not: bare "policy" or "safety" also appear in quota and
+// rate-limit prose, and matching those would end a request that another attempt
+// would have served.
+var policyRefusalMarkers = []string{
+	"content_policy", "content policy",
+	"content_filter", "content filter",
+	"invalid_prompt",
+	"moderation",
+	"usage polic",
+	"safety system",
+	"flagged for possible",
+	"trusted access for cyber",
+}
+
+// policyRefused reports whether text is a provider refusing the content rather
+// than failing to serve it. The difference decides whether the request is sent
+// again: a fault is worth another attempt, while a refusal is the provider's
+// decision about this exact payload. Repeating it cannot change the answer, and
+// repeating it is what walks one refused request through every key in the pool -
+// so a refusal ends the request on the attempt that earned it, with the
+// provider's own words left intact for the caller to read.
+func policyRefused(text string) bool {
+	text = strings.ToLower(text)
+	for _, marker := range policyRefusalMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// refusalText is the failure a terminal event reports, and nothing else. Reading
+// the whole payload would let an answer that merely discusses content policy be
+// filed as one refused by it.
+func refusalText(payload map[string]any) string {
+	candidates := []any{payload["error"], payload["incomplete_details"]}
+	if response, ok := payload["response"].(map[string]any); ok {
+		candidates = append(candidates, response["error"], response["incomplete_details"])
+	}
+	text := strings.Builder{}
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if encoded, err := json.Marshal(candidate); err == nil {
+			text.Write(encoded)
+		}
+	}
+	return text.String()
 }
 
 // freeformToolRejected reports a refusal aimed at the freeform ("custom") tool

@@ -892,6 +892,125 @@ func TestResponsesEmptyFailureRetriesAreBounded(t *testing.T) {
 	}
 }
 
+// A refusal is the provider answering, not the provider breaking. It used to be
+// filed as an empty failure, so the relay sent the same refused payload again
+// under the next key in the pool: three attempts, three keys, one verdict, and a
+// client held through two backoffs for the answer the first attempt already had.
+func TestResponsesPolicyRefusalIsAnsweredOnceWithoutRotatingKeys(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte(`data: {"type":"response.in_progress","response":{"status":"in_progress"}}` + "\n\n"))
+		_, _ = writer.Write([]byte(`data: {"type":"response.failed","response":{"status":"failed","output":[],"error":{"code":"invalid_prompt","message":"This content was flagged for possible cybersecurity risk."}}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"key-a", "key-b", "key-c"}}
+	activity := &recordingActivity{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: credentialsRoute(parsed), Credentials: credentials, Activity: activity,
+		Config: Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024, PermanentAttempts: 3},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if attempts != 1 || credentials.calls != 1 || len(activity.retries) != 0 {
+		t.Fatalf("refusal was sent again: attempts=%d credentials=%d retries=%d", attempts, credentials.calls, len(activity.retries))
+	}
+	if !strings.Contains(response.Body.String(), "flagged for possible cybersecurity risk") {
+		t.Fatalf("the provider's own refusal did not reach the client: %s", response.Body.String())
+	}
+	if activity.finish.ErrorCode != "policy_refusal" {
+		t.Fatalf("refusal was filed as %q, so the operator reads it as a broken provider", activity.finish.ErrorCode)
+	}
+	// The key did nothing wrong and the answer is not one either: reporting success
+	// would credit the pool for a turn that produced nothing.
+	if len(credentials.outcomes) != 1 || credentials.outcomes[0].Kind != relayapp.AttemptRequestError {
+		t.Fatalf("refused attempt was reported to the pool as %+v", credentials.outcomes)
+	}
+}
+
+// The same verdict arriving as a status must not walk the pool either. The 400
+// ladder repairs and resends, and stripping sealed reasoning is deliberately
+// ungated on what the provider said - so a refusal that reached it was resent
+// with a smaller body and then twice more under fresh keys.
+func TestBadRequestPolicyRefusalIsNotRepairedOrRotated(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":{"code":"invalid_prompt","message":"This content was flagged for possible cybersecurity risk."}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"key-a", "key-b", "key-c"}}
+	activity := &recordingActivity{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: credentialsRoute(parsed), Credentials: credentials, Activity: activity,
+		Config: Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024, PermanentAttempts: 3},
+	})
+	body := `{"model":"gpt-test","input":[{"type":"reasoning","encrypted_content":"sealed"},{"type":"message","role":"user","content":"audit this"}]}`
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if attempts != 1 || credentials.calls != 1 || len(activity.retries) != 0 {
+		t.Fatalf("refused request was repaired and resent: attempts=%d credentials=%d retries=%d", attempts, credentials.calls, len(activity.retries))
+	}
+	if activity.finish.ErrorCode != "policy_refusal" {
+		t.Fatalf("status refusal was filed as %q", activity.finish.ErrorCode)
+	}
+}
+
+// policyRefused decides whether a request is ever sent again, so it has to stay
+// blind to prose that only sounds like a verdict: quota and context-length bodies
+// are the ones another attempt can still serve.
+func TestOrdinaryFaultsAreNotReadAsRefusals(t *testing.T) {
+	// One phrasing per marker, so no marker sits in the list unguarded: a refusal
+	// the list stops recognising is a refusal that goes back to walking the pool.
+	for _, refusal := range []string{
+		`{"error":{"message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request."}}`,
+		`{"error":{"message":"To get authorized for security work, join the Trusted Access for Cyber program"}}`,
+		`{"error":{"code":"invalid_prompt","message":"Your request was rejected"}}`,
+		`{"error":{"code":"content_policy_violation"}}`,
+		`{"error":{"message":"this violates our content policy"}}`,
+		`{"error":{"code":"content_filter"}}`,
+		`{"error":{"message":"stopped by the content filter"}}`,
+		`{"error":{"message":"blocked by our moderation system"}}`,
+		`{"error":{"message":"not permitted under our usage policies"}}`,
+		`{"error":{"message":"rejected by the safety system"}}`,
+	} {
+		if !policyRefused(refusal) {
+			t.Fatalf("a refusal was missed and will be resent under every key: %s", refusal)
+		}
+	}
+	for _, fault := range []string{
+		`{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for your organization"}}`,
+		`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details"}}`,
+		`{"error":{"code":"server_error","message":"The server had an error while processing your request"}}`,
+		`{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 128000 tokens"}}`,
+	} {
+		if policyRefused(fault) {
+			t.Fatalf("an ordinary fault was read as a refusal and will not be retried: %s", fault)
+		}
+	}
+}
+
+// The refusal is read out of the failure the event reports, not out of the whole
+// event. An answer that discusses content policy is not an answer refused by it,
+// and reading the payload whole would strand exactly the turns this codebase
+// produces - the ones that talk about moderation and key pools for a living.
+func TestAnAnswerAboutPolicyIsNotAnAnswerRefusedByIt(t *testing.T) {
+	inspector := &sseInspector{path: "/v1/responses"}
+	terminal := inspector.Feed([]byte(`data: {"type":"response.failed","response":{"status":"failed","error":null,"output":[{"type":"message","content":[{"type":"output_text","text":"our content policy blocked the moderation test"}]}]}}` + "\n\n"))
+	if terminal != "response.failed" || inspector.refused || !inspector.retryableFailure() || inspector.reason() != "response.failed" {
+		t.Fatalf("an answer about policy was filed as one refused by it: refused=%v retryable=%v reason=%q", inspector.refused, inspector.retryableFailure(), inspector.reason())
+	}
+}
+
 func TestResponsesInspectorReadsPastInProgressChunk(t *testing.T) {
 	first := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
 	second := []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n")

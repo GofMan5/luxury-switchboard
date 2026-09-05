@@ -913,3 +913,50 @@ func TestAChatProviderThatDidNotFinishSaysSoAfterTranslation(t *testing.T) {
 		})
 	}
 }
+
+// A client that spells the endpoint differently still reaches the chat-only
+// fallback. The relay answers on its own ServeHTTP, so /V1/Responses arrives
+// verbatim; comparing it raw skips the endpoint probe and hands the provider
+// 404 page to the caller instead of translating.
+func TestAutoFormatProbeIgnoresPathSpelling(t *testing.T) {
+	counter := &pathCounter{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := readRequestBody(request, absoluteMaxRequestBytes)
+		if err != nil {
+			t.Errorf("upstream could not read the request: %v", err)
+			return
+		}
+		counter.hit(writer, request, body)
+		if canonicalPath(request.URL.Path) == responsesPath {
+			writer.WriteHeader(http.StatusNotFound)
+			_, _ = writer.Write([]byte("<html><head><title>404 Not Found</title></head><body>Not Found</body></html>"))
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte(chatStreamText))
+	}))
+	t.Cleanup(upstream.Close)
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{
+			ProviderID: "chat-only", BaseURL: parsed, AuthMode: "passthrough",
+			Format: "auto", ChatPath: "/v1/chat/completions",
+		}},
+		Credentials: &credentialSource{values: []string{""}},
+	})
+	for _, spelling := range []string{"/V1/Responses", "/v1//responses", "/v1/./responses"} {
+		request := httptest.NewRequest(http.MethodPost, "http://relay"+spelling, strings.NewReader(`{"model":"gpt-test","input":"hi","stream":true}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("spelling %q failed: status=%d body=%s", spelling, response.Code, response.Body.String())
+		}
+		if !strings.Contains(strings.Join(sseEventTypes(response.Body.Bytes()), " "), "response.completed") {
+			t.Fatalf("spelling %q never completed: %v", spelling, sseEventTypes(response.Body.Bytes()))
+		}
+	}
+	if counter.count("/v1/chat/completions") != 3 {
+		t.Fatalf("expected three chat requests, saw %d", counter.count("/v1/chat/completions"))
+	}
+}

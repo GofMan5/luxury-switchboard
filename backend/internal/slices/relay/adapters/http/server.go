@@ -925,7 +925,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			server.chatOnly.Delete(route.ProviderID)
 			return genericErrorResponse(status), nil
-		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model) && endpointMissing404(status, errorBody) && strings.TrimRight(incoming.URL.Path, "/") == responsesPath:
+		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model) && endpointMissing404(status, errorBody) && canonicalPath(incoming.URL.Path) == responsesPath:
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			server.chatOnly.Store(route.ProviderID, struct{}{})
 			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)

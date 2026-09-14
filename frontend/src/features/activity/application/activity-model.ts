@@ -59,8 +59,10 @@ export class ActivityModel {
 
   dispose(): void {
     this.#unsubscribe?.()
+    this.#unsubscribe = null
     window.clearTimeout(this.#summaryTimer)
     clearInterval(this.#pollTimer)
+    this.#pollTimer = undefined
     this.#listeners.clear()
   }
 

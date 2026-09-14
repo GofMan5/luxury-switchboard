@@ -30,4 +30,19 @@ describe('ActivityModel', () => {
     expect(model.snapshot().requests).toEqual([live, expect.objectContaining({ id: 'history' })])
     model.dispose()
   })
+
+  it('resubscribes and restarts polling when it connects again after dispose', async () => {
+    // dispose() must clear the saved unsubscribe and poll timer: both fields are
+    // ??=-guarded in connect(), so a stale value would silently skip the new
+    // subscription and leave the model deaf after a reconnect.
+    const port = new FakeActivityPort()
+    const model = new ActivityModel(port)
+    await model.connect()
+    expect(port.listener).not.toBeNull()
+    model.dispose()
+    expect(port.listener).toBeNull()
+    await model.connect()
+    expect(port.listener).not.toBeNull()
+    model.dispose()
+  })
 })

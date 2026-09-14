@@ -88,7 +88,7 @@ func normalizeResponsesTools(method, path, contentType string, body []byte) ([]b
 		group, _ := item["tools"].([]any)
 		declared = flattenToolNamespaces(group, nil, 0, declared)
 	}
-	tools, compat := providerToolDefinitions(existing, declared)
+	tools, compat, reserved := providerToolDefinitions(existing, declared, kept)
 	if len(tools) > maxToolDefinitions {
 		return body, toolCompat{}
 	}
@@ -96,7 +96,7 @@ func normalizeResponsesTools(method, path, contentType string, body []byte) ([]b
 	// Calls kept on the provider side cannot be matched locally, so their replayed
 	// outputs must never be treated as orphans.
 	_, serverHistory := payload["previous_response_id"].(string)
-	kept, itemsChanged := normalizeInputItems(kept, compat, serverHistory)
+	kept, itemsChanged := normalizeInputItems(kept, compat, reserved, serverHistory)
 	if itemsChanged {
 		changed = true
 	}
@@ -149,10 +149,10 @@ func namespacePrefix(prefix []string, name string, depth int) []string {
 	return append(append([]string(nil), prefix...), name)
 }
 
-func providerToolDefinitions(existing []any, declared []declaredTool) ([]any, toolCompat) {
+func providerToolDefinitions(existing []any, declared []declaredTool, history []any) ([]any, toolCompat, map[string]struct{}) {
 	compat := toolCompat{toClient: map[string]string{}, toProvider: map[string]string{}, freeform: map[string]struct{}{}}
 	listed := make(map[string]struct{}, len(existing)+len(declared))
-	reserved := make(map[string]struct{}, len(existing)+len(declared))
+	reserved := make(map[string]struct{}, len(existing)+len(declared)+len(history))
 	for _, entry := range existing {
 		if name := definitionName(entry); name != "" {
 			listed[name] = struct{}{}
@@ -164,6 +164,24 @@ func providerToolDefinitions(existing []any, declared []declaredTool) ([]any, to
 			reserved[tool.qualified] = struct{}{}
 		}
 	}
+	// History can replay a tool the request no longer declares under its safe
+	// name. That name still reaches the provider verbatim, so an alias minted
+	// for a declared or existing tool must steer clear of it, whatever order
+	// the items arrive in; otherwise two distinct tools share one provider name.
+	for _, entry := range history {
+		item, _ := entry.(map[string]any)
+		if item == nil {
+			continue
+		}
+		switch item["type"] {
+		case "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
+		default:
+			continue
+		}
+		if name, _ := item["name"].(string); providerSafeToolName(name) {
+			reserved[name] = struct{}{}
+		}
+	}
 	tools := make([]any, 0, len(existing)+len(declared))
 	for _, entry := range existing {
 		definition, _ := entry.(map[string]any)
@@ -171,17 +189,33 @@ func providerToolDefinitions(existing []any, declared []declaredTool) ([]any, to
 			tools = append(tools, entry)
 			continue
 		}
-		tools = append(tools, providerToolDefinition(definition, definitionName(entry), compat))
+		name := definitionName(entry)
+		// Top-level tools travel verbatim to a strict upstream, so an unsafe name
+		// here is the same 400 as a dotted history replay.
+		if raw, isString := definition["name"].(string); isString && raw != "" && !providerSafeToolName(raw) {
+			if reused, ok := compat.toProvider[raw]; ok {
+				name = reused
+			} else {
+				name = providerToolName(raw, reserved)
+				reserved[name] = struct{}{}
+				compat.toClient[name] = raw
+				compat.toProvider[raw] = name
+			}
+			listed[name] = struct{}{}
+		}
+		tools = append(tools, providerToolDefinition(definition, name, compat))
 	}
 	for _, tool := range declared {
 		name := tool.qualified
-		// Names that cannot be written as a plain JSON string are left untouched;
-		// the provider decides whether to accept them.
-		if !providerSafeToolName(name) && plainToolName(name) {
-			name = providerToolName(tool.qualified, reserved)
-			reserved[name] = struct{}{}
-			compat.toClient[name] = tool.qualified
-			compat.toProvider[tool.qualified] = name
+		if name != "" && !providerSafeToolName(name) {
+			if reused, ok := compat.toProvider[name]; ok {
+				name = reused
+			} else {
+				name = providerToolName(tool.qualified, reserved)
+				reserved[name] = struct{}{}
+				compat.toClient[name] = tool.qualified
+				compat.toProvider[tool.qualified] = name
+			}
 		}
 		if _, duplicate := listed[name]; duplicate {
 			continue
@@ -189,7 +223,7 @@ func providerToolDefinitions(existing []any, declared []declaredTool) ([]any, to
 		listed[name] = struct{}{}
 		tools = append(tools, providerToolDefinition(tool.definition, name, compat))
 	}
-	return tools, compat
+	return tools, compat, reserved
 }
 
 // providerToolDefinition renames a tool definition. A freeform tool is recorded
@@ -237,10 +271,32 @@ func documentedFreeformTool(definition map[string]any) map[string]any {
 // every call carries exactly one string output. Clients may report an extra output
 // for the same call (a background notification) or content-part arrays, which
 // documented providers reject outright.
-func normalizeInputItems(input []any, compat toolCompat, serverHistory bool) ([]any, bool) {
+func normalizeInputItems(input []any, compat toolCompat, reserved map[string]struct{}, serverHistory bool) ([]any, bool) {
 	changed := false
 	calls := make(map[string]struct{}, len(input)/2+1)
 	outputs := make(map[string]map[string]any, len(input)/2+1)
+	if reserved == nil {
+		reserved = make(map[string]struct{}, len(compat.toClient)+len(input))
+		for alias := range compat.toClient {
+			reserved[alias] = struct{}{}
+		}
+	}
+	// History can replay a tool the current request no longer declares (renamed or
+	// removed tool, previous_response_id path). A strict upstream still validates
+	// that name, so it gets the same reversible alias a declared tool would have.
+	aliasUnsafe := func(original string, custom bool) string {
+		if provider, ok := compat.toProvider[original]; ok {
+			return provider
+		}
+		alias := providerToolName(original, reserved)
+		reserved[alias] = struct{}{}
+		compat.toClient[alias] = original
+		compat.toProvider[original] = alias
+		if custom {
+			compat.freeform[alias] = struct{}{}
+		}
+		return alias
+	}
 	kept := make([]any, 0, len(input))
 	for _, entry := range input {
 		item, _ := entry.(map[string]any)
@@ -251,15 +307,20 @@ func normalizeInputItems(input []any, compat toolCompat, serverHistory bool) ([]
 		callID, _ := item["call_id"].(string)
 		switch kind, _ := item["type"].(string); kind {
 		case "function_call", "custom_tool_call":
-			name, _ := item["name"].(string)
-			if provider, aliased := compat.toProvider[name]; aliased {
-				item["name"] = provider
+			// An empty name is left alone: it is already unsafe, and aliasing it
+			// would mint a hash that restores to nothing.
+			if raw, hasName := item["name"].(string); hasName && raw != "" && !providerSafeToolName(raw) {
+				item["name"] = aliasUnsafe(raw, kind == "custom_tool_call")
 				changed = true
 			}
 			if callID != "" {
 				calls[callID] = struct{}{}
 			}
 		case "function_call_output", "custom_tool_call_output":
+			if raw, hasName := item["name"].(string); hasName && raw != "" && !providerSafeToolName(raw) {
+				item["name"] = aliasUnsafe(raw, kind == "custom_tool_call_output")
+				changed = true
+			}
 			if text, converted := toolOutputText(item["output"]); converted {
 				item["output"] = text
 				changed = true
@@ -467,8 +528,12 @@ func providerToolName(qualified string, reserved map[string]struct{}) string {
 		}
 		return '_'
 	}, strings.ReplaceAll(qualified, ".", "__"))
-	if _, clash := reserved[alias]; !clash && len(alias) <= maxToolNameBytes {
-		return alias
+	// The mapped alias holds only safe runes, so only an empty or overlong alias
+	// can still be invalid; both fall through to the suffixed form below.
+	if alias != "" && len(alias) <= maxToolNameBytes {
+		if _, clash := reserved[alias]; !clash {
+			return alias
+		}
 	}
 	digest := sha256.Sum256([]byte(qualified))
 	suffix := "_" + hex.EncodeToString(digest[:4])
@@ -493,20 +558,6 @@ func providerSafeToolName(value string) bool {
 func providerSafeToolRune(character rune) bool {
 	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
 		character >= '0' && character <= '9' || character == '_' || character == '-'
-}
-
-// plainToolName keeps aliasing reversible: names needing JSON escaping or holding
-// control characters are never renamed.
-func plainToolName(value string) bool {
-	if value == "" || len(value) > 4*maxToolNameBytes {
-		return false
-	}
-	for _, character := range value {
-		if character < 32 || character == 127 || character == '"' || character == '\\' {
-			return false
-		}
-	}
-	return true
 }
 
 // restoreClientToolCalls converts provider tool calls back into the shape the

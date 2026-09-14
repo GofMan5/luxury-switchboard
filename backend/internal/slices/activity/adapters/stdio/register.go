@@ -37,6 +37,9 @@ func Register(server *platform.Server, service *application.Service, history app
 		if platform.DecodePayload(payload, &query) != nil {
 			return nil, platform.MethodError{Code: "invalid_payload", Message: "Invalid history query"}
 		}
+		if !application.ValidPeriod(query.Period) {
+			return nil, platform.MethodError{Code: "invalid_payload", Message: "Invalid history period"}
+		}
 		requests, err := history.Recent(ctx, query.Period, query.Limit)
 		if err != nil {
 			return nil, platform.MethodError{Code: "history_query_failed", Message: "History query failed"}
@@ -52,6 +55,9 @@ func Register(server *platform.Server, service *application.Service, history app
 		}
 		if platform.DecodePayload(payload, &query) != nil {
 			return nil, platform.MethodError{Code: "invalid_payload", Message: "Invalid history query"}
+		}
+		if !application.ValidPeriod(query.Period) {
+			return nil, platform.MethodError{Code: "invalid_payload", Message: "Invalid history period"}
 		}
 		stats, err := history.Stats(ctx, query.Period)
 		if err != nil {

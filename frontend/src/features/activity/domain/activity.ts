@@ -17,6 +17,7 @@ export interface ActivityRequest {
   readonly bytesIn: number
   readonly bytesOut: number
   readonly errorCode?: string
+  readonly errorDetail?: string
   readonly inputTokens: number
   readonly outputTokens: number
   readonly cachedTokens: number

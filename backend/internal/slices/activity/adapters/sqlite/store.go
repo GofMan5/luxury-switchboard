@@ -71,7 +71,7 @@ func Open(path string, retentionDays int) (*Store, error) {
 }
 
 func (store *Store) Record(request domain.Request) bool {
-	if store.closed.Load() || !terminal(request.State) {
+	if store.closed.Load() || !domain.IsTerminal(request.State) {
 		return false
 	}
 	return store.queue.Add(request)
@@ -83,8 +83,8 @@ func (store *Store) Recent(ctx context.Context, period application.Period, limit
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT request_id, started_at_ms, updated_at_ms, state, model_id, provider_id,
-method, path, status_code, queue_ms, latency_ms, retries, bytes_in, bytes_out, error_code,
+	query := `SELECT request_id, started_at_ms, updated_at_ms, state, model_id, provider_id, provider_name,
+method, path, status_code, queue_ms, latency_ms, retries, bytes_in, bytes_out, error_code, error_detail,
 input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens, context_tokens,
 generation_ms, tokens_per_second
 FROM requests WHERE (? = 0 OR started_at_ms >= ?) ORDER BY started_at_ms DESC LIMIT ?`
@@ -99,8 +99,8 @@ FROM requests WHERE (? = 0 OR started_at_ms >= ?) ORDER BY started_at_ms DESC LI
 		var started, updated int64
 		if err := rows.Scan(
 			&request.ID, &started, &updated, &request.State, &request.Model, &request.ProviderID,
-			&request.Method, &request.Path, &request.Status, &request.QueueMS, &request.LatencyMS,
-			&request.Retries, &request.BytesIn, &request.BytesOut, &request.ErrorCode,
+			&request.ProviderName, &request.Method, &request.Path, &request.Status, &request.QueueMS, &request.LatencyMS,
+			&request.Retries, &request.BytesIn, &request.BytesOut, &request.ErrorCode, &request.ErrorDetail,
 			&request.InputTokens, &request.OutputTokens, &request.CachedTokens,
 			&request.ReasoningTokens, &request.TotalTokens, &request.ContextTokens,
 			&request.GenerationMS, &request.TokensPerSecond,
@@ -137,7 +137,7 @@ FROM requests WHERE (? = 0 OR started_at_ms >= ?)`
 		return application.HistoryStats{}, errors.New("history statistics query failed")
 	}
 	if stats.Completed > 0 {
-		offset := max(int64(float64(stats.Completed)*0.95+0.999999)-1, 0)
+		offset := int64(application.P95Index(int(stats.Completed)))
 		if err := store.db.QueryRowContext(ctx,
 			`SELECT latency_ms FROM requests WHERE state='completed' AND (? = 0 OR started_at_ms >= ?) ORDER BY latency_ms LIMIT 1 OFFSET ?`,
 			cutoff, cutoff, offset,
@@ -171,10 +171,10 @@ func (store *Store) writeBatch(batch []domain.Request) error {
 		return err
 	}
 	statement, err := tx.Prepare(`INSERT OR REPLACE INTO requests (
-request_id, started_at_ms, updated_at_ms, state, model_id, provider_id, method, path,
-status_code, queue_ms, latency_ms, retries, bytes_in, bytes_out, error_code,
+request_id, started_at_ms, updated_at_ms, state, model_id, provider_id, provider_name, method, path,
+status_code, queue_ms, latency_ms, retries, bytes_in, bytes_out, error_code, error_detail,
 input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens, context_tokens,
-generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -183,9 +183,9 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	for _, request := range batch {
 		if _, err := statement.Exec(
 			request.ID, request.StartedAt.UnixMilli(), request.UpdatedAt.UnixMilli(), request.State,
-			request.Model, request.ProviderID, request.Method, request.Path, request.Status,
+			request.Model, request.ProviderID, request.ProviderName, request.Method, request.Path, request.Status,
 			request.QueueMS, request.LatencyMS, request.Retries, request.BytesIn, request.BytesOut,
-			request.ErrorCode, request.InputTokens, request.OutputTokens, request.CachedTokens,
+			request.ErrorCode, request.ErrorDetail, request.InputTokens, request.OutputTokens, request.CachedTokens,
 			request.ReasoningTokens, request.TotalTokens, request.ContextTokens,
 			request.GenerationMS, request.TokensPerSecond,
 		); err != nil {
@@ -209,9 +209,9 @@ func migrate(db *sql.DB) error {
 	const schema = `CREATE TABLE IF NOT EXISTS requests (
 request_id TEXT PRIMARY KEY, started_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
 state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled')), model_id TEXT NOT NULL,
-provider_id TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, status_code INTEGER NOT NULL,
+provider_id TEXT NOT NULL, provider_name TEXT NOT NULL DEFAULT '', method TEXT NOT NULL, path TEXT NOT NULL, status_code INTEGER NOT NULL,
 queue_ms REAL NOT NULL, latency_ms REAL NOT NULL, retries INTEGER NOT NULL,
-bytes_in INTEGER NOT NULL, bytes_out INTEGER NOT NULL, error_code TEXT NOT NULL,
+bytes_in INTEGER NOT NULL, bytes_out INTEGER NOT NULL, error_code TEXT NOT NULL, error_detail TEXT NOT NULL DEFAULT '',
 input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL,
 reasoning_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL, context_tokens INTEGER NOT NULL,
 generation_ms REAL NOT NULL, tokens_per_second REAL NOT NULL,
@@ -220,10 +220,55 @@ CREATE INDEX IF NOT EXISTS requests_started ON requests(started_at_ms DESC);`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("history migration failed: %w", err)
 	}
+	rows, err := db.Query(`PRAGMA table_info(requests)`)
+	if err != nil {
+		return fmt.Errorf("history migration failed: %w", err)
+	}
+	hasErrorDetail := false
+	hasProviderName := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("history migration failed: %w", err)
+		}
+		switch name {
+		case "error_detail":
+			hasErrorDetail = true
+		case "provider_name":
+			hasProviderName = true
+		}
+	}
+	// A mid-iteration read error must fail the migration: deciding which
+	// ALTER to run on a partial column list retries a duplicate-column
+	// ALTER against a column the failed scan never reported.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("history migration failed: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("history migration failed: %w", err)
+	}
+	if !hasErrorDetail {
+		if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN error_detail TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("history migration failed: %w", err)
+		}
+	}
+	if !hasProviderName {
+		if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN provider_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("history migration failed: %w", err)
+		}
+	}
 	return nil
 }
 
 func periodCutoff(period application.Period, now time.Time) (int64, error) {
+	if !application.ValidPeriod(period) {
+		return 0, errors.New("invalid history period")
+	}
 	var duration time.Duration
 	switch period {
 	case application.Period24H:
@@ -238,8 +283,4 @@ func periodCutoff(period application.Period, now time.Time) (int64, error) {
 		return 0, errors.New("invalid history period")
 	}
 	return now.Add(-duration).UnixMilli(), nil
-}
-
-func terminal(state domain.State) bool {
-	return state == domain.StateCompleted || state == domain.StateFailed || state == domain.StateCancelled
 }

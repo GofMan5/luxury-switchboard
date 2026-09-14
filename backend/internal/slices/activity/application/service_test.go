@@ -38,6 +38,48 @@ func TestUnknownErrorTextIsNotPersisted(t *testing.T) {
 	}
 }
 
+func TestRelayErrorCodesSurviveFinish(t *testing.T) {
+	for _, code := range []string{"policy_refusal", "chat_compatibility", "guardrail_blocked"} {
+		service := NewService(10)
+		id := service.Start(domain.Start{Path: "/v1/responses"})
+		service.Finish(id, domain.Finish{Status: 502, ErrorCode: code, ErrorDetail: "relay detail"})
+		request := service.List(1)[0]
+		if request.State != domain.StateFailed || request.ErrorCode != code || request.ErrorDetail != "relay detail" {
+			t.Fatalf("relay code %q was dropped: %+v", code, request)
+		}
+	}
+}
+
+func TestUnknownErrorCodeClearsDetail(t *testing.T) {
+	service := NewService(10)
+	id := service.Start(domain.Start{Path: "/v1/responses"})
+	service.Finish(id, domain.Finish{Status: 502, ErrorCode: "private upstream detail", ErrorDetail: "must not persist alone"})
+	request := service.List(1)[0]
+	if request.State != domain.StateFailed || request.ErrorCode != "" || request.ErrorDetail != "" {
+		t.Fatalf("unknown error left residue: %+v", request)
+	}
+}
+
+func TestP95IndexBoundaries(t *testing.T) {
+	cases := map[int]int{-5: 0, 0: 0, 1: 0, 2: 1, 19: 18, 20: 18, 21: 19, 100: 94}
+	for count, want := range cases {
+		if got := P95Index(count); got != want {
+			t.Fatalf("P95Index(%d) = %d, want %d", count, got, want)
+		}
+	}
+}
+
+func TestErrorDetailIsRetainedWithControlAndSizeBounds(t *testing.T) {
+	service := NewService(10)
+	id := service.Start(domain.Start{Path: "/v1/responses"})
+	detail := "provider detail\nrequest id: abc"
+	service.Finish(id, domain.Finish{Status: 502, ErrorCode: "transport", ErrorDetail: detail})
+	request := service.List(1)[0]
+	if request.ErrorCode != "transport" || request.ErrorDetail != detail {
+		t.Fatalf("error detail was not retained: %+v", request)
+	}
+}
+
 func TestFinishDoesNotAddCachedOrReasoningTwice(t *testing.T) {
 	service := NewService(10)
 	id := service.Start(domain.Start{Path: "/v1/responses"})

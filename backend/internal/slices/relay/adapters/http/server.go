@@ -24,12 +24,13 @@ import (
 )
 
 const (
-	absoluteMaxRequestBytes  = 256 * 1024 * 1024
-	maxBufferedResponseBytes = 32 * 1024 * 1024
-	maxProxyClients          = 64
-	maxRequestModelBytes     = 128
-	maxCacheTraversalDepth   = 64
-	maxRelayAttempts         = 64
+	absoluteMaxRequestBytes         = 256 * 1024 * 1024
+	maxBufferedResponseBytes        = 32 * 1024 * 1024
+	maxProxyClients                 = 64
+	maxRequestModelBytes            = 128
+	maxCacheTraversalDepth          = 64
+	maxRelayAttempts                = 64
+	maxStreamFailuresBeforeFallback = 3
 	// terminalRefused is the terminal reason for an answer the provider's content
 	// policy declined. It is deliberately not "response.failed": a failure is worth
 	// another attempt, a verdict is not.
@@ -43,10 +44,11 @@ var hopHeaders = map[string]struct{}{
 }
 
 var (
-	errIncompleteSSE       = errors.New("upstream SSE ended without a terminal event")
-	errClientDisconnected  = errors.New("client disconnected")
-	errResponseTooLarge    = errors.New("upstream response exceeds the buffer limit")
-	errRetryableSSEFailure = errors.New("upstream SSE failed before output")
+	errIncompleteSSE           = errors.New("upstream SSE ended without a terminal event")
+	errClientDisconnected      = errors.New("client disconnected")
+	errResponseTooLarge        = errors.New("upstream response exceeds the buffer limit")
+	errRetryableSSEFailure     = errors.New("upstream SSE failed before output")
+	errInvalidFallbackResponse = errors.New("fallback response is not a completed Responses object")
 )
 
 type Server struct {
@@ -267,12 +269,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	bytesOut := int64(0)
 	cancelled := false
 	errorCode := ""
+	errorDetail := ""
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
 	defer func() {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: status, BytesOut: bytesOut, Cancelled: cancelled, ErrorCode: errorCode,
-			Usage: usage, Generation: generation,
+			ErrorDetail: errorDetail,
+			Usage:       usage, Generation: generation,
 		})
 	}()
 	committed := false
@@ -331,6 +335,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// Its COST is the exception: `refused` is a fact about the answer, and a refused
 		// answer was still generated and still billed, so those tokens are kept.
 		errorCode = ""
+		errorDetail = ""
 		refusedUsage := usage
 		if clientStream {
 			response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
@@ -341,6 +346,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if committed {
 				cancelled = errors.Is(err, context.Canceled) || errors.Is(err, errClientDisconnected)
 				errorCode = "stream_incomplete"
+				errorDetail = err.Error()
 				writeStreamFailure(writer, request.URL.Path, model)
 				return
 			}
@@ -348,10 +354,12 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				status = http.StatusServiceUnavailable
 				cancelled = true
 				errorCode = "cancelled"
+				errorDetail = err.Error()
 				writeError(writer, http.StatusServiceUnavailable, "Request cancelled")
 			} else {
 				status = http.StatusBadGateway
 				errorCode = "transport"
+				errorDetail = err.Error()
 				writeError(writer, http.StatusBadGateway, "Provider is unavailable")
 			}
 			return
@@ -364,12 +372,16 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		switch {
 		case terminal == terminalRefused:
 			errorCode = "policy_refusal"
+			errorDetail = responseErrorDetail(response, "Provider response was refused", secrets)
 		case terminal == "response.incomplete":
 			errorCode = "stream_incomplete"
+			errorDetail = responseErrorDetail(response, "Provider stream ended incomplete", secrets)
 		case terminal == "response.failed":
 			errorCode = "upstream_status"
+			errorDetail = responseErrorDetail(response, "Provider reported a failed response", secrets)
 		case status >= 400:
 			errorCode = "request_rejected"
+			errorDetail = responseErrorDetail(response, fmt.Sprintf("provider returned HTTP %d", status), secrets)
 		}
 		if status >= 400 && committed {
 			response.Body.Close()
@@ -388,6 +400,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if readErr != nil || int64(len(raw)) > limit {
 				status = http.StatusBadGateway
 				errorCode = "chat_compatibility"
+				errorDetail = errorText(readErr, "Chat completions stream could not be converted")
 				if committed {
 					writeStreamFailure(writer, request.URL.Path, model)
 				} else {
@@ -399,6 +412,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if convertErr != nil {
 				status = http.StatusBadGateway
 				errorCode = "chat_compatibility"
+				errorDetail = convertErr.Error()
 				if committed {
 					writeStreamFailure(writer, request.URL.Path, model)
 				} else {
@@ -424,6 +438,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if readErr != nil || len(raw) > maxImageResponse || convertErr != nil {
 				status = http.StatusBadGateway
 				errorCode = "image_generation"
+				errorDetail = errorText(convertErr, errorText(readErr, "Image generation response could not be converted"))
 				writeError(writer, http.StatusBadGateway, "Image generation failed")
 				return
 			}
@@ -453,12 +468,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if waitErr := waitRetry(ctx, delay); waitErr != nil {
 				cancelled = true
 				errorCode = "cancelled"
+				errorDetail = waitErr.Error()
 				return
 			}
 			continue
 		}
 		status = http.StatusBadGateway
 		errorCode = code
+		errorDetail = code
 		if committed {
 			writeStreamFailure(writer, request.URL.Path, model)
 		} else {
@@ -478,6 +495,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
 				cancelled = true
 				errorCode = "client_disconnected"
+				errorDetail = writeErr.Error()
 				return
 			}
 			bytesOut += int64(count)
@@ -490,6 +508,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		if readErr != nil {
 			errorCode = "stream_incomplete"
+			errorDetail = readErr.Error()
 			return
 		}
 	}
@@ -554,24 +573,42 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		Path: urlValue.Path, BytesIn: int64(len(body)),
 	})
 	markers := make([]string, 0, 4)
+	// Usage and generation live here so every Finish below files the same
+	// report ServeHTTP's defer does, including the failure exits.
+	usage := relayapp.TokenUsage{}
+	generation := time.Duration(0)
 	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
 	}, &chatActive)
 	if err != nil {
-		server.activity.Finish(activityID, relayapp.ActivityFinish{Cancelled: errors.Is(err, context.Canceled), ErrorCode: "transport"})
+		server.activity.Finish(activityID, relayapp.ActivityFinish{
+			Status: http.StatusBadGateway, Cancelled: errors.Is(err, context.Canceled),
+			ErrorCode: "transport", ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+			Usage: usage, Generation: generation,
+		})
 		return relayapp.DispatchResponse{}, err
 	}
 	defer response.Body.Close()
+	usage = usageFromHeaders(response.Header)
+	generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
 	limit := responseBufferLimit(server.config)
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil || int64(len(responseBody)) > limit {
-		server.activity.Finish(activityID, relayapp.ActivityFinish{Status: response.StatusCode, ErrorCode: "stream_incomplete"})
+		server.activity.Finish(activityID, relayapp.ActivityFinish{
+			Status: response.StatusCode, ErrorCode: "stream_incomplete",
+			ErrorDetail: truncateErrorDetail(redactSecrets(errorText(err, "response exceeded the buffer limit"), markers)),
+			Usage:       usage, Generation: generation,
+		})
 		return relayapp.DispatchResponse{}, errIncompleteSSE
 	}
 	if imageCompat {
 		responseBody, err = imagesResponse(responseBody)
 		if err != nil {
-			server.activity.Finish(activityID, relayapp.ActivityFinish{Status: http.StatusBadGateway, ErrorCode: "image_generation"})
+			server.activity.Finish(activityID, relayapp.ActivityFinish{
+				Status: http.StatusBadGateway, ErrorCode: "image_generation",
+				ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+				Usage:       usage, Generation: generation,
+			})
 			return relayapp.DispatchResponse{}, err
 		}
 		response.Header.Set("Content-Type", "application/json")
@@ -583,7 +620,11 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if chatActive && response.StatusCode < 400 {
 		responseBody, err = chatToResponses(responseBody, streamRequested)
 		if err != nil {
-			server.activity.Finish(activityID, relayapp.ActivityFinish{Status: http.StatusBadGateway, ErrorCode: "chat_compatibility"})
+			server.activity.Finish(activityID, relayapp.ActivityFinish{
+				Status: http.StatusBadGateway, ErrorCode: "chat_compatibility",
+				ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+				Usage:       usage, Generation: generation,
+			})
 			return relayapp.DispatchResponse{}, err
 		}
 		if streamRequested {
@@ -596,8 +637,6 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		response.Header.Del("Content-Encoding")
 	}
 	terminal := response.Header.Get("X-Switchboard-Terminal")
-	usage := usageFromHeaders(response.Header)
-	generation := durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
 	removeUsageHeaders(response.Header)
 	response.Header.Del("X-Switchboard-Terminal")
 	responseBody = restoreClientToolCalls(responseBody, clientTools, urlValue.Path, strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "event-stream"))
@@ -608,19 +647,28 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: request.PublicModel,
 		ClientDeclaredTools: clientDeclaredTools,
 	}); blocked {
-		server.activity.Finish(activityID, relayapp.ActivityFinish{Status: http.StatusBadGateway, ErrorCode: code})
+		server.activity.Finish(activityID, relayapp.ActivityFinish{
+			Status: http.StatusBadGateway, ErrorCode: code, ErrorDetail: code,
+			Usage: usage, Generation: generation,
+		})
 		return relayapp.DispatchResponse{}, errGuardrailBlocked
 	}
 	if response.Header.Get("Content-Length") != "" {
 		response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
 	}
 	dispatchError := ""
+	dispatchDetail := ""
 	if response.StatusCode >= 400 {
 		dispatchError = "request_rejected"
+		dispatchDetail = jsonErrorDetail(responseBody, markers)
+		if dispatchDetail == "" {
+			dispatchDetail = fmt.Sprintf("provider returned HTTP %d", response.StatusCode)
+		}
 	}
 	server.activity.Finish(activityID, relayapp.ActivityFinish{
 		Status: response.StatusCode, BytesOut: int64(len(responseBody)),
 		Usage: usage, Generation: generation, ErrorCode: dispatchError,
+		ErrorDetail: dispatchDetail,
 	})
 	return relayapp.DispatchResponse{
 		Status: response.StatusCode, Headers: response.Header.Clone(), Body: responseBody,
@@ -638,6 +686,9 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool) (*http.Response, error) {
 	requestFailures := 0
 	credentialFailures := 0
+	streamFailures := 0
+	fallbackActive := false
+	fallbackPath := canonicalPath(incoming.URL.Path)
 	// What the attempts before this one cost. A retried answer was still generated and
 	// still billed, so its tokens belong to the request even though nobody read it.
 	discarded := relayapp.TokenUsage{}
@@ -682,7 +733,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				drainResponse(response)
 				return genericErrorResponse(http.StatusBadGateway), nil
 			}
-			if *terminalStream {
+			if *terminalStream && !fallbackActive {
 				ssePath := incoming.URL.Path
 				if chatActive != nil && *chatActive {
 					ssePath = defaultChatCompletionsPath
@@ -699,6 +750,18 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					}
 					if errors.Is(bufferErr, errResponseTooLarge) {
 						return nil, bufferErr
+					}
+					if errors.Is(bufferErr, errIncompleteSSE) && fallbackPath == responsesPath && (chatActive == nil || !*chatActive) {
+						streamFailures++
+						if streamFailures >= maxStreamFailuresBeforeFallback && canRetry(attempt, attemptLimit) {
+							if fallback, ok := nonStreamingResponsesRequest(body, server.config.MaxRequestBytes); ok {
+								body = fallback
+								fallbackActive = true
+								*terminalStream = false
+								server.observeRetry(activityID, attempt, http.StatusOK, 0)
+								continue
+							}
+						}
 					}
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
 						requestFailures++
@@ -766,6 +829,23 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					continue
 				}
 				terminal := jsonTerminal(buffered)
+				var fallbackSSE []byte
+				fallbackTerminal := ""
+				if fallbackActive {
+					fallbackSSE, fallbackTerminal, bufferErr = responsesJSONToSSE(buffered)
+					if bufferErr != nil {
+						finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+						if !canRetry(attempt, attemptLimit) {
+							return nil, bufferErr
+						}
+						delay := retryDelay(attempt, nil, server.config)
+						server.observeRetry(activityID, attempt, 0, delay)
+						if err := waitRetry(ctx, delay); err != nil {
+							return nil, err
+						}
+						continue
+					}
+				}
 				// A 200 with no body is not an answer. The client reports it as an
 				// empty or malformed response and the run ends there, so it is retried
 				// on the same budget as a provider that failed out loud. Malformed
@@ -796,9 +876,17 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				} else {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
 				}
-				response.Body = io.NopCloser(bytes.NewReader(buffered))
-				response.ContentLength = int64(len(buffered))
-				response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
+				if fallbackActive {
+					response.Body = io.NopCloser(bytes.NewReader(fallbackSSE))
+					response.ContentLength = -1
+					response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+					response.Header.Del("Content-Length")
+					response.Header.Set("X-Switchboard-Terminal", fallbackTerminal)
+				} else {
+					response.Body = io.NopCloser(bytes.NewReader(buffered))
+					response.ContentLength = int64(len(buffered))
+					response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
+				}
 				response.Header.Del("Content-Encoding")
 				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), time.Since(attemptStarted))
 				return response, nil
@@ -1272,6 +1360,63 @@ func requiresStreamTerminal(request *http.Request, body []byte) bool {
 	return json.Unmarshal(body, &payload) == nil && payload.Stream
 }
 
+// nonStreamingResponsesRequest is the last compatibility attempt for providers
+// whose SSE connection repeatedly closes before response.completed. The full JSON
+// response is converted back to SSE before it reaches the caller, so a client that
+// asked for a stream keeps the same wire contract.
+func nonStreamingResponsesRequest(body []byte, maxBytes int64) ([]byte, bool) {
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil || payload == nil {
+		return nil, false
+	}
+	stream, ok := payload["stream"].(bool)
+	if !ok || !stream {
+		return nil, false
+	}
+	payload["stream"] = false
+	encoded, err := json.Marshal(payload)
+	if err != nil || (maxBytes > 0 && int64(len(encoded)) > maxBytes) {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func responsesJSONToSSE(body []byte) ([]byte, string, error) {
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil || payload == nil {
+		return nil, "", errInvalidFallbackResponse
+	}
+	terminal := "response.completed"
+	status, _ := payload["status"].(string)
+	if status == "completed" && (payload["error"] != nil || payload["incomplete_details"] != nil) {
+		return nil, "", errInvalidFallbackResponse
+	}
+	if status != "completed" {
+		switch status {
+		case "failed", "cancelled":
+			terminal = "response.failed"
+		case "incomplete":
+			terminal = "response.incomplete"
+		default:
+			if payload["error"] != nil {
+				terminal = "response.failed"
+			} else {
+				return nil, "", errInvalidFallbackResponse
+			}
+		}
+	}
+	event := map[string]any{"type": terminal, "response": payload}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return nil, "", errInvalidFallbackResponse
+	}
+	return append(append([]byte("event: "+terminal+"\ndata: "), encoded...), []byte("\n\n")...), terminal, nil
+}
+
 type bodyRead struct {
 	chunk []byte
 	err   error
@@ -1422,14 +1567,15 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 }
 
 type sseInspector struct {
-	path     string
-	line     []byte
-	event    []byte
-	terminal string
-	finished bool
-	output   bool
-	refused  bool
-	usage    relayapp.TokenUsage
+	path      string
+	line      []byte
+	event     []byte
+	eventName string
+	terminal  string
+	finished  bool
+	output    bool
+	refused   bool
+	usage     relayapp.TokenUsage
 }
 
 func (inspector *sseInspector) Feed(chunk []byte) string {
@@ -1467,6 +1613,9 @@ func (inspector *sseInspector) consumeLine(line []byte) {
 		return
 	}
 	if !bytes.HasPrefix(line, []byte("data:")) {
+		if bytes.HasPrefix(line, []byte("event:")) {
+			inspector.eventName = strings.TrimSpace(string(bytes.TrimPrefix(line, []byte("event:"))))
+		}
 		return
 	}
 	data := bytes.TrimPrefix(line, []byte("data:"))
@@ -1480,10 +1629,13 @@ func (inspector *sseInspector) consumeLine(line []byte) {
 func (inspector *sseInspector) finishEvent() {
 	if len(inspector.event) == 0 || inspector.terminal != "" {
 		inspector.event = nil
+		inspector.eventName = ""
 		return
 	}
 	data := inspector.event
 	inspector.event = nil
+	eventName := inspector.eventName
+	inspector.eventName = ""
 	if bytes.Equal(data, []byte("[DONE]")) {
 		if inspector.path == "/v1/chat/completions" || inspector.path == "/v1/completions" {
 			inspector.terminal = "done"
@@ -1496,6 +1648,9 @@ func (inspector *sseInspector) finishEvent() {
 	}
 	inspector.mergeUsage(payload)
 	eventType, _ := payload["type"].(string)
+	if eventType == "" {
+		eventType = typelessEventType(eventName, payload)
+	}
 	if inspector.path == "/v1/responses" && (strings.HasSuffix(eventType, ".delta") || strings.HasSuffix(eventType, ".partial_image")) {
 		inspector.output = true
 	}
@@ -1534,6 +1689,23 @@ func (inspector *sseInspector) finishEvent() {
 
 func (inspector *sseInspector) retryableFailure() bool {
 	return inspector.path == "/v1/responses" && inspector.terminal == "response.failed" && !inspector.output && !inspector.refused
+}
+
+// typelessEventType names typeless stream data from its `event:` line, but only
+// when the payload carries the response object that line reports on. A bare
+// `event: response.completed` over `data: {}` used to fail the whole stream as
+// invalid, and a bare `event: response.output_text.delta` over `{}` counted as
+// output and kept a failed stream from the retry it was owed — so typeless data
+// without a response object is ignored instead of named.
+func typelessEventType(eventName string, payload map[string]any) string {
+	if eventName == "" {
+		return ""
+	}
+	response, ok := payload["response"].(map[string]any)
+	if !ok || response == nil {
+		return ""
+	}
+	return eventName
 }
 
 // reason is the terminal as the rest of the relay files it. A refusal keeps a
@@ -1716,7 +1888,7 @@ func copyResponseHeaders(target, source http.Header, secrets []string) {
 // credential worth protecting.
 func containsSecret(value string, secrets []string) bool {
 	for _, secret := range secrets {
-		if len(secret) >= 8 && strings.Contains(value, secret) {
+		if len(secret) >= minSecretMatchBytes && strings.Contains(value, secret) {
 			return true
 		}
 	}
@@ -1826,7 +1998,7 @@ func policyRefused(text string) bool {
 // the whole payload would let an answer that merely discusses content policy be
 // filed as one refused by it.
 func refusalText(payload map[string]any) string {
-	candidates := []any{payload["error"], payload["incomplete_details"]}
+	candidates := []any{payload["error"], payload["incomplete_details"], payload["message"]}
 	if response, ok := payload["response"].(map[string]any); ok {
 		candidates = append(candidates, response["error"], response["incomplete_details"])
 	}
@@ -1983,6 +2155,142 @@ var usageHeaderNames = []string{
 	"X-Switchboard-Total-Tokens",
 	"X-Switchboard-Context-Tokens",
 	"X-Switchboard-Generation-Nanoseconds",
+}
+
+func errorText(err error, fallback string) string {
+	if err != nil {
+		return err.Error()
+	}
+	return fallback
+}
+
+// responseErrorDetail keeps the provider's terminal error reason available without
+// copying streamed output into activity history, then restores the body for the
+// normal response path. Only the scalar code and message are kept, with any
+// credential echoed back by the provider redacted: the full error object is
+// provider-controlled, and filing it verbatim persisted whatever it quoted.
+func responseErrorDetail(response *http.Response, fallback string, secrets []string) string {
+	if response == nil || response.Body == nil {
+		return fallback
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	response.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(body), response.Body), Closer: response.Body}
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return fallback
+	}
+	if detail := terminalErrorDetail(body, secrets); detail != "" {
+		return detail
+	}
+	return fallback
+}
+
+func terminalErrorDetail(body []byte, secrets []string) string {
+	for _, block := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+		data := sseData(block)
+		if len(data) == 0 {
+			continue
+		}
+		if detail := jsonErrorDetail(data, secrets); detail != "" {
+			return detail
+		}
+	}
+	return jsonErrorDetail(body, secrets)
+}
+
+// maxErrorDetailRunes bounds the provider-shaped text filed in activity history.
+// The activity store keeps 4096 runes; the relay files far less, because a code
+// and a message say why the provider refused and everything beyond them is
+// payload-shaped.
+const maxErrorDetailRunes = 512
+
+const redactedSecret = "[redacted]"
+
+// minSecretMatchBytes is the shortest credential fragment worth scrubbing out of
+// filed text. Shorter fragments also match ordinary prose, so editing those here
+// would mangle the reason; they stay for the public sanitizer to fail closed on.
+const minSecretMatchBytes = 8
+
+func jsonErrorDetail(body []byte, secrets []string) string {
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil || payload == nil {
+		return ""
+	}
+	candidates := []any{payload["error"], payload["incomplete_details"]}
+	if response, ok := payload["response"].(map[string]any); ok {
+		candidates = append(candidates, response["error"], response["incomplete_details"])
+	}
+	for _, candidate := range candidates {
+		if detail := errorCandidateDetail(candidate); detail != "" {
+			return truncateErrorDetail(redactSecrets(detail, secrets))
+		}
+	}
+	return ""
+}
+
+// errorCandidateDetail reads one error-shaped value the way the history files
+// it: a string travels as itself, an object contributes only its scalar code
+// and message, and anything else (nil, numbers, arrays, nested objects) is not
+// a reason and is skipped.
+func errorCandidateDetail(candidate any) string {
+	switch candidate := candidate.(type) {
+	case string:
+		return candidate
+	case map[string]any:
+		return errorObjectDetail(candidate)
+	default:
+		return ""
+	}
+}
+
+// errorObjectDetail keeps the code and the message and drops everything else.
+// type stands in for a missing code; a message on its own still travels.
+func errorObjectDetail(candidate map[string]any) string {
+	code := errorScalarText(candidate["code"])
+	if code == "" {
+		code = errorScalarText(candidate["type"])
+	}
+	message := errorScalarText(candidate["message"])
+	switch {
+	case code != "" && message != "":
+		return code + ": " + message
+	case code != "":
+		return code
+	default:
+		return message
+	}
+}
+
+func errorScalarText(value any) string {
+	switch value := value.(type) {
+	case string:
+		return value
+	case json.Number:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+// redactSecrets scrubs the credentials of the attempt in flight out of text
+// about to be filed. A provider that echoes the key it was sent must not have
+// that key persisted into history and rendered back in the UI.
+func redactSecrets(value string, secrets []string) string {
+	for _, secret := range secrets {
+		if len(secret) >= minSecretMatchBytes && strings.Contains(value, secret) {
+			value = strings.ReplaceAll(value, secret, redactedSecret)
+		}
+	}
+	return value
+}
+
+func truncateErrorDetail(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > maxErrorDetailRunes {
+		return string(runes[:maxErrorDetailRunes])
+	}
+	return string(runes)
 }
 
 // addDiscardedUsage folds the cost of an attempt that was thrown away into the cost

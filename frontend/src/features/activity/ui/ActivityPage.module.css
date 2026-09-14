@@ -23,7 +23,7 @@
   gap: 10px;
   border-bottom: 1px solid var(--border-subtle);
   padding: 9px 16px;
-  background: #1b1b1b;
+  background: var(--bg-surface);
 }
 
 .search,
@@ -36,13 +36,13 @@
   border-radius: var(--radius-control);
   padding: 0 10px;
   color: var(--text-muted);
-  background: #232323;
+  background: var(--bg-elevated);
   transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
 }
 .search:hover,
-.filter:hover { border-color: #565656; background: #262626; }
+.filter:hover { border-color: var(--border-strong); background: var(--bg-raised); }
 .search:focus-within,
-.filter:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px rgb(112 155 199 / 9%); }
+.filter:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 22%, transparent); }
 
 .search {
   width: min(360px, 34vw);
@@ -101,7 +101,7 @@
   z-index: 2;
   top: 0;
   color: var(--text-secondary);
-  background: #171717;
+  background: var(--bg-canvas);
   font-size: 11px;
   font-weight: 600;
 }
@@ -110,16 +110,23 @@
   cursor: default;
 }
 
-.table tbody tr:hover,
-.table tbody tr:focus {
+.table tbody tr:hover {
   background: color-mix(in srgb, var(--bg-hover) 78%, transparent);
-  outline: none;
+}
+
+.table tbody tr:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.table tbody tr:active {
+  background: color-mix(in srgb, var(--bg-selected) 72%, transparent);
 }
 
 .table tr[data-selected='true'] {
   color: var(--text-primary);
   background: var(--bg-selected);
-  box-shadow: inset 2px 0 #72a3d4;
+  box-shadow: inset 2px 0 var(--focus-ring);
 }
 
 .table th:nth-child(1) { width: 118px; }
@@ -131,6 +138,33 @@
 .table th:nth-child(8),
 .table th:nth-child(9),
 .table th:nth-child(10) { width: 88px; }
+
+.error {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--status-danger) 45%, var(--border-subtle));
+  padding: 10px 16px;
+  color: color-mix(in srgb, var(--status-danger) 72%, var(--text-primary));
+  background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas));
+}
+
+.skeletonRow td { height: 42px; }
+
+.skeleton {
+  display: block;
+  height: 12px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  animation: activity-skeleton-pulse var(--motion-standard) var(--ease-standard) infinite alternate;
+}
+
+@keyframes activity-skeleton-pulse {
+  from { opacity: .45; }
+  to { opacity: 1; }
+}
 
 .empty {
   height: 220px !important;
@@ -154,7 +188,7 @@
   min-width: 0;
   overflow: auto;
   border-left: 1px solid var(--border-subtle);
-  background: #1d1d1d;
+  background: var(--bg-surface);
   animation: inspector-in var(--motion-standard) var(--ease-standard) both;
 }
 
@@ -196,6 +230,8 @@
 
 .close { transition: color var(--motion-fast), background var(--motion-fast); }
 .close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.close:active { background: var(--bg-raised); }
 
 .inspectorStatus {
   display: flex;
@@ -267,7 +303,16 @@
   font-size: 11px;
 }
 
-.safeError strong { color: #ffaaa4; font-family: var(--font-mono); font-size: 12px; }
+.safeError strong {
+  display: block;
+  color: color-mix(in srgb, var(--status-danger) 72%, var(--text-primary));
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 
 @media (max-width: 1279px) {
   .body[data-inspector='true'] { grid-template-columns: minmax(0, 1fr); }
@@ -277,7 +322,7 @@
     inset: 64px 0 0 auto;
     width: min(380px, calc(100vw - 56px));
     border-left: 1px solid var(--border-strong);
-    box-shadow: -18px 0 40px rgb(0 0 0 / 32%);
+    box-shadow: var(--shadow-float);
   }
 }
 
@@ -292,6 +337,7 @@
   .filter,
   .filter select { min-width: 0; }
   .filter span { display: none; }
+  .close { width: 44px; height: 44px; }
   .table { min-width: 680px; }
   .table th:nth-child(3), .table td:nth-child(3),
   .table th:nth-child(5), .table td:nth-child(5),

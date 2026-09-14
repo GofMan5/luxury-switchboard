@@ -1,8 +1,10 @@
 import { useDeferredValue, useMemo, useState } from 'react'
 import { Pause, Play, Search, SlidersHorizontal, X } from 'lucide-react'
+import { useAppServices } from '../../../app/services'
 import { formatBytes, formatClock, formatDecimal, formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { ActivityRequest, ActivityState } from '../domain/activity'
 import { activityLabels } from './activity-view'
 import { useActivity } from './useActivity'
@@ -10,8 +12,11 @@ import styles from './ActivityPage.module.css'
 
 type StateFilter = 'all' | ActivityState
 
+const skeletonRows = [0, 1, 2, 3, 4, 5]
+
 export default function ActivityPage() {
   const activity = useActivity()
+  const { activity: activityModel } = useAppServices()
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase())
   const [stateFilter, setStateFilter] = useState<StateFilter>('all')
@@ -30,10 +35,17 @@ export default function ActivityPage() {
     [source, stateFilter, deferredSearch],
   )
   const selected = source.find((request) => request.id === selectedID)
+  const loading = activity.phase === 'loading' && activity.requests.length === 0
+  const failed = activity.phase === 'error'
 
   const togglePause = () => {
     if (!paused) setFrozen(activity.requests)
     setPaused((value) => !value)
+  }
+
+  const openRequest = (id: string) => {
+    setSelectedID(id)
+    setInspectorOpen(true)
   }
 
   return (
@@ -79,61 +91,80 @@ export default function ActivityPage() {
         <Button variant="primary" disabled={!selected} onClick={() => setInspectorOpen(true)}>Details</Button>
       </div>
 
+      {failed ? (
+        <div className={styles.error} role="alert">
+          <span>{activity.error || 'Activity is unavailable'}</span>
+          <Button variant="secondary" onClick={() => void activityModel.connect()}>Retry</Button>
+        </div>
+      ) : null}
+
       <div className={styles.body} data-inspector={Boolean(selected && inspectorOpen)}>
-        <div className={styles.tablePane}>
-          <table className={styles.table}>
+        <div className={styles.tablePane} aria-busy={loading}>
+          {loading ? <p className="sr-only" role="status">Loading live activity…</p> : null}
+          <table className={styles.table} aria-label="Live requests">
             <thead>
               <tr>
-                <th>State</th>
-                <th>Model</th>
-                <th>Route / Provider</th>
-                <th>HTTP</th>
-                <th>Queue</th>
-                <th>Latency</th>
-                <th>Tok/s</th>
-                <th>Context</th>
-                <th>Traffic</th>
-                <th>Time</th>
+                <th scope="col">State</th>
+                <th scope="col">Model</th>
+                <th scope="col">Route / Provider</th>
+                <th scope="col">HTTP</th>
+                <th scope="col">Queue</th>
+                <th scope="col">Latency</th>
+                <th scope="col">Tok/s</th>
+                <th scope="col">Context</th>
+                <th scope="col">Traffic</th>
+                <th scope="col">Time</th>
               </tr>
             </thead>
             <tbody>
-              {requests.map((request) => (
-                <tr
-                  key={request.id}
-                  data-selected={request.id === selectedID}
-                  tabIndex={0}
-                  onClick={() => setSelectedID(request.id)}
-                  onDoubleClick={() => {
-                    setSelectedID(request.id)
-                    setInspectorOpen(true)
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault()
-                      setSelectedID(request.id)
-                      setInspectorOpen(true)
-                    }
-                  }}
-                >
-                  <td><span className={styles.state}><StatusDot state={request.state} />{activityLabels[request.state]}</span></td>
-                  <td title={request.model}>{request.model || '—'}</td>
-                  <td>{request.providerName || '—'}</td>
-                  <td>{request.status || '—'}</td>
-                  <td>{request.queueMs > 0 ? formatDuration(request.queueMs) : '0 ms'}</td>
-                  <td>{formatDuration(request.latencyMs)}</td>
-                  <td>{request.tokensPerSecond > 0 ? formatDecimal(request.tokensPerSecond) : '—'}</td>
-                  <td>{request.contextTokens > 0 ? request.contextTokens.toLocaleString() : '—'}</td>
-                  <td>{formatBytes(request.bytesIn + request.bytesOut)}</td>
-                  <td>{formatClock(request.updatedAt)}</td>
+              {loading ? skeletonRows.map((row) => (
+                <tr key={row} className={styles.skeletonRow} aria-hidden="true">
+                  <td colSpan={10}><span className={styles.skeleton} /></td>
                 </tr>
-              ))}
-              {requests.length === 0 ? (
+              )) : requests.map((request, index) => {
+                const isSelected = request.id === selectedID
+                return (
+                  <tr
+                    key={request.id}
+                    data-selected={isSelected}
+                    data-row=""
+                    aria-selected={isSelected}
+                    tabIndex={isSelected || (selectedID === '' && index === 0) ? 0 : -1}
+                    onClick={() => openRequest(request.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        openRequest(request.id)
+                        return
+                      }
+                      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault()
+                        const rows = [...(event.currentTarget.closest('tbody')?.querySelectorAll<HTMLElement>('tr[data-row]') ?? [])]
+                        const next = rows[rows.indexOf(event.currentTarget) + (event.key === 'ArrowDown' ? 1 : -1)]
+                        next?.focus()
+                      }
+                    }}
+                  >
+                    <td><span className={styles.state}><StatusDot state={request.state} />{activityLabels[request.state]}</span></td>
+                    <td title={request.model}>{request.model || '—'}</td>
+                    <td>{request.providerName || '—'}</td>
+                    <td>{request.status || '—'}</td>
+                    <td>{request.queueMs > 0 ? formatDuration(request.queueMs) : '0 ms'}</td>
+                    <td>{formatDuration(request.latencyMs)}</td>
+                    <td>{request.tokensPerSecond > 0 ? formatDecimal(request.tokensPerSecond) : '—'}</td>
+                    <td>{request.contextTokens > 0 ? request.contextTokens.toLocaleString() : '—'}</td>
+                    <td>{formatBytes(request.bytesIn + request.bytesOut)}</td>
+                    <td>{formatClock(request.updatedAt)}</td>
+                  </tr>
+                )
+              })}
+              {!loading && !failed && requests.length === 0 ? (
                 <tr><td colSpan={10} className={styles.empty}>No requests match the current filters.</td></tr>
               ) : null}
             </tbody>
           </table>
           <footer className={styles.tableFooter}>
-            <span>Showing {requests.length} of {activity.requests.length}</span>
+            <span>{loading ? 'Connecting…' : `Showing ${requests.length} of ${activity.requests.length}`}</span>
             <span>Live buffer · 100 visible</span>
           </footer>
         </div>
@@ -144,8 +175,10 @@ export default function ActivityPage() {
 }
 
 function RequestInspector({ request, onClose }: { request: ActivityRequest; onClose: () => void }) {
+  const dialogRef = useModalFocus<HTMLElement>(onClose)
+  // Non-modal side panel: live updates continue behind it, so modal semantics would lie.
   return (
-    <aside className={styles.inspector} aria-label="Request inspector">
+    <aside ref={dialogRef} className={styles.inspector} role="complementary" aria-label="Request inspector">
       <header>
         <div>
           <h2>Request Inspector</h2>
@@ -183,10 +216,10 @@ function RequestInspector({ request, onClose }: { request: ActivityRequest; onCl
         {request.retries > 0 ? <TimelineRow label="Retried" value={`${request.retries} attempts`} warning /> : null}
         <TimelineRow label={activityLabels[request.state]} value={formatClock(request.updatedAt)} state={request.state} />
       </section>
-      {request.errorCode ? (
+      {request.errorCode || request.errorDetail ? (
         <div className={styles.safeError}>
-          <span>Safe error code</span>
-          <strong>{request.errorCode}</strong>
+          <span>{request.errorCode || 'Error'}</span>
+          <strong>{request.errorDetail || request.errorCode}</strong>
         </div>
       ) : null}
     </aside>

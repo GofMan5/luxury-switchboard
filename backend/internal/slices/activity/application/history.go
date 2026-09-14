@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"math"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/activity/domain"
 )
@@ -36,4 +37,26 @@ type History interface {
 	Recent(context.Context, Period, int) ([]domain.Request, error)
 	Stats(context.Context, Period) (HistoryStats, error)
 	Close(context.Context) error
+}
+
+// ValidPeriod reports whether period names a known history window. Stdio
+// handlers check it first so an unknown period reads as invalid_payload
+// instead of a storage failure.
+func ValidPeriod(period Period) bool {
+	switch period {
+	case Period24H, Period48H, Period72H, PeriodAll:
+		return true
+	default:
+		return false
+	}
+}
+
+// P95Index is the 0-based rank of the p95 element among count sorted
+// latencies. In-memory summaries and the history percentile query share it
+// so both read the same element.
+func P95Index(count int) int {
+	if count < 1 {
+		return 0
+	}
+	return max(int(math.Ceil(float64(count)*0.95))-1, 0)
 }

@@ -18,12 +18,13 @@ type ActivityRetry struct {
 }
 
 type ActivityFinish struct {
-	Status     int
-	BytesOut   int64
-	Cancelled  bool
-	ErrorCode  string
-	Usage      TokenUsage
-	Generation time.Duration
+	Status      int
+	BytesOut    int64
+	Cancelled   bool
+	ErrorCode   string
+	ErrorDetail string
+	Usage       TokenUsage
+	Generation  time.Duration
 }
 
 type TokenUsage struct {

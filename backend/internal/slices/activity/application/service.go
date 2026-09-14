@@ -2,7 +2,6 @@ package application
 
 import (
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -14,6 +13,22 @@ import (
 )
 
 const defaultCapacity = 2_000
+
+const (
+	// Real relay codes (see relay/adapters/http/server.go and the guardrail
+	// verdict): dropping one stores StateFailed with an empty ErrorCode.
+	errCancelled           = "cancelled"
+	errProviderUnavailable = "provider_unavailable"
+	errTransport           = "transport"
+	errUpstreamStatus      = "upstream_status"
+	errStreamIncomplete    = "stream_incomplete"
+	errClientDisconnected  = "client_disconnected"
+	errRequestRejected     = "request_rejected"
+	errImageGeneration     = "image_generation"
+	errPolicyRefusal       = "policy_refusal"
+	errChatCompatibility   = "chat_compatibility"
+	errGuardrailBlocked    = "guardrail_blocked"
+)
 
 var serviceSequence atomic.Uint64
 
@@ -92,6 +107,12 @@ func (service *Service) Finish(id string, value domain.Finish) {
 		request.Status = normalizedStatus(value.Status)
 		request.BytesOut = max(value.BytesOut, 0)
 		request.ErrorCode = cleanError(value.ErrorCode)
+		request.ErrorDetail = cleanErrorDetail(value.ErrorDetail)
+		if request.ErrorCode == "" {
+			// Unknown text must not persist without its code: a dropped
+			// code with a kept detail desyncs history from the relay.
+			request.ErrorDetail = ""
+		}
 		request.InputTokens = max(value.InputTokens, 0)
 		request.OutputTokens = max(value.OutputTokens, 0)
 		request.CachedTokens = min(max(value.CachedTokens, 0), request.InputTokens)
@@ -157,8 +178,7 @@ func (service *Service) Summary(window time.Duration) domain.Summary {
 	}
 	if len(latencies) > 0 {
 		sort.Float64s(latencies)
-		index := max(int(math.Ceil(float64(len(latencies))*0.95))-1, 0)
-		summary.P95MS = latencies[index]
+		summary.P95MS = latencies[P95Index(len(latencies))]
 	}
 	if window > 0 {
 		summary.RPM = float64(summary.Requests) / window.Minutes()
@@ -183,7 +203,7 @@ func (service *Service) update(id string, mutate func(*domain.Request, time.Time
 		return
 	}
 	mutate(&request, service.now().UTC())
-	if _, hidden := service.hidden[id]; hidden && terminal(request.State) {
+	if _, hidden := service.hidden[id]; hidden && domain.IsTerminal(request.State) {
 		delete(service.hidden, id)
 		delete(service.requests, id)
 	} else {
@@ -206,23 +226,19 @@ func (service *Service) trimLocked() {
 	for len(service.order) > service.capacity {
 		index := len(service.order) - 1
 		for candidate := len(service.order) - 1; candidate >= 0; candidate-- {
-			if terminal(service.requests[service.order[candidate]].State) {
+			if domain.IsTerminal(service.requests[service.order[candidate]].State) {
 				index = candidate
 				break
 			}
 		}
 		id := service.order[index]
 		service.order = append(service.order[:index], service.order[index+1:]...)
-		if terminal(service.requests[id].State) {
+		if domain.IsTerminal(service.requests[id].State) {
 			delete(service.requests, id)
 		} else {
 			service.hidden[id] = struct{}{}
 		}
 	}
-}
-
-func terminal(state domain.State) bool {
-	return state == domain.StateCompleted || state == domain.StateFailed || state == domain.StateCancelled
 }
 
 func clean(value string, limit int) string {
@@ -254,9 +270,25 @@ func normalizedStatus(value int) int {
 
 func cleanError(value string) string {
 	switch value {
-	case "cancelled", "provider_unavailable", "transport", "upstream_status", "stream_incomplete", "client_disconnected", "request_rejected", "image_generation":
+	case errCancelled, errProviderUnavailable, errTransport, errUpstreamStatus, errStreamIncomplete,
+		errClientDisconnected, errRequestRejected, errImageGeneration,
+		errPolicyRefusal, errChatCompatibility, errGuardrailBlocked:
 		return value
 	default:
 		return ""
 	}
+}
+
+func cleanErrorDetail(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if (r < 32 && r != '\n' && r != '\r' && r != '\t') || r == 127 {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	runes := []rune(value)
+	if len(runes) > 4096 {
+		return string(runes[:4096])
+	}
+	return value
 }

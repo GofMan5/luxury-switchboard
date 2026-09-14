@@ -611,3 +611,212 @@ func TestDataLinesAreJoinedWithTheNewlineTheSpecNames(t *testing.T) {
 		t.Fatalf("a block the relay cannot read was rewritten anyway:\n%s", got)
 	}
 }
+
+// A strict upstream validates input[].name even when the tool definition is gone:
+// a renamed or removed tool replays at depth (input[326]) with its dotted MCP name
+// and the whole request dies with 400 input[N].name invalid_string. The alias has
+// to be synthesized from history alone and still restore on the way back.
+func TestAHistoryOnlyDottedNameIsAliasedBeforeUpstream(t *testing.T) {
+	body, compat := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(`{
+	 "model":"gpt-test",
+	 "input":[
+	  {"type":"function_call","name":"collaboration.spawn_agent","call_id":"c1","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"c1","output":"done"},
+	  {"type":"custom_tool_call","name":"team/reviewer:check task","call_id":"c2","input":"hi"}
+	 ]}`))
+	var payload struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("normalized request is not valid JSON: %s", body)
+	}
+	if len(payload.Input) != 3 {
+		t.Fatalf("history items were dropped: %s", body)
+	}
+	for _, item := range payload.Input {
+		if name, ok := item["name"].(string); ok && !providerSafeToolName(name) {
+			t.Fatalf("history name reached the provider outside ^[a-zA-Z0-9_-]+$: %q", name)
+		}
+	}
+	first, _ := payload.Input[0]["name"].(string)
+	if first == "collaboration.spawn_agent" {
+		t.Fatalf("dotted history name was forwarded verbatim: %s", body)
+	}
+	if compat.toClient[first] != "collaboration.spawn_agent" {
+		t.Fatalf("history alias is not reversible: %+v", compat.toClient)
+	}
+	third, _ := payload.Input[2]["name"].(string)
+	if compat.toClient[third] != "team/reviewer:check task" {
+		t.Fatalf("unsafe custom history name is not reversible: %+v", compat.toClient)
+	}
+	restored := string(restoreClientToolCalls(
+		[]byte(`{"output":[{"type":"function_call","name":"`+first+`","call_id":"c9","arguments":"{}"}]}`),
+		compat, "/v1/responses", false))
+	if !strings.Contains(restored, `"name":"collaboration.spawn_agent"`) {
+		t.Fatalf("provider alias was not restored for the client: %s", restored)
+	}
+}
+
+// Top-level tools travel verbatim to a strict upstream, so an unsafe tools[].name
+// is the same 400 as a dotted history replay. It has to be aliased before the
+// request leaves, not repaired after the refusal.
+func TestATopLevelUnsafeToolNameIsAliasedBeforeUpstream(t *testing.T) {
+	body, compat := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(`{
+	 "model":"gpt-test",
+	 "tools":[{"type":"function","name":"collaboration.spawn_agent","parameters":{"type":"object"}}],
+	 "input":[{"type":"message","role":"user","content":[]}]}`))
+	var payload struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("normalized request is not valid JSON: %s", body)
+	}
+	if len(payload.Tools) != 1 {
+		t.Fatalf("tool definition was dropped: %s", body)
+	}
+	if !providerSafeToolName(payload.Tools[0].Name) {
+		t.Fatalf("unsafe top-level tool name reached the provider: %q", payload.Tools[0].Name)
+	}
+	if compat.toClient[payload.Tools[0].Name] != "collaboration.spawn_agent" {
+		t.Fatalf("top-level alias is not reversible: %+v", compat.toClient)
+	}
+}
+
+// A declared unsafe name must not mint the verbatim name of an unrelated
+// history-only tool: both would reach the provider under one name for two
+// distinct tools. The safe history name reserves the alias before any alias
+// is minted, whatever order the items arrive in.
+func TestADeclaredAliasDoesNotCollideWithASafeHistoryName(t *testing.T) {
+	body, compat := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(`{
+	 "model":"gpt-test",
+	 "input":[
+	  {"type":"additional_tools","tools":[{"type":"function","name":"a/b"}]},
+	  {"type":"function_call","name":"a_b","call_id":"c0","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"c0","name":"a_b","output":"old"},
+	  {"type":"function_call","name":"a/b","call_id":"c1","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"c1","name":"a/b","output":"new"}
+	 ]}`))
+	var payload struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("normalized request is not valid JSON: %s", body)
+	}
+	if len(payload.Input) != 4 {
+		t.Fatalf("history items were dropped: %s", body)
+	}
+	safeCall, _ := payload.Input[0]["name"].(string)
+	safeOutput, _ := payload.Input[1]["name"].(string)
+	if safeCall != "a_b" || safeOutput != "a_b" {
+		t.Fatalf("safe history names must travel verbatim: %s", body)
+	}
+	aliasedCall, _ := payload.Input[2]["name"].(string)
+	aliasedOutput, _ := payload.Input[3]["name"].(string)
+	if !providerSafeToolName(aliasedCall) || !providerSafeToolName(aliasedOutput) {
+		t.Fatalf("unsafe history names must be aliased: %s", body)
+	}
+	if aliasedCall == "a_b" || aliasedOutput == "a_b" || aliasedCall != aliasedOutput {
+		t.Fatalf("declared and history tools share one provider name: %q vs %q", aliasedCall, safeCall)
+	}
+	if len(aliasedCall) > maxToolNameBytes {
+		t.Fatalf("alias broke the 64-byte documented shape: %q", aliasedCall)
+	}
+	if compat.toClient[aliasedCall] != "a/b" {
+		t.Fatalf("history alias is not reversible: %+v", compat.toClient)
+	}
+	if len(payload.Tools) != 1 || payload.Tools[0].Name != aliasedCall {
+		t.Fatalf("declared tool lost its alias: %+v", payload.Tools)
+	}
+	restored := string(restoreClientToolCalls(
+		[]byte(`{"output":[{"type":"function_call","name":"`+aliasedCall+`","call_id":"c9","arguments":"{}"}]}`),
+		compat, "/v1/responses", false))
+	if !strings.Contains(restored, `"name":"a/b"`) {
+		t.Fatalf("provider alias was not restored for the client: %s", restored)
+	}
+}
+
+// Two distinct originals must never share one provider name: the second alias
+// carries a hash suffix so each restores to its own client name.
+func TestDistinctUnsafeNamesGetDistinctAliases(t *testing.T) {
+	body, compat := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(`{
+	 "model":"gpt-test",
+	 "tools":[
+	  {"type":"function","name":"a/b","parameters":{"type":"object"}},
+	  {"type":"function","name":"a:b","parameters":{"type":"object"}}
+	 ],
+	 "input":[
+	  {"type":"function_call","name":"a/b","call_id":"c1","arguments":"{}"},
+	  {"type":"function_call","name":"a:b","call_id":"c2","arguments":"{}"}
+	 ]}`))
+	var payload struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("normalized request is not valid JSON: %s", body)
+	}
+	if len(payload.Tools) != 2 || payload.Tools[0].Name == payload.Tools[1].Name {
+		t.Fatalf("colliding tool names were not separated: %+v", payload.Tools)
+	}
+	for _, tool := range payload.Tools {
+		if !providerSafeToolName(tool.Name) || len(tool.Name) > maxToolNameBytes {
+			t.Fatalf("alias broke the 64-byte documented shape: %q", tool.Name)
+		}
+	}
+	first, _ := payload.Input[0]["name"].(string)
+	second, _ := payload.Input[1]["name"].(string)
+	if first == "a/b" || second == "a:b" || first == second {
+		t.Fatalf("history collision was not separated: %q vs %q", first, second)
+	}
+	if compat.toClient[first] != "a/b" || compat.toClient[second] != "a:b" {
+		t.Fatalf("colliding aliases do not restore distinctly: %+v", compat.toClient)
+	}
+}
+
+// An empty tool name is already outside the documented shape, and aliasing it
+// would mint a hash that restores to nothing — so replayed history with no
+// name travels untouched instead of gaining an alias. The same holds for a
+// top-level definition with an empty name: it passes verbatim with no minted
+// alias.
+func TestAnEmptyHistoryToolNameIsLeftUntouched(t *testing.T) {
+	body, compat := normalizeResponsesTools(http.MethodPost, "/v1/responses", "application/json", []byte(`{
+	 "model":"gpt-test",
+	 "tools":[{"type":"function","name":"","parameters":{"type":"object"}}],
+	 "input":[
+	  {"type":"function_call","name":"","call_id":"c1","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"c1","name":"","output":"done"},
+	  {"type":"custom_tool_call","name":"","call_id":"c2","input":"hi"},
+	  {"type":"custom_tool_call_output","call_id":"c2","name":"","output":"done"}
+	 ]}`))
+	var payload struct {
+		Tools []map[string]any `json:"tools"`
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("normalized request is not valid JSON: %s", body)
+	}
+	if len(payload.Input) != 4 {
+		t.Fatalf("nameless history items were dropped: %s", body)
+	}
+	for _, item := range payload.Input {
+		if name, hasName := item["name"].(string); hasName && name != "" {
+			t.Fatalf("empty history name gained an alias: %q in %s", name, body)
+		}
+	}
+	if len(payload.Tools) != 1 {
+		t.Fatalf("nameless tool definition was dropped: %s", body)
+	}
+	if name, _ := payload.Tools[0]["name"].(string); name != "" {
+		t.Fatalf("empty definition name gained an alias: %q in %s", name, body)
+	}
+	if len(compat.toClient) != 0 || len(compat.toProvider) != 0 {
+		t.Fatalf("empty names minted aliases that restore to nothing: %+v", compat.toClient)
+	}
+}

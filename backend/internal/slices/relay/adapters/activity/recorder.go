@@ -40,6 +40,7 @@ func (recorder *Recorder) Finish(id string, value relayapp.ActivityFinish) {
 	recorder.service.Finish(id, activitydomain.Finish{
 		Status: value.Status, BytesOut: value.BytesOut,
 		Cancelled: value.Cancelled, ErrorCode: value.ErrorCode,
+		ErrorDetail: value.ErrorDetail,
 		InputTokens: value.Usage.InputTokens, OutputTokens: value.Usage.OutputTokens,
 		CachedTokens: value.Usage.CachedTokens, ReasoningTokens: value.Usage.ReasoningTokens,
 		TotalTokens: value.Usage.TotalTokens, ContextTokens: value.Usage.ContextTokens,

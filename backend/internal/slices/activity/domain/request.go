@@ -12,6 +12,13 @@ const (
 	StateCancelled State = "cancelled"
 )
 
+// IsTerminal reports whether a request reached a final state and will not
+// change again. Memory trimming and history persistence share it so a state
+// added here cannot leak into one path and not the other.
+func IsTerminal(state State) bool {
+	return state == StateCompleted || state == StateFailed || state == StateCancelled
+}
+
 type Request struct {
 	ID              string    `json:"id"`
 	StartedAt       time.Time `json:"startedAt"`
@@ -29,6 +36,7 @@ type Request struct {
 	BytesIn         int64     `json:"bytesIn"`
 	BytesOut        int64     `json:"bytesOut"`
 	ErrorCode       string    `json:"errorCode,omitempty"`
+	ErrorDetail     string    `json:"errorDetail,omitempty"`
 	InputTokens     int64     `json:"inputTokens"`
 	OutputTokens    int64     `json:"outputTokens"`
 	CachedTokens    int64     `json:"cachedTokens"`
@@ -59,6 +67,7 @@ type Finish struct {
 	BytesOut        int64
 	Cancelled       bool
 	ErrorCode       string
+	ErrorDetail     string
 	InputTokens     int64
 	OutputTokens    int64
 	CachedTokens    int64

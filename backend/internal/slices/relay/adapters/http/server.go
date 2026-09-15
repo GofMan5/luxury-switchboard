@@ -684,7 +684,16 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 }
 
 func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool) (*http.Response, error) {
+	// Each failure class below spends its own PermanentAttempts budget:
+	// requestFailures counts rejections of this payload, serverFailures plain 5xx
+	// answers, and credentialFailures key rotations (bounded by the pool size
+	// instead whenever the source reports one). A mixed sequence can therefore
+	// spend up to one budget per class before the request ends. That is
+	// deliberate, not a leak: a rotation must not eat the retries a flapping
+	// upstream still deserves, and sharing one counter would couple rotation (a
+	// per-key decision) to payload and upstream verdicts it has nothing to do with.
 	requestFailures := 0
+	serverFailures := 0
 	credentialFailures := 0
 	streamFailures := 0
 	fallbackActive := false
@@ -895,6 +904,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			return response, nil
 		}
 
+		// A 429 or 529 needs no prose: the status alone is the throttle verdict, so
+		// the key rotates without paying for a body read and scan. Draining (not
+		// reading) keeps the connection reusable without retaining the body.
 		if status == http.StatusTooManyRequests || status == 529 {
 			delay := retryDelay(attempt, response, server.config)
 			finishLease(lease, relayapp.AttemptOutcome{
@@ -910,10 +922,34 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		}
 
-		if status == http.StatusRequestTimeout || status >= 500 {
+		// Error branches classify on prose, so the body is read once here and
+		// lowered once for the classifiers below. A 402 never reaches the rate
+		// branch: the provider's billing verdict stays authoritative even when
+		// its prose mentions limits (see balanceUnavailable).
+		errorBody := readErrorBody(response)
+		failureText := normalizeErrorText(errorBody)
+		rateLimited := rateLimitedText(failureText)
+		if status != http.StatusPaymentRequired && rateLimited {
+			delay := retryDelay(attempt, response, server.config)
+			finishLease(lease, relayapp.AttemptOutcome{
+				Kind: relayapp.AttemptRateLimited, RetryAfter: delay,
+			})
+			if !canRetry(attempt, attemptLimit) {
+				return genericErrorResponse(status), nil
+			}
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		// A 408 is a transient timeout, not a deterministically failing upstream:
+		// the request simply never got an answer, so it retries on the attempt
+		// ceiling like a transport failure instead of spending the
+		// permanent-attempt budget a 5xx that answers out loud spends.
+		if status == http.StatusRequestTimeout {
 			delay := retryDelay(attempt, response, server.config)
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
-			drainResponse(response)
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
@@ -924,7 +960,27 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		}
 
-		errorBody := readErrorBody(response)
+		if status >= 500 {
+			delay := retryDelay(attempt, response, server.config)
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
+			serverFailures++
+			// A 5xx without a rate-limit verdict is a deterministically failing
+			// upstream, not a queue to wait in: it retries on the
+			// permanent-attempt budget like every other failure the relay
+			// answers out loud, instead of burning the full 64-attempt ceiling
+			// with backoff per request. Transport errors and 408s keep that
+			// ceiling — a dropped socket or a timed-out wait says nothing about
+			// the next attempt.
+			if serverFailures >= server.config.PermanentAttempts || !canRetry(attempt, attemptLimit) {
+				return genericErrorResponse(status), nil
+			}
+			server.observeRetry(activityID, attempt, status, delay)
+			if err := waitRetry(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		// A refusal is the provider's verdict on this exact payload, so none of the
 		// repairs below apply to it and neither does the next key: stripping reasoning
 		// or downgrading tools resends the same content, and the plain retry after
@@ -957,7 +1013,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 		}
 		switch {
-		case balanceUnavailable(status, errorBody):
+		case balanceUnavailable(status, errorBody, rateLimited):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
@@ -2111,14 +2167,68 @@ func modelUnavailable(body []byte, model string) bool {
 			strings.Contains(text, "not available for your account"))
 }
 
-func balanceUnavailable(status int, body []byte) bool {
+// errorTextReplacer unpunctuates error prose for the classifiers below. One
+// compiled replacer for every failed attempt instead of one per check.
+var errorTextReplacer = strings.NewReplacer("_", " ", "-", " ")
+
+// normalizeErrorText lowers an error body once for the classifiers below. Every
+// failed attempt used to pay this lowering-plus-unpunctuation pass per check
+// (rate, then balance, then balance's own inner rate check); now the retry path
+// pays it once and hands the result down.
+//
+// Only the rate/balance verdicts share it. policyRefused and the repair matchers
+// keep reading the raw body: their markers name identifiers with underscores
+// ("invalid_prompt", "max_completion_tokens") that this pass turns into spaces.
+func normalizeErrorText(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	return errorTextReplacer.Replace(strings.ToLower(string(body)))
+}
+
+// billingExhaustionMarkers name a spent account rather than a throttled key: the
+// quota is gone until the next billing period, so the key waits out the midnight
+// ban instead of rotating through the pool on a short cooldown. They win over any
+// rate wording — "You exceeded your current quota, please check your plan"
+// carries "exceeded" plus "quota" and used to read as throttling, retrying every
+// key for an account that has nothing left.
+//
+// Bare "sufficient"/"insufficient" is deliberately not one of them: it also
+// matches "insufficient permissions", a 403 about access rather than money that
+// must keep rotating as an authentication failure instead of banning the key
+// until midnight. The "insufficient balance/funds/quota" markers below already
+// cover genuine billing exhaustion worded that way.
+var billingExhaustionMarkers = []string{
+	"billing period",
+	"current quota",
+	"check your plan",
+	"check your billing",
+	"billing details",
+	"top up",
+	"topup",
+}
+
+func balanceUnavailable(status int, body []byte, rateLimited bool) bool {
 	if status == http.StatusPaymentRequired {
+		// A 402 is the provider's billing verdict and stays authoritative even
+		// when the prose around it mentions limits.
 		return true
 	}
 	if status < 400 || status >= 500 || len(body) == 0 {
 		return false
 	}
-	text := strings.NewReplacer("_", " ", "-", " ").Replace(strings.ToLower(string(body)))
+	text := normalizeErrorText(body)
+	for _, marker := range billingExhaustionMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	// rateLimited is the verdict the caller already computed on this same body:
+	// taking it as a parameter keeps this check to its own single scan instead
+	// of re-running the rate classifier (and its normalization) from scratch.
+	if rateLimited {
+		return false
+	}
 	for _, marker := range []string{
 		"insufficient balance", "insufficient funds", "insufficient quota",
 		"not enough balance", "balance is too low", "balance too low", "balance exhausted",
@@ -2126,6 +2236,63 @@ func balanceUnavailable(status int, body []byte) bool {
 	} {
 		if strings.Contains(text, marker) {
 			return true
+		}
+	}
+	return false
+}
+
+// rateLimitedBody reports whether an error body carries a rate-limit verdict
+// rather than any other failure. The signal wins over every other
+// classification except billing: a 503 that says "rate limit" is a throttled key,
+// not a dead server (blind 5xx retries burned 64 attempts per request while the
+// heartbeat held the client stream open), and a 4xx with quota wording is a
+// throttled key, not a dead balance (which bans the key until Moscow midnight,
+// shown in the UI as a ~1200-minute cooldown). A 402 never reaches this check on
+// the retry path — the provider's billing verdict stays authoritative even when
+// its prose mentions limits. Genuine billing exhaustion (billing-period and
+// "check your plan" wording, "insufficient balance/funds/quota" with no rate
+// wording) and content-policy verdicts deliberately do not match, so none of
+// them is downgraded to a retry.
+func rateLimitedBody(body []byte) bool {
+	return rateLimitedText(normalizeErrorText(body))
+}
+
+// rateLimitedText is rateLimitedBody on prose the caller already normalized, so a
+// failed attempt pays the lowering pass once no matter how many classifiers read it.
+func rateLimitedText(text string) bool {
+	if text == "" {
+		return false
+	}
+	// Billing exhaustion borrows quota wording ("You exceeded your current quota,
+	// please check your plan"), so it is excluded before any rate marker runs.
+	for _, marker := range billingExhaustionMarkers {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"rate limit", "ratelimit",
+		"too many requests",
+		"throttl",
+		"request limit",
+		"quota exceeded",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	// "you have exceeded your request/quota/..." states the verb before the
+	// noun, so the check is ordered: "exceed" first, then what was exceeded.
+	// "limit" is not one of those nouns on purpose: by itself it also matches
+	// permanent caps on this payload ("input exceeds token limit", "context size
+	// exceeds limit"), and matching those rotated keys to the ceiling for a
+	// request no key can serve.
+	if index := strings.Index(text, "exceed"); index >= 0 {
+		rest := text[index+len("exceed"):]
+		for _, noun := range []string{"request", "rate", "quota"} {
+			if strings.Contains(rest, noun) {
+				return true
+			}
 		}
 	}
 	return false

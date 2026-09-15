@@ -716,8 +716,17 @@ func TestStreamingPermanentErrorEndsWithDialectTerminal(t *testing.T) {
 }
 
 func TestBalanceErrorsIncludePaymentAndLocalizedMarkers(t *testing.T) {
-	if !balanceUnavailable(http.StatusPaymentRequired, nil) || !balanceUnavailable(http.StatusForbidden, []byte(`{"error":"Недостаточный баланс"}`)) || balanceUnavailable(http.StatusBadRequest, []byte(`{"error":"bad prompt"}`)) {
+	if !balanceUnavailable(http.StatusPaymentRequired, nil, false) || !balanceUnavailable(http.StatusForbidden, []byte(`{"error":"Недостаточный баланс"}`), false) || balanceUnavailable(http.StatusBadRequest, []byte(`{"error":"bad prompt"}`), false) {
 		t.Fatal("balance error classification is incomplete")
+	}
+	// Billing-period exhaustion borrows quota wording but waits for the next
+	// period, not a throttle window: it bans the key, never throttles it.
+	billing := []byte(`{"error":{"message":"You exceeded your current quota, please check your plan and billing details"}}`)
+	if rateLimitedBody(billing) {
+		t.Fatal("billing-period exhaustion was filed as a rate limit")
+	}
+	if !balanceUnavailable(http.StatusForbidden, billing, rateLimitedBody(billing)) {
+		t.Fatal("billing-period exhaustion did not ban the key")
 	}
 }
 
@@ -741,6 +750,316 @@ func TestBalanceErrorRotatesKeyBeforeAuthenticationCooldown(t *testing.T) {
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || len(credentials.outcomes) < 2 || credentials.outcomes[0].Kind != relayapp.AttemptBalanceExhausted {
 		t.Fatalf("balance key was misclassified: status=%d outcomes=%+v", response.Code, credentials.outcomes)
+	}
+}
+
+// A 503 that says "rate limit" is a rate limit, not a dead server. The relay
+// used to file it under the generic 5xx branch and burn the full 64-attempt
+// ceiling with backoff per request while the heartbeat held the client stream
+// open; the client then retried the failed request, which read as an infinite
+// loop in history (2319 rows at status 503, up to 63 retries each).
+func TestRateLimited503IsNotHammeredAsServerError(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Retry-After", "120")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":{"message":"Rate limit exceeded for gpt-test, please retry"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: 50 * time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+		AttemptLimit: 3,
+	})
+	if err != nil || response.Status != http.StatusServiceUnavailable || attempts != 3 {
+		t.Fatalf("rate-limited 503 did not stop at the attempt limit: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+	if len(credentials.outcomes) == 0 || credentials.outcomes[0].Kind != relayapp.AttemptRateLimited {
+		t.Fatalf("rate-limited 503 was not filed as a rate limit: %+v", credentials.outcomes)
+	}
+	// Retry-After: 120 parsed but capped at RetryMax, so the scheduler half of
+	// the cooldown (min(delay, 1 minute)) can never see more than a minute.
+	if credentials.outcomes[0].RetryAfter != 50*time.Millisecond {
+		t.Fatalf("Retry-After was not honored within its cap: %s", credentials.outcomes[0].RetryAfter)
+	}
+}
+
+// A 4xx carrying quota wording with a rate-limit meaning must not kill the key
+// until Moscow midnight. The gateway-normalized "insufficient_quota" on a 403
+// matched the balance markers and banned a merely throttled key for ~20h,
+// which the Keys UI then showed as a ~1200-minute cooldown.
+func TestQuotaWordedRateLimitIsNotABalanceDeath(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts++
+		if request.Header.Get("Authorization") == "Bearer limited-key" {
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your request quota, rate limit reached"}}`))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"limited-key", "fresh-key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusOK || attempts != 2 {
+		t.Fatalf("throttled key was not rotated past: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+	if len(credentials.outcomes) < 2 || credentials.outcomes[0].Kind != relayapp.AttemptRateLimited {
+		t.Fatalf("quota-worded rate limit was filed as a balance death: %+v", credentials.outcomes)
+	}
+}
+
+// A genuine balance exhaustion still bans the key: 402 is the provider's
+// billing verdict, so it stays authoritative even if the prose around it
+// mentions limits. This locks the other half of the guard above.
+func TestRealBalanceExhaustionStillBansTheKey(t *testing.T) {
+	if !balanceUnavailable(http.StatusPaymentRequired, []byte(`{"error":"insufficient_balance"}`), false) {
+		t.Fatal("a 402 for insufficient balance stopped banning the key")
+	}
+	// The bool is the caller's precomputed rate verdict: even filed as throttled,
+	// a 402 stays the provider's billing verdict.
+	if balanceUnavailable(http.StatusPaymentRequired, []byte(`{"error":"rate limit exceeded"}`), true) != true {
+		t.Fatal("a 402 stopped being authoritative over rate-limit prose")
+	}
+	if balanceUnavailable(http.StatusForbidden, []byte(`{"error":"rate limit exceeded"}`), true) {
+		t.Fatal("rate-limit prose on a non-402 still reads as a balance death")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusPaymentRequired)
+		_, _ = writer.Write([]byte(`{"error":"insufficient_balance"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"empty-key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusPaymentRequired {
+		t.Fatalf("balance exhaustion did not surface: status=%d err=%v", response.Status, err)
+	}
+	if len(credentials.outcomes) == 0 || credentials.outcomes[0].Kind != relayapp.AttemptBalanceExhausted {
+		t.Fatalf("balance exhaustion was misclassified: %+v", credentials.outcomes)
+	}
+}
+
+// A 402 with rate-limit prose is still the provider's billing verdict: the rate
+// branch must not run before the balance check, or the spent key rotates on a
+// short cooldown instead of banning until midnight.
+func TestPaymentRequiredWithRateProseStillBansTheKey(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusPaymentRequired)
+		_, _ = writer.Write([]byte(`{"error":{"message":"Rate limit exceeded for gpt-test, slow down"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"empty-key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusPaymentRequired {
+		t.Fatalf("balance exhaustion did not surface: status=%d err=%v", response.Status, err)
+	}
+	if len(credentials.outcomes) == 0 || credentials.outcomes[0].Kind != relayapp.AttemptBalanceExhausted {
+		t.Fatalf("a 402 with rate prose was filed as throttling: %+v", credentials.outcomes)
+	}
+}
+
+// Billing-period exhaustion borrows quota wording but is not throttling: the
+// account is spent until the next period, so the key bans until midnight instead
+// of rotating through the pool on a short cooldown.
+func TestBillingPeriodExhaustionBansTheKeyInsteadOfThrottling(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"message":"You exceeded your current quota, please check your plan and billing details"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"empty-key", "fresh-key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden || attempts != 2 {
+		t.Fatalf("billing exhaustion did not rotate past the spent key: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+	if len(credentials.outcomes) == 0 || credentials.outcomes[0].Kind != relayapp.AttemptBalanceExhausted {
+		t.Fatalf("billing exhaustion was filed as throttling: %+v", credentials.outcomes)
+	}
+}
+
+// A 5xx with no rate-limit signal is a deterministically failing upstream, not
+// a queue to wait in. It used to burn all 64 attempts (up to ~30 minutes with
+// backoff) before failing; now it spends the permanent-attempt budget, the same
+// as every other failure the relay answers out loud.
+func TestPersistent503FailsFastOnPermanentBudget(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":"upstream exploded"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "local", BaseURL: parsed, AuthMode: "passthrough"}},
+		Credentials: &credentialSource{values: []string{""}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "local", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusServiceUnavailable || attempts != 2 {
+		t.Fatalf("persistent 503 did not fail fast: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+}
+
+// A 408 is a wait that timed out, not an answer: it retries on the attempt
+// ceiling like a transport failure instead of spending the permanent-attempt
+// budget a 5xx that answers out loud spends. With a budget of 2 and a ceiling
+// of 5, a persistent 408 must travel all 5 attempts.
+func TestPersistent408RetriesOnTheAttemptCeiling(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusRequestTimeout)
+		_, _ = writer.Write([]byte(`{"error":"request timeout"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{""}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "local", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+		AttemptLimit: 5,
+	})
+	if err != nil || response.Status != http.StatusRequestTimeout || attempts != 5 {
+		t.Fatalf("persistent 408 did not ride the attempt ceiling: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+	for _, outcome := range credentials.outcomes {
+		if outcome.Kind != relayapp.AttemptServerError {
+			t.Fatalf("timed-out attempt was filed as %+v", outcome)
+		}
+	}
+}
+
+// Failure classes spend their own PermanentAttempts budgets, so a mixed
+// sequence outlives any single one: with a budget of 2, 422/503/422 spends the
+// request budget twice and the server budget once before the second 422 ends it.
+func TestMixedPermanentFailuresSpendOneBudgetPerClass(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts%2 == 0 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte(`{"error":"upstream exploded"}`))
+			return
+		}
+		writer.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = writer.Write([]byte(`{"error":"bad payload"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "local", BaseURL: parsed, AuthMode: "passthrough"}},
+		Credentials: &credentialSource{values: []string{""}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "local", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusUnprocessableEntity || attempts != 3 {
+		t.Fatalf("mixed permanent failures did not spend one budget per class: status=%d attempts=%d err=%v", response.Status, attempts, err)
+	}
+}
+
+// The rate-limit classifier must catch throttling prose in any spelling while
+// leaving alone the texts it must never steal: genuine billing exhaustion
+// (which bans the key until midnight), permanent caps on this payload (which no
+// key can serve), and content-policy verdicts (which end the request at once).
+// A bare "insufficient_quota" with no rate wording stays a billing problem, not
+// a rate limit. A quota "for this billing period" is billing exhaustion too —
+// it waits for the next period, not a throttle window — even though it says
+// "quota exceeded".
+func TestRateLimitedBodyMatchesOnlyRateLanguage(t *testing.T) {
+	matches := []string{
+		`{"error":"Rate limit exceeded for gpt-test"}`,
+		`{"error":{"code":"RateLimitExceeded"}}`,
+		`{"error":"rate_limit_exceeded"}`,
+		`{"error":"too many requests"}`,
+		`{"error":"request throttled, slow down"}`,
+		`{"error":"request limit reached"}`,
+		`{"error":"you have exceeded your request quota"}`,
+		`{"error":"you have exceeded rate limit, please try again later"}`,
+	}
+	for _, body := range matches {
+		if !rateLimitedBody([]byte(body)) {
+			t.Fatalf("rate-limit prose was missed: %s", body)
+		}
+	}
+	misses := []string{
+		``,
+		`{"error":"bad prompt"}`,
+		`{"error":"insufficient_balance"}`,
+		`{"error":"insufficient funds, please top up"}`,
+		`{"error":{"code":"insufficient_quota"}}`,
+		`{"error":"quota exceeded for this billing period"}`,
+		`{"error":"You exceeded your current quota, please check your plan and billing details"}`,
+		`{"error":{"message":"Input exceeds token limit"}}`,
+		`{"error":{"message":"context size exceeds limit for this model"}}`,
+		`{"error":"content policy violation"}`,
+		`{"error":"this model does not exist"}`,
+	}
+	for _, body := range misses {
+		if rateLimitedBody([]byte(body)) {
+			t.Fatalf("non-rate prose was filed as a rate limit: %s", body)
+		}
 	}
 }
 

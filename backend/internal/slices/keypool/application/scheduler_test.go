@@ -210,3 +210,83 @@ func TestQueueCallbackFiresOnceWhileWaitingForRPM(t *testing.T) {
 		t.Fatalf("queue callback count=%d", queued)
 	}
 }
+
+// A rotation takes a free key without queueing, and reports a miss instead of
+// waiting when the pool has nothing dispatchable.
+func TestTryAcquireTakesWithoutQueueingAndMissesOnCooldown(t *testing.T) {
+	scheduler := NewScheduler(10)
+	clock := time.Now()
+	scheduler.now = func() time.Time { return clock }
+	primary := testKey(t, "echo", "Primary", "primary-secret", 0, 0)
+	fallback := testKey(t, "echo", "Fallback", "fallback-secret", 1, 0)
+	if err := scheduler.Configure("echo", 0, 0, []domain.Key{primary, fallback}); err != nil {
+		t.Fatal(err)
+	}
+	first, ok := scheduler.TryAcquire("echo", "model")
+	if !ok || first.Key().ID != primary.ID {
+		t.Fatalf("free key was not taken: ok=%v", ok)
+	}
+	// A cooled key is not dispatchable: the rotation ends instead of waiting
+	// for the cooldown to lapse.
+	first.Finish(domain.Outcome{Kind: domain.OutcomeRateLimited, RetryAfter: time.Minute})
+	second, ok := scheduler.TryAcquire("echo", "model")
+	if !ok || second.Key().ID != fallback.ID {
+		t.Fatalf("rotation did not fall through to the free key: ok=%v", ok)
+	}
+	second.Finish(domain.Outcome{Kind: domain.OutcomeRateLimited, RetryAfter: time.Minute})
+	if _, ok := scheduler.TryAcquire("echo", "model"); ok {
+		t.Fatal("a fully cooled pool must miss, not park")
+	}
+	clock = clock.Add(time.Minute)
+	if _, ok := scheduler.TryAcquire("echo", "model"); !ok {
+		t.Fatal("lapsed cooldown did not free the pool")
+	}
+}
+
+// A rotation never jumps the fair queue: with another request waiting on the
+// provider, even a free key is a miss.
+func TestTryAcquireMissesWhileAnotherRequestWaits(t *testing.T) {
+	scheduler := NewScheduler(10)
+	first := testKey(t, "echo", "First", "first-secret", 0, 0)
+	second := testKey(t, "echo", "Second", "second-secret", 1, 0)
+	if err := scheduler.Configure("echo", 0, 0, []domain.Key{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	// Block both keys for this model only, so they stay dispatchable for any
+	// other model while a waiter parks on the blocked one.
+	for range 2 {
+		lease, _, err := scheduler.Acquire(context.Background(), "echo", "model-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		lease.Finish(domain.Outcome{Kind: domain.OutcomeModelUnavailable, Model: "model-a"})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		acquired, _, err := scheduler.Acquire(ctx, "echo", "model-a")
+		if err != nil {
+			return
+		}
+		acquired.Finish(domain.Outcome{Kind: domain.OutcomeSuccess})
+	}()
+	// The waiter registers before its first wait; without it the assertion
+	// below could run before the queue exists.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		scheduler.mu.Lock()
+		queued := len(scheduler.waiters)
+		scheduler.mu.Unlock()
+		if queued > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := scheduler.TryAcquire("echo", "model-b"); ok {
+		t.Fatal("rotation jumped a queued request")
+	}
+	cancel()
+	<-done
+}

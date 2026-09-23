@@ -200,6 +200,44 @@ func (lease *Lease) Key() domain.Key {
 	return lease.key
 }
 
+// TryAcquire takes a key only if one is dispatchable right now, without
+// queueing. The relay uses it when it is already rotating on a credential
+// rejection: the first attempt waited its fair turn, but parking every
+// rotation on the cooldowns other requests left behind turned one refused
+// request into tens of minutes of queueing (measured: 11 keys, 41 minutes).
+// A miss means the request ends on the rejection it already holds instead of
+// waiting for another key.
+func (scheduler *Scheduler) TryAcquire(providerID, model string) (*Lease, bool) {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	now := scheduler.now()
+	provider := scheduler.providers[providerID]
+	if provider == nil || len(provider.keys) == 0 {
+		return nil, false
+	}
+	// Never jump the fair queue: a rotation takes a free key only when nobody
+	// else is waiting on this provider.
+	for _, pending := range scheduler.waiters {
+		if pending.providerID == providerID {
+			return nil, false
+		}
+	}
+	scheduler.pruneLocked(provider, now)
+	if !rateAvailable(provider.starts, provider.rpm) {
+		return nil, false
+	}
+	key := selectKey(provider, model, now)
+	if key == nil {
+		return nil, false
+	}
+	provider.starts = append(provider.starts, now)
+	key.starts = append(key.starts, now)
+	return &Lease{
+		scheduler: scheduler, providerID: providerID,
+		keyID: key.key.ID, key: key.key,
+	}, true
+}
+
 func (lease *Lease) Finish(outcome domain.Outcome) {
 	lease.once.Do(func() {
 		lease.scheduler.finish(lease.providerID, lease.keyID, outcome)

@@ -702,15 +702,34 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	// still billed, so its tokens belong to the request even though nobody read it.
 	discarded := relayapp.TokenUsage{}
 	model := requestModel(body, incoming.Header.Get("Content-Type"))
+	// rotateImmediate carries a credential rotation into the next iteration
+	// without queueing: the rotation takes over only from a key that is free
+	// right now, and rotationStatus is the rejection it ends on when none is.
+	rotateImmediate := false
+	rotationStatus := http.StatusBadGateway
 	for attempt := 0; ; attempt++ {
-		lease, credential, waited, err := server.acquireCredential(ctx, route, model, func() { server.activity.Waiting(activityID) })
-		if err != nil {
-			return nil, err
+		var lease relayapp.CredentialLease
+		var credential relayapp.Credential
+		if rotateImmediate {
+			rotateImmediate = false
+			var ok bool
+			lease, credential, ok = server.tryAcquireCredential(route, model)
+			if !ok {
+				return genericErrorResponse(rotationStatus), nil
+			}
+			server.activity.Resume(activityID, 0)
+		} else {
+			var waited time.Duration
+			var err error
+			lease, credential, waited, err = server.acquireCredential(ctx, route, model, func() { server.activity.Waiting(activityID) })
+			if err != nil {
+				return nil, err
+			}
+			server.activity.Resume(activityID, waited)
 		}
 		if onCredential != nil {
 			onCredential(credential)
 		}
-		server.activity.Resume(activityID, waited)
 		upstream, err := buildUpstreamRequest(ctx, incoming, body, route, credential.Value)
 		if err != nil {
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
@@ -1023,27 +1042,47 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				return nil, err
 			}
 			continue
-		case status == http.StatusUnauthorized || status == http.StatusForbidden:
-			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication})
-			credentialFailures++
-			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
-				return genericErrorResponse(status), nil
-			}
-			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
-				return nil, err
-			}
-			continue
-		case status == http.StatusNotFound && modelMissing(errorBody, model):
+		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelMissing(errorBody, model):
 			// The provider does not host the model at all. Retrying is pointless
 			// and blocking the keys would only stall the next request as well.
+			// Some gateways answer this with 403 rather than 404, so the check
+			// runs before the authentication rotation below.
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			return genericErrorResponse(status), nil
-		case status == http.StatusNotFound && modelUnavailable(errorBody, model):
+		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelUnavailable(errorBody, model):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
 				return genericErrorResponse(status), nil
 			}
+			// Same rule as the authentication rotation below: the next attempt
+			// takes over only from a key that is free right now instead of
+			// parking on the model blocks other requests left behind.
+			rotateImmediate = true
+			rotationStatus = status
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+				return nil, err
+			}
+			continue
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			// The first refusal cools the key that produced it. A second refusal
+			// inside the same request is evidence about the verdict, not the key:
+			// every key answers the same way, so the key stays usable for other
+			// requests and only this one pays.
+			if credentialFailures == 0 {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication})
+			} else {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			}
+			credentialFailures++
+			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
+				return genericErrorResponse(status), nil
+			}
+			// The rotation takes over only from a key that is free right now.
+			// Parking it on the cooldowns other requests left behind is what
+			// turned one refused answer into tens of minutes of queueing.
+			rotateImmediate = true
+			rotationStatus = status
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
 				return nil, err
 			}
@@ -1295,6 +1334,23 @@ func (server *Server) acquireCredential(ctx context.Context, route relayapp.Rout
 		return nil, relayapp.Credential{}, waited, err
 	}
 	return lease, lease.Credential(), waited, nil
+}
+
+// tryAcquireCredential takes the next rotation key without queueing.
+// Passthrough routes hold no keys, so there is nothing to wait on and the
+// rotation always proceeds.
+func (server *Server) tryAcquireCredential(route relayapp.Route, model string) (relayapp.CredentialLease, relayapp.Credential, bool) {
+	if route.AuthMode == "passthrough" {
+		return nil, relayapp.Credential{}, true
+	}
+	if server.credentials == nil {
+		return nil, relayapp.Credential{}, false
+	}
+	lease, ok := server.credentials.TryAcquire(route.ProviderID, model)
+	if !ok {
+		return nil, relayapp.Credential{}, false
+	}
+	return lease, lease.Credential(), true
 }
 
 func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
@@ -2154,9 +2210,15 @@ func modelMissing(body []byte, model string) bool {
 	return false
 }
 
-// modelUnavailable reports a 404 the account, not the catalogue, is responsible
-// for: the model exists but this key may not call it. Another key can succeed,
-// so the request rotates through the pool.
+// modelUnavailable reports a 404 or 403 the account, not the catalogue, is
+// responsible for: the model exists but this key may not call it. Another key
+// can succeed, so the request rotates through the pool.
+//
+// A 403 carries the same verdict on reseller gateways: the token is valid but
+// not entitled to the model (measured: `403 该令牌无权访问模型 gpt-5`). It is
+// still a rotation rather than a refusal, because another account's key may
+// hold the entitlement — but it blocks the model, not the key, so the key
+// stays usable for everything else.
 func modelUnavailable(body []byte, model string) bool {
 	if model == "" || len(body) == 0 {
 		return false
@@ -2164,7 +2226,12 @@ func modelUnavailable(body []byte, model string) bool {
 	text := strings.ToLower(string(body))
 	return strings.Contains(text, strings.ToLower(model)) &&
 		(strings.Contains(text, "not available on your plan") ||
-			strings.Contains(text, "not available for your account"))
+			strings.Contains(text, "not available for your account") ||
+			strings.Contains(text, "no access") ||
+			strings.Contains(text, "access denied") ||
+			strings.Contains(text, "not entitled") ||
+			strings.Contains(text, "forbidden") ||
+			strings.Contains(text, "无权"))
 }
 
 // errorTextReplacer unpunctuates error prose for the classifiers below. One

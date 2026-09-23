@@ -50,6 +50,13 @@ func (source *countingCredentials) Acquire(context.Context, string, string, func
 	return &countedLease{source: source}, 0, nil
 }
 
+func (source *countingCredentials) TryAcquire(string, string) (relayapp.CredentialLease, bool) {
+	source.mutex.Lock()
+	source.acquired++
+	source.mutex.Unlock()
+	return &countedLease{source: source}, true
+}
+
 func (source *countingCredentials) counts() (int, int) {
 	source.mutex.Lock()
 	defer source.mutex.Unlock()

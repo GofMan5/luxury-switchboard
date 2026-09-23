@@ -38,6 +38,7 @@ type credentialSource struct {
 	values   []string
 	proxyURL string
 	calls    int
+	tryCalls int
 	outcomes []relayapp.AttemptOutcome
 }
 
@@ -75,12 +76,28 @@ func (source delayedCredentialSource) Acquire(ctx context.Context, _, _ string, 
 	}
 }
 
+// TryAcquire misses: a queued credential is by definition not free right now.
+func (source delayedCredentialSource) TryAcquire(string, string) (relayapp.CredentialLease, bool) {
+	return nil, false
+}
+
 func (source *credentialSource) Acquire(context.Context, string, string, func()) (relayapp.CredentialLease, time.Duration, error) {
 	source.mu.Lock()
 	value := source.values[min(source.calls, len(source.values)-1)]
 	source.calls++
 	source.mu.Unlock()
 	return &credentialLease{source: source, value: value, proxyURL: source.proxyURL}, 0, nil
+}
+
+// TryAcquire never parks in tests: the fake pool is always free, the way a
+// healthy scheduler is, so rotations take the next value immediately.
+func (source *credentialSource) TryAcquire(string, string) (relayapp.CredentialLease, bool) {
+	source.mu.Lock()
+	value := source.values[min(source.calls, len(source.values)-1)]
+	source.calls++
+	source.tryCalls++
+	source.mu.Unlock()
+	return &credentialLease{source: source, value: value, proxyURL: source.proxyURL}, true
 }
 
 type credentialLease struct {
@@ -544,6 +561,24 @@ func TestPlanSpecificModelUnavailableErrorIsClassified(t *testing.T) {
 	if modelMissing(body, "gpt-5.6-sol") {
 		t.Fatal("a plan restriction was mistaken for a missing model")
 	}
+	// Reseller gateways refuse with 403 instead of 404, in English or Chinese.
+	for _, prose := range []string{
+		`{"error":{"message":"Token has no access to model gpt-6-astra"}}`,
+		`{"error":{"message":"Access denied for model gpt-6-astra"}}`,
+		`{"error":{"message":"该令牌无权访问模型 gpt-6-astra"}}`,
+	} {
+		if !modelUnavailable([]byte(prose), "gpt-6-astra") {
+			t.Fatalf("entitlement refusal was not classified: %s", prose)
+		}
+		if modelMissing([]byte(prose), "gpt-6-astra") {
+			t.Fatalf("an entitlement refusal was mistaken for a missing model: %s", prose)
+		}
+	}
+	// A bare 403 names no model, so it stays an authentication rotation.
+	bare := []byte(`{"error":"invalid credential"}`)
+	if modelUnavailable(bare, "gpt-6-astra") || modelMissing(bare, "gpt-6-astra") {
+		t.Fatal("a bare 403 was classified as a model verdict")
+	}
 }
 
 // A model the provider does not host cannot appear on another key. The relay
@@ -601,6 +636,197 @@ func TestCredentialRejectionStopsAfterEveryKeyAnswered(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("expected one attempt per key, saw %d", attempts)
+	}
+}
+
+// A 403 that says the model is not hosted is terminal like its 404 twin: no
+// key can conjure a model the provider does not have.
+func TestForbiddenMissingModelIsNotRotated(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"message":"The model 'gpt-6-astra' does not exist"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-6-astra",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-6-astra"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden {
+		t.Fatalf("missing model did not surface as 403: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("missing model was retried %d times", attempts)
+	}
+	if len(credentials.outcomes) != 1 || credentials.outcomes[0].Kind != relayapp.AttemptRequestError {
+		t.Fatalf("missing model was reported to the pool as %+v", credentials.outcomes)
+	}
+}
+
+// A 403 that says the token may not call the model still rotates — another
+// account's key may hold the entitlement — but it blocks the model, not the
+// key, so the key stays usable for everything else.
+func TestForbiddenModelEntitlementRotatesWithoutCoolingKeys(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"message":"该令牌无权访问模型 gpt-6-astra"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-6-astra",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-6-astra"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden {
+		t.Fatalf("entitlement refusal did not surface as 403: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected one attempt per key, saw %d", attempts)
+	}
+	for _, outcome := range credentials.outcomes {
+		if outcome.Kind != relayapp.AttemptModelUnavailable {
+			t.Fatalf("entitlement refusal cooled a key instead of blocking the model: %+v", credentials.outcomes)
+		}
+	}
+}
+
+// A bare 403 names no model, so the pool cannot tell a bad key from a refused
+// verdict. The first refusal still cools the key it came from, but a repeat
+// inside the same request is evidence about the verdict: every key answers the
+// same way, and re-cooling each one poisons the pool for every request behind.
+func TestRepeatedAuthFailureDoesNotRecoolTheKey(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":"invalid credential"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden {
+		t.Fatalf("credential rejection did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected one attempt per key, saw %d", attempts)
+	}
+	if len(credentials.outcomes) != 3 ||
+		credentials.outcomes[0].Kind != relayapp.AttemptAuthentication ||
+		credentials.outcomes[1].Kind != relayapp.AttemptRequestError ||
+		credentials.outcomes[2].Kind != relayapp.AttemptRequestError {
+		t.Fatalf("repeat refusal re-cooled the pool: %+v", credentials.outcomes)
+	}
+}
+
+// parkingCredentialSource blocks in Acquire after the first lease, the way a
+// scheduler parks on cooldowns, while TryAcquire stays instant.
+type parkingCredentialSource struct {
+	mu       sync.Mutex
+	calls    int
+	tryCalls int
+}
+
+func (source *parkingCredentialSource) Count(string) int { return 3 }
+
+func (source *parkingCredentialSource) Acquire(ctx context.Context, _, _ string, _ func()) (relayapp.CredentialLease, time.Duration, error) {
+	source.mu.Lock()
+	source.calls++
+	parked := source.calls > 1
+	source.mu.Unlock()
+	if parked {
+		<-ctx.Done()
+		return nil, 0, ctx.Err()
+	}
+	return parkingLease{}, 0, nil
+}
+
+func (source *parkingCredentialSource) TryAcquire(string, string) (relayapp.CredentialLease, bool) {
+	source.mu.Lock()
+	source.tryCalls++
+	source.mu.Unlock()
+	return parkingLease{}, true
+}
+
+type parkingLease struct{}
+
+func (parkingLease) Credential() relayapp.Credential { return relayapp.Credential{Value: "key"} }
+func (parkingLease) Finish(relayapp.AttemptOutcome)  {}
+
+// A rotation takes over only from a key that is free right now. Before this,
+// every rotation queued behind the cooldowns other requests left behind, and
+// one refused answer cost tens of minutes of queueing on an 11-key pool.
+func TestAuthRotationDoesNotParkOnCooldowns(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":"invalid credential"}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &parkingCredentialSource{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		response relayapp.DispatchResponse
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		response, err := server.Dispatch(ctx, relayapp.DispatchRequest{
+			Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-test",
+			Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+		})
+		done <- result{response: response, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		if outcome.err != nil || outcome.response.Status != http.StatusForbidden {
+			t.Fatalf("credential rejection did not surface: status=%d err=%v", outcome.response.Status, outcome.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("rotation parked on the credential queue instead of taking a free key")
+	}
+	if attempts != 3 {
+		t.Fatalf("expected one attempt per key, saw %d", attempts)
+	}
+	credentials.mu.Lock()
+	tryCalls := credentials.tryCalls
+	credentials.mu.Unlock()
+	if tryCalls != 2 {
+		t.Fatalf("rotations did not take the immediate path: tryCalls=%d", tryCalls)
 	}
 }
 

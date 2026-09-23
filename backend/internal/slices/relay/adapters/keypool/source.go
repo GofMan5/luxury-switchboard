@@ -31,6 +31,17 @@ func (source *Source) Count(providerID string) int {
 	return source.scheduler.Count(providerID)
 }
 
+// TryAcquire takes a key only when one is dispatchable right now, so a request
+// already rotating on a rejection ends on it instead of queueing behind the
+// cooldowns other requests left.
+func (source *Source) TryAcquire(providerID, model string) (relayapp.CredentialLease, bool) {
+	lease, ok := source.scheduler.TryAcquire(providerID, model)
+	if !ok {
+		return nil, false
+	}
+	return &leaseAdapter{lease: lease}, true
+}
+
 type leaseAdapter struct {
 	lease *keyapp.Lease
 }

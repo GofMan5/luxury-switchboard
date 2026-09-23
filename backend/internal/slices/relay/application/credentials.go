@@ -45,6 +45,11 @@ type CredentialLease interface {
 
 type CredentialSource interface {
 	Acquire(context.Context, string, string, func()) (CredentialLease, time.Duration, error)
+	// TryAcquire takes a key only when one is dispatchable right now, without
+	// queueing. The retry loop uses it once it is already rotating on a
+	// rejection: the first attempt waited its fair turn, later ones must not
+	// park on the cooldowns other requests left behind.
+	TryAcquire(providerID, model string) (CredentialLease, bool)
 }
 
 // CredentialCounter is the optional half of a CredentialSource that knows how

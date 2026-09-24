@@ -288,6 +288,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	clientStream := streamRequested && !imageCompat
 	bufferTerminal := clientStream || imageCompat || chatCompat
 	chatActive := chatCompat
+	// The provider's own words for the terminal failure, filed into history
+	// below. The client body stays neutral; this travels out-of-band.
+	var upstreamDetail string
 	if clientStream {
 		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
@@ -316,7 +319,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			// Kept so the answer's headers can be checked against it: a provider that
 			// echoes the key we sent it must not hand that key to the client.
 			secrets = sensitiveCredentialMarkers(credential)
-		}, &chatActive)
+		}, &chatActive, &upstreamDetail)
 	}
 	var response *http.Response
 	// A refused answer is a wasted attempt, not a dead request. The rules match shell
@@ -381,7 +384,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			errorDetail = responseErrorDetail(response, "Provider reported a failed response", secrets)
 		case status >= 400:
 			errorCode = "request_rejected"
-			errorDetail = responseErrorDetail(response, fmt.Sprintf("provider returned HTTP %d", status), secrets)
+			// Prefer the provider's own words when it gave any; the fallback
+			// below only covers verdicts without a readable body (429s, empty
+			// answers). The client still receives the neutral error body.
+			errorDetail = truncateErrorDetail(redactSecrets(upstreamDetail, secrets))
+			if errorDetail == "" {
+				errorDetail = responseErrorDetail(response, fmt.Sprintf("provider returned HTTP %d", status), secrets)
+			}
 		}
 		if status >= 400 && committed {
 			response.Body.Close()
@@ -577,9 +586,10 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	// report ServeHTTP's defer does, including the failure exits.
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
+	var upstreamDetail string
 	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
-	}, &chatActive)
+	}, &chatActive, &upstreamDetail)
 	if err != nil {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, Cancelled: errors.Is(err, context.Canceled),
@@ -660,7 +670,13 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	dispatchDetail := ""
 	if response.StatusCode >= 400 {
 		dispatchError = "request_rejected"
-		dispatchDetail = jsonErrorDetail(responseBody, markers)
+		// Same rule as the local path above: the provider's own words when it
+		// gave any, redacted with the attempt's markers before filing. The
+		// dispatch body itself stays neutral.
+		dispatchDetail = truncateErrorDetail(redactSecrets(upstreamDetail, markers))
+		if dispatchDetail == "" {
+			dispatchDetail = jsonErrorDetail(responseBody, markers)
+		}
 		if dispatchDetail == "" {
 			dispatchDetail = fmt.Sprintf("provider returned HTTP %d", response.StatusCode)
 		}
@@ -683,7 +699,12 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 	return loaded
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string) (*http.Response, error) {
+	// A retried call starts wordless: the detail below always describes the
+	// attempt this call ended on, never a previous call's verdict.
+	if upstreamDetail != nil {
+		*upstreamDetail = ""
+	}
 	// Each failure class below spends its own PermanentAttempts budget:
 	// requestFailures counts rejections of this payload, serverFailures plain 5xx
 	// answers, and credentialFailures key rotations (bounded by the pool size
@@ -946,6 +967,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// branch: the provider's billing verdict stays authoritative even when
 		// its prose mentions limits (see balanceUnavailable).
 		errorBody := readErrorBody(response)
+		// The response that leaves the relay stays neutral by design; the
+		// provider's own words travel out-of-band instead, so history shows the
+		// reason ("Budget pool quota has been exhausted") rather than a bare
+		// status. Redaction happens at the boundary before filing.
+		noteUpstreamDetail(upstreamDetail, errorBody)
 		failureText := normalizeErrorText(errorBody)
 		rateLimited := rateLimitedText(failureText)
 		if status != http.StatusPaymentRequired && rateLimited {
@@ -2431,11 +2457,12 @@ func terminalErrorDetail(body []byte, secrets []string) string {
 	return jsonErrorDetail(body, secrets)
 }
 
-// maxErrorDetailRunes bounds the provider-shaped text filed in activity history.
-// The activity store keeps 4096 runes; the relay files far less, because a code
-// and a message say why the provider refused and everything beyond them is
-// payload-shaped.
-const maxErrorDetailRunes = 512
+// maxErrorDetailRunes bounds the provider text filed in activity history. It
+// matches the activity store cap: the filed reason is the raw upstream body,
+// not an extract, so anything the provider answered travels. A history pull
+// that still exceeds the protocol frame degrades to response_too_large on that
+// command — it never takes the sidecar down.
+const maxErrorDetailRunes = 4096
 
 const redactedSecret = "[redacted]"
 
@@ -2443,6 +2470,20 @@ const redactedSecret = "[redacted]"
 // filed text. Shorter fragments also match ordinary prose, so editing those here
 // would mangle the reason; they stay for the public sanitizer to fail closed on.
 const minSecretMatchBytes = 8
+
+// noteUpstreamDetail keeps the terminal failure's raw upstream body for the
+// call that ends on it. No extract, no field filter: every error the provider
+// answered travels — a code, a message, a reseller envelope, plain prose. It
+// always overwrites, even with an empty body: a later attempt that answered
+// unreadably must not leave an earlier attempt's words filed as this
+// request's reason. Redaction and the rune bound apply at the boundary before
+// filing, never here.
+func noteUpstreamDetail(into *string, body []byte) {
+	if into == nil {
+		return
+	}
+	*into = strings.TrimSpace(string(body))
+}
 
 func jsonErrorDetail(body []byte, secrets []string) string {
 	var payload map[string]any
@@ -2455,6 +2496,12 @@ func jsonErrorDetail(body []byte, secrets []string) string {
 	if response, ok := payload["response"].(map[string]any); ok {
 		candidates = append(candidates, response["error"], response["incomplete_details"])
 	}
+	// Reseller envelopes also carry the reason beside the error object: a
+	// top-level message (the reseller) or a code/msg pair (its current API).
+	// The envelope itself is read before the bare strings, so a code/msg pair
+	// files as "401: Invalid API Key!" rather than losing its code — and a
+	// present error object still wins over all of it.
+	candidates = append(candidates, payload, payload["message"], payload["msg"])
 	for _, candidate := range candidates {
 		if detail := errorCandidateDetail(candidate); detail != "" {
 			return truncateErrorDetail(redactSecrets(detail, secrets))
@@ -2479,13 +2526,17 @@ func errorCandidateDetail(candidate any) string {
 }
 
 // errorObjectDetail keeps the code and the message and drops everything else.
-// type stands in for a missing code; a message on its own still travels.
+// type stands in for a missing code; a message on its own still travels. msg
+// is the same field under its reseller name.
 func errorObjectDetail(candidate map[string]any) string {
 	code := errorScalarText(candidate["code"])
 	if code == "" {
 		code = errorScalarText(candidate["type"])
 	}
 	message := errorScalarText(candidate["message"])
+	if message == "" {
+		message = errorScalarText(candidate["msg"])
+	}
 	switch {
 	case code != "" && message != "":
 		return code + ": " + message

@@ -830,6 +830,106 @@ func TestAuthRotationDoesNotParkOnCooldowns(t *testing.T) {
 	}
 }
 
+// History must show the provider's own words for a terminal failure, not a
+// bare status: "The request could not be completed" sent the operator hunting
+// through curl while the reason ("Budget pool quota has been exhausted") was
+// already in hand. The dispatch body stays neutral all the same.
+func TestTerminalFailureFilesTheProvidersOwnWords(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusPaymentRequired)
+		_, _ = writer.Write([]byte(`{"error":{"code":"budget_exhausted","message":"Budget pool quota has been exhausted"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	activity := &recordingActivity{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      credentialsRoute(parsed),
+		Credentials: &credentialSource{values: []string{"key"}},
+		Activity:    activity,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusPaymentRequired {
+		t.Fatalf("billing verdict did not surface: status=%d err=%v", response.Status, err)
+	}
+	if !strings.Contains(string(response.Body), "The request could not be completed") {
+		t.Fatalf("dispatch body stopped being neutral: %s", response.Body)
+	}
+	if strings.Contains(string(response.Body), "Budget pool quota") {
+		t.Fatalf("provider prose leaked to the caller: %s", response.Body)
+	}
+	if activity.finish.ErrorCode != "request_rejected" || !strings.Contains(activity.finish.ErrorDetail, "Budget pool quota has been exhausted") {
+		t.Fatalf("history filed no usable reason: %+v", activity.finish)
+	}
+	// The full envelope travels, not an extract: the code survives filtering.
+	if !strings.Contains(activity.finish.ErrorDetail, `"code":"budget_exhausted"`) {
+		t.Fatalf("history filed a filtered extract instead of the raw error: %q", activity.finish.ErrorDetail)
+	}
+}
+
+// A body that is not JSON at all still travels verbatim: plain prose is a
+// reason too, and dropping it would hide verdicts no extract understands.
+func TestTerminalFailureFilesPlainProseVerbatim(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte("forbidden: this key is bound to another egress ip, contact support"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	activity := &recordingActivity{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      credentialsRoute(parsed),
+		Credentials: &credentialSource{values: []string{"key"}},
+		Activity:    activity,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden {
+		t.Fatalf("refusal did not surface: status=%d err=%v", response.Status, err)
+	}
+	if activity.finish.ErrorDetail != "forbidden: this key is bound to another egress ip, contact support" {
+		t.Fatalf("plain verdict was filtered or rewritten: %q", activity.finish.ErrorDetail)
+	}
+}
+
+// A provider that echoes the key it was sent must not have that key persisted
+// into history and rendered back in the UI along with its words.
+func TestTerminalFailureDetailRedactsAnEchoedKey(t *testing.T) {
+	const key = "sk-echoed-provider-key-value"
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"message":"key ` + key + ` is not entitled to this model"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	activity := &recordingActivity{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      credentialsRoute(parsed),
+		Credentials: &credentialSource{values: []string{key}},
+		Activity:    activity,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden {
+		t.Fatalf("refusal did not surface: status=%d err=%v", response.Status, err)
+	}
+	if strings.Contains(activity.finish.ErrorDetail, key) {
+		t.Fatalf("echoed key was filed into history: %q", activity.finish.ErrorDetail)
+	}
+	if !strings.Contains(activity.finish.ErrorDetail, "[redacted]") {
+		t.Fatalf("redaction left no trace: %q", activity.finish.ErrorDetail)
+	}
+}
+
 func TestDispatchAttemptLimitBoundsHealthProbe(t *testing.T) {
 	var attempts int
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -2262,6 +2362,9 @@ func TestJSONErrorDetailKeepsOnlyScalarCodeAndMessage(t *testing.T) {
 		{"nested objects are dropped", `{"error":{"code":"bad_model","message":"no","detail":{"key":"` + secret + `"},"tags":["a","b"]}}`, []string{secret}, "bad_model: no"},
 		{"echoed credential is redacted", `{"error":{"code":"invalid_key","message":"bad key ` + secret + ` here"}}`, []string{secret}, "invalid_key: bad key [redacted] here"},
 		{"reason without code or message is not a reason", `{"incomplete_details":{"reason":"max_output_tokens"}}`, nil, ""},
+		{"reseller code/msg pair keeps its code", `{"code":401,"msg":"Invalid API Key!","data":null}`, nil, "401: Invalid API Key!"},
+		{"reseller top-level message", `{"message":"UNAUTHENTICATED","success":false,"type":"unauthorized_client_error"}`, nil, "unauthorized_client_error: UNAUTHENTICATED"},
+		{"error object beats the envelope", `{"error":{"message":"unauthorized client detected"},"message":"UNAUTHENTICATED","success":false,"type":"unauthorized_client_error"}`, nil, "unauthorized client detected"},
 		{"nil error", `{"error":null}`, nil, ""},
 		{"numeric error", `{"error":42}`, nil, ""},
 		{"no error", `{"status":"failed"}`, nil, ""},
@@ -2271,7 +2374,7 @@ func TestJSONErrorDetailKeepsOnlyScalarCodeAndMessage(t *testing.T) {
 			t.Fatalf("%s: got %q, want %q", testCase.name, got, testCase.want)
 		}
 	}
-	long := `{"error":{"code":"big","message":"` + strings.Repeat("x", 2000) + `"}}`
+	long := `{"error":{"code":"big","message":"` + strings.Repeat("x", maxErrorDetailRunes+1000) + `"}}`
 	if got := jsonErrorDetail([]byte(long), nil); len([]rune(got)) != maxErrorDetailRunes {
 		t.Fatalf("error detail escaped its bound: %d runes", len([]rune(got)))
 	}

@@ -243,6 +243,37 @@ func TestTryAcquireTakesWithoutQueueingAndMissesOnCooldown(t *testing.T) {
 	}
 }
 
+// An auth verdict never resolves on a timer, so the key that produced one sits
+// out thirty seconds, not five minutes: a dead single-key pool used to make
+// every request queue the whole cooldown before failing again (measured:
+// nineteen five-minute waits on one "Invalid token"). Thirty seconds keeps the
+// retry pace gentle while the refusal stays fast.
+func TestAnAuthenticationRefusalCoolsTheKeyForThirtySeconds(t *testing.T) {
+	scheduler := NewScheduler(10)
+	clock := time.Now()
+	scheduler.now = func() time.Time { return clock }
+	key := testKey(t, "echo", "Solo", "solo-secret", 0, 0)
+	if err := scheduler.Configure("echo", 0, 0, []domain.Key{key}); err != nil {
+		t.Fatal(err)
+	}
+	lease, _, err := scheduler.Acquire(context.Background(), "echo", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Finish(domain.Outcome{Kind: domain.OutcomeAuthentication})
+	if _, ok := scheduler.TryAcquire("echo", "model"); ok {
+		t.Fatal("an auth-refused key was still dispatchable")
+	}
+	clock = clock.Add(29 * time.Second)
+	if _, ok := scheduler.TryAcquire("echo", "model"); ok {
+		t.Fatal("the auth cooldown lapsed early")
+	}
+	clock = clock.Add(2 * time.Second)
+	if _, ok := scheduler.TryAcquire("echo", "model"); !ok {
+		t.Fatal("the auth cooldown did not lapse after thirty seconds")
+	}
+}
+
 // A rotation never jumps the fair queue: with another request waiting on the
 // provider, even a free key is a miss.
 func TestTryAcquireMissesWhileAnotherRequestWaits(t *testing.T) {

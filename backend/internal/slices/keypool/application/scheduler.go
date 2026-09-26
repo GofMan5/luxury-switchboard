@@ -21,6 +21,14 @@ const (
 	defaultMaxQueued = 10_000
 	rateWindow       = time.Minute
 	modelCooldown    = 5 * time.Minute
+	// authCooldown is how long a key that answered 401/403 sits out. An auth
+	// verdict never resolves on a timer — the token is valid or it is not — so
+	// the cooldown buys exactly one thing: keeping a client's own retry loop
+	// off the provider's back. Five minutes asked too much for that (measured:
+	// a dead single-key pool made every request queue the full five minutes
+	// before failing again, nineteen times in a row); thirty seconds keeps the
+	// pace gentle while the refusal stays fast and honest.
+	authCooldown = 30 * time.Second
 )
 
 type Scheduler struct {
@@ -323,7 +331,7 @@ func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outc
 	case domain.OutcomeBalanceExhausted:
 		key.balanceUntil = nextMoscowMidnight(now)
 	case domain.OutcomeAuthentication:
-		key.cooldownUntil = maxTime(key.cooldownUntil, now.Add(modelCooldown))
+		key.cooldownUntil = maxTime(key.cooldownUntil, now.Add(authCooldown))
 	case domain.OutcomeSuccess, domain.OutcomeServerError, domain.OutcomeTransport, domain.OutcomeRequestError:
 		// Request-scoped outcomes must not cool an otherwise working key.
 	}

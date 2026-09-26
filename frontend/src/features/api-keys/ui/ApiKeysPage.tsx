@@ -5,7 +5,7 @@ import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
 import { useApiKeys } from './useApiKeys'
-import { parsePastedKeys, proxyURLIsValid, MAX_IMPORT_KEYS, type PastedKey } from './key-form'
+import { parsePastedKeys, proxyURLIsValid, MAX_IMPORT_KEYS, MAX_IMPORT_FRAME_CHARS, type PastedKey } from './key-form'
 import styles from './ApiKeysPage.module.css'
 
 export default function ApiKeysPage() {
@@ -240,6 +240,14 @@ function BulkImport({ providerId, unit, pending, operationError, onClose, onImpo
       setError(`Import at most ${MAX_IMPORT_KEYS} keys at once; split the list.`)
       return
     }
+    // The command travels as one protocol frame the desktop shell caps at
+    // 256 KiB. Pasting the wrong clipboard (a config, a log) used to exceed it
+    // and die as a generic transport failure; measuring the exact serialized
+    // size says it in a sentence the caller can act on.
+    if (JSON.stringify(parsed).length > MAX_IMPORT_FRAME_CHARS) {
+      setError('This paste is too large for one command. Split it into smaller batches, or check the wrong clipboard did not land here.')
+      return
+    }
     if (!Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000) {
       setError('Enter a limit from 0 to 1,000,000.')
       return
@@ -265,6 +273,7 @@ function BulkImport({ providerId, unit, pending, operationError, onClose, onImpo
               value={text}
               rows={9}
               spellCheck={false}
+              maxLength={262_144}
               data-autofocus
               placeholder={'team_alpha sk-first-secret\nteam_beta sk-second-secret'}
               onChange={(event) => setText(event.currentTarget.value)}

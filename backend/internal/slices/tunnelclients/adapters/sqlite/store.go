@@ -142,19 +142,22 @@ func (store *Store) DeleteProfile(ctx context.Context, ip string) error {
 
 func (store *Store) Close(ctx context.Context) error {
 	store.closed.Store(true)
-	if err := store.queue.Close(ctx); err != nil {
-		return err
-	}
+	closeErr := store.queue.Close(ctx)
+	// The database is closed even when the final flush timed out: an unflushed
+	// WAL checkpoint is already the worst outcome of that path, and skipping
+	// db.Close() on top of it left the handle open for a process that is on its
+	// way out anyway.
 	store.closeMu.Lock()
 	defer store.closeMu.Unlock()
 	if store.dbClosed {
-		return nil
+		return closeErr
 	}
-	if err := store.db.Close(); err != nil {
-		return err
-	}
+	dbErr := store.db.Close()
 	store.dbClosed = true
-	return nil
+	if closeErr != nil {
+		return closeErr
+	}
+	return dbErr
 }
 
 func (store *Store) writeBatch(batch []domain.Event) error {

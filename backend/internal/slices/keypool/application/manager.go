@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +20,12 @@ var (
 	ErrUnknownProvider = errors.New("unknown provider")
 	ErrProviderHasKeys = errors.New("provider still has keys")
 	ErrImportTooLarge  = errors.New("import batch is too large")
+	// ErrStoreUnavailable names a write refused because the store behind it
+	// could not be read: saving the runtime pool over an unreadable file would
+	// atomically replace it, and every key the user ever entered is gone after
+	// the next start. Routes and providers made the same call first; this is
+	// the same rule.
+	ErrStoreUnavailable = errors.New("key storage could not be read; saving now would replace it")
 )
 
 // MaxImportBatch bounds one bulk import. This many realistic keys still fit the
@@ -34,6 +41,8 @@ type Manager struct {
 	providerRates map[string]Rate
 	builtins      []domain.Key
 	userKeys      []domain.Key
+	loadMu        sync.RWMutex
+	loadErr       error
 }
 
 // Rate is a provider's request budget: how many requests fit in one window. A
@@ -89,6 +98,23 @@ func NewManager(scheduler *Scheduler, repository Repository, providerRates map[s
 }
 
 func (manager *Manager) Load(ctx context.Context) error {
+	err := manager.load(ctx)
+	manager.loadMu.Lock()
+	manager.loadErr = err
+	manager.loadMu.Unlock()
+	return err
+}
+
+// Availability reports why the persisted key pool could not be read, or nil
+// when it could. Mutations refuse while it is set: a save would replace the
+// unreadable file with the runtime pool plus one edit.
+func (manager *Manager) Availability() error {
+	manager.loadMu.RLock()
+	defer manager.loadMu.RUnlock()
+	return manager.loadErr
+}
+
+func (manager *Manager) load(ctx context.Context) error {
 	keys, err := manager.repository.Load(ctx)
 	if err != nil {
 		return err
@@ -171,6 +197,9 @@ func (manager *Manager) RemoveProvider(providerID string) error {
 func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.PublicKey, error) {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return domain.PublicKey{}, ErrStoreUnavailable
+	}
 	if _, exists := manager.providerRates[params.ProviderID]; !exists {
 		return domain.PublicKey{}, ErrUnknownProvider
 	}
@@ -211,6 +240,9 @@ func (manager *Manager) AddMany(ctx context.Context, request Import) (ImportRepo
 	}
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return ImportReport{}, ErrStoreUnavailable
+	}
 	if _, exists := manager.providerRates[request.ProviderID]; !exists {
 		return ImportReport{}, ErrUnknownProvider
 	}
@@ -256,6 +288,9 @@ func (manager *Manager) AddMany(ctx context.Context, request Import) (ImportRepo
 func (manager *Manager) Update(ctx context.Context, providerID, keyID string, update Update) (domain.PublicKey, error) {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return domain.PublicKey{}, ErrStoreUnavailable
+	}
 	if update.RPM < 0 || strings.TrimSpace(update.Label) == "" {
 		return domain.PublicKey{}, errors.New("invalid key update")
 	}
@@ -320,6 +355,9 @@ func (manager *Manager) Update(ctx context.Context, providerID, keyID string, up
 func (manager *Manager) Remove(ctx context.Context, providerID, keyID string) error {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return ErrStoreUnavailable
+	}
 	manager.mu.RLock()
 	all := manager.combinedLocked(manager.userKeys)
 	candidate := slices.Clone(manager.userKeys)
@@ -343,6 +381,9 @@ func (manager *Manager) Remove(ctx context.Context, providerID, keyID string) er
 func (manager *Manager) Move(ctx context.Context, providerID, keyID string, direction int) error {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return ErrStoreUnavailable
+	}
 	if direction != -1 && direction != 1 {
 		return errors.New("invalid move direction")
 	}
@@ -384,7 +425,7 @@ func (manager *Manager) persistAndApply(ctx context.Context, candidate []domain.
 func (manager *Manager) persistState(ctx context.Context, builtins, candidate []domain.Key) error {
 	persisted := append(persistedBuiltinMetadata(builtins), candidate...)
 	if err := manager.repository.Save(ctx, persisted); err != nil {
-		return errors.New("key settings could not be saved")
+		return fmt.Errorf("key settings could not be saved: %w", err)
 	}
 	manager.mu.Lock()
 	manager.builtins = slices.Clone(builtins)

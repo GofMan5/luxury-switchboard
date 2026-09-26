@@ -174,3 +174,49 @@ func providerFixture(t *testing.T, id string, builtin bool) domain.Provider {
 	}
 	return provider
 }
+
+// An unreadable provider store must block the first write rather than let it
+// atomically replace the file: the runtime catalog after a failed load holds
+// builtins plus nothing, and saving it would erase every provider definition
+// the user ever entered the moment the keyring unlocks mid-session.
+func TestFailedLoadBlocksTheFirstWrite(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	catalog, _ := NewCatalog([]domain.Provider{local}, local.ID)
+	repository := &failingProviderRepository{}
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0}, count: make(map[string]int)}
+	manager, _ := NewManager(catalog, repository, keys)
+	if err := manager.Load(context.Background()); err == nil {
+		t.Fatal("the injected load failure was not reported")
+	}
+	if _, err := manager.Add(context.Background(), domain.Params{
+		Name: "Custom", BaseURL: "https://provider.example/v1",
+		AuthMode: domain.AuthBearer, RPM: 90, Enabled: true,
+	}); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("a write over an unreadable store was accepted: %v", err)
+	}
+	if _, err := manager.Update(context.Background(), local.ID, domain.Params{
+		Name: "Local", BaseURL: "http://127.0.0.1:8799",
+		AuthMode: domain.AuthPassthrough, RPM: 12, Enabled: true,
+	}); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("an update over an unreadable store was accepted: %v", err)
+	}
+	if err := manager.Delete(context.Background(), local.ID); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("a delete over an unreadable store was accepted: %v", err)
+	}
+	if repository.saved {
+		t.Fatal("an unreadable store was rewritten")
+	}
+}
+
+type failingProviderRepository struct {
+	saved bool
+}
+
+func (repository *failingProviderRepository) Load(context.Context) (SavedState, error) {
+	return SavedState{}, errors.New("secure storage is locked")
+}
+
+func (repository *failingProviderRepository) Save(context.Context, SavedState) error {
+	repository.saved = true
+	return nil
+}

@@ -1,5 +1,5 @@
 import { useDeferredValue, useMemo, useState } from 'react'
-import { Pause, Play, Search, SlidersHorizontal, X } from 'lucide-react'
+import { Copy, Pause, Play, Search, SlidersHorizontal, X } from 'lucide-react'
 import { useAppServices } from '../../../app/services'
 import { formatBytes, formatClock, formatDecimal, formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
@@ -164,7 +164,11 @@ export default function ActivityPage() {
             </tbody>
           </table>
           <footer className={styles.tableFooter}>
-            <span>{loading ? 'Connecting…' : `Showing ${requests.length} of ${activity.requests.length}`}</span>
+            <span>
+              {loading ? 'Connecting…' : activity.available > activity.requests.length
+                ? `Newest ${activity.requests.length} of ${activity.available}`
+                : `Showing ${requests.length} of ${activity.requests.length}`}
+            </span>
             <span>Live buffer · 100 visible</span>
           </footer>
         </div>
@@ -220,10 +224,23 @@ function RequestInspector({ request, onClose }: { request: ActivityRequest; onCl
         <div className={styles.safeError}>
           <span>{request.errorCode || 'Error'}</span>
           <strong>{request.errorDetail || request.errorCode}</strong>
+          <button type="button" className={styles.copyDetail} onClick={() => void copyDetail(request.errorDetail || request.errorCode || '')}>
+            <Copy size={13} aria-hidden="true" />
+            Copy detail
+          </button>
         </div>
       ) : null}
     </aside>
   )
+}
+
+async function copyDetail(value: string): Promise<void> {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+  } catch {
+    // The detail stays on screen either way; a failed copy is a notice, not a loss.
+  }
 }
 
 function Detail({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

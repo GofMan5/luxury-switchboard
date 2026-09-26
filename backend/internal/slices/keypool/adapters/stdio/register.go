@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strconv"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
@@ -150,6 +151,8 @@ func invalidPayload() platform.MethodError {
 
 func managementError(err error) platform.MethodError {
 	switch {
+	case errors.Is(err, application.ErrStoreUnavailable), errors.Is(err, secretstore.ErrUnavailable):
+		return platform.MethodError{Code: "secure_storage_unavailable", Message: "Secure storage is unavailable. Start or unlock Linux Secret Service, run Switchboard without sudo, then restart it."}
 	case errors.Is(err, application.ErrKeyNotFound):
 		return platform.MethodError{Code: "key_not_found", Message: "Key was not found"}
 	case errors.Is(err, application.ErrPinnedKey):

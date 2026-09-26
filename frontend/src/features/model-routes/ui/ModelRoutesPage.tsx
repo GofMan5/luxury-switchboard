@@ -56,10 +56,18 @@ export default function ModelRoutesPage() {
 
   // The catalog selection mirrors what is published, so one apply step is enough
   // and the user always sees the live routing state instead of an empty list.
+  // A discovery that has not finished yet clears the seed: re-discovering the
+  // same unchanged catalog produces the same key, and without the reset the
+  // checkboxes stayed empty after a plain Refresh — with "Apply to relay" armed
+  // to delete everything the seed was supposed to mirror.
   const seedKey = `${state.target}|${models.providerId}|${models.models.length}|${publishedHere.join(' ')}`
   const seeded = useRef('')
   useEffect(() => {
-    if (models.phase !== 'ready' || seeded.current === seedKey) return
+    if (models.phase !== 'ready') {
+      seeded.current = ''
+      return
+    }
+    if (seeded.current === seedKey) return
     seeded.current = seedKey
     modelsModel.select(publishedHere)
   }, [modelsModel, models.phase, publishedHere, seedKey])

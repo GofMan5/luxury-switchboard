@@ -20,8 +20,11 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   const { state: providersState } = useProviders()
   const { state: settingsState } = useSettings()
   const { appVersion } = useAppServices()
-  const activeProvider = providersState.catalog.providers.find(
-    (provider) => provider.id === providersState.catalog.activeId,
+  // Every other shell read is guarded because the boundary below wraps only the
+  // workspace: a throw here is the blank-window-no-sidebar failure mode the
+  // boundary exists to prevent, and the catalog shape is data from the wire.
+  const activeProvider = (providersState.catalog?.providers ?? []).find(
+    (provider) => provider.id === providersState.catalog?.activeId,
   )
   const live = relayState.snapshot.state === 'live'
   const needsStop = live || (relayState.snapshot.state === 'error' && Boolean(relayState.snapshot.address))

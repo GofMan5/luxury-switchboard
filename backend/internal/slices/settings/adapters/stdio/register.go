@@ -3,6 +3,9 @@ package settingsstdio
 import (
 	"context"
 	"encoding/json"
+	"errors"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/settings/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
@@ -19,6 +22,9 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		result, err := service.Update(ctx, settings)
 		if err != nil {
+			if errors.Is(err, application.ErrStoreUnavailable) || errors.Is(err, secretstore.ErrUnavailable) {
+				return nil, platform.MethodError{Code: "secure_storage_unavailable", Message: "Secure storage is unavailable. Start or unlock Linux Secret Service, run Switchboard without sudo, then restart it."}
+			}
 			return nil, platform.MethodError{Code: "settings_update_failed", Message: "Settings could not be saved"}
 		}
 		_ = server.Emit("settings.changed", result)

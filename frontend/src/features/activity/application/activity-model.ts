@@ -4,6 +4,10 @@ import type { ActivityPort } from './activity-port'
 export interface ActivityModelState {
   readonly phase: 'loading' | 'ready' | 'error'
   readonly requests: readonly ActivityRequest[]
+  /** How many rows the control plane held for this list before the frame budget
+   * dropped the oldest ones. Equal to requests.length unless a provider
+   * incident made the rows too heavy to ship whole. */
+  readonly available: number
   readonly summary: ActivitySummary
   readonly error: string
 }
@@ -22,6 +26,7 @@ export class ActivityModel {
   #state: ActivityModelState = {
     phase: 'loading',
     requests: [],
+    available: 0,
     summary: emptySummary,
     error: '',
   }
@@ -46,11 +51,11 @@ export class ActivityModel {
     const baseline = new Map(this.#state.requests.map((request) => [request.id, request.updatedAt]))
     this.#unsubscribe ??= this.#port.subscribe((request) => this.#accept(request))
     try {
-      const [requests, summary] = await Promise.all([this.#port.list(100), this.#port.summary()])
+      const [listed, summary] = await Promise.all([this.#port.list(100), this.#port.summary()])
       const live = this.#state.requests.filter((request) => baseline.get(request.id) !== request.updatedAt)
       const liveIDs = new Set(live.map((request) => request.id))
-      const merged = [...live, ...requests.filter((request) => !liveIDs.has(request.id))].slice(0, 100)
-      this.#set({ phase: 'ready', requests: merged, summary, error: '' })
+      const merged = [...live, ...listed.requests.filter((request) => !liveIDs.has(request.id))].slice(0, 100)
+      this.#set({ phase: 'ready', requests: merged, available: Math.max(listed.available, merged.length), summary, error: '' })
       this.#pollTimer ??= setInterval(() => void this.#refreshSummary(), 1_000)
     } catch {
       this.#set({ ...this.#state, phase: 'error', error: 'Activity is unavailable' })

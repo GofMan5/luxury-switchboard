@@ -120,6 +120,11 @@ export class GuardrailsModel {
 
   #prepend(record: GuardrailRecord) {
     if (!record?.id) return
+    // A live record wins over an answer that is already on its way back: the
+    // fetched list predates this finding, and without the bump it would replace
+    // the row this event just added — with no self-heal, the finding went
+    // missing until the next manual refresh.
+    this.#generation++
     const existing = this.#state.findings.find((candidate) => candidate.id === record.id)
     // The same record can arrive twice across a reconnect, and a duplicate would
     // read as a second attack rather than one. A repeat of one the control plane is

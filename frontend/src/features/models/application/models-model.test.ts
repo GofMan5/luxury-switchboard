@@ -47,6 +47,24 @@ describe('ModelsModel', () => {
     model.dispose()
   })
 
+  it('re-discovery clears the selection, so re-seeding restores it', async () => {
+    // The Model Routes effect mirrors the published routes into the checkboxes
+    // after every completed discovery. Its reset only works because a
+    // re-discovery of the very same catalog clears the selection: without
+    // that, a plain Refresh left the checkboxes empty and armed "Apply to
+    // relay" to delete the routes the seed was supposed to mirror.
+    const model = new ModelsModel(new FakeModelsPort())
+    model.connect()
+    await model.discover('provider-a')
+    model.select(['model-a', 'model-b'])
+    expect(model.snapshot().selected).toEqual(['model-a', 'model-b'])
+    await model.discover('provider-a')
+    expect(model.snapshot().selected).toEqual([])
+    model.select(['model-a'])
+    expect(model.snapshot().selected).toEqual(['model-a'])
+    model.dispose()
+  })
+
   it('chunks large tests and clears testing rows after interruption', async () => {
     const port = new FakeModelsPort()
     const model = new ModelsModel(port)

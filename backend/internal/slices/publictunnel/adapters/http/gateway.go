@@ -22,6 +22,15 @@ import (
 const (
 	maxTunnelBody = 64 * 1024 * 1024
 	maxTunnelRPM  = 1_000_000
+	// A public client that trickles its body byte by byte, or connects and then
+	// never reads the answer, would otherwise pin one of the eight global
+	// limiter slots for as long as the socket stays open: the server's
+	// ReadHeaderTimeout only covers headers and IdleTimeout only covers the
+	// gaps between requests. Both deadlines are walls generous enough that no
+	// legitimate transfer hits them: a full 64 MiB upload on a slow uplink and
+	// a multi-megabyte answer to a slow reader both fit with room to spare.
+	maxTunnelBodyRead      = 10 * time.Minute
+	maxTunnelResponseWrite = 2 * time.Minute
 )
 
 var allowedPaths = map[string]struct{}{"/v1/responses": {}, "/v1/chat/completions": {}, "/v1/completions": {}, "/v1/messages": {}, "/v1/images/generations": {}, "/v1/images/edits": {}}
@@ -35,13 +44,21 @@ type Gateway struct {
 	limiter  *ipLimiter
 	activity tunnelapp.ClientActivity
 	bans     tunnelapp.Bans
+	// The client-facing leg's only time bounds. Generous walls rather than
+	// transport tuning: they exist so a stalled public client cannot pin one of
+	// the eight global limiter slots for the life of its socket.
+	bodyReadTimeout      time.Duration
+	responseWriteTimeout time.Duration
 }
 
 func NewGateway(config domain.Config, routes tunnelapp.Routes, markers tunnelapp.Markers, relay relayapp.Dispatcher, activity tunnelapp.ClientActivity, bans tunnelapp.Bans) (*Gateway, error) {
 	if len(config.Token) < 32 || len(config.Token) > 512 || routes == nil || markers == nil || relay == nil || config.RPMPerIP < 0 || config.RPMPerIP > maxTunnelRPM || config.ContextLimitKiB < 0 || config.ContextLimitKiB > 2*1024*1024 {
 		return nil, errors.New("invalid tunnel gateway settings")
 	}
-	return &Gateway{config: config, routes: routes, markers: markers, relay: relay, limiter: newIPLimiter(), activity: activity, bans: bans}, nil
+	return &Gateway{
+		config: config, routes: routes, markers: markers, relay: relay, limiter: newIPLimiter(), activity: activity, bans: bans,
+		bodyReadTimeout: maxTunnelBodyRead, responseWriteTimeout: maxTunnelResponseWrite,
+	}, nil
 }
 
 func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -88,19 +105,27 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	defer release()
+	// The deadlines below are the only bound on how long this handler can hold
+	// the limiter slot it just took. http.NewResponseController reaches the
+	// connection under the server's own plumbing; a handler that never touches
+	// the body or the answer is exactly the slot-pinning an idle socket used
+	// to achieve.
+	controller := http.NewResponseController(writer)
+	_ = controller.SetReadDeadline(time.Now().Add(gateway.bodyReadTimeout))
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxTunnelBody+1))
+	_ = controller.SetReadDeadline(time.Time{})
 	if err != nil || len(body) > maxTunnelBody {
-		gateway.error(writer, http.StatusRequestEntityTooLarge, "Request rejected")
+		gateway.fail(controller, writer, http.StatusRequestEntityTooLarge, "Request rejected")
 		return
 	}
 	model, payload, err := requestPayload(body, request.Header.Get("Content-Type"), path)
 	if err != nil {
-		gateway.error(writer, http.StatusBadRequest, "Request rejected")
+		gateway.fail(controller, writer, http.StatusBadRequest, "Request rejected")
 		return
 	}
 	route, ok := gateway.routes.Resolve(model)
 	if !ok {
-		gateway.error(writer, http.StatusForbidden, "Request rejected")
+		gateway.fail(controller, writer, http.StatusForbidden, "Request rejected")
 		return
 	}
 	markers := identifyingMarkers(gateway.markers.SensitiveMarkers(route.ProviderID)...)
@@ -125,7 +150,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if textRequest && limit > 0 && len(body) > limit*1024 {
 		status = http.StatusRequestEntityTooLarge
 		errorCode = "context_limit"
-		gateway.error(writer, http.StatusRequestEntityTooLarge, "Request rejected")
+		gateway.fail(controller, writer, http.StatusRequestEntityTooLarge, "Request rejected")
 		return
 	}
 	if payload != nil && providerProbe(payload, path) {
@@ -135,7 +160,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writer.Header().Set("Content-Length", strconv.Itoa(len(clean)))
 		writer.WriteHeader(http.StatusOK)
 		status = http.StatusOK
-		written, writeErr := writer.Write(clean)
+		written, writeErr := gateway.answer(controller, writer, clean)
 		bytesOut = int64(written)
 		if writeErr != nil {
 			errorCode = "client_disconnected"
@@ -145,7 +170,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	response, err := gateway.relay.Dispatch(request.Context(), relayapp.DispatchRequest{Method: request.Method, Path: path, Headers: forwardHeaders(request.Header), Body: body, ProviderID: route.ProviderID, PublicModel: route.PublicModel, UpstreamModel: route.UpstreamModel})
 	if err != nil {
 		errorCode = "upstream_rejected"
-		gateway.error(writer, http.StatusBadGateway, "Request could not be completed")
+		gateway.fail(controller, writer, http.StatusBadGateway, "Request could not be completed")
 		return
 	}
 	// Credential markers first and unfiltered: a secret must refuse the answer at any
@@ -159,7 +184,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	clean, contentType, err := sanitizeResponse(response, path, route.PublicModel, markers, gateway.config.BrandResponse)
 	if err != nil {
 		errorCode = "unsafe_response"
-		gateway.error(writer, http.StatusBadGateway, "Request could not be completed")
+		gateway.fail(controller, writer, http.StatusBadGateway, "Request could not be completed")
 		return
 	}
 	writer.Header().Set("Content-Type", contentType)
@@ -167,11 +192,26 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Content-Length", strconv.Itoa(len(clean)))
 	writer.WriteHeader(response.Status)
 	status = response.Status
-	written, writeErr := writer.Write(clean)
+	written, writeErr := gateway.answer(controller, writer, clean)
 	bytesOut = int64(written)
 	if writeErr != nil {
 		errorCode = "client_disconnected"
 	}
+}
+
+// answer writes a fully buffered response body under a write deadline, so a
+// client that stopped reading cannot hold the limiter slot the handler still
+// owns. The deadline is set per write and generous: the body is already in
+// memory, so only the client's own pace of reading is being bounded.
+func (gateway *Gateway) answer(controller *http.ResponseController, writer http.ResponseWriter, body []byte) (int, error) {
+	_ = controller.SetWriteDeadline(time.Now().Add(gateway.responseWriteTimeout))
+	return writer.Write(body)
+}
+
+// fail is error() with the same write deadline attached.
+func (gateway *Gateway) fail(controller *http.ResponseController, writer http.ResponseWriter, status int, message string) {
+	_ = controller.SetWriteDeadline(time.Now().Add(gateway.responseWriteTimeout))
+	gateway.error(writer, status, message)
 }
 
 func requestPayload(body []byte, contentType, path string) (string, map[string]any, error) {

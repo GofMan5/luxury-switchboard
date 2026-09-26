@@ -41,7 +41,7 @@ beforeEach(() => {
 
 describe('ActivityPage phases', () => {
   it('shows skeleton rows and a busy table while the first batch loads', () => {
-    show({ phase: 'loading', requests: [], summary, error: '' })
+    show({ phase: 'loading', requests: [], available: 0, summary, error: '' })
     // A live region's text is announced, not named, so the name filter stays off.
     expect(screen.getByRole('status').textContent).toMatch(/loading live activity/iu)
     expect(screen.getByRole('table').closest('div')?.getAttribute('aria-busy')).toBe('true')
@@ -50,7 +50,7 @@ describe('ActivityPage phases', () => {
   })
 
   it('shows the error with a retry that reconnects', () => {
-    show({ phase: 'error', requests: [], summary, error: 'Activity is unavailable' })
+    show({ phase: 'error', requests: [], available: 0, summary, error: 'Activity is unavailable' })
     expect(screen.getByRole('alert')).toBeTruthy()
     // The alert is the state; an empty-table row would double-report it.
     expect(screen.queryByText(/no requests match/iu)).toBeNull()
@@ -61,7 +61,7 @@ describe('ActivityPage phases', () => {
 
 describe('ActivityPage rows and inspector', () => {
   it('marks columns, selects with roving tabindex, and opens on Enter', async () => {
-    show({ phase: 'ready', requests: [request('a'), request('b', 'completed')], summary, error: '' })
+    show({ phase: 'ready', available: 2, requests: [request('a'), request('b', 'completed')], summary, error: '' })
     expect(document.querySelectorAll('th[scope="col"]')).toHaveLength(10)
     const rows = screen.getByRole('table').querySelectorAll('tbody tr[data-row]')
     expect(rows).toHaveLength(2)
@@ -77,7 +77,7 @@ describe('ActivityPage rows and inspector', () => {
   })
 
   it('moves focus with arrows and returns it to the row when the inspector closes', async () => {
-    show({ phase: 'ready', requests: [request('a'), request('b')], summary, error: '' })
+    show({ phase: 'ready', available: 2, requests: [request('a'), request('b')], summary, error: '' })
     const first = screen.getByRole('table').querySelectorAll('tbody tr[data-row]')[0] as HTMLElement
     first.focus()
     fireEvent.keyDown(first, { key: 'ArrowDown' })

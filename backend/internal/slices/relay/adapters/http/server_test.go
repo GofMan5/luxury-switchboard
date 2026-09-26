@@ -555,19 +555,22 @@ func TestAProviderThatOnlyRateLimitsStopsInsteadOfRetryingForever(t *testing.T) 
 
 func TestPlanSpecificModelUnavailableErrorIsClassified(t *testing.T) {
 	body := []byte(`{"error":{"message":"Model 'gpt-5.6-sol' is not available on your plan."}}`)
-	if !modelUnavailable(body, "gpt-5.6-sol") {
+	if !modelUnavailable(body, "gpt-5.6-sol", http.StatusNotFound) {
 		t.Fatal("plan-specific unavailable model did not fall through to the next key")
 	}
 	if modelMissing(body, "gpt-5.6-sol") {
 		t.Fatal("a plan restriction was mistaken for a missing model")
 	}
-	// Reseller gateways refuse with 403 instead of 404, in English or Chinese.
+	// Reseller gateways refuse with 403 instead of 404, in English or Chinese,
+	// and reword the verdict per release: a 403 that names the model is about
+	// the model whatever the wording, while a 404 keeps its marker list.
 	for _, prose := range []string{
 		`{"error":{"message":"Token has no access to model gpt-6-astra"}}`,
 		`{"error":{"message":"Access denied for model gpt-6-astra"}}`,
 		`{"error":{"message":"该令牌无权访问模型 gpt-6-astra"}}`,
+		`{"error":{"message":"model gpt-6-astra is not included in your current subscription"}}`,
 	} {
-		if !modelUnavailable([]byte(prose), "gpt-6-astra") {
+		if !modelUnavailable([]byte(prose), "gpt-6-astra", http.StatusForbidden) {
 			t.Fatalf("entitlement refusal was not classified: %s", prose)
 		}
 		if modelMissing([]byte(prose), "gpt-6-astra") {
@@ -576,8 +579,13 @@ func TestPlanSpecificModelUnavailableErrorIsClassified(t *testing.T) {
 	}
 	// A bare 403 names no model, so it stays an authentication rotation.
 	bare := []byte(`{"error":"invalid credential"}`)
-	if modelUnavailable(bare, "gpt-6-astra") || modelMissing(bare, "gpt-6-astra") {
+	if modelUnavailable(bare, "gpt-6-astra", http.StatusForbidden) || modelMissing(bare, "gpt-6-astra") {
 		t.Fatal("a bare 403 was classified as a model verdict")
+	}
+	// A 404 naming the model without plan markers is not an entitlement
+	// refusal; it feeds the endpoint-probe path instead.
+	if modelUnavailable([]byte(`{"error":{"message":"no route for model gpt-6-astra"}}`), "gpt-6-astra", http.StatusNotFound) {
+		t.Fatal("a markerless 404 was classified as an entitlement refusal")
 	}
 }
 
@@ -742,6 +750,214 @@ func TestRepeatedAuthFailureDoesNotRecoolTheKey(t *testing.T) {
 		credentials.outcomes[1].Kind != relayapp.AttemptRequestError ||
 		credentials.outcomes[2].Kind != relayapp.AttemptRequestError {
 		t.Fatalf("repeat refusal re-cooled the pool: %+v", credentials.outcomes)
+	}
+}
+
+// A shared batch quota is the provider's verdict, not any key's balance: it
+// refills on the provider's schedule and every key answers it identically.
+// The midnight ban this answer used to file per rotated key froze every
+// working model behind a verdict no key was responsible for.
+func TestASharedPoolQuotaDoesNotBanTheKeys(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusPaymentRequired)
+		_, _ = writer.Write([]byte(`{"error":{"message":"Budget pool quota has been exhausted"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-6-astra",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-6-astra"}`),
+	})
+	if err != nil || response.Status != http.StatusPaymentRequired {
+		t.Fatalf("shared pool verdict did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("a provider-wide verdict rotated the pool: attempts=%d", attempts)
+	}
+	if len(credentials.outcomes) != 1 || credentials.outcomes[0].Kind != relayapp.AttemptRequestError {
+		t.Fatalf("shared pool verdict damaged a key: %+v", credentials.outcomes)
+	}
+}
+
+// A client-level auth verdict ("unauthorized client detected") is the edge
+// refusing the caller, not the credential: every key answers it the same way,
+// so rotating walks the whole pool for nothing and the first refusal's
+// cooldown freezes models that work behind one probe that does not.
+func TestAClientBlockDoesNotRotateOrCoolThePool(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":{"message":"unauthorized client detected, contact support for assistance"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodGet, Path: "/v1/models", ProviderID: "vendor-hub",
+	})
+	if err != nil || response.Status != http.StatusUnauthorized {
+		t.Fatalf("client block did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("a client-level verdict rotated the pool: attempts=%d", attempts)
+	}
+	if len(credentials.outcomes) != 1 || credentials.outcomes[0].Kind != relayapp.AttemptRequestError {
+		t.Fatalf("client block cooled a key: %+v", credentials.outcomes)
+	}
+}
+
+// A 403 that names the model in any wording blocks the model, never the key:
+// the working models on the same key must not queue behind the refused one.
+func TestAFortyThreeNamingTheModelBlocksTheModelWhateverTheWording(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"message":"model gpt-6-astra is not included in your current subscription tier"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-6-astra",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-6-astra"}`),
+	})
+	if err != nil || response.Status != http.StatusForbidden {
+		t.Fatalf("model refusal did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected one attempt per key, saw %d", attempts)
+	}
+	for _, outcome := range credentials.outcomes {
+		if outcome.Kind != relayapp.AttemptModelUnavailable {
+			t.Fatalf("unfamiliar wording cooled a key instead of blocking the model: %+v", credentials.outcomes)
+		}
+	}
+}
+
+// Congestion answers on their own once a channel frees up, so a 503 that names
+// it (new-api's saturation wording, measured on the reseller) is waited out on
+// the attempt ceiling instead of surfacing after the two-try budget a plain
+// 5xx spends. The verdict must not cool the keys: every key answers it
+// identically.
+func TestAnOverloadedServiceIsRetriedInsteadOfSurfaced(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+		if attempts <= 4 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte(`{"error":{"message":"当前分组上游负载已饱和，请稍后再试"}}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("congestion was surfaced instead of waited out: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 5 {
+		t.Fatalf("expected the congestion to be retried past the permanent budget, saw %d attempts", attempts)
+	}
+	for _, outcome := range credentials.outcomes[:4] {
+		if outcome.Kind != relayapp.AttemptServerError {
+			t.Fatalf("congestion damaged a key: %+v", credentials.outcomes)
+		}
+	}
+	if credentials.outcomes[4].Kind != relayapp.AttemptSuccess {
+		t.Fatalf("the answer that finally arrived was not filed as a success: %+v", credentials.outcomes)
+	}
+}
+
+// English overload wording rides the same class.
+func TestEnglishOverloadWordingIsRetried(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+		if attempts <= 2 {
+			writer.WriteHeader(http.StatusBadGateway)
+			_, _ = writer.Write([]byte(`{"error":{"message":"The service is overloaded. No channel available, please try again later."}}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("English congestion was surfaced instead of waited out: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected retries past the permanent budget, saw %d attempts", attempts)
+	}
+}
+
+// A broken 5xx without congestion wording keeps the permanent-attempt budget:
+// the ceiling above is for queues, not for dead servers.
+func TestAPlainFiveHundredStaysBounded(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(`{"error":{"message":"internal error, index out of range"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusInternalServerError {
+		t.Fatalf("plain 500 did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("plain 500 exceeded the permanent budget: %d attempts", attempts)
 	}
 }
 

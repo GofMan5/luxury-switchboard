@@ -311,8 +311,29 @@
   font-weight: 500;
   line-height: 1.45;
   overflow-wrap: anywhere;
+  /* The detail is the provider's raw answer, up to the store's 4096-rune cap:
+   * the whole verdict stays one scroll away instead of stretching the panel. */
+  max-height: 280px;
+  overflow-y: auto;
   white-space: pre-wrap;
 }
+
+.copyDetail {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 4px 9px;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.copyDetail:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.copyDetail:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
 @media (max-width: 1279px) {
   .body[data-inspector='true'] { grid-template-columns: minmax(0, 1fr); }

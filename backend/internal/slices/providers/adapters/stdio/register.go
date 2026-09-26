@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
@@ -165,6 +166,10 @@ func invalidPayload() platform.MethodError {
 
 func managementError(err error) platform.MethodError {
 	switch {
+	case errors.Is(err, application.ErrStoreUnavailable):
+		return platform.MethodError{Code: "secure_storage_unavailable", Message: "Secure storage is unavailable. Start or unlock Linux Secret Service, run Switchboard without sudo, then restart it."}
+	case errors.Is(err, secretstore.ErrUnavailable):
+		return platform.MethodError{Code: "secure_storage_unavailable", Message: "Secure storage is unavailable. Start or unlock Linux Secret Service, run Switchboard without sudo, then restart it."}
 	case errors.Is(err, application.ErrProviderUnavailable):
 		return platform.MethodError{Code: "provider_unavailable", Message: "Provider is unavailable"}
 	case errors.Is(err, application.ErrBuiltinProvider):

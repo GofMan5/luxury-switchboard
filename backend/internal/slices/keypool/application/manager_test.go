@@ -28,6 +28,59 @@ func (repository *memoryRepository) Save(_ context.Context, keys []domain.Key) e
 	return nil
 }
 
+// An unreadable key store must block the first write rather than let it
+// atomically replace the file: the runtime pool after a failed load holds the
+// builtins and nothing else, and saving it would erase every API key the user
+// entered the moment the keyring unlocks mid-session.
+func TestFailedLoadBlocksTheFirstWrite(t *testing.T) {
+	repository := &lockedKeyRepository{}
+	scheduler := NewScheduler(10)
+	builtin := testKey(t, "echo", "Environment key", "environment-secret", 0, 30)
+	builtin.Pinned = true
+	manager, err := NewManager(scheduler, repository, map[string]Rate{"echo": {Limit: 120}}, []domain.Key{builtin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Load(context.Background()); err == nil {
+		t.Fatal("the injected load failure was not reported")
+	}
+	if _, err := manager.Add(context.Background(), domain.Params{
+		ProviderID: "echo", Label: "Pro", Secret: "pro-secret", RPM: 90,
+	}); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("an add over an unreadable store was accepted: %v", err)
+	}
+	if _, err := manager.AddMany(context.Background(), Import{
+		ProviderID: "echo", Entries: []ImportEntry{{Label: "A", Secret: "a-secret"}, {Label: "B", Secret: "b-secret"}},
+	}); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("an import over an unreadable store was accepted: %v", err)
+	}
+	if _, err := manager.Update(context.Background(), "echo", builtin.ID, Update{Label: "x", RPM: 1}); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("an update over an unreadable store was accepted: %v", err)
+	}
+	if err := manager.Remove(context.Background(), "echo", builtin.ID); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("a remove over an unreadable store was accepted: %v", err)
+	}
+	if err := manager.Move(context.Background(), "echo", builtin.ID, 1); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("a move over an unreadable store was accepted: %v", err)
+	}
+	if repository.saved {
+		t.Fatal("an unreadable store was rewritten")
+	}
+}
+
+type lockedKeyRepository struct {
+	saved bool
+}
+
+func (repository *lockedKeyRepository) Load(context.Context) ([]domain.Key, error) {
+	return nil, errors.New("secure storage is locked")
+}
+
+func (repository *lockedKeyRepository) Save(context.Context, []domain.Key) error {
+	repository.saved = true
+	return nil
+}
+
 func TestManagerPersistsAddedKeyAndPinnedRPM(t *testing.T) {
 	repository := &memoryRepository{}
 	scheduler := NewScheduler(10)

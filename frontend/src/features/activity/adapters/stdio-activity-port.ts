@@ -1,5 +1,5 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
-import type { ActivityPort } from '../application/activity-port'
+import type { ActivityListResult, ActivityPort } from '../application/activity-port'
 import type { ActivityRequest, ActivitySummary } from '../domain/activity'
 
 export class StdioActivityPort implements ActivityPort {
@@ -9,13 +9,13 @@ export class StdioActivityPort implements ActivityPort {
     this.#session = session
   }
 
-  async list(limit: number, signal?: AbortSignal): Promise<readonly ActivityRequest[]> {
-    const result = await this.#session.call<{ requests: readonly ActivityRequest[] }>(
+  async list(limit: number, signal?: AbortSignal): Promise<ActivityListResult> {
+    const result = await this.#session.call<{ requests: readonly ActivityRequest[]; available?: number }>(
       'activity.list',
       { limit },
       signal,
     )
-    return result.requests
+    return { requests: result.requests, available: result.available ?? result.requests.length }
   }
 
   summary(signal?: AbortSignal): Promise<ActivitySummary> {

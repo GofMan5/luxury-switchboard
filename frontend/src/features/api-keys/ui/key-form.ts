@@ -8,6 +8,14 @@ const MAX_LABEL_RUNES = 80
  */
 export const MAX_IMPORT_KEYS = 500
 
+/**
+ * How many characters the serialized import may carry. One command rides a
+ * 256 KiB protocol frame the desktop shell enforces; the wrong clipboard (a
+ * config, a log) used to exceed it and die as a generic transport failure.
+ * Measuring the exact serialized size turns that into a sentence too.
+ */
+export const MAX_IMPORT_FRAME_CHARS = 240_000
+
 export function proxyURLIsValid(value: string): boolean {
   const raw = value.trim()
   if (!raw) return true

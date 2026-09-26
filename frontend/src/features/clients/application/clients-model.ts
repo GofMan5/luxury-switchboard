@@ -80,6 +80,10 @@ export class ClientsModel {
       return false
     }
     this.#set({ ...this.#state, pendingIp: profile.ip, error: '' })
+    // A governance decision outranks a refresh that is already on its way
+    // back: without the bump, the older snapshot would briefly re-show an
+    // address the owner just banned.
+    this.#generation++
     try {
       const clients = await this.#port.saveProfile({ ...profile, note })
       this.#set({ ...this.#state, phase: 'ready', clients, pendingIp: '', error: '' })

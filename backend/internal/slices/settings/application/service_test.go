@@ -25,6 +25,32 @@ func (repository *memoryRepository) Save(_ context.Context, settings domain.Sett
 	return nil
 }
 
+// An unreadable settings file must block the first save rather than let it
+// atomically replace the file: the service runs on defaults after a failed
+// load, and saving those would erase the user's whole configuration the
+// moment the keyring unlocks mid-session.
+func TestFailedLoadBlocksTheFirstSave(t *testing.T) {
+	service, _ := NewService(&lockedSettingsRepository{err: errors.New("secure storage is locked")})
+	if err := service.Load(context.Background()); err == nil {
+		t.Fatal("the injected load failure was not reported")
+	}
+	if _, err := service.Update(context.Background(), domain.Defaults()); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("a save over an unreadable store was accepted: %v", err)
+	}
+}
+
+type lockedSettingsRepository struct {
+	err error
+}
+
+func (repository *lockedSettingsRepository) Load(context.Context) (domain.Settings, bool, error) {
+	return domain.Settings{}, false, repository.err
+}
+
+func (repository *lockedSettingsRepository) Save(context.Context, domain.Settings) error {
+	return repository.err
+}
+
 func TestServicePersistsBeforePublishing(t *testing.T) {
 	repository := &memoryRepository{}
 	service, _ := NewService(repository)

@@ -1005,17 +1005,41 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			continue
 		}
 
+		// A 5xx that names congestion is a queue to wait in, not a verdict to
+		// hand the caller: "no channel available", "service overloaded",
+		// "upstream load is saturated" (new-api's wording, measured on
+		// the reseller) mean the provider has nothing free right now and usually
+		// does seconds later. The permanent-attempt budget that ends a
+		// deterministic 5xx after two tries was ending work the caller cannot
+		// restart from here — so the overloaded class waits the congestion out
+		// on the same ceiling a 429 uses. The verdict cools nothing: every key
+		// answers it identically, so pool damage would only spread the wait to
+		// models that work.
+		if status >= 500 && serviceOverloaded(failureText) {
+			delay := retryDelay(attempt, response, server.config)
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
+			if !canRetry(attempt, attemptLimit) {
+				return genericErrorResponse(status), nil
+			}
+			server.observeRetry(activityID, attempt, status, delay)
+			if err := waitRetry(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		if status >= 500 {
 			delay := retryDelay(attempt, response, server.config)
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			serverFailures++
-			// A 5xx without a rate-limit verdict is a deterministically failing
-			// upstream, not a queue to wait in: it retries on the
-			// permanent-attempt budget like every other failure the relay
-			// answers out loud, instead of burning the full 64-attempt ceiling
-			// with backoff per request. Transport errors and 408s keep that
-			// ceiling — a dropped socket or a timed-out wait says nothing about
-			// the next attempt.
+			// A 5xx without a rate-limit or congestion verdict is a
+			// deterministically failing upstream, not a queue to wait in: it
+			// retries on the permanent-attempt budget like every other failure
+			// the relay answers out loud, instead of burning the full
+			// 64-attempt ceiling with backoff per request. Transport errors,
+			// 408s and congestion keep that ceiling — a dropped socket, a
+			// timed-out wait and a busy channel all say nothing about the next
+			// attempt.
 			if serverFailures >= server.config.PermanentAttempts || !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
@@ -1058,7 +1082,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 		}
 		switch {
-		case balanceUnavailable(status, errorBody, rateLimited):
+		case balanceUnavailable(status, errorBody, rateLimited) && !sharedPoolExhausted(errorBody):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
@@ -1068,6 +1092,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				return nil, err
 			}
 			continue
+		case balanceUnavailable(status, errorBody, rateLimited) && sharedPoolExhausted(errorBody):
+			// The batch quota is the provider's, not any key's: rotating would
+			// walk the request through keys that all answer the same way, and
+			// the midnight ban this class used to file froze every working
+			// model behind a verdict no key was responsible for. The request
+			// ends on the refusal; the next one tries the pool fresh.
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			return genericErrorResponse(status), nil
 		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelMissing(errorBody, model):
 			// The provider does not host the model at all. Retrying is pointless
 			// and blocking the keys would only stall the next request as well.
@@ -1075,7 +1107,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// runs before the authentication rotation below.
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			return genericErrorResponse(status), nil
-		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelUnavailable(errorBody, model):
+		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelUnavailable(errorBody, model, status):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
@@ -1090,6 +1122,13 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				return nil, err
 			}
 			continue
+		case (status == http.StatusUnauthorized || status == http.StatusForbidden) && clientBlocked(errorBody):
+			// A verdict about the client, not the credential: every key answers
+			// it identically, so rotation is wasted attempts and the first
+			// refusal's cooldown would freeze models that work behind one
+			// probe that does not.
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			return genericErrorResponse(status), nil
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			// The first refusal cools the key that produced it. A second refusal
 			// inside the same request is evidence about the verdict, not the key:
@@ -1134,7 +1173,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			server.chatOnly.Delete(route.ProviderID)
 			return genericErrorResponse(status), nil
-		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model) && endpointMissing404(status, errorBody) && canonicalPath(incoming.URL.Path) == responsesPath:
+		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && canonicalPath(incoming.URL.Path) == responsesPath:
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			server.chatOnly.Store(route.ProviderID, struct{}{})
 			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)
@@ -2240,24 +2279,63 @@ func modelMissing(body []byte, model string) bool {
 // responsible for: the model exists but this key may not call it. Another key
 // can succeed, so the request rotates through the pool.
 //
-// A 403 carries the same verdict on reseller gateways: the token is valid but
-// not entitled to the model (measured: `403 该令牌无权访问模型 gpt-5`). It is
-// still a rotation rather than a refusal, because another account's key may
-// hold the entitlement — but it blocks the model, not the key, so the key
-// stays usable for everything else.
-func modelUnavailable(body []byte, model string) bool {
+// A 403 that names the model is a verdict about the model whatever the wording:
+// the token is not entitled to it, the plan does not carry it, the daily batch
+// for it is spent (measured: `403 该令牌无权访问模型 gpt-5`; resellers reword
+// these per release, so the model's own name in a forbidden verdict is the one
+// stable signal). It is still a rotation rather than a refusal, because
+// another account's key may hold the entitlement — but it blocks the model,
+// not the key, so the key stays usable for everything else. A 404 keeps its
+// marker list: on a not-found endpoint the wording is what separates a missing
+// model from a plan restriction.
+func modelUnavailable(body []byte, model string, status int) bool {
 	if model == "" || len(body) == 0 {
 		return false
 	}
 	text := strings.ToLower(string(body))
-	return strings.Contains(text, strings.ToLower(model)) &&
-		(strings.Contains(text, "not available on your plan") ||
-			strings.Contains(text, "not available for your account") ||
-			strings.Contains(text, "no access") ||
-			strings.Contains(text, "access denied") ||
-			strings.Contains(text, "not entitled") ||
-			strings.Contains(text, "forbidden") ||
-			strings.Contains(text, "无权"))
+	if !strings.Contains(text, strings.ToLower(model)) {
+		return false
+	}
+	if status == http.StatusForbidden {
+		return true
+	}
+	return strings.Contains(text, "not available on your plan") ||
+		strings.Contains(text, "not available for your account") ||
+		strings.Contains(text, "no access") ||
+		strings.Contains(text, "access denied") ||
+		strings.Contains(text, "not entitled")
+}
+
+// sharedPoolExhausted reports a billing verdict about the provider's shared
+// pool rather than the key's own balance: the reseller releases GPT/Claude
+// capacity in daily batches, and "Budget pool quota has been exhausted" means
+// the batch is spent for everyone (measured, and stated in their own
+// announcements). Banning keys until midnight for it froze the whole pool
+// behind a verdict no key was responsible for.
+func sharedPoolExhausted(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "budget pool") ||
+		strings.Contains(text, "pool quota") ||
+		strings.Contains(text, "quota pool") ||
+		strings.Contains(text, "shared pool")
+}
+
+// clientBlocked reports an auth verdict about the caller's client rather than
+// the credential: reseller edges answer "unauthorized client detected" the
+// same way for every key, so rotating is wasted attempts and cooling the first
+// key freezes models that work behind one that does not (measured: a
+// /v1/models probe rotated nine keys on this verdict).
+func clientBlocked(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "unauthorized client") ||
+		strings.Contains(text, "unauthorized_client") ||
+		strings.Contains(text, "unauthorized client error")
 }
 
 // errorTextReplacer unpunctuates error prose for the classifiers below. One
@@ -2386,6 +2464,28 @@ func rateLimitedText(text string) bool {
 			if strings.Contains(rest, noun) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// serviceOverloaded reports a 5xx whose prose names congestion rather than
+// breakage. These answers resolve on their own once a channel frees up, so the
+// request retries instead of surfacing the status. Wording is taken from the
+// resellers this relay actually serves: new-api's Chinese saturation message
+// (measured on the reseller) and the English overload idioms.
+func serviceOverloaded(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"overloaded", "overload", "no channel", "try again later", "try again",
+		"resource exhausted", "temporarily unavailable", "server is busy",
+		"capacity", "saturated", "backpressure",
+		"负载已饱和", "请稍后再试", "无可用渠道", "繁忙",
+	} {
+		if strings.Contains(text, marker) {
+			return true
 		}
 	}
 	return false

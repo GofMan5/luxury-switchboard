@@ -3,10 +3,17 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
 )
+
+// ErrStoreUnavailable names a write refused because the settings file could
+// not be read: saving defaults over an unreadable file would replace it, and
+// the user's whole configuration is gone after the next start. Routes,
+// providers and the key pool made the same call first; this is the same rule.
+var ErrStoreUnavailable = errors.New("settings storage could not be read; saving now would replace it")
 
 type Repository interface {
 	Load(context.Context) (domain.Settings, bool, error)
@@ -19,6 +26,8 @@ type Service struct {
 	repository Repository
 	settings   domain.Settings
 	applied    domain.Settings
+	loadMu     sync.RWMutex
+	loadErr    error
 
 	listenersMu sync.RWMutex
 	listeners   []func(domain.Settings)
@@ -39,24 +48,37 @@ func NewService(repository Repository) (*Service, error) {
 
 func (service *Service) Load(ctx context.Context) error {
 	settings, found, err := service.repository.Load(ctx)
+	if err == nil && found {
+		// Settings written before a field existed carry a zero value for it. Filling
+		// those in before validating keeps an older file loadable instead of discarding
+		// every setting the user had configured.
+		settings = settings.Normalized()
+		if invalid := settings.Validate(); invalid != nil {
+			err = fmt.Errorf("stored settings are invalid: %w", invalid)
+		}
+	}
+	service.loadMu.Lock()
+	service.loadErr = err
+	service.loadMu.Unlock()
 	if err != nil {
 		return err
 	}
 	if !found {
 		return nil
 	}
-	// Settings written before a field existed carry a zero value for it. Filling
-	// those in before validating keeps an older file loadable instead of discarding
-	// every setting the user had configured.
-	settings = settings.Normalized()
-	if err := settings.Validate(); err != nil {
-		return err
-	}
 	service.mu.Lock()
 	service.settings = settings
 	service.applied = settings
 	service.mu.Unlock()
 	return nil
+}
+
+// Availability reports why the settings file could not be read, or nil when it
+// could. A save refuses while it is set.
+func (service *Service) Availability() error {
+	service.loadMu.RLock()
+	defer service.loadMu.RUnlock()
+	return service.loadErr
 }
 
 func (service *Service) Snapshot() domain.Settings {
@@ -68,12 +90,15 @@ func (service *Service) Snapshot() domain.Settings {
 func (service *Service) Update(ctx context.Context, settings domain.Settings) (UpdateResult, error) {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return UpdateResult{}, ErrStoreUnavailable
+	}
 	settings = settings.Normalized()
 	if err := settings.Validate(); err != nil {
 		return UpdateResult{}, err
 	}
 	if err := service.repository.Save(ctx, settings); err != nil {
-		return UpdateResult{}, errors.New("settings could not be saved")
+		return UpdateResult{}, fmt.Errorf("settings could not be saved: %w", err)
 	}
 	service.mu.Lock()
 	service.settings = settings

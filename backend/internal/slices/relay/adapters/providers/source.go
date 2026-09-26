@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"sync/atomic"
 
 	providerapp "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 	providerdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
@@ -12,11 +13,20 @@ type Source struct {
 	catalog   *providerapp.Catalog
 	routes    relayapp.ModelRouteResolver
 	failovers relayapp.FailoverRoutes
+	// failoverEnabled gates the chain: off means terminal verdicts end the
+	// request where they happened. Applied live from settings.
+	failoverEnabled atomic.Bool
 }
 
 func NewSource(catalog *providerapp.Catalog, routes relayapp.ModelRouteResolver, failovers relayapp.FailoverRoutes) *Source {
-	return &Source{catalog: catalog, routes: routes, failovers: failovers}
+	source := &Source{catalog: catalog, routes: routes, failovers: failovers}
+	source.failoverEnabled.Store(true)
+	return source
 }
+
+// SetFailoverEnabled gates the chain live: requests in flight keep the route
+// they resolved with.
+func (source *Source) SetFailoverEnabled(enabled bool) { source.failoverEnabled.Store(enabled) }
 
 func (source *Source) Current(_ context.Context, model string) (relayapp.Route, error) {
 	provider, err := source.catalog.Active()
@@ -52,9 +62,11 @@ func (source *Source) Pinned(_ context.Context, providerID, upstreamModel string
 
 // Next walks the failover chain past the provider that just refused. Entries
 // whose provider is gone or disabled are skipped here rather than at the
-// routes slice: the catalog is this adapter's own domain.
+// routes slice: the catalog is this adapter's own domain. With the chain
+// gated off it reports a clean miss, which the relay reads as "the verdict is
+// final" — the strict routing an operator asked for.
 func (source *Source) Next(_ context.Context, currentProviderID, publicModel string) (relayapp.Route, bool, error) {
-	if source.failovers == nil || publicModel == "" {
+	if source.failovers == nil || publicModel == "" || !source.failoverEnabled.Load() {
 		return relayapp.Route{}, false, nil
 	}
 	for _, candidate := range source.failovers.Chain(publicModel) {

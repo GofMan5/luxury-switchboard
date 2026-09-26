@@ -32,6 +32,19 @@ export class ModelsModel {
   }
 
   snapshot = () => this.#state
+
+  /** Discovers a provider's catalog without moving this model's state: the
+   * failover wizard reads several providers while the page keeps showing its
+   * own. Failures return an empty list — a wizard row falls back to free text
+   * rather than an error surface. */
+  async catalogOf(providerId: string): Promise<readonly string[]> {
+    if (!providerId) return []
+    try {
+      return await this.#port.discover(providerId)
+    } catch {
+      return []
+    }
+  }
   subscribe = (listener: () => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
 
   connect() {

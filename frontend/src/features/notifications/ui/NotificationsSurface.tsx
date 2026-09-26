@@ -52,6 +52,9 @@ function Toast({ notification }: { notification: Notification }) {
         <strong>{notification.title}</strong>
         <p>{notification.body}</p>
       </div>
+      {/* The whole timeline is CSS: enter, five seconds of life with the bar
+       * draining, then leave. The model drops the row after the leave. */}
+      <span className={styles.toastTimer} aria-hidden="true" />
     </div>
   )
 }

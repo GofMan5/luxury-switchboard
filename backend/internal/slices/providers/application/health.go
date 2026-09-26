@@ -22,11 +22,13 @@ type ReachabilityProber interface {
 
 // HealthState is one provider's reachability, as the sidebar shows it. The
 // reason is a short neutral sentence, never the endpoint or an error with a
-// URL inside.
+// URL inside; the latency is the probe's own round trip, for the operator's
+// sense of the provider, not a routing input.
 type HealthState struct {
 	ProviderID string    `json:"providerId"`
 	Up         bool      `json:"up"`
 	Reason     string    `json:"reason"`
+	LatencyMS  int64     `json:"latencyMs"`
 	Since      time.Time `json:"since"`
 }
 
@@ -95,9 +97,10 @@ func (monitor *HealthMonitor) Run(ctx context.Context, interval time.Duration) {
 }
 
 type probeOutcome struct {
-	id     string
-	up     bool
-	reason string
+	id        string
+	up        bool
+	reason    string
+	latencyMS int64
 }
 
 // pass probes all enabled providers concurrently — a provider that times out
@@ -119,8 +122,9 @@ func (monitor *HealthMonitor) pass(ctx context.Context) {
 		group.Add(1)
 		go func(index int, provider providerdomain.Provider) {
 			defer group.Done()
+			started := time.Now()
 			up, reason := monitor.prober.ProbeReachability(probeCtx, provider)
-			outcomes[index] = probeOutcome{id: provider.ID, up: up, reason: reason}
+			outcomes[index] = probeOutcome{id: provider.ID, up: up, reason: reason, latencyMS: time.Since(started).Milliseconds()}
 		}(index, provider)
 	}
 	group.Wait()
@@ -132,7 +136,7 @@ func (monitor *HealthMonitor) pass(ctx context.Context) {
 	for _, outcome := range outcomes {
 		probed[outcome.id] = struct{}{}
 		previous, existed := monitor.states[outcome.id]
-		next := HealthState{ProviderID: outcome.id, Up: outcome.up, Reason: outcome.reason}
+		next := HealthState{ProviderID: outcome.id, Up: outcome.up, Reason: outcome.reason, LatencyMS: outcome.latencyMS}
 		switch {
 		case !existed || previous.Up != outcome.up:
 			// A transition resets the clock; the first sighting counts as one
@@ -140,14 +144,14 @@ func (monitor *HealthMonitor) pass(ctx context.Context) {
 			next.Since = now
 			monitor.states[outcome.id] = next
 			changed = append(changed, next)
-		case previous.Reason != outcome.reason:
-			// Same verdict, different wording: the snapshot updates, nobody
+		case previous.Reason != outcome.reason || previous.LatencyMS != outcome.latencyMS:
+			// Same verdict, fresher numbers: the snapshot updates, nobody
 			// is told.
 			next.Since = previous.Since
 			monitor.states[outcome.id] = next
 		default:
 			monitor.states[outcome.id] = HealthState{
-				ProviderID: outcome.id, Up: outcome.up, Reason: outcome.reason, Since: previous.Since,
+				ProviderID: outcome.id, Up: outcome.up, Reason: outcome.reason, LatencyMS: outcome.latencyMS, Since: previous.Since,
 			}
 		}
 	}

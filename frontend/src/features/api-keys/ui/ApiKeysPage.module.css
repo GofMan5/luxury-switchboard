@@ -83,3 +83,26 @@
 
 tr[data-dead='true'] td:first-child { box-shadow: inset 3px 0 0 var(--status-danger); }
 tr[data-dead='true'] .keyLabel small { color: var(--status-danger); }
+.poolReport {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 11px 20px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--status-success) 5%, var(--bg-canvas));
+}
+
+.poolReport[data-rejected] {
+  background: color-mix(in srgb, var(--status-danger) 6%, var(--bg-canvas));
+}
+
+.poolReport > div { min-width: 0; flex: 1; }
+.poolReport strong { display: block; color: var(--text-primary); font-size: 13px; }
+.poolReport span { display: block; margin-top: 3px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+.poolReport button { white-space: nowrap; }
+
+.spinning { animation: icon-spin 1s linear infinite; }
+[data-animations='off'] .spinning { animation: none; }
+
+@keyframes icon-spin { to { transform: rotate(360deg); } }

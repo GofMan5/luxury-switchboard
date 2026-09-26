@@ -200,10 +200,88 @@ func TestDuplicatePersistedAndBulkRoutesAreRejected(t *testing.T) {
 	}
 }
 
-// One public model may sit on several providers, and the request walks the
-// chain in priority order. A terminal verdict degrades the provider for a
-// short TTL: its sibling serves first, and the chain re-probes it once the TTL
-// lapses instead of committing to its death.
+// Balance mode round-robins the healthy entries of a chain, so two providers
+// alternate — the shared daily quota of each is spent half as fast — while a
+// degraded one sits out the rotation and an all-degraded chain still serves.
+func TestBalanceModeRoundRobinsHealthyChainEntries(t *testing.T) {
+	clock := time.Unix(0, 0)
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"alpha-relay": true, "agent": true, "third": true})
+	service.degradeClock = func() time.Time { return clock }
+	for _, entry := range []struct {
+		provider string
+		priority int
+	}{{"alpha-relay", 0}, {"agent", 1}, {"third", 2}} {
+		if err := service.Upsert(context.Background(), domain.Assignment{
+			Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "glm-" + entry.provider,
+			ProviderID: entry.provider, Priority: entry.priority, Enabled: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.SetChainMode("balance")
+	seen := map[string]int{}
+	for range 6 {
+		got, ok := service.Resolve(domain.TargetRelay, "glm")
+		if !ok {
+			t.Fatal("the balanced chain refused to serve")
+		}
+		seen[got.ProviderID]++
+	}
+	for provider, count := range seen {
+		if count != 2 {
+			t.Fatalf("the rotation was not fair: %s served %d of 6", provider, count)
+		}
+	}
+	// A degraded entry sits out the rotation; the rest keep sharing.
+	service.Degrade("alpha-relay")
+	seen = map[string]int{}
+	for range 6 {
+		got, _ := service.Resolve(domain.TargetRelay, "glm")
+		seen[got.ProviderID]++
+	}
+	if seen["alpha-relay"] != 0 || seen["agent"] != 3 || seen["third"] != 3 {
+		t.Fatalf("a degraded entry kept taking traffic: %+v", seen)
+	}
+	// Everything degraded: the chain still serves, by priority.
+	service.Degrade("agent")
+	service.Degrade("third")
+	got, ok := service.Resolve(domain.TargetRelay, "glm")
+	if !ok || got.ProviderID != "alpha-relay" {
+		t.Fatalf("an all-degraded chain refused to serve: %+v ok=%v", got, ok)
+	}
+	// The tunnel target ignores the mode: one route per model, always.
+	if got, _ := service.Resolve(domain.TargetTunnel, "glm"); got.ProviderID != "" {
+		t.Fatalf("the tunnel target participated in the rotation: %+v", got)
+	}
+	// Strict mode returns to priority order (all-degraded degrades to the
+	// configured order rather than refusing).
+	service.SetChainMode("failover")
+	if got, _ := service.Resolve(domain.TargetRelay, "glm"); got.ProviderID != "alpha-relay" {
+		t.Fatalf("strict mode did not follow priority: %+v", got)
+	}
+}
+
+// One provider entry needs no rotation: balance mode must not become a
+// coin flip that occasionally answers nothing.
+func TestBalanceModeWithASingleEntryAlwaysServes(t *testing.T) {
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"solo": true})
+	if err := service.Upsert(context.Background(), domain.Assignment{
+		Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "glm-solo", ProviderID: "solo", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service.SetChainMode("balance")
+	for range 3 {
+		if got, ok := service.Resolve(domain.TargetRelay, "glm"); !ok || got.ProviderID != "solo" {
+			t.Fatalf("a single-entry chain missed: %+v ok=%v", got, ok)
+		}
+	}
+}
+
+// The relay target is an ordered chain: siblings whose provider is degraded
+// come later even at equal priority, and an all-degraded chain still serves.
 func TestFailoverChainPrefersSiblingsOfADegradedProvider(t *testing.T) {
 	clock := time.Unix(0, 0)
 	repository := &memoryRepository{}

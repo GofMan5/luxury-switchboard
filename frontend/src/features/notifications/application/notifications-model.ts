@@ -9,10 +9,15 @@ export interface NotificationsState {
   readonly error: string
 }
 
-/** How long a toast stays on screen. Hover pauses nothing on purpose: the feed
+/** How long a toast is fully on screen. The exit animation plays on top of
+ * this, driven by CSS, so the model holds the row for the animation's sake
+ * and retires it a beat after. Hover pauses nothing on purpose: the feed
  * keeps every notification, so a missed toast is one click away, and a hover
  * trap fights the pointer. */
-const TOAST_TTL_MS = 6_000
+const TOAST_TTL_MS = 5_000
+/** The exit animation's duration; the model waits it out before dropping the
+ * row so the animation is never cut mid-frame. */
+const TOAST_EXIT_MS = 300
 /** How many toasts stack before the oldest is dropped outright. */
 const MAX_VISIBLE_TOASTS = 4
 
@@ -89,11 +94,13 @@ export class NotificationsModel {
     if (this.#state.enabled) {
       this.#set({ ...this.#state, unread: this.#state.unread + 1 })
       // The toast retires itself; the notification itself stays in the feed.
+      // The timer fires after the exit animation finished playing, so the row
+      // leaves the stack only once it is visually gone.
       const timer = setTimeout(() => {
         this.#timers.delete(timer)
         this.#expired.add(notification.id)
         this.#notify()
-      }, TOAST_TTL_MS)
+      }, TOAST_TTL_MS + TOAST_EXIT_MS)
       this.#timers.add(timer)
     }
   }

@@ -12,7 +12,7 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 )
 
-func Register(server *platform.Server, manager *application.Manager) {
+func Register(server *platform.Server, manager *application.Manager, prober application.PoolProber) {
 	server.Handle("keys.list", func(_ context.Context, payload json.RawMessage) (any, error) {
 		var query struct {
 			ProviderID string `json:"providerId"`
@@ -75,6 +75,21 @@ func Register(server *platform.Server, manager *application.Manager) {
 		if report.Added > 0 {
 			_ = server.Emit("keys.changed", map[string]string{"providerId": command.ProviderID})
 		}
+		return report, nil
+	})
+	server.Handle("keys.check", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var command struct {
+			ProviderID string `json:"providerId"`
+		}
+		if platform.DecodePayload(payload, &command) != nil || command.ProviderID == "" {
+			return nil, invalidPayload()
+		}
+		report, err := manager.CheckPool(ctx, command.ProviderID, prober)
+		if err != nil {
+			return nil, managementError(err)
+		}
+		// Every filed answer changed a streak or a badge somewhere.
+		_ = server.Emit("keys.changed", map[string]string{"providerId": command.ProviderID})
 		return report, nil
 	})
 	server.Handle("keys.update", func(ctx context.Context, payload json.RawMessage) (any, error) {

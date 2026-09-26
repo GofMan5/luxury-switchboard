@@ -29,6 +29,10 @@
   --motion-fast: 120ms;
   --motion-standard: 180ms;
   --ease-standard: cubic-bezier(.2, .8, .2, 1);
+  /* The iOS-flavored curve: fast take-off, long glide, no overshoot. Used for
+   * the surfaces that arrive and leave (toasts, panels, dialogs), where the
+   * standard curve reads as abrupt. */
+  --ease-ios: cubic-bezier(.32, .72, .13, 1);
   --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Cascadia Mono', Consolas, ui-monospace, monospace;
   color: var(--text-secondary);
@@ -268,10 +272,10 @@ table tbody tr { transition: color var(--motion-fast), background var(--motion-f
   max-height: calc(100vh - 32px);
   overflow: auto;
   border: 1px solid #484848;
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--bg-surface);
   box-shadow: var(--shadow-float);
-  animation: modal-in var(--motion-standard) var(--ease-standard) both;
+  animation: modal-in 340ms var(--ease-ios) both;
 }
 
 .ui-modal > header {
@@ -318,7 +322,7 @@ table tbody tr { transition: color var(--motion-fast), background var(--motion-f
 }
 
 @keyframes modal-in {
-  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  from { opacity: 0; transform: translateY(14px) scale(.965); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 

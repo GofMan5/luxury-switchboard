@@ -1,6 +1,6 @@
 [package]
 name = "switchboard-desktop"
-version = "1.0.16"
+version = "1.0.17"
 description = "Luxury Switchboard desktop shell"
 authors = ["Luxury Private"]
 license = "LicenseRef-Proprietary"

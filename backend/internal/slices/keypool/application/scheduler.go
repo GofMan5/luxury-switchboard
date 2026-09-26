@@ -68,8 +68,11 @@ type keyState struct {
 	// authStreak counts consecutive authentication refusals; any other
 	// outcome resets it. Three in a row is the dead-credential signal the
 	// operator is told about.
-	authStreak  int
-	lastOutcome domain.OutcomeKind
+	authStreak int
+	// lastOutcome is the outcome of the key's last finished attempt, nil
+	// before the first: the kind's zero value is a real outcome (success),
+	// so an untouched key must not read as one.
+	lastOutcome *domain.OutcomeKind
 }
 
 type waiter struct {
@@ -295,13 +298,17 @@ func (scheduler *Scheduler) Snapshot(providerID string) []domain.PublicKey {
 	for _, state := range provider.keys {
 		until := maxTime(state.cooldownUntil, state.balanceUntil)
 		cooldown := max(until.Sub(now).Milliseconds(), 0)
+		lastOutcome := ""
+		if state.lastOutcome != nil {
+			lastOutcome = outcomeName(*state.lastOutcome)
+		}
 		result = append(result, domain.PublicKey{
 			ID: state.key.ID, ProviderID: state.key.ProviderID,
 			Label: state.key.Label, Priority: state.key.Priority, RPM: state.key.RPM,
 			Pinned: state.key.Pinned, ProxyConfigured: state.key.ProxyURL != "",
 			CooldownMS: cooldown, BlockedModels: activeBlocks(state.blockedModels, now),
 			Retries429: state.retries429, StartsInWindow: len(state.starts),
-			AuthStreak: state.authStreak, LastOutcome: outcomeName(state.lastOutcome),
+			AuthStreak: state.authStreak, LastOutcome: lastOutcome,
 		})
 	}
 	return result
@@ -389,7 +396,8 @@ func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outc
 	}
 	// Health bookkeeping: the streak survives a rate limit or a server error
 	// (those say nothing about the credential) and breaks on anything else.
-	key.lastOutcome = outcome.Kind
+	kind := outcome.Kind
+	key.lastOutcome = &kind
 	deadNow := false
 	if outcome.Kind == domain.OutcomeAuthentication {
 		key.authStreak++

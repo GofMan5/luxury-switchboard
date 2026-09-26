@@ -45,15 +45,20 @@
 }
 
 .toast {
+  position: relative;
   display: flex;
   gap: 10px;
   align-items: flex-start;
+  overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  padding: 11px 13px;
-  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
-  box-shadow: var(--shadow-float);
-  animation: toast-in var(--motion-standard) var(--ease-standard) both;
+  border-radius: 14px;
+  padding: 12px 14px 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: 0 14px 40px rgb(0 0 0 / 38%);
+  /* iOS-style timeline: a soft spring in, five seconds of life, a gentle
+   * fall-away. Only transform and opacity animate, so the stack never
+   * repaints text mid-motion. */
+  animation: toast-enter 420ms var(--ease-ios) both, toast-leave 300ms var(--ease-ios) 5s forwards;
 }
 
 [data-animations='off'] .toast { animation: none; }
@@ -88,6 +93,26 @@
   overflow-wrap: anywhere;
 }
 
+/* The countdown: the remaining life of the toast, draining linearly. It
+ * starts after the entrance finishes, so the full five seconds are honest. */
+.toastTimer {
+  position: absolute;
+  right: 14px;
+  bottom: 7px;
+  left: 14px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 45%, transparent);
+  transform-origin: left;
+  animation: toast-drain 5s linear 420ms forwards;
+}
+
+.toast[data-severity='danger'] .toastTimer { background: color-mix(in srgb, var(--status-danger) 65%, transparent); }
+.toast[data-severity='warning'] .toastTimer { background: color-mix(in srgb, var(--status-warning) 65%, transparent); }
+.toast[data-severity='success'] .toastTimer { background: color-mix(in srgb, var(--status-success) 55%, transparent); }
+
+[data-animations='off'] .toastTimer { animation: none; transform: scaleX(0); }
+
 .panel {
   position: fixed;
   z-index: 150;
@@ -98,10 +123,10 @@
   width: min(400px, calc(100vw - 24px));
   flex-direction: column;
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--bg-surface);
   box-shadow: var(--shadow-float);
-  animation: toast-in var(--motion-standard) var(--ease-standard) both;
+  animation: panel-enter 380ms var(--ease-ios) both;
 }
 
 [data-animations='off'] .panel { animation: none; }
@@ -160,12 +185,27 @@
 .row p { margin-top: 3px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .row time { display: block; margin-top: 5px; color: var(--text-muted); font-size: 11px; }
 
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(-6px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateY(-14px) scale(.96); }
+  60% { opacity: 1; }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toast-leave {
+  to { opacity: 0; transform: translateY(-8px) scale(.97); }
+}
+
+@keyframes toast-drain {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
 }
 
 @media (max-width: 959px) {
   .toasts { top: 10px; right: 10px; }
   .panel { top: 50px; right: 8px; }
+}
+
+@keyframes panel-enter {
+  from { opacity: 0; transform: translateY(-10px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }

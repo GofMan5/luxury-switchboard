@@ -30,6 +30,12 @@ export interface Settings {
   readonly providerHealthEnabled: boolean
   /** Motion switch for the interface. Reduced-motion at the OS level still wins. */
   readonly animationsEnabled: boolean
+  /** Route chains: on moves a request to the next provider after a verdict no
+   * retry could change; off keeps routing strict. */
+  readonly failoverEnabled: boolean
+  /** How a healthy chain shares requests: 'failover' serves strictly by
+   * priority, 'balance' round-robins the healthy entries. */
+  readonly chainMode: 'failover' | 'balance'
 }
 
 export interface SettingsUpdateResult {

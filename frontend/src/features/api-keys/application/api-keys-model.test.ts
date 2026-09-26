@@ -15,6 +15,7 @@ class Port implements ApiKeysPort {
   remove = async () => undefined
   move = async () => undefined
   reset = async () => undefined
+  checkPool: ApiKeysPort['checkPool'] = async () => ({ checked: 0, rejected: 0, reachable: true })
   subscribe = (listener: (providerId: string) => void) => { this.listener = listener; return () => undefined }
 }
 

@@ -26,6 +26,8 @@ const initial: Settings = {
   notificationsEnabled: true,
   providerHealthEnabled: true,
   animationsEnabled: true,
+  failoverEnabled: true,
+  chainMode: 'balance',
 }
 
 describe('SettingsForm', () => {

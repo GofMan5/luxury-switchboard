@@ -1,7 +1,8 @@
-import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
-import { Bell, Database, Gauge, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
+import { useContext, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
 import { restartApp } from '../../../platform/lifecycle/restart-app'
 import { Button } from '../../../shared/ui/Button'
+import { ServicesContext } from '../../../app/services'
 import type { Settings } from '../domain/settings'
 import { useSettings } from './useSettings'
 import styles from './SettingsPage.module.css'
@@ -23,8 +24,11 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
     const value = Number(event.currentTarget.value)
     setSettings((current) => ({ ...current, [field]: value }))
   }
-  const toggle = (field: 'notificationsEnabled' | 'providerHealthEnabled' | 'animationsEnabled') => () => {
+  const toggle = (field: 'notificationsEnabled' | 'providerHealthEnabled' | 'animationsEnabled' | 'failoverEnabled') => () => {
     setSettings((current) => ({ ...current, [field]: !current[field] }))
+  }
+  const chainMode = (event: ChangeEvent<HTMLSelectElement>) => {
+    setSettings((current) => ({ ...current, chainMode: event.currentTarget.value as Settings['chainMode'] }))
   }
   const submit = (event: FormEvent) => { event.preventDefault(); void onSave(settings) }
   const restart = async () => {
@@ -72,15 +76,114 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
           <NumberField label="Guardrail findings" value={settings.guardrailFindings} min={50} max={5000} onChange={number('guardrailFindings')} note="Inspection mode is chosen on the Guardrails page." />
         </SettingsSection>
 
+        <SettingsSection icon={<GitBranch />} title="Failover & routing" description="What happens when a provider in a model route chain answers with a verdict no retry could change.">
+          <ToggleField label="Failover chain" checked={settings.failoverEnabled} onChange={toggle('failoverEnabled')} note="On: a dead provider, an exhausted shared quota, a client-level rejection or a missing model moves the request to the next provider of that model's chain. Off: the refusal reaches your client exactly where it happened." />
+          <div className={styles.field}>
+            <span>Chain mode</span>
+            <span className={styles.inputWrap}>
+              <select value={settings.chainMode} onChange={chainMode} aria-label="Chain mode">
+                <option value="balance">Balance (round-robin)</option>
+                <option value="failover">Failover (strict order)</option>
+              </select>
+            </span>
+            <em>Balance spreads requests across every healthy provider of a chain: two providers means twice the daily quota, because the batch quotas resellers run out of are per provider, not per you. Failover sends everything to the head of the chain and only moves on refusal.</em>
+          </div>
+          <div className={styles.explainer}>
+            <strong>How a chain works</strong>
+            <p>Publish one model on several providers in Model Routes — for example glm → alpha-relay first, vendor-hub second. A request for glm lands on alpha-relay; when alpha-relay answers with a final verdict (dead keys, a spent quota, a client ban, a model it does not host), the relay degrades alpha-relay for five minutes, rewrites the request to the upstream name of the sibling and sends it there. Your client never sees the failure. After five minutes the chain tries alpha-relay again — in Balance mode it shares the load right away. Configure chains on the Model Routes page; models without a chain keep using the active provider.</p>
+          </div>
+        </SettingsSection>
+
         <SettingsSection icon={<Bell />} title="Notifications & appearance" description="What the shell tells you as it happens, and how it moves.">
           <ToggleField label="Notifications" checked={settings.notificationsEnabled} onChange={toggle('notificationsEnabled')} note="Toasts and the unread badge. The feed itself stays recorded either way." />
           <ToggleField label="Provider health probe" checked={settings.providerHealthEnabled} onChange={toggle('providerHealthEnabled')} note="One anonymous reachability check per enabled provider every two minutes." />
           <ToggleField label="Animations" checked={settings.animationsEnabled} onChange={toggle('animationsEnabled')} note="The system's reduced-motion setting always wins over this switch." />
         </SettingsSection>
 
+        <SettingsSection icon={<ArchiveRestore />} title="Backup" description="Carry providers, keys and routes to another machine or another install.">
+          <BackupPanel />
+        </SettingsSection>
+
         <section className={styles.invariant}><History size={18} /><div><strong>Security boundaries are fixed</strong><p>Loopback binding, remote HTTPS, secret redaction, body/frame caps{__OWNER_EDITION__ ? ' and fail-closed tunnel sanitization' : ''} cannot be disabled from Settings.</p></div></section>
       </div>
     </form>
+  )
+}
+
+/** Plain-text backup, on request: one button writes the file, one file picker
+ * restores it. The warning about the format is stated here and in the file
+ * itself, because the operator asked for exactly this trade. */
+function BackupPanel() {
+  const [copied, setCopied] = useState(false)
+  const importInput = useRef<HTMLInputElement | null>(null)
+  // The form is also rendered in isolation by its own tests, without the
+  // services context; the panel then shows its explanation and no controls.
+  const services = useContext(ServicesContext)
+  if (!services) {
+    return (
+      <div className={styles.backupNote}>
+        <strong>Plain text, no passphrase</strong>
+        <p>One button writes providers, keys and routes to a JSON file you can open anywhere; a file picker restores them onto a new machine. Entries that already exist are skipped.</p>
+      </div>
+    )
+  }
+  const backup = services.backup
+  const state = backup.snapshot()
+
+  const pickFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (!file) return
+    void file.text().then((content) => void backup.import(content))
+  }
+
+  const copyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(state.lastExportPath)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2_000)
+    } catch {
+      // The path stays selectable in the notice either way.
+    }
+  }
+
+  return (
+    <>
+      <div className={styles.backupRow}>
+        <Button type="button" disabled={state.exporting} onClick={() => void backup.export()}>
+          <Database size={15} aria-hidden="true" />
+          {state.exporting ? 'Writing…' : 'Export backup'}
+        </Button>
+        <Button type="button" variant="secondary" disabled={state.importing} onClick={() => importInput.current?.click()}>
+          <ArchiveRestore size={15} aria-hidden="true" />
+          {state.importing ? 'Restoring…' : 'Restore from file'}
+        </Button>
+        <input ref={importInput} type="file" accept=".json,application/json" className="sr-only" aria-label="Backup file" onChange={pickFile} />
+      </div>
+      <div className={styles.backupNote}>
+        <strong>Plain text, no passphrase</strong>
+        <p>The file carries every key in the clear — that is what makes it openable anywhere. Keep it wherever you trust, and move it off shared storage. Restoring adds what a machine lacks: entries that already exist are skipped, nothing is deleted.</p>
+      </div>
+      {state.lastExportPath ? (
+        <div className={styles.backupOutcome} role="status">
+          <span>Backup written to <code>{state.lastExportPath}</code></span>
+          <Button type="button" variant="ghost" onClick={() => void copyPath()}>{copied ? 'Copied' : 'Copy path'}</Button>
+        </div>
+      ) : null}
+      {state.lastReport ? (
+        <div className={styles.backupOutcome} role="status" data-report>
+          <span>
+            Restored {state.lastReport.providersAdded} provider{state.lastReport.providersAdded === 1 ? '' : 's'},
+            {' '}{state.lastReport.keysAdded} key{state.lastReport.keysAdded === 1 ? '' : 's'},
+            {' '}{state.lastReport.routesAdded} route{state.lastReport.routesAdded === 1 ? '' : 's'}
+            {state.lastReport.providersSkipped + state.lastReport.keysSkipped + state.lastReport.routesSkipped > 0 ? ` (already present: ${state.lastReport.providersSkipped + state.lastReport.keysSkipped + state.lastReport.routesSkipped})` : ''}
+            {state.lastReport.failed > 0 ? `, ${state.lastReport.failed} entries could not be restored` : ''}
+            .
+          </span>
+        </div>
+      ) : null}
+      {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
+    </>
   )
 }
 

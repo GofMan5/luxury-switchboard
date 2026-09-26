@@ -1,4 +1,5 @@
 import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
+import type { PoolCheckReport } from './api-keys-port'
 import type { ApiKeysPort } from './api-keys-port'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
@@ -8,11 +9,15 @@ export interface ApiKeysState {
   readonly keys: readonly ApiKey[]
   readonly pendingId: string
   readonly error: string
+  /** A pool check is running: the button shows it and the pool stays usable. */
+  readonly checkingPool: boolean
+  /** The last pool check's verdict, kept until the next one or a provider switch. */
+  readonly poolReport: PoolCheckReport | null
 }
 
 export class ApiKeysModel {
   readonly #port: ApiKeysPort
-  #state: ApiKeysState = { phase: 'idle', providerId: '', keys: [], pendingId: '', error: '' }
+  #state: ApiKeysState = { phase: 'idle', providerId: '', keys: [], pendingId: '', error: '', checkingPool: false, poolReport: null }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #generation = 0
@@ -34,14 +39,40 @@ export class ApiKeysModel {
   async load(providerId: string, clearPending = false): Promise<void> {
     if (!providerId) return
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', providerId, keys: providerId === this.#state.providerId ? this.#state.keys : [], error: '' })
+    const poolReport = providerId === this.#state.providerId ? this.#state.poolReport : null
+    this.#set({ ...this.#state, phase: 'loading', providerId, keys: providerId === this.#state.providerId ? this.#state.keys : [], poolReport, error: '' })
     try {
       const keys = await this.#port.list(providerId)
       if (generation !== this.#generation) return
-      this.#set({ phase: 'ready', providerId, keys, pendingId: clearPending ? '' : this.#state.pendingId, error: '' })
+      this.#set({ ...this.#state, phase: 'ready', providerId, keys, pendingId: clearPending ? '' : this.#state.pendingId, error: '' })
     } catch {
       if (generation !== this.#generation) return
       this.#set({ ...this.#state, phase: 'error', pendingId: clearPending ? '' : this.#state.pendingId, error: 'API keys are unavailable' })
+    }
+  }
+
+  /** Probes every key of the current provider through its own catalog
+   * endpoint: rejected credentials earn their streak, accepted ones reset it,
+   * and the report says what the round found. The pool stays usable while it
+   * runs. */
+  async checkPool(): Promise<void> {
+    if (!this.#state.providerId || this.#state.checkingPool) return
+    this.#set({ ...this.#state, checkingPool: true, error: '' })
+    try {
+      const poolReport = await this.#port.checkPool(this.#state.providerId)
+      const keys = await this.#port.list(this.#state.providerId)
+      this.#set({ ...this.#state, phase: 'ready', keys, poolReport, checkingPool: false })
+    } catch (error) {
+      this.#set({ ...this.#state, checkingPool: false, error: error instanceof ControlPlaneError ? error.message : 'The pool could not be checked' })
+    }
+  }
+
+  /** Removes every key the last check marked rejected. Sequential on purpose:
+   * each removal is its own save, so a failure leaves the rest in place. */
+  async removeRejected(): Promise<void> {
+    const rejected = this.#state.keys.filter((key) => key.authStreak >= 3)
+    for (const key of rejected) {
+      if (!await this.remove(key.id)) return
     }
   }
 

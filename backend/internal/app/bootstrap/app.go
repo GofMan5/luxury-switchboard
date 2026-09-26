@@ -15,12 +15,16 @@ import (
 	activitysqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/sqlite"
 	activitystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/stdio"
 	activityapp "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
+	backuplive "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/live"
+	backupstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/stdio"
+	backupapp "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/application"
 	guardrailrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/relay"
 	guardrailruleset "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/ruleset"
 	guardrailstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/stdio"
 	guardrailapp "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/application"
 	guardraildomain "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/domain"
 	keydpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/dpapi"
+	keyprobe "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/probe"
 	keystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/adapters/stdio"
 	keyapp "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/application"
 	modelproviders "github.com/luxuryprivate/switchboard/backend/internal/slices/models/adapters/providers"
@@ -84,11 +88,11 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	keyScheduler, keyManager, keyPathErr, err := defaultKeyManager(providers, settings.MaxQueued)
+	keyScheduler, keyManager, keyRepository, keyPathErr, err := defaultKeyManager(providers, settings.MaxQueued)
 	if err != nil {
 		return nil, err
 	}
-	providerManager, providerLoadErr, err := defaultProviderManager(catalog, keyManager)
+	providerManager, providerRepository, providerLoadErr, err := defaultProviderManager(catalog, keyManager)
 	if err != nil {
 		return nil, err
 	}
@@ -102,12 +106,21 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if keyLoadErr != nil {
 		logger.Printf("encrypted key settings could not be loaded; using runtime defaults")
 	}
-	routeService, routeLoadErr, err := defaultRouteService(catalog)
+	routeService, routeRepository, routeLoadErr, err := defaultRouteService(catalog)
 	if err != nil {
 		return nil, err
 	}
 	if routeLoadErr != nil {
 		logger.Printf("encrypted model routes could not be loaded; using active provider")
+	}
+	// The backup reads the same encrypted stores the managers own and restores
+	// through the same managers: nothing bypasses validation on the way back.
+	backupService, err := backupapp.NewService(
+		backuplive.NewSources(providerRepository, keyRepository, routeRepository),
+		backuplive.NewSinks(providerManager, keyManager, routeService, catalog),
+	)
+	if err != nil {
+		return nil, err
 	}
 	providerManager.SetRouteUsage(routeService)
 	routeResolver := relayroutes.NewResolver(routeService)
@@ -164,7 +177,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	}
 	healthMonitor.SetEnabled(settings.ProviderHealthEnabled)
 	providerstdio.Register(protocol, catalog, providerManager, keyScheduler, healthMonitor)
-	keystdio.Register(protocol, keyManager)
+	keystdio.Register(protocol, keyManager, keyprobe.NewProber(catalog))
 	relaystdio.Register(protocol, relay)
 	activitystdio.Register(protocol, activity, history)
 	settingsstdio.Register(protocol, settingsService)
@@ -207,9 +220,16 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 			_ = guardrails.SetMode(mode)
 		}
 		healthMonitor.SetEnabled(applied.ProviderHealthEnabled)
+		routeService.SetChainMode(applied.Normalized().ChainMode)
+		routes.SetFailoverEnabled(applied.FailoverEnabled)
 	})
+	// The initial values come from the same record, so a restart and a live
+	// change leave the relay in the same state.
+	routeService.SetChainMode(settings.Normalized().ChainMode)
+	routes.SetFailoverEnabled(settings.FailoverEnabled)
 	routestdio.Register(protocol, routeService)
 	modelstdio.Register(protocol, modelService)
+	backupstdio.Register(protocol, backupService)
 	edition, err := registerEdition(protocol, editionDependencies{
 		catalog: catalog, keys: keyManager, routes: routeService,
 		relay: httpRuntime, settings: settings, logger: logger,
@@ -302,7 +322,7 @@ func defaultProviders() ([]providerdomain.Provider, string, error) {
 	return []providerdomain.Provider{local, echo}, active, nil
 }
 
-func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*keyapp.Scheduler, *keyapp.Manager, error, error) {
+func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*keyapp.Scheduler, *keyapp.Manager, *keydpapi.Repository, error, error) {
 	scheduler := keyapp.NewScheduler(maxQueued)
 	rates := make(map[string]keyapp.Rate, len(providers))
 	for _, provider := range providers {
@@ -313,33 +333,34 @@ func defaultKeyManager(providers []providerdomain.Provider, maxQueued int) (*key
 	if path == "" {
 		path, pathErr = keydpapi.DefaultPath()
 	} else if !filepath.IsAbs(path) {
-		return nil, nil, nil, errors.New("key settings path must be absolute")
+		return nil, nil, nil, errors.New("key settings path must be absolute"), nil
 	}
 	repository := keydpapi.New(path)
 	manager, err := keyapp.NewManager(scheduler, repository, rates, nil)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, err, nil
 	}
-	return scheduler, manager, pathErr, nil
+	return scheduler, manager, repository, pathErr, nil
 }
 
-func defaultProviderManager(catalog *providerapp.Catalog, keys *keyapp.Manager) (*providerapp.Manager, error, error) {
+func defaultProviderManager(catalog *providerapp.Catalog, keys *keyapp.Manager) (*providerapp.Manager, *providerdpapi.Repository, error, error) {
 	path := os.Getenv("SWITCHBOARD_PROVIDERS_PATH")
 	var pathErr error
 	if path == "" {
 		path, pathErr = providerdpapi.DefaultPath()
 	} else if !filepath.IsAbs(path) {
-		return nil, nil, errors.New("provider settings path must be absolute")
+		return nil, nil, errors.New("provider settings path must be absolute"), nil
 	}
-	manager, err := providerapp.NewManager(catalog, providerdpapi.New(path), keys)
+	repository := providerdpapi.New(path)
+	manager, err := providerapp.NewManager(catalog, repository, keys)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err, nil
 	}
 	loadErr := pathErr
 	if loadErr == nil {
 		loadErr = manager.Load(context.Background())
 	}
-	return manager, loadErr, nil
+	return manager, repository, loadErr, nil
 }
 
 func defaultSettingsService() (*settingsapp.Service, error, error) {
@@ -381,23 +402,24 @@ func defaultHistory(retentionDays int) (activityapp.History, error) {
 	return store, nil
 }
 
-func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, error, error) {
+func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, *routedpapi.Repository, error, error) {
 	path := os.Getenv("SWITCHBOARD_ROUTES_PATH")
 	var pathErr error
 	if path == "" {
 		path, pathErr = routedpapi.DefaultPath()
 	} else if !filepath.IsAbs(path) {
-		return nil, nil, errors.New("routes path must be absolute")
+		return nil, nil, errors.New("routes path must be absolute"), nil
 	}
-	service, err := routeapp.NewService(routedpapi.New(path), routeproviders.NewCatalog(catalog))
+	repository := routedpapi.New(path)
+	service, err := routeapp.NewService(repository, routeproviders.NewCatalog(catalog))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err, nil
 	}
 	loadErr := pathErr
 	if loadErr == nil {
 		loadErr = service.Load(context.Background())
 	}
-	return service, loadErr, nil
+	return service, repository, loadErr, nil
 }
 
 func environmentPort(fallback int) int {

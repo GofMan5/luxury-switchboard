@@ -45,6 +45,8 @@ type storedSettings struct {
 	NotificationsEnabled  *bool  `json:"notificationsEnabled"`
 	ProviderHealthEnabled *bool  `json:"providerHealthEnabled"`
 	AnimationsEnabled     *bool  `json:"animationsEnabled"`
+	FailoverEnabled       *bool  `json:"failoverEnabled"`
+	ChainMode             string `json:"chainMode"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -97,6 +99,10 @@ func (stored storedSettings) restore() domain.Settings {
 	settings.NotificationsEnabled = stored.NotificationsEnabled == nil || *stored.NotificationsEnabled
 	settings.ProviderHealthEnabled = stored.ProviderHealthEnabled == nil || *stored.ProviderHealthEnabled
 	settings.AnimationsEnabled = stored.AnimationsEnabled == nil || *stored.AnimationsEnabled
+	settings.FailoverEnabled = stored.FailoverEnabled == nil || *stored.FailoverEnabled
+	// ChainMode normalizes empty (a pre-chain file) to the default in the
+	// domain; the switch itself carries the user's explicit choice.
+	settings.ChainMode = stored.ChainMode
 
 	return settings
 }

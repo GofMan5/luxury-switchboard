@@ -21,6 +21,13 @@ var ErrProviderUnavailable = errors.New("route provider is unavailable")
 // case is one wasted attempt per TTL per model.
 const degradeTTL = 5 * time.Minute
 
+// Chain modes: "failover" serves strictly by priority, "balance" round-robins
+// the healthy entries. The string values are the settings record's contract.
+const (
+	chainModeFailover = "failover"
+	chainModeBalance  = "balance"
+)
+
 type Repository interface {
 	Load(context.Context) ([]domain.Assignment, error)
 	Save(context.Context, []domain.Assignment) error
@@ -41,6 +48,13 @@ type Service struct {
 	// request to a provider that just refused.
 	degraded     map[string]time.Time
 	degradeClock func() time.Time
+	// chainMode is how a healthy chain shares requests: strict priority or
+	// round-robin. Live-applied from settings.
+	chainModeValue string
+	// rotation advances on every balanced resolve; a plain counter per
+	// service rather than per model keeps the hot path lock-cheap, and the
+	// modulo of the eligible set is what makes the round fair.
+	rotation uint64
 }
 
 func NewService(repository Repository, providers ProviderCatalog) (*Service, error) {
@@ -50,7 +64,25 @@ func NewService(repository Repository, providers ProviderCatalog) (*Service, err
 	return &Service{
 		repository: repository, providers: providers,
 		degraded: map[string]time.Time{}, degradeClock: time.Now,
+		chainModeValue: chainModeFailover,
 	}, nil
+}
+
+// SetChainMode switches how a healthy chain shares requests. Applied live:
+// requests in flight keep their already-resolved route.
+func (service *Service) SetChainMode(mode string) {
+	if mode != chainModeFailover && mode != chainModeBalance {
+		return
+	}
+	service.mu.Lock()
+	service.chainModeValue = mode
+	service.mu.Unlock()
+}
+
+func (service *Service) chainMode() string {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	return service.chainModeValue
 }
 
 func (service *Service) Load(ctx context.Context) error {
@@ -126,18 +158,64 @@ func (service *Service) List(target domain.Target) []domain.Assignment {
 	return result
 }
 
-// Resolve answers the assignment a request should try first. The relay target
-// is an ordered chain: siblings whose provider is degraded come later even at
-// equal priority, and an all-degraded chain still serves — degrading is
-// preference, not removal, so a chain never answers "no route" it would not
-// have answered before.
+// Resolve answers the assignment a request should try. The relay target
+// depends on the chain mode:
+//
+//   - failover: strictly by priority, degraded siblings pushed behind healthy
+//     ones, and an all-degraded chain still serves — degrading is preference,
+//     not removal, so a chain never answers "no route" it would not have
+//     answered before.
+//   - balance: round-robin across the healthy entries, in priority order. A
+//     provider's shared daily quota is spent per provider, so spreading
+//     requests across the chain multiplies the quota by its healthy length;
+//     degraded entries sit out the rotation and return when their TTL lapses.
+//     An all-degraded chain serves by priority, same as failover.
+//
+// The tunnel target has one route per model and ignores the mode.
 func (service *Service) Resolve(target domain.Target, model string) (domain.Assignment, bool) {
+	if target != domain.TargetRelay || service.chainMode() != chainModeBalance {
+		return service.resolveByPriority(target, model)
+	}
+	// Balance mode needs the write lock: the rotation counter moves on every
+	// resolve. The critical section is a map increment, nothing more.
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.loadErr != nil {
+		return domain.Assignment{}, false
+	}
+	now := service.degradeClock()
+	eligible := make([]domain.Assignment, 0, 2)
+	for _, assignment := range service.assignments {
+		if assignment.Target != target || !assignment.Enabled {
+			continue
+		}
+		if assignment.PublicModel != model && !slices.Contains(assignment.Aliases, model) {
+			continue
+		}
+		if !service.isDegradedLocked(assignment.ProviderID, now) {
+			eligible = append(eligible, assignment)
+		}
+	}
+	if len(eligible) == 0 {
+		// Nothing healthy: the chain still serves, by its configured order.
+		return service.resolveByPriorityLocked(target, model, now)
+	}
+	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].Priority < eligible[j].Priority })
+	service.rotation++
+	pick := eligible[int(service.rotation%uint64(len(eligible)))]
+	return pick, true
+}
+
+func (service *Service) resolveByPriority(target domain.Target, model string) (domain.Assignment, bool) {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
 	if service.loadErr != nil {
 		return domain.Assignment{}, false
 	}
-	now := service.degradeClock()
+	return service.resolveByPriorityLocked(target, model, service.degradeClock())
+}
+
+func (service *Service) resolveByPriorityLocked(target domain.Target, model string, now time.Time) (domain.Assignment, bool) {
 	var best domain.Assignment
 	found := false
 	bestRank := 0

@@ -1,5 +1,5 @@
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ArrowDown, ArrowUp, CheckCheck, FlaskConical, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, CheckCheck, FlaskConical, GitBranch, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
@@ -29,6 +29,7 @@ export default function ModelRoutesPage() {
   const { model: modelsModel, state: models } = useModels()
   const { state: providers } = useProviders()
   const [editor, setEditor] = useState<ModelRoute | 'new' | null>(null)
+  const [wizard, setWizard] = useState(false)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<CatalogFilter>('all')
   const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase())
@@ -125,7 +126,10 @@ export default function ModelRoutesPage() {
     <section className={styles.page}>
       <header className="page-header">
         <div><h1>Model Routes</h1><p>Pick the models each target serves; aliases stay editable per route</p></div>
-        <Button variant="primary" onClick={() => { model.clearError(); setEditor('new') }}><Plus size={16} />Add route</Button>
+        <div className={styles.headerActions}>
+          {state.target === 'relay' ? <Button onClick={() => { model.clearError(); setWizard(true) }}><GitBranch size={16} aria-hidden="true" />Build failover chain</Button> : null}
+          <Button variant="primary" onClick={() => { model.clearError(); setEditor('new') }}><Plus size={16} />Add route</Button>
+        </div>
       </header>
 
       {OWNER_EDITION ? (
@@ -227,6 +231,18 @@ export default function ModelRoutesPage() {
       </section>
 
       {editor ? <RouteEditor target={state.target} route={editor === 'new' ? undefined : editor} providers={providers.catalog.providers.filter((provider) => provider.enabled)} pending={Boolean(state.pending)} operationError={state.error} onClose={() => setEditor(null)} onSave={async route => { if (await model.upsert(route)) setEditor(null) }} /> : null}
+
+      {wizard ? (
+        <ChainWizard
+          providers={providers.catalog.providers.filter((provider) => provider.enabled)}
+          initialPublicModel=""
+          pending={Boolean(state.pending)}
+          operationError={state.error}
+          onClose={() => setWizard(false)}
+          discover={modelsModel.catalogOf.bind(modelsModel)}
+          onSave={async routes => { await model.upsertMany(routes) }}
+        />
+      ) : null}
     </section>
   )
 }
@@ -275,4 +291,140 @@ function RouteEditor({ target, route, providers, pending, operationError, onClos
     void onSave({ target, publicModel: publicModel.trim(), upstreamModel: upstreamModel.trim(), providerId, contextLimitKiB: Math.round(context * 1024), priority: target === 'relay' ? chainPriority : undefined, aliases: aliasList, enabled })
   }
   return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Also match</span><input value={aliases} maxLength={1024} placeholder="claude-opus-5[1m], alias-2" onChange={event => setAliases(event.currentTarget.value)} /><small>Extra requested names that route to this same upstream model, comma or space separated.{target === 'tunnel' ? ' Accepted by the tunnel, but /v1/models lists only the public alias above, which is also the name every answer carries.' : ''}</small></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>{target === 'relay' ? <label><span>Failover order</span><span className={styles.suffixed}><input type="number" min="0" max="1000" step="1" required value={priority} onChange={event => setPriority(event.currentTarget.value)} /><small>lower first</small></span><small>Add the same requested model on another provider with a higher number and a request that gets a final refusal here moves there on its own.</small></label> : null}<label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
+}
+
+interface ChainEntry {
+  readonly providerId: string
+  upstreamModel: string
+}
+
+/** Builds a failover chain in one pass: one public model, several providers in
+ * order, upstream models picked from each provider's discovered catalog. The
+ * manual Add-route editor stays for aliases and context caps; this exists so
+ * the chain feature is one dialog instead of three careful edits. */
+function ChainWizard({ providers, initialPublicModel, pending, operationError, onClose, discover, onSave }: {
+  providers: readonly { id: string; name: string }[]
+  initialPublicModel: string
+  pending: boolean
+  operationError: string
+  onClose: () => void
+  discover: (providerId: string) => Promise<readonly string[]>
+  onSave: (routes: readonly ModelRoute[]) => Promise<unknown>
+}) {
+  const [publicModel, setPublicModel] = useState(initialPublicModel)
+  const [entries, setEntries] = useState<ChainEntry[]>(() => providers.slice(0, 2).map((provider) => ({ providerId: provider.id, upstreamModel: '' })))
+  const [catalogs, setCatalogs] = useState<ReadonlyMap<string, readonly string[]>>(() => new Map())
+  const [loadingProvider, setLoadingProvider] = useState('')
+  const [error, setError] = useState('')
+  const dialogRef = useModalFocus<HTMLFormElement>(onClose, pending)
+
+  useEffect(() => {
+    for (const entry of entries) {
+      if (catalogs.has(entry.providerId) || entry.providerId === '') continue
+      setLoadingProvider(entry.providerId)
+      void discover(entry.providerId).then((models) => {
+        setCatalogs((current) => new Map(current).set(entry.providerId, models))
+        setLoadingProvider('')
+      })
+    }
+    // Catalogs load once per provider; entries changing providers reload theirs.
+  }, [catalogs, discover, entries])
+
+  const setEntry = (index: number, patch: Partial<ChainEntry>) => {
+    setEntries((current) => current.map((entry, position) => position === index ? { ...entry, ...patch } : entry))
+  }
+  const moveEntry = (index: number, direction: -1 | 1) => {
+    setEntries((current) => {
+      const next = [...current]
+      const target = index + direction
+      if (target < 0 || target >= next.length) return current
+      const moved = next[target]
+      next[target] = next[index]
+      next[index] = moved
+      return next
+    })
+  }
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const name = publicModel.trim()
+    if (!name) { setError('Name the model your clients will ask for.'); return }
+    if (entries.length < 2) { setError('A chain needs at least two providers; a single one is just a route.'); return }
+    const seenProviders = new Set<string>()
+    for (const entry of entries) {
+      if (!entry.providerId || seenProviders.has(entry.providerId)) { setError('Each provider may appear once in the chain.'); return }
+      seenProviders.add(entry.providerId)
+      if (!entry.upstreamModel.trim()) { setError('Pick the upstream model for every provider.'); return }
+    }
+    setError('')
+    void onSave(entries.map((entry, index) => ({
+      target: 'relay' as const,
+      publicModel: name,
+      upstreamModel: entry.upstreamModel.trim(),
+      providerId: entry.providerId,
+      contextLimitKiB: 0,
+      priority: index,
+      aliases: [],
+      enabled: true,
+    })))
+  }
+
+  return (
+    <div className="ui-scrim" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
+      <form ref={dialogRef} className={`ui-modal ${styles.chainModal}`} role="dialog" aria-modal="true" aria-label="Build failover chain" onSubmit={submit}>
+        <header>
+          <div><h2>Build failover chain</h2><p>One public model, several providers. A request walks them in order; a final refusal moves it to the next.</p></div>
+          <button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>
+        </header>
+        <div className={styles.form}>
+          <label>
+            <span>Public model</span>
+            <input value={publicModel} maxLength={128} required data-autofocus placeholder="glm" onChange={(event) => setPublicModel(event.currentTarget.value)} />
+            <small>The name your clients ask for. Every provider below serves it under its own upstream name.</small>
+          </label>
+          <div className={styles.chainRows} role="list" aria-label="Chain providers in order">
+            {entries.map((entry, index) => {
+              const catalog = catalogs.get(entry.providerId) ?? []
+              return (
+                <div key={index} className={styles.chainRow} role="listitem">
+                  <span className={styles.chainPosition} aria-hidden="true">{index + 1}</span>
+                  <label>
+                    <span>Provider</span>
+                    <select value={entry.providerId} onChange={(event) => setEntry(index, { providerId: event.currentTarget.value, upstreamModel: '' })}>
+                      {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Upstream model</span>
+                    {catalog.length > 0 ? (
+                      <select value={entry.upstreamModel} onChange={(event) => setEntry(index, { upstreamModel: event.currentTarget.value })}>
+                        <option value="">{loadingProvider === entry.providerId ? 'Loading�' : 'Pick a model'}</option>
+                        {catalog.map((model) => <option key={model} value={model}>{model}</option>)}
+                      </select>
+                    ) : (
+                      <input value={entry.upstreamModel} maxLength={128} placeholder={loadingProvider === entry.providerId ? 'Loading�' : 'Model name on this provider'} onChange={(event) => setEntry(index, { upstreamModel: event.currentTarget.value })} />
+                    )}
+                  </label>
+                  <div className={styles.chainRowActions}>
+                    <button type="button" aria-label="Move earlier in the chain" disabled={index === 0} onClick={() => moveEntry(index, -1)}><ArrowUp size={14} /></button>
+                    <button type="button" aria-label="Move later in the chain" disabled={index === entries.length - 1} onClick={() => moveEntry(index, 1)}><ArrowDown size={14} /></button>
+                    <button type="button" aria-label="Remove from the chain" disabled={entries.length <= 2} onClick={() => setEntries((current) => current.filter((_, position) => position !== index))}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <Button type="button" disabled={entries.length >= providers.length} onClick={() => setEntries((current) => {
+            const used = new Set(current.map((entry) => entry.providerId))
+            const next = providers.find((provider) => !used.has(provider.id))
+            return next ? [...current, { providerId: next.id, upstreamModel: '' }] : current
+          })}><Plus size={14} />Add provider</Button>
+          {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
+        </div>
+        <footer>
+          <Button type="button" disabled={pending} onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={pending || !publicModel.trim()}>{pending ? 'Saving�' : `Save chain of ${entries.length}`}</Button>
+        </footer>
+      </form>
+    </div>
+  )
 }

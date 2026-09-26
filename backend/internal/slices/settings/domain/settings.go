@@ -31,6 +31,15 @@ type Settings struct {
 	// system's reduced-motion preference still wins over it: a system-level
 	// request is a stronger statement than an app toggle.
 	AnimationsEnabled bool `json:"animationsEnabled"`
+	// FailoverEnabled turns the route chains on or off. Off means terminal
+	// verdicts end the request where they happened — strict routing for
+	// someone who wants to know exactly which provider served them.
+	FailoverEnabled bool `json:"failoverEnabled"`
+	// ChainMode decides how a chain of healthy providers shares requests:
+	// "failover" serves strictly by priority (the head provider until it
+	// degrades), "balance" round-robins across every healthy entry, which
+	// spreads a provider's shared daily quota across the whole chain.
+	ChainMode string `json:"chainMode"`
 }
 
 // DefaultGuardrailMode is monitor rather than block. The detection rules match on
@@ -52,8 +61,16 @@ func Defaults() Settings {
 		NotificationsEnabled:  true,
 		ProviderHealthEnabled: true,
 		AnimationsEnabled:     true,
+		FailoverEnabled:       true,
+		ChainMode:             DefaultChainMode,
 	}
 }
+
+// DefaultChainMode is balance rather than failover: the chains exist to absorb
+// dying providers, and a healthy chain that also shares the load turns two
+// free resellers into twice the daily quota — the reason most operators build
+// one. Strict-priority routing stays one toggle away.
+const DefaultChainMode = "balance"
 
 // Normalized fills in values that predate a field, so settings written by an
 // older build load instead of failing validation.
@@ -63,6 +80,9 @@ func (settings Settings) Normalized() Settings {
 	}
 	if settings.GuardrailFindings == 0 {
 		settings.GuardrailFindings = Defaults().GuardrailFindings
+	}
+	if settings.ChainMode == "" {
+		settings.ChainMode = DefaultChainMode
 	}
 	return settings
 }
@@ -76,6 +96,8 @@ func (settings Settings) RequiresRestart(next Settings) bool {
 	settings.NotificationsEnabled, next.NotificationsEnabled = true, true
 	settings.ProviderHealthEnabled, next.ProviderHealthEnabled = true, true
 	settings.AnimationsEnabled, next.AnimationsEnabled = true, true
+	settings.FailoverEnabled, next.FailoverEnabled = true, true
+	settings.ChainMode, next.ChainMode = "", ""
 	return settings != next
 }
 
@@ -107,6 +129,8 @@ func (settings Settings) Validate() error {
 		return errors.New("guardrail mode must be off, monitor or block")
 	case settings.GuardrailFindings < 50 || settings.GuardrailFindings > 5_000:
 		return errors.New("guardrail finding capacity is out of range")
+	case settings.ChainMode != "failover" && settings.ChainMode != "balance":
+		return errors.New("chain mode must be failover or balance")
 	default:
 		return nil
 	}

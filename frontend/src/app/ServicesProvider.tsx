@@ -25,6 +25,8 @@ import { StdioSharedPort } from '../features/shared-control/adapters/stdio-share
 import { SharedModel } from '../features/shared-control/application/shared-model'
 import { StdioNotificationsPort } from '../features/notifications/adapters/stdio-notifications-port'
 import { NotificationsModel } from '../features/notifications/application/notifications-model'
+import { StdioBackupPort } from '../features/backup/adapters/stdio-backup-port'
+import { BackupModel } from '../features/backup/application/backup-model'
 import { createControlPlaneSession } from '../platform/stdio/create-session'
 import type { ControlPlaneSession } from '../platform/stdio/session'
 import { Button } from '../shared/ui/Button'
@@ -109,6 +111,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           models: new ModelsModel(new StdioModelsPort(session)),
           guardrails: new GuardrailsModel(new StdioGuardrailsPort(session)),
           notifications: new NotificationsModel(new StdioNotificationsPort(session)),
+          backup: new BackupModel(new StdioBackupPort(session)),
           appVersion: session.appVersion ?? '',
           // Owner-only models are constructed only where their commands exist.
           ...(__OWNER_EDITION__

@@ -28,7 +28,7 @@ func TestEnvironmentCredentialIsNeverAutoLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, manager, _, err := defaultKeyManager(providers, 100)
+	_, manager, _, _, err := defaultKeyManager(providers, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

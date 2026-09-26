@@ -100,4 +100,12 @@ type PublicKey struct {
 	BlockedModels   int    `json:"blockedModels"`
 	Retries429      int    `json:"retries429"`
 	StartsInWindow  int    `json:"startsInWindow"`
+	// AuthStreak is how many authentication refusals this key answered in a
+	// row. Three or more reads as a dead credential: an auth verdict never
+	// resolves on its own, so the operator should revoke and replace rather
+	// than wait.
+	AuthStreak int `json:"authStreak"`
+	// LastOutcome is the outcome kind of the key's last finished attempt, so
+	// the operator sees WHY a key sits where it sits.
+	LastOutcome string `json:"lastOutcome"`
 }

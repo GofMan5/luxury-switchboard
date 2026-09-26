@@ -18,6 +18,19 @@ type Settings struct {
 	// guardrails existed carry an empty value, which reads as the default.
 	GuardrailMode     string `json:"guardrailMode"`
 	GuardrailFindings int    `json:"guardrailFindings"`
+	// NotificationsEnabled is the master switch for the notification feed and
+	// its toasts. Badges and health dots stay on: they are ambient state, not
+	// interruptions. Settings persisted before notifications existed read as
+	// on.
+	NotificationsEnabled bool `json:"notificationsEnabled"`
+	// ProviderHealthEnabled runs the background reachability probe. It costs
+	// one cheap catalog call per enabled provider every two minutes; off means
+	// the sidebar shows configured state, not liveness.
+	ProviderHealthEnabled bool `json:"providerHealthEnabled"`
+	// AnimationsEnabled is the motion switch for the interface. The operating
+	// system's reduced-motion preference still wins over it: a system-level
+	// request is a stronger statement than an app toggle.
+	AnimationsEnabled bool `json:"animationsEnabled"`
 }
 
 // DefaultGuardrailMode is monitor rather than block. The detection rules match on
@@ -33,9 +46,12 @@ func Defaults() Settings {
 		RetryBaseMilliseconds: 500, RetryMaxSeconds: 30,
 		PermanentAttempts: 2, MaxQueued: 10_000,
 		ActivityCapacity: 2_000, HistoryRetentionDays: 30,
-		TunnelRetentionHours: 72,
-		GuardrailMode:        DefaultGuardrailMode,
-		GuardrailFindings:    500,
+		TunnelRetentionHours:  72,
+		GuardrailMode:         DefaultGuardrailMode,
+		GuardrailFindings:     500,
+		NotificationsEnabled:  true,
+		ProviderHealthEnabled: true,
+		AnimationsEnabled:     true,
 	}
 }
 
@@ -53,9 +69,13 @@ func (settings Settings) Normalized() Settings {
 
 // RequiresRestart reports whether moving to next needs the process restarted.
 // Settings that the running application re-reads on its own — currently the
-// guardrail mode — must not ask the user to restart for nothing.
+// guardrail mode, the notification, health-probe and animation switches —
+// must not ask the user to restart for nothing.
 func (settings Settings) RequiresRestart(next Settings) bool {
 	settings.GuardrailMode, next.GuardrailMode = "", ""
+	settings.NotificationsEnabled, next.NotificationsEnabled = true, true
+	settings.ProviderHealthEnabled, next.ProviderHealthEnabled = true, true
+	settings.AnimationsEnabled, next.AnimationsEnabled = true, true
 	return settings != next
 }
 

@@ -1,8 +1,10 @@
 import type { PropsWithChildren } from 'react'
+import { useEffect } from 'react'
 import { PanelLeftClose, Square } from 'lucide-react'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
 import { useSettings } from '../features/settings/ui/useSettings'
+import { NotificationsSurface } from '../features/notifications/ui/NotificationsSurface'
 import { useAppServices } from './services'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
@@ -26,6 +28,24 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   const activeProvider = (providersState.catalog?.providers ?? []).find(
     (provider) => provider.id === providersState.catalog?.activeId,
   )
+  // The motion switch is applied at the document root, where the CSS gates
+  // every animation at once; the OS-level reduced-motion preference still wins.
+  const animationsEnabled = settingsState.settings?.animationsEnabled ?? true
+  useEffect(() => {
+    document.documentElement.dataset.animations = animationsEnabled ? 'on' : 'off'
+  }, [animationsEnabled])
+  // The toast master switch follows the settings record: the feed stays, the
+  // interruptions stop.
+  const { notifications } = useAppServices()
+  const notificationsEnabled = settingsState.settings?.notificationsEnabled ?? true
+  useEffect(() => {
+    notifications.setEnabled(notificationsEnabled)
+  }, [notifications, notificationsEnabled])
+  // Liveness of the active provider: the probe's dot, right where the route
+  // names it. Unknown health reads as neutral — the probe runs every two
+  // minutes, and silence is not an error.
+  const activeHealth = providersState.health.get(activeProvider?.id ?? '')
+  const healthTone = activeHealth ? (activeHealth.up ? 'completed' : 'failed') : 'stopped'
   const live = relayState.snapshot.state === 'live'
   const needsStop = live || (relayState.snapshot.state === 'error' && Boolean(relayState.snapshot.address))
   const configuredPort = settingsState.settings?.listenerPort || relayState.snapshot.port
@@ -73,16 +93,22 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
               {relayState.snapshot.address || (configuredPort ? `127.0.0.1:${configuredPort}` : 'Loopback listener')}
             </span>
             <span className={styles.divider} aria-hidden="true" />
-            <span className={styles.route}>Active route: {activeProvider?.name ?? '—'}</span>
+            <span className={styles.route}>
+              Active route: {activeProvider?.name ?? '—'}
+              {activeProvider ? <StatusDot state={healthTone} /> : null}
+            </span>
           </div>
-          <Button
-            variant={needsStop ? 'danger' : 'primary'}
-            disabled={relayState.pending}
-            onClick={() => void relay.toggle()}
-          >
-            <Square size={13} fill="currentColor" aria-hidden="true" />
-            {relayState.pending ? 'Applying…' : live ? 'Stop relay' : needsStop ? 'Retry stop' : 'Start relay'}
-          </Button>
+          <div className={styles.runtimeActions}>
+            <Button
+              variant={needsStop ? 'danger' : 'primary'}
+              disabled={relayState.pending}
+              onClick={() => void relay.toggle()}
+            >
+              <Square size={13} fill="currentColor" aria-hidden="true" />
+              {relayState.pending ? 'Applying…' : live ? 'Stop relay' : needsStop ? 'Retry stop' : 'Start relay'}
+            </Button>
+            <NotificationsSurface />
+          </div>
         </header>
         <main className={styles.content}>
           {/* Around the workspace, not the shell: a screen that throws must not

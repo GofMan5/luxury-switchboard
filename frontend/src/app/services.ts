@@ -11,6 +11,7 @@ import type { TunnelModel } from '../features/tunnel/application/tunnel-model'
 import type { ClientsModel } from '../features/clients/application/clients-model'
 import type { ModelsModel } from '../features/models/application/models-model'
 import type { SharedModel } from '../features/shared-control/application/shared-model'
+import type { NotificationsModel } from '../features/notifications/application/notifications-model'
 
 export interface AppServices {
   readonly relay: RelayModel
@@ -22,6 +23,7 @@ export interface AppServices {
   readonly routes: RoutesModel
   readonly models: ModelsModel
   readonly guardrails: GuardrailsModel
+  readonly notifications: NotificationsModel
   /** Publishing workspaces exist only in the owner edition. */
   readonly tunnel?: TunnelModel
   readonly clients?: ClientsModel

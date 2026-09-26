@@ -27,6 +27,14 @@ export interface ProviderCatalog {
   readonly providers: readonly Provider[]
 }
 
+/** One provider's reachability, as the sidebar dot and provider rows show it.
+ * A missing entry means "not probed yet": the probe runs every two minutes. */
+export interface ProviderHealth {
+  readonly providerId: string
+  readonly up: boolean
+  readonly reason: string
+}
+
 export interface ProviderInput {
   readonly name: string
   readonly baseUrl: string

@@ -20,6 +20,12 @@ type Assignment struct {
 	ContextLimitKiB int      `json:"contextLimitKiB"`
 	Aliases         []string `json:"aliases,omitempty"`
 	Enabled         bool     `json:"enabled"`
+	// Priority orders the failover chain among assignments that share a public
+	// model on the relay target: a request tries them in this order and moves
+	// to the next when the current one answers terminally. Lower comes first.
+	// The tunnel target keeps one route per model, so the field reads zero
+	// there and orders nothing.
+	Priority int `json:"priority"`
 }
 
 func (assignment Assignment) Validate() error {
@@ -34,6 +40,9 @@ func (assignment Assignment) Validate() error {
 	}
 	if assignment.ContextLimitKiB < 0 || assignment.ContextLimitKiB > 2*1024*1024 {
 		return errors.New("route context limit is invalid")
+	}
+	if assignment.Priority < 0 || assignment.Priority > 1000 {
+		return errors.New("route priority is invalid")
 	}
 	if len(assignment.Aliases) > 16 {
 		return errors.New("route alias list is too long")

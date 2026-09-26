@@ -69,10 +69,21 @@ export default function ApiKeysPage() {
             {ordered.map((key, index) => {
               const movablePosition = movablePositions.get(key.id) ?? -1
               return (
-                <tr key={key.id}>
+                <tr key={key.id} data-dead={key.authStreak >= 3 || undefined}>
                   <td className={styles.priority}>{index + 1}</td>
                   <td>
-                    <span className={styles.keyLabel}><KeyRound size={15} aria-hidden="true" /><span><strong>{key.label}</strong><small>{key.pinned ? 'Managed · direct IP' : 'Encrypted local key'}</small></span></span>
+                    <span className={styles.keyLabel}>
+                      <KeyRound size={15} aria-hidden="true" />
+                      <span>
+                        <strong>{key.label}</strong>
+                        <small>
+                          {key.authStreak >= 3
+                            ? 'Looks dead — revoke and replace it'
+                            : key.pinned ? 'Managed · direct IP' : 'Encrypted local key'}
+                        </small>
+                      </span>
+                      {key.lastOutcome ? <span className={styles.outcome} data-outcome={key.lastOutcome}>{key.lastOutcome}</span> : null}
+                    </span>
                   </td>
                   <td>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
                   <td>{key.startsInWindow} / {perSecond ? 's' : 'min'}</td>

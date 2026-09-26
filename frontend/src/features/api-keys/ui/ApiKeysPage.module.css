@@ -64,3 +64,22 @@
   .table th:nth-child(4), .table td:nth-child(4), .table th:nth-child(7), .table td:nth-child(7) { display: none; }
   .iconAction { width: 30px; height: 30px; }
 }
+.outcome {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 2px 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.outcome[data-outcome='success'] { color: var(--status-success); border-color: color-mix(in srgb, var(--status-success) 40%, var(--border-subtle)); }
+.outcome[data-outcome='authentication'] { color: var(--status-danger); border-color: color-mix(in srgb, var(--status-danger) 45%, var(--border-subtle)); }
+.outcome[data-outcome='rate-limited'] { color: var(--status-warning); border-color: color-mix(in srgb, var(--status-warning) 45%, var(--border-subtle)); }
+.outcome[data-outcome='balance-exhausted'] { color: var(--status-warning); border-color: color-mix(in srgb, var(--status-warning) 45%, var(--border-subtle)); }
+
+tr[data-dead='true'] td:first-child { box-shadow: inset 3px 0 0 var(--status-danger); }
+tr[data-dead='true'] .keyLabel small { color: var(--status-danger); }

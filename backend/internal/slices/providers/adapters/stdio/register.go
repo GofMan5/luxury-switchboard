@@ -21,10 +21,23 @@ type KeyCounter interface {
 	Count(string) int
 }
 
-func Register(server *platform.Server, catalog *application.Catalog, manager *application.Manager, keys KeyCounter) {
+func Register(server *platform.Server, catalog *application.Catalog, manager *application.Manager, keys KeyCounter, health *application.HealthMonitor) {
 	server.Handle("providers.list", func(_ context.Context, _ json.RawMessage) (any, error) {
 		return snapshot(catalog, keys)
 	})
+	server.Handle("providers.health", func(_ context.Context, _ json.RawMessage) (any, error) {
+		if health == nil {
+			// No monitor means the probe is disabled: the answer is an honest
+			// empty snapshot, not an error a surface has to treat as failure.
+			return map[string]any{"states": []application.HealthState{}}, nil
+		}
+		return map[string]any{"states": health.Snapshot()}, nil
+	})
+	if health != nil {
+		health.OnChanged(func(_ application.HealthState, snapshot []application.HealthState) {
+			_ = server.Emit("providers.health", map[string]any{"states": snapshot})
+		})
+	}
 	server.Handle("providers.activate", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
 			ID string `json:"id"`

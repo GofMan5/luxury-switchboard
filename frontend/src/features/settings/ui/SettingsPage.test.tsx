@@ -23,6 +23,9 @@ const initial: Settings = {
   tunnelRetentionHours: 72,
   guardrailMode: 'monitor',
   guardrailFindings: 500,
+  notificationsEnabled: true,
+  providerHealthEnabled: true,
+  animationsEnabled: true,
 }
 
 describe('SettingsForm', () => {

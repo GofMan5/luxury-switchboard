@@ -20,7 +20,11 @@ func Register(server *platform.Server, manager *application.Manager) {
 		if platform.DecodePayload(payload, &query) != nil || query.ProviderID == "" {
 			return nil, invalidPayload()
 		}
-		return map[string]any{"keys": manager.List(query.ProviderID)}, nil
+		keys := manager.List(query.ProviderID)
+		return map[string]any{
+			"keys":      withinOneFrame(keys),
+			"available": len(keys),
+		}, nil
 	})
 	server.Handle("keys.add", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
@@ -147,6 +151,26 @@ func keyTarget(payload json.RawMessage) (string, string, error) {
 
 func invalidPayload() platform.MethodError {
 	return platform.MethodError{Code: "invalid_payload", Message: "Invalid key settings"}
+}
+
+// withinOneFrame drops the lowest-priority keys until the answer fits one
+// protocol frame. Rows are bounded — labels, counters, milliseconds — so this
+// only bites a deliberately enormous pool, and `available` says so honestly
+// instead of a short list passing for the whole pool. List already orders by
+// priority, so what stays is what the scheduler would use first.
+func withinOneFrame(keys []domain.PublicKey) []domain.PublicKey {
+	for len(keys) > 0 {
+		encoded, err := json.Marshal(keys)
+		if err != nil {
+			return nil
+		}
+		if len(encoded) <= platform.MaxPayloadBytes {
+			return keys
+		}
+		next := len(keys) * platform.MaxPayloadBytes / len(encoded)
+		keys = keys[:min(next, len(keys)-1)]
+	}
+	return keys
 }
 
 func managementError(err error) platform.MethodError {

@@ -110,3 +110,27 @@ describe('RoutesModel', () => {
     expect(model.snapshot().published.tunnel).toEqual([{ ...route, target: 'tunnel', publicModel: 'public-alias' }])
   })
 })
+
+describe('RoutesModel chains', () => {
+  it('swaps a provider with its chain neighbor in one batch', async () => {
+    const port = new Port()
+    const primary: ModelRoute = { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-primary', providerId: 'alpha-relay', contextLimitKiB: 0, aliases: [], enabled: true, priority: 0 }
+    const backup: ModelRoute = { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-backup', providerId: 'agent', contextLimitKiB: 0, aliases: [], enabled: true, priority: 1 }
+    port.list = async () => [primary, backup]
+    const model = new RoutesModel(port)
+    await model.load('relay')
+    expect(await model.moveInChain(primary, 1)).toBe(true)
+    expect(port.batches).toEqual([2])
+  })
+
+  it('refuses to move past the ends of a chain', async () => {
+    const port = new Port()
+    const solo: ModelRoute = { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-primary', providerId: 'alpha-relay', contextLimitKiB: 0, aliases: [], enabled: true, priority: 0 }
+    port.list = async () => [solo]
+    const model = new RoutesModel(port)
+    await model.load('relay')
+    expect(await model.moveInChain(solo, 1)).toBe(false)
+    expect(await model.moveInChain(solo, -1)).toBe(false)
+    expect(port.batches).toEqual([])
+  })
+})

@@ -1,4 +1,4 @@
-import type { ProviderCatalog } from '../domain/provider'
+import type { ProviderCatalog, ProviderHealth } from '../domain/provider'
 import type { ProviderInput } from '../domain/provider'
 import type { ProvidersPort } from './providers-port'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
@@ -8,6 +8,8 @@ export interface ProvidersModelState {
   readonly catalog: ProviderCatalog
   readonly pendingId: string
   readonly error: string
+  /** Provider reachability by id, updated live by the health probe. */
+  readonly health: ReadonlyMap<string, ProviderHealth>
 }
 
 const initialState: ProvidersModelState = {
@@ -15,6 +17,7 @@ const initialState: ProvidersModelState = {
   catalog: { activeId: '', providers: [] },
   pendingId: '',
   error: '',
+  health: new Map(),
 }
 
 export class ProvidersModel {
@@ -22,6 +25,7 @@ export class ProvidersModel {
   #state = initialState
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
+  #unsubscribeHealth: (() => void) | null = null
   #generation = 0
 
   constructor(port: ProvidersPort) {
@@ -37,14 +41,25 @@ export class ProvidersModel {
 
   async connect(): Promise<void> {
     this.#unsubscribe ??= this.#port.subscribe(() => void this.refresh(false))
+    // The health probe pushes its own transitions; a failed poll is not an
+    // error surface — the dots simply stay at their last known state.
+    this.#unsubscribeHealth ??= this.#port.subscribeHealth((states) => {
+      this.#set({ ...this.#state, health: new Map(states.map((state) => [state.providerId, state])) })
+    })
     await this.refresh()
+    try {
+      const health = await this.#port.health()
+      this.#set({ ...this.#state, health: new Map(health.map((state) => [state.providerId, state])) })
+    } catch {
+      // Health is ambient state, not a workspace: no error surface for it.
+    }
   }
 
   async refresh(clearPending = true): Promise<void> {
     const generation = ++this.#generation
     try {
       const catalog = await this.#port.list()
-      if (generation === this.#generation) this.#set({ phase: 'ready', catalog, pendingId: clearPending ? '' : this.#state.pendingId, error: '' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', catalog, pendingId: clearPending ? '' : this.#state.pendingId, error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', pendingId: clearPending ? '' : this.#state.pendingId, error: 'Providers are unavailable' })
     }
@@ -80,6 +95,8 @@ export class ProvidersModel {
   dispose(): void {
     this.#unsubscribe?.()
     this.#unsubscribe = null
+    this.#unsubscribeHealth?.()
+    this.#unsubscribeHealth = null
     this.#listeners.clear()
   }
 

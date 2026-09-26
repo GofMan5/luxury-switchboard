@@ -1,5 +1,5 @@
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { CheckCheck, FlaskConical, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, CheckCheck, FlaskConical, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
@@ -100,6 +100,24 @@ export default function ModelRoutesPage() {
     () => selectionChanges(state.routes, state.target, models.providerId, models.selected),
     [models.providerId, models.selected, state.routes, state.target],
   )
+  // The table lists chains in failover order: public model first, then the
+  // priority that decides which provider answers before which.
+  const orderedRoutes = useMemo(
+    () => [...state.routes].sort((left, right) => {
+      if (left.publicModel !== right.publicModel) return left.publicModel.localeCompare(right.publicModel)
+      return (left.priority ?? 0) - (right.priority ?? 0)
+    }),
+    [state.routes],
+  )
+  const chainCount = useMemo(() => {
+    const sizes = new Map<string, number>()
+    for (const route of state.routes) {
+      if (state.target === 'relay' && route.enabled) sizes.set(route.publicModel, (sizes.get(route.publicModel) ?? 0) + 1)
+    }
+    let chained = 0
+    for (const size of sizes.values()) if (size > 1) chained++
+    return chained
+  }, [state.routes, state.target])
   const pendingChanges = changes.additions.length + changes.removals.length
   const busy = Boolean(state.pending) || models.testing || !models.providerId
 
@@ -173,10 +191,38 @@ export default function ModelRoutesPage() {
       </section>
 
       <section className={styles.routes}>
-        <header><div><h2>{state.target === 'relay' ? 'Relay assignments' : 'Published tunnel models'}</h2><p>{state.routes.length} routes</p></div></header>
-        <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Public model / alias</th><th>Upstream model</th><th>Provider</th><th>Context cap</th><th>State</th><th>Actions</th></tr></thead><tbody>
-          {state.routes.map((route) => <tr key={route.publicModel}><td><strong>{route.publicModel}</strong>{route.aliases && route.aliases.length > 0 ? <small className={styles.aliases}> · {route.aliases.join(' · ')}</small> : null}</td><td>{route.upstreamModel}</td><td>{providerNames.get(route.providerId) ?? route.providerId}</td><td>{route.contextLimitKiB === 0 ? 'Default' : `${Math.round(route.contextLimitKiB / 1024)} MiB`}</td><td>{route.enabled ? 'Enabled' : 'Disabled'}</td><td><div className={styles.actions}><button type="button" aria-label={`Edit ${route.publicModel}`} onClick={() => { model.clearError(); setEditor(route) }}><Pencil /></button><button type="button" aria-label={`Delete ${route.publicModel}`} onClick={() => void model.delete(route.publicModel)}><Trash2 /></button></div></td></tr>)}
-          {state.phase !== 'loading' && state.routes.length === 0 ? <tr><td colSpan={6} className={styles.empty}>No {state.target === 'relay' ? 'relay assignments' : 'public tunnel models'} yet.</td></tr> : null}
+        <header><div><h2>{state.target === 'relay' ? 'Relay assignments' : 'Published tunnel models'}</h2><p>{state.routes.length} routes{chainCount > 0 ? ` · ${chainCount} chained` : ''}</p></div></header>
+        <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Public model / alias</th><th>Upstream model</th><th>Provider</th><th>{state.target === 'relay' ? 'Failover order' : 'Context cap'}</th><th>State</th><th>Actions</th></tr></thead><tbody>
+          {orderedRoutes.map((route) => {
+            const sameModel = orderedRoutes.filter((entry) => entry.publicModel === route.publicModel)
+            const chainPosition = sameModel.findIndex((entry) => entry.providerId === route.providerId)
+            const chained = state.target === 'relay' && sameModel.length > 1
+            return (
+              <tr key={`${route.publicModel}:${route.providerId}`} data-chain={chained || undefined}>
+                <td>
+                  <strong>{route.publicModel}</strong>
+                  {route.aliases && route.aliases.length > 0 ? <small className={styles.aliases}> · {route.aliases.join(' · ')}</small> : null}
+                  {chained ? <small className={styles.chainNote}>chain of {sameModel.length}</small> : null}
+                </td>
+                <td>{route.upstreamModel}</td>
+                <td>{providerNames.get(route.providerId) ?? route.providerId}</td>
+                <td>
+                  {state.target === 'relay'
+                    ? chained
+                      ? <span className={styles.orderControls}>
+                          <button type="button" aria-label={`Move ${route.publicModel} on ${providerNames.get(route.providerId) ?? route.providerId} earlier in the chain`} disabled={chainPosition === 0 || Boolean(state.pending)} onClick={() => void model.moveInChain(route, -1)}><ArrowUp size={13} aria-hidden="true" /></button>
+                          <span title="A request tries this chain in order and moves on when a provider answers with a verdict no retry could change">{chainPosition + 1} of {sameModel.length}</span>
+                          <button type="button" aria-label={`Move ${route.publicModel} on ${providerNames.get(route.providerId) ?? route.providerId} later in the chain`} disabled={chainPosition === sameModel.length - 1 || Boolean(state.pending)} onClick={() => void model.moveInChain(route, 1)}><ArrowDown size={13} aria-hidden="true" /></button>
+                        </span>
+                      : route.priority ? `first` : '—'
+                    : route.contextLimitKiB === 0 ? 'Default' : `${Math.round(route.contextLimitKiB / 1024)} MiB`}
+                </td>
+                <td>{route.enabled ? 'Enabled' : 'Disabled'}</td>
+                <td><div className={styles.actions}><button type="button" aria-label={`Edit ${route.publicModel}`} onClick={() => { model.clearError(); setEditor(route) }}><Pencil /></button><button type="button" aria-label={`Delete ${route.publicModel}`} onClick={() => void model.delete(route.publicModel)}><Trash2 /></button></div></td>
+              </tr>
+            )
+          })}
+          {state.phase !== 'loading' && orderedRoutes.length === 0 ? <tr><td colSpan={6} className={styles.empty}>No {state.target === 'relay' ? 'relay assignments' : 'public tunnel models'} yet.</td></tr> : null}
         </tbody></table></div>
       </section>
 
@@ -212,6 +258,7 @@ function RouteEditor({ target, route, providers, pending, operationError, onClos
   const [upstreamModel, setUpstreamModel] = useState(route?.upstreamModel ?? '')
   const [providerId, setProviderId] = useState(providers.some((provider) => provider.id === route?.providerId) ? route?.providerId ?? '' : providers[0]?.id ?? '')
   const [contextMiB, setContextMiB] = useState(String((route?.contextLimitKiB ?? 0) / 1024))
+  const [priority, setPriority] = useState(String(route?.priority ?? 0))
   const [aliases, setAliases] = useState(route?.aliases?.join(' ') ?? '')
   const [enabled, setEnabled] = useState(route?.enabled ?? true)
   const [error, setError] = useState('')
@@ -219,11 +266,13 @@ function RouteEditor({ target, route, providers, pending, operationError, onClos
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const context = Number(contextMiB)
+    const chainPriority = Number(priority)
     const aliasList = [...new Set(aliases.split(/[\s,]+/u).map((alias) => alias.trim()).filter(Boolean))]
     if (!publicModel.trim() || !upstreamModel.trim() || !providerId || !Number.isFinite(context) || context < 0 || context > 2_048) { setError('Complete both model names, provider and a context limit from 0 to 2048 MiB.'); return }
+    if (!Number.isInteger(chainPriority) || chainPriority < 0 || chainPriority > 1000) { setError('Failover order must be a whole number from 0 to 1000.'); return }
     if (aliasList.some((alias) => alias.length > 128 || alias === publicModel.trim())) { setError('Aliases must differ from the requested name and be at most 128 characters.'); return }
     setError('')
-    void onSave({ target, publicModel: publicModel.trim(), upstreamModel: upstreamModel.trim(), providerId, contextLimitKiB: Math.round(context * 1024), aliases: aliasList, enabled })
+    void onSave({ target, publicModel: publicModel.trim(), upstreamModel: upstreamModel.trim(), providerId, contextLimitKiB: Math.round(context * 1024), priority: target === 'relay' ? chainPriority : undefined, aliases: aliasList, enabled })
   }
-  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Also match</span><input value={aliases} maxLength={1024} placeholder="claude-opus-5[1m], alias-2" onChange={event => setAliases(event.currentTarget.value)} /><small>Extra requested names that route to this same upstream model, comma or space separated.{target === 'tunnel' ? ' Accepted by the tunnel, but /v1/models lists only the public alias above, which is also the name every answer carries.' : ''}</small></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
+  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Also match</span><input value={aliases} maxLength={1024} placeholder="claude-opus-5[1m], alias-2" onChange={event => setAliases(event.currentTarget.value)} /><small>Extra requested names that route to this same upstream model, comma or space separated.{target === 'tunnel' ? ' Accepted by the tunnel, but /v1/models lists only the public alias above, which is also the name every answer carries.' : ''}</small></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>{target === 'relay' ? <label><span>Failover order</span><span className={styles.suffixed}><input type="number" min="0" max="1000" step="1" required value={priority} onChange={event => setPriority(event.currentTarget.value)} /><small>lower first</small></span><small>Add the same requested model on another provider with a higher number and a request that gets a final refusal here moves there on its own.</small></label> : null}<label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
 }

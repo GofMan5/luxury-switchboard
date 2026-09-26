@@ -9,12 +9,13 @@ import (
 )
 
 type Source struct {
-	catalog *providerapp.Catalog
-	routes  relayapp.ModelRouteResolver
+	catalog   *providerapp.Catalog
+	routes    relayapp.ModelRouteResolver
+	failovers relayapp.FailoverRoutes
 }
 
-func NewSource(catalog *providerapp.Catalog, routes relayapp.ModelRouteResolver) *Source {
-	return &Source{catalog: catalog, routes: routes}
+func NewSource(catalog *providerapp.Catalog, routes relayapp.ModelRouteResolver, failovers relayapp.FailoverRoutes) *Source {
+	return &Source{catalog: catalog, routes: routes, failovers: failovers}
 }
 
 func (source *Source) Current(_ context.Context, model string) (relayapp.Route, error) {
@@ -47,6 +48,32 @@ func (source *Source) Pinned(_ context.Context, providerID, upstreamModel string
 		return relayapp.Route{}, providerapp.ErrProviderUnavailable
 	}
 	return providerRoute(provider, upstreamModel), nil
+}
+
+// Next walks the failover chain past the provider that just refused. Entries
+// whose provider is gone or disabled are skipped here rather than at the
+// routes slice: the catalog is this adapter's own domain.
+func (source *Source) Next(_ context.Context, currentProviderID, publicModel string) (relayapp.Route, bool, error) {
+	if source.failovers == nil || publicModel == "" {
+		return relayapp.Route{}, false, nil
+	}
+	for _, candidate := range source.failovers.Chain(publicModel) {
+		if candidate.ProviderID == currentProviderID {
+			continue
+		}
+		provider, exists := source.catalog.Get(candidate.ProviderID)
+		if !exists || !provider.Enabled {
+			continue
+		}
+		return providerRoute(provider, candidate.UpstreamModel), true, nil
+	}
+	return relayapp.Route{}, false, nil
+}
+
+func (source *Source) Degrade(providerID string) {
+	if source.failovers != nil {
+		source.failovers.Degrade(providerID)
+	}
 }
 
 func providerRoute(provider providerdomain.Provider, upstreamModel string) relayapp.Route {

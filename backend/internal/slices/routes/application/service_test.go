@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
-
-	"github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
 )
 
 type memoryRepository struct {
@@ -196,5 +197,88 @@ func TestDuplicatePersistedAndBulkRoutesAreRejected(t *testing.T) {
 	}
 	if err := service.Delete(context.Background(), domain.Target("invalid"), "public"); err == nil {
 		t.Fatal("invalid route deletion was reported successful")
+	}
+}
+
+// One public model may sit on several providers, and the request walks the
+// chain in priority order. A terminal verdict degrades the provider for a
+// short TTL: its sibling serves first, and the chain re-probes it once the TTL
+// lapses instead of committing to its death.
+func TestFailoverChainPrefersSiblingsOfADegradedProvider(t *testing.T) {
+	clock := time.Unix(0, 0)
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"alpha-relay": true, "agent": true})
+	service.degradeClock = func() time.Time { return clock }
+	if err := service.Upsert(context.Background(), domain.Assignment{Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "glm-5.3", ProviderID: "alpha-relay", Priority: 0, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Upsert(context.Background(), domain.Assignment{Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "glm-5.3", ProviderID: "agent", Priority: 1, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := service.Resolve(domain.TargetRelay, "glm"); got.ProviderID != "alpha-relay" {
+		t.Fatalf("the chain did not start at its priority head: %+v", got)
+	}
+	chain := service.Chain("glm")
+	if len(chain) != 2 || chain[0].ProviderID != "alpha-relay" || chain[1].ProviderID != "agent" {
+		t.Fatalf("the chain was not ordered: %+v", chain)
+	}
+	// The primary answers a terminal verdict: its sibling moves up for the
+	// TTL, and the chain still serves rather than answering "no route".
+	service.Degrade("alpha-relay")
+	if got, _ := service.Resolve(domain.TargetRelay, "glm"); got.ProviderID != "agent" {
+		t.Fatalf("a degraded head still took the request: %+v", got)
+	}
+	// Both degraded is preference, not removal: the chain falls back to its
+	// configured order rather than refusing.
+	service.Degrade("agent")
+	if got, ok := service.Resolve(domain.TargetRelay, "glm"); !ok || got.ProviderID != "alpha-relay" {
+		t.Fatalf("an all-degraded chain refused to serve: %+v ok=%v", got, ok)
+	}
+	// The TTL lapses and the primary takes over again.
+	clock = clock.Add(degradeTTL + time.Second)
+	if got, _ := service.Resolve(domain.TargetRelay, "glm"); got.ProviderID != "alpha-relay" {
+		t.Fatalf("the degraded provider was never re-probed: %+v", got)
+	}
+}
+
+// Upserting the same model on a second provider adds a chain entry rather than
+// replacing the first, and deleting the model removes the whole chain.
+func TestRelayRowsAreKeyedByModelAndProvider(t *testing.T) {
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"alpha-relay": true, "agent": true})
+	for _, provider := range []string{"alpha-relay", "agent"} {
+		if err := service.Upsert(context.Background(), domain.Assignment{Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "glm-5.3", ProviderID: provider, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(service.List(domain.TargetRelay)) != 2 {
+		t.Fatalf("the second provider replaced the first: %+v", service.List(domain.TargetRelay))
+	}
+	if err := service.Delete(context.Background(), domain.TargetRelay, "glm"); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.List(domain.TargetRelay)) != 0 {
+		t.Fatal("deleting the model left chain rows behind")
+	}
+}
+
+// The tunnel target publishes one route per public model: a second entry for
+// one name would make the public boundary ambiguous.
+func TestTunnelTargetRejectsASecondRowPerModel(t *testing.T) {
+	repository := &memoryRepository{}
+	service, _ := NewService(repository, providers{"alpha-relay": true, "agent": true})
+	first := domain.Assignment{Target: domain.TargetTunnel, PublicModel: "public", UpstreamModel: "up", ProviderID: "alpha-relay", Enabled: true}
+	if err := service.Upsert(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := domain.Assignment{Target: domain.TargetTunnel, PublicModel: "public", UpstreamModel: "up", ProviderID: "agent", Enabled: true}
+	if err := service.Upsert(context.Background(), second); err != nil {
+		t.Fatalf("a second tunnel row was rejected: %v", err)
+	}
+	if got, _ := service.Resolve(domain.TargetTunnel, "public"); got.ProviderID != "agent" {
+		t.Fatalf("the tunnel row was not replaced: %+v", got)
+	}
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatalf("the replaced row must load: %v", err)
 	}
 }

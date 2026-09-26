@@ -933,6 +933,105 @@ func TestEnglishOverloadWordingIsRetried(t *testing.T) {
 	}
 }
 
+// A terminal verdict moves the request to the chain's next provider instead of
+// surfacing: the whole point of a chain is that the client never learns a
+// provider died. The failed provider is degraded so the next request starts
+// where this one ended, and the body speaks the sibling's upstream model.
+func TestATerminalVerdictFailoversToTheSiblingProvider(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusPaymentRequired)
+		_, _ = writer.Write([]byte(`{"error":{"message":"Budget pool quota has been exhausted"}}`))
+	}))
+	defer primary.Close()
+	sibling := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.URL.Path; got != "/v1/responses" {
+			t.Fatalf("the sibling saw an unexpected path: %q", got)
+		}
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"glm-5.3-sibling"`) {
+			t.Fatalf("the body did not speak the sibling's upstream model: %s", body)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"served"}]}]}`))
+	}))
+	defer sibling.Close()
+	primaryURL, _ := url.Parse(primary.URL)
+	siblingURL, _ := url.Parse(sibling.URL)
+	chain := &recordingChain{
+		routes: []relayapp.ModelRoute{{ProviderID: "primary", UpstreamModel: "glm-5.3-primary"}, {ProviderID: "sibling", UpstreamModel: "glm-5.3-sibling"}},
+	}
+	failovers := &switchingFailovers{chain: chain, routes: map[string]relayapp.Route{
+		"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+		"sibling": {ProviderID: "sibling", BaseURL: siblingURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-sibling"},
+	}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: multiRoute{routes: map[string]relayapp.Route{
+			"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+			"sibling": {ProviderID: "sibling", BaseURL: siblingURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-sibling"},
+		}, first: "primary"},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Failovers:   failovers,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"glm","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "served") {
+		t.Fatalf("the sibling's answer never reached the client: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(chain.degraded) != 1 || chain.degraded[0] != "primary" {
+		t.Fatalf("the refused provider was not degraded: %v", chain.degraded)
+	}
+}
+
+// recordingChain is the routes half of a chain: fixed order, recorded
+// degradations.
+type recordingChain struct {
+	routes   []relayapp.ModelRoute
+	degraded []string
+}
+
+func (chain *recordingChain) Chain(string) []relayapp.ModelRoute { return chain.routes }
+func (chain *recordingChain) Degrade(providerID string) {
+	chain.degraded = append(chain.degraded, providerID)
+}
+
+// switchingFailovers adapts the chain to the relay's failover port.
+type switchingFailovers struct {
+	chain  *recordingChain
+	routes map[string]relayapp.Route
+}
+
+func (failovers *switchingFailovers) Next(_ context.Context, currentProviderID, publicModel string) (relayapp.Route, bool, error) {
+	for _, candidate := range failovers.chain.Chain(publicModel) {
+		if candidate.ProviderID == currentProviderID {
+			continue
+		}
+		return failovers.routes[candidate.ProviderID], true, nil
+	}
+	return relayapp.Route{}, false, nil
+}
+
+func (failovers *switchingFailovers) Degrade(providerID string) { failovers.chain.Degrade(providerID) }
+
+// multiRoute serves the first provider for any model, so the failover switch
+// itself is what changes the provider under the request.
+type multiRoute struct {
+	routes map[string]relayapp.Route
+	first  string
+}
+
+func (source multiRoute) Current(_ context.Context, _ string) (relayapp.Route, error) {
+	return source.routes[source.first], nil
+}
+
+func (source multiRoute) Pinned(_ context.Context, providerID, upstreamModel string) (relayapp.Route, error) {
+	route := source.routes[providerID]
+	route.UpstreamModel = upstreamModel
+	return route, nil
+}
+
 // A broken 5xx without congestion wording keeps the permanent-attempt budget:
 // the ceiling above is for queues, not for dead servers.
 func TestAPlainFiveHundredStaysBounded(t *testing.T) {

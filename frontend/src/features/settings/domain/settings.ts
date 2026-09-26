@@ -19,6 +19,17 @@ export interface Settings {
    */
   readonly guardrailMode: GuardrailMode
   readonly guardrailFindings: number
+  /**
+   * Master switch for notification toasts and the unread badge. The feed
+   * itself stays live either way: history is not the operator's decision to
+   * make per event. An older control plane omits these fields; the defaults
+   * read as on.
+   */
+  readonly notificationsEnabled: boolean
+  /** Runs the background reachability probe of enabled providers. */
+  readonly providerHealthEnabled: boolean
+  /** Motion switch for the interface. Reduced-motion at the OS level still wins. */
+  readonly animationsEnabled: boolean
 }
 
 export interface SettingsUpdateResult {

@@ -1,5 +1,5 @@
 import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
-import { Database, Gauge, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
+import { Bell, Database, Gauge, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
 import { restartApp } from '../../../platform/lifecycle/restart-app'
 import { Button } from '../../../shared/ui/Button'
 import type { Settings } from '../domain/settings'
@@ -22,6 +22,9 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
   const number = (field: keyof Settings) => (event: ChangeEvent<HTMLInputElement>) => {
     const value = Number(event.currentTarget.value)
     setSettings((current) => ({ ...current, [field]: value }))
+  }
+  const toggle = (field: 'notificationsEnabled' | 'providerHealthEnabled' | 'animationsEnabled') => () => {
+    setSettings((current) => ({ ...current, [field]: !current[field] }))
   }
   const submit = (event: FormEvent) => { event.preventDefault(); void onSave(settings) }
   const restart = async () => {
@@ -69,6 +72,12 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
           <NumberField label="Guardrail findings" value={settings.guardrailFindings} min={50} max={5000} onChange={number('guardrailFindings')} note="Inspection mode is chosen on the Guardrails page." />
         </SettingsSection>
 
+        <SettingsSection icon={<Bell />} title="Notifications & appearance" description="What the shell tells you as it happens, and how it moves.">
+          <ToggleField label="Notifications" checked={settings.notificationsEnabled} onChange={toggle('notificationsEnabled')} note="Toasts and the unread badge. The feed itself stays recorded either way." />
+          <ToggleField label="Provider health probe" checked={settings.providerHealthEnabled} onChange={toggle('providerHealthEnabled')} note="One anonymous reachability check per enabled provider every two minutes." />
+          <ToggleField label="Animations" checked={settings.animationsEnabled} onChange={toggle('animationsEnabled')} note="The system's reduced-motion setting always wins over this switch." />
+        </SettingsSection>
+
         <section className={styles.invariant}><History size={18} /><div><strong>Security boundaries are fixed</strong><p>Loopback binding, remote HTTPS, secret redaction, body/frame caps{__OWNER_EDITION__ ? ' and fail-closed tunnel sanitization' : ''} cannot be disabled from Settings.</p></div></section>
       </div>
     </form>
@@ -81,4 +90,23 @@ function SettingsSection({ icon, title, description, children }: { icon: ReactNo
 
 function NumberField({ label, value, min, max, suffix, note, onChange }: { label: string; value: number; min: number; max: number; suffix?: string; note?: string; onChange: (event: ChangeEvent<HTMLInputElement>) => void }) {
   return <label className={styles.field}><span>{label}</span><span className={styles.inputWrap}><input type="number" value={value} min={min} max={max} step="1" onChange={onChange} />{suffix ? <small>{suffix}</small> : null}</span>{note ? <em>{note}</em> : null}</label>
+}
+
+function ToggleField({ label, checked, note, onChange }: { label: string; checked: boolean; note?: string; onChange: () => void }) {
+  return (
+    <div className={styles.field}>
+      <span>{label}</span>
+      <button
+        type="button"
+        className={styles.switch}
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={onChange}
+      >
+        <span className={styles.knob} aria-hidden="true" />
+      </button>
+      {note ? <em>{note}</em> : null}
+    </div>
+  )
 }

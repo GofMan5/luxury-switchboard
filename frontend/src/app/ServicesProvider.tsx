@@ -23,6 +23,8 @@ import { StdioModelsPort } from '../features/models/adapters/stdio-models-port'
 import { ModelsModel } from '../features/models/application/models-model'
 import { StdioSharedPort } from '../features/shared-control/adapters/stdio-shared-port'
 import { SharedModel } from '../features/shared-control/application/shared-model'
+import { StdioNotificationsPort } from '../features/notifications/adapters/stdio-notifications-port'
+import { NotificationsModel } from '../features/notifications/application/notifications-model'
 import { createControlPlaneSession } from '../platform/stdio/create-session'
 import type { ControlPlaneSession } from '../platform/stdio/session'
 import { Button } from '../shared/ui/Button'
@@ -59,6 +61,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         current.activity.connect(),
         current.settings.connect(),
         current.guardrails.connect(),
+        current.notifications.connect(),
         current.tunnel?.connect() ?? Promise.resolve(),
         current.clients?.connect() ?? Promise.resolve(),
         current.shared?.connect() ?? Promise.resolve(),
@@ -80,6 +83,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.guardrails.dispose()
       services?.statistics.dispose()
       services?.routes.dispose()
+      services?.notifications.dispose()
       services?.tunnel?.dispose()
       services?.clients?.dispose()
       services?.models.dispose()
@@ -104,6 +108,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           routes: new RoutesModel(new StdioRoutesPort(session), { tracksBothTargets: __OWNER_EDITION__ }),
           models: new ModelsModel(new StdioModelsPort(session)),
           guardrails: new GuardrailsModel(new StdioGuardrailsPort(session)),
+          notifications: new NotificationsModel(new StdioNotificationsPort(session)),
           appVersion: session.appVersion ?? '',
           // Owner-only models are constructed only where their commands exist.
           ...(__OWNER_EDITION__

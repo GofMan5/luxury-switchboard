@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Provider, ProviderCatalog, ProviderInput } from '../domain/provider'
+import type { Provider, ProviderCatalog, ProviderHealth, ProviderInput } from '../domain/provider'
 import type { ProvidersPort } from './providers-port'
 import { ProvidersModel } from './providers-model'
 
@@ -21,6 +21,13 @@ class FakeProvidersPort implements ProvidersPort {
   async add(value: ProviderInput): Promise<Provider> { return { id: 'custom', ...value, cacheTtl: value.cache1h ? '1h0m0s' : '0s', keyConfigured: false, keyCount: 0, builtin: false } }
   async update(id: string, value: ProviderInput): Promise<Provider> { return { id, ...value, cacheTtl: value.cache1h ? '1h0m0s' : '0s', keyConfigured: false, keyCount: 0, builtin: false } }
   async delete(): Promise<void> {}
+  healthStates: readonly ProviderHealth[] = []
+  async health(): Promise<readonly ProviderHealth[]> { return this.healthStates }
+  healthListener: ((states: readonly ProviderHealth[]) => void) | null = null
+  subscribeHealth(listener: (states: readonly ProviderHealth[]) => void) {
+    this.healthListener = listener
+    return () => { this.healthListener = null }
+  }
   subscribe(listener: () => void) {
     this.listener = listener
     return () => { this.listener = null }

@@ -75,6 +75,21 @@ export class RoutesModel {
     return this.#mutate(route.publicModel, () => this.#port.upsert(route))
   }
 
+  /** Swaps one provider's place in a model's failover chain with its neighbor.
+   * Both rows travel in one batch so a failure leaves the order untouched. */
+  async moveInChain(route: ModelRoute, direction: -1 | 1): Promise<boolean> {
+    const chain = this.#state.routes
+      .filter((entry) => entry.target === this.#state.target && entry.publicModel === route.publicModel && entry.enabled)
+      .sort((left, right) => (left.priority ?? 0) - (right.priority ?? 0))
+    const index = chain.findIndex((entry) => entry.providerId === route.providerId)
+    const neighbor = index >= 0 ? chain[index + direction] : undefined
+    if (!neighbor) return false
+    return this.upsertMany([
+      { ...route, priority: neighbor.priority ?? 0 },
+      { ...neighbor, priority: route.priority ?? 0 },
+    ])
+  }
+
   async upsertMany(routes: readonly ModelRoute[]): Promise<boolean> {
     if (routes.length === 0) return false
     return this.#mutate('*', () => this.#publishAll(routes))

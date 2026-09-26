@@ -33,3 +33,20 @@ type ModelRoute struct {
 type ModelRouteResolver interface {
 	Relay(string) (ModelRoute, bool, error)
 }
+
+// FailoverRoutes is the routing half of a failover chain: the ordered siblings
+// behind a public model, and the parking of a provider that just answered
+// terminally. The relay drives it; the routes slice owns the order and TTL.
+type FailoverRoutes interface {
+	Chain(publicModel string) []ModelRoute
+	Degrade(providerID string)
+}
+
+// FailoverSource answers the next concrete route after the current provider
+// answered terminally. It is the providers-side view of the chain: entries
+// whose provider no longer exists or is disabled are skipped here, so the
+// relay never has to know the catalog.
+type FailoverSource interface {
+	Next(ctx context.Context, currentProviderID, publicModel string) (Route, bool, error)
+	Degrade(providerID string)
+}

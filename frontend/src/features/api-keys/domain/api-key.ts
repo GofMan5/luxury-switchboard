@@ -10,6 +10,10 @@ export interface ApiKey {
   readonly blockedModels: number
   readonly retries429: number
   readonly startsInWindow: number
+  /** Consecutive authentication refusals: three reads as a dead credential. */
+  readonly authStreak: number
+  /** Outcome of the key's last finished attempt, empty before the first. */
+  readonly lastOutcome: string
 }
 
 export interface AddApiKey {

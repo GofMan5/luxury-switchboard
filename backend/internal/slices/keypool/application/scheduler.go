@@ -29,16 +29,24 @@ const (
 	// before failing again, nineteen times in a row); thirty seconds keeps the
 	// pace gentle while the refusal stays fast and honest.
 	authCooldown = 30 * time.Second
+	// deadKeyThreshold is how many authentication refusals in a row read as a
+	// dead credential (the notifications domain carries the same number for
+	// its wording): two might be a flaky provider, three is a verdict.
+	deadKeyThreshold = 3
 )
 
 type Scheduler struct {
 	mu         sync.Mutex
 	providers  map[string]*providerState
 	waiters    []*waiter
-	nextTicket uint64
 	notify     chan struct{}
+	nextTicket uint64
 	now        func() time.Time
 	maxQueued  int
+	// deadKeyListeners hear about a key whose authentication streak crossed the
+	// dead threshold: the notification feed is the consumer, and it wants the
+	// label, not the internal state.
+	deadKeyListeners []func(providerID, label string)
 }
 
 type providerState struct {
@@ -57,6 +65,11 @@ type keyState struct {
 	balanceUntil  time.Time
 	blockedModels map[string]time.Time
 	retries429    int
+	// authStreak counts consecutive authentication refusals; any other
+	// outcome resets it. Three in a row is the dead-credential signal the
+	// operator is told about.
+	authStreak  int
+	lastOutcome domain.OutcomeKind
 }
 
 type waiter struct {
@@ -120,6 +133,8 @@ func (scheduler *Scheduler) Configure(providerID string, rpm int, window time.Du
 				state.balanceUntil = old.balanceUntil
 				state.blockedModels = cloneBlocks(old.blockedModels)
 				state.retries429 = old.retries429
+				state.authStreak = old.authStreak
+				state.lastOutcome = old.lastOutcome
 			}
 		}
 	}
@@ -286,9 +301,35 @@ func (scheduler *Scheduler) Snapshot(providerID string) []domain.PublicKey {
 			Pinned: state.key.Pinned, ProxyConfigured: state.key.ProxyURL != "",
 			CooldownMS: cooldown, BlockedModels: activeBlocks(state.blockedModels, now),
 			Retries429: state.retries429, StartsInWindow: len(state.starts),
+			AuthStreak: state.authStreak, LastOutcome: outcomeName(state.lastOutcome),
 		})
 	}
 	return result
+}
+
+// outcomeName gives the operator-facing name of an outcome kind, empty before
+// the key's first finished attempt.
+func outcomeName(kind domain.OutcomeKind) string {
+	switch kind {
+	case domain.OutcomeSuccess:
+		return "success"
+	case domain.OutcomeRateLimited:
+		return "rate-limited"
+	case domain.OutcomeServerError:
+		return "server-error"
+	case domain.OutcomeTransport:
+		return "transport"
+	case domain.OutcomeRequestError:
+		return "request-error"
+	case domain.OutcomeModelUnavailable:
+		return "model-unavailable"
+	case domain.OutcomeBalanceExhausted:
+		return "balance-exhausted"
+	case domain.OutcomeAuthentication:
+		return "authentication"
+	default:
+		return ""
+	}
 }
 
 func (scheduler *Scheduler) Count(providerID string) int {
@@ -308,11 +349,23 @@ func (scheduler *Scheduler) RemoveProvider(providerID string) {
 	scheduler.mu.Unlock()
 }
 
+// OnDeadKey registers a listener told once per streak when a key crosses the
+// dead-credential threshold: three consecutive authentication refusals. The
+// listener runs outside the scheduler lock.
+func (scheduler *Scheduler) OnDeadKey(listener func(providerID, label string)) {
+	if listener == nil {
+		return
+	}
+	scheduler.mu.Lock()
+	scheduler.deadKeyListeners = append(scheduler.deadKeyListeners, listener)
+	scheduler.mu.Unlock()
+}
+
 func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outcome) {
 	scheduler.mu.Lock()
-	defer scheduler.mu.Unlock()
 	key := findKey(scheduler.providers[providerID], keyID)
 	if key == nil {
+		scheduler.mu.Unlock()
 		return
 	}
 	now := scheduler.now()
@@ -332,10 +385,30 @@ func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outc
 		key.balanceUntil = nextMoscowMidnight(now)
 	case domain.OutcomeAuthentication:
 		key.cooldownUntil = maxTime(key.cooldownUntil, now.Add(authCooldown))
-	case domain.OutcomeSuccess, domain.OutcomeServerError, domain.OutcomeTransport, domain.OutcomeRequestError:
-		// Request-scoped outcomes must not cool an otherwise working key.
+	default:
 	}
+	// Health bookkeeping: the streak survives a rate limit or a server error
+	// (those say nothing about the credential) and breaks on anything else.
+	key.lastOutcome = outcome.Kind
+	deadNow := false
+	if outcome.Kind == domain.OutcomeAuthentication {
+		key.authStreak++
+		deadNow = key.authStreak == deadKeyThreshold
+	} else {
+		key.authStreak = 0
+	}
+	deadLabel := ""
+	if deadNow {
+		deadLabel = key.key.Label
+	}
+	listeners := append([]func(providerID, label string){}, scheduler.deadKeyListeners...)
 	scheduler.broadcastLocked()
+	scheduler.mu.Unlock()
+	if deadLabel != "" {
+		for _, listener := range listeners {
+			listener(providerID, deadLabel)
+		}
+	}
 }
 
 func (scheduler *Scheduler) firstDispatchableLocked(now time.Time) (*waiter, *keyState) {

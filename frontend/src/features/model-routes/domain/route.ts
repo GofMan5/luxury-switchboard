@@ -8,6 +8,10 @@ export interface ModelRoute {
   /** Older profiles and routes without aliases omit the field on the wire. */
   readonly aliases?: readonly string[]
   readonly enabled: boolean
+  /** Relay chains: the order a request tries providers of the same public
+   * model in, lower first. Tunnel routes keep one entry per model and ignore
+   * it. Older control planes omit the field; it reads as zero. */
+  readonly priority?: number
 }
 
 /** Models of one provider that the given routes already publish. */

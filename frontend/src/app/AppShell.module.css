@@ -141,7 +141,10 @@
 
 .address,
 .route {
+  display: inline-flex;
   overflow: hidden;
+  align-items: center;
+  gap: 7px;
   color: #aaa;
   font-size: 12px;
   text-overflow: ellipsis;
@@ -184,4 +187,9 @@
 @media (max-width: 760px) {
   .address,
   .runtimeState .divider { display: none; }
+}
+.runtimeActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }

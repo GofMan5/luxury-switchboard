@@ -27,7 +27,12 @@ import (
 	modelrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/models/adapters/relay"
 	modelstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/models/adapters/stdio"
 	modelapp "github.com/luxuryprivate/switchboard/backend/internal/slices/models/application"
+	notificationsrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/adapters/relay"
+	notificationsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/adapters/stdio"
+	notificationsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/application"
+	notificationsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/domain"
 	providerdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/dpapi"
+	providerhealth "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/health"
 	providerstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/stdio"
 	providerapp "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 	providerdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
@@ -51,11 +56,13 @@ import (
 )
 
 type App struct {
-	protocol *platform.Server
-	relay    *relayapp.Service
-	history  activityapp.History
-	edition  editionRuntime
-	logger   *log.Logger
+	protocol      *platform.Server
+	relay         *relayapp.Service
+	history       activityapp.History
+	edition       editionRuntime
+	logger        *log.Logger
+	healthMonitor *providerapp.HealthMonitor
+	healthCancel  context.CancelFunc
 }
 
 func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
@@ -103,7 +110,8 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		logger.Printf("encrypted model routes could not be loaded; using active provider")
 	}
 	providerManager.SetRouteUsage(routeService)
-	routes := relayproviders.NewSource(catalog, relayroutes.NewResolver(routeService))
+	routeResolver := relayroutes.NewResolver(routeService)
+	routes := relayproviders.NewSource(catalog, routeResolver, routeResolver)
 	credentials := relaykeypool.NewSource(keyScheduler)
 	activity := activityapp.NewService(settings.ActivityCapacity)
 	history, historyErr := defaultHistory(settings.HistoryRetentionDays)
@@ -115,10 +123,12 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	notifications := notificationsapp.NewService()
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(settings.ListenerPort)))
 	httpRuntime := relayhttp.NewServer(address, relayhttp.Dependencies{
 		Routes: routes, Credentials: credentials, Activity: recorder,
-		Guardrail: guardrailrelay.New(guardrails),
+		Guardrail: guardrailrelay.New(guardrails), Failovers: routes,
+		RouteEvents: notificationsrelay.NewSink(notifications),
 		Config: relayhttp.Config{
 			MaxRequestBytes:       int64(settings.MaxRequestMiB) * 1024 * 1024,
 			ResponseHeaderTimeout: time.Duration(settings.HeaderTimeoutSeconds) * time.Second,
@@ -145,18 +155,58 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 
 	protocol := platform.NewServer(stdin, stdout, 32)
 	systemstdio.Register(protocol)
-	providerstdio.Register(protocol, catalog, providerManager, keyScheduler)
+	// The health monitor probes enabled providers on an interval the settings
+	// gate. It runs in both editions: a public user's providers die the same
+	// way an owner's do.
+	healthMonitor, err := providerapp.NewHealthMonitor(catalog, providerhealth.NewHTTPProber())
+	if err != nil {
+		return nil, err
+	}
+	healthMonitor.SetEnabled(settings.ProviderHealthEnabled)
+	providerstdio.Register(protocol, catalog, providerManager, keyScheduler, healthMonitor)
 	keystdio.Register(protocol, keyManager)
 	relaystdio.Register(protocol, relay)
 	activitystdio.Register(protocol, activity, history)
 	settingsstdio.Register(protocol, settingsService)
 	guardrailstdio.Register(protocol, guardrails)
+	notificationsstdio.Register(protocol, notifications)
+	// A dead key is the one failure the relay absorbs silently — the pool
+	// rotates, the request succeeds — so the operator learns it only here.
+	keyScheduler.OnDeadKey(func(_, label string) {
+		_ = notifications.Raise(
+			notificationsdomain.KindKeyHealth, notificationsdomain.SeverityDanger,
+			"Key \""+label+"\" looks dead",
+			"It answered three authentication refusals in a row. Revoke it at the provider and replace it; the pool is working around it until then.",
+		)
+	})
+	// Reachability transitions are notifications, not polls: the sidebar dot
+	// carries the state, the toast carries the change.
+	healthMonitor.OnChanged(func(changed providerapp.HealthState, _ []providerapp.HealthState) {
+		provider, exists := catalog.Get(changed.ProviderID)
+		if !exists {
+			return
+		}
+		if changed.Up {
+			_ = notifications.Raise(
+				notificationsdomain.KindProviderHealth, notificationsdomain.SeveritySuccess,
+				provider.Name+" is reachable again",
+				"The endpoint started answering. Requests no longer avoid it.",
+			)
+			return
+		}
+		_ = notifications.Raise(
+			notificationsdomain.KindProviderHealth, notificationsdomain.SeverityDanger,
+			provider.Name+" is unreachable",
+			"The endpoint stopped answering: "+changed.Reason+".",
+		)
+	})
 	// The mode is a setting, so changing it must take effect on the next request
 	// rather than at the next launch.
 	settingsService.OnApplied(func(applied settingsdomain.Settings) {
 		if mode, err := guardraildomain.ParseMode(applied.Normalized().GuardrailMode); err == nil {
 			_ = guardrails.SetMode(mode)
 		}
+		healthMonitor.SetEnabled(applied.ProviderHealthEnabled)
 	})
 	routestdio.Register(protocol, routeService)
 	modelstdio.Register(protocol, modelService)
@@ -168,15 +218,21 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		return nil, err
 	}
 	return &App{
-		protocol: protocol,
-		relay:    relay,
-		history:  history,
-		edition:  edition,
-		logger:   logger,
+		protocol:      protocol,
+		relay:         relay,
+		history:       history,
+		edition:       edition,
+		logger:        logger,
+		healthMonitor: healthMonitor,
 	}, nil
 }
 
 func (app *App) Run(ctx context.Context) error {
+	if app.healthMonitor != nil && app.healthMonitor.Enabled() {
+		healthCtx, cancelHealth := context.WithCancel(context.Background())
+		app.healthCancel = cancelHealth
+		go app.healthMonitor.Run(healthCtx, 2*time.Minute)
+	}
 	if _, err := app.relay.Start(); err != nil {
 		app.logger.Printf("relay start failed")
 	}
@@ -186,6 +242,9 @@ func (app *App) Run(ctx context.Context) error {
 		app.logger.Printf("edition runtime did not stop cleanly")
 	}
 	cancelEdition()
+	if app.healthCancel != nil {
+		app.healthCancel()
+	}
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if stopErr := app.relay.Stop(stopCtx); stopErr != nil {
 		app.logger.Printf("relay shutdown was not clean")

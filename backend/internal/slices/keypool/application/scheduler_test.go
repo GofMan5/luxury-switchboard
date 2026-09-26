@@ -274,6 +274,60 @@ func TestAnAuthenticationRefusalCoolsTheKeyForThirtySeconds(t *testing.T) {
 	}
 }
 
+// A dead key announces itself once: the listener fires at the threshold and
+// not again until the streak breaks and rebuilds.
+func TestADeadKeyAnnouncesItselfOncePerStreak(t *testing.T) {
+	scheduler := NewScheduler(10)
+	clock := time.Now()
+	scheduler.now = func() time.Time { return clock }
+	key := testKey(t, "echo", "Solo", "solo-secret", 0, 0)
+	if err := scheduler.Configure("echo", 0, 0, []domain.Key{key}); err != nil {
+		t.Fatal(err)
+	}
+	announced := make(chan string, 4)
+	scheduler.OnDeadKey(func(_, label string) { announced <- label })
+	// Each refusal cools the key for the auth cooldown, so the clock advances
+	// between attempts: the test measures the streak, not the wait.
+	refuse := func(outcome domain.OutcomeKind) {
+		t.Helper()
+		lease, _, err := scheduler.Acquire(context.Background(), "echo", "model")
+		if err != nil {
+			t.Fatal(err)
+		}
+		lease.Finish(domain.Outcome{Kind: outcome})
+		clock = clock.Add(authCooldown + time.Second)
+	}
+	// Two refusals are noise; the third is the verdict, the fourth is the
+	// same streak continuing.
+	refuse(domain.OutcomeAuthentication)
+	refuse(domain.OutcomeAuthentication)
+	refuse(domain.OutcomeAuthentication)
+	refuse(domain.OutcomeAuthentication)
+	select {
+	case label := <-announced:
+		if label != "Solo" {
+			t.Fatalf("the wrong key announced itself: %q", label)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a dead key never announced itself")
+	}
+	select {
+	case label := <-announced:
+		t.Fatalf("the same streak announced itself twice: %q", label)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// A success breaks the streak; a rebuilt streak announces again.
+	refuse(domain.OutcomeSuccess)
+	refuse(domain.OutcomeAuthentication)
+	refuse(domain.OutcomeAuthentication)
+	refuse(domain.OutcomeAuthentication)
+	select {
+	case <-announced:
+	case <-time.After(time.Second):
+		t.Fatal("a rebuilt streak never announced itself")
+	}
+}
+
 // A rotation never jumps the fair queue: with another request waiting on the
 // provider, even a free key is a miss.
 func TestTryAcquireMissesWhileAnotherRequestWaits(t *testing.T) {

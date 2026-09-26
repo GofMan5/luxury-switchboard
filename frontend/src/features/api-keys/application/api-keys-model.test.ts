@@ -3,7 +3,7 @@ import type { AddApiKey, ApiKey, UpdateApiKey } from '../domain/api-key'
 import { ApiKeysModel } from './api-keys-model'
 import type { ApiKeysPort } from './api-keys-port'
 
-const key: ApiKey = { id: 'key-1', providerId: 'echo', label: 'Primary', priority: 0, rpm: 30, pinned: false, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 0 }
+const key: ApiKey = { id: 'key-1', providerId: 'echo', label: 'Primary', priority: 0, rpm: 30, pinned: false, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 0, authStreak: 0, lastOutcome: '' }
 
 class Port implements ApiKeysPort {
   listener: ((providerId: string) => void) | undefined

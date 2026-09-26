@@ -31,6 +31,10 @@ const (
 	maxCacheTraversalDepth          = 64
 	maxRelayAttempts                = 64
 	maxStreamFailuresBeforeFallback = 3
+	// maxRouteFailovers caps how many providers one request walks through on
+	// terminal verdicts. A chain longer than this is a misconfiguration; the
+	// cap keeps a routing loop from ever outliving the request.
+	maxRouteFailovers = 4
 	// terminalRefused is the terminal reason for an answer the provider's content
 	// policy declined. It is deliberately not "response.failed": a failure is worth
 	// another attempt, a verdict is not.
@@ -57,6 +61,8 @@ type Server struct {
 	credentials  relayapp.CredentialSource
 	activity     relayapp.ActivitySink
 	guardrail    relayapp.Guardrail
+	failovers    relayapp.FailoverSource
+	routeEvents  relayapp.RouteEventSink
 	config       Config
 	client       *http.Client
 	transport    *http.Transport
@@ -74,6 +80,12 @@ type Dependencies struct {
 	Credentials relayapp.CredentialSource
 	Activity    relayapp.ActivitySink
 	Guardrail   relayapp.Guardrail
+	// Failovers is optional: nil leaves terminal verdicts as final answers,
+	// the behavior of a build without route chains.
+	Failovers relayapp.FailoverSource
+	// RouteEvents is optional: when set, a failover switch is reported with
+	// the provider names the operator knows.
+	RouteEvents relayapp.RouteEventSink
 	Config      Config
 }
 
@@ -134,6 +146,8 @@ func NewServer(address string, dependencies Dependencies) *Server {
 		credentials:  dependencies.Credentials,
 		activity:     activity,
 		guardrail:    guardrail,
+		failovers:    dependencies.Failovers,
+		routeEvents:  dependencies.RouteEvents,
 		config:       config,
 		client:       &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
 		transport:    transport,
@@ -208,6 +222,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// declaration into the documented tools array.
 	clientDeclaredTools := server.guardrail.ClientDeclaredTools(body)
 	model := requestModel(body, request.Header.Get("Content-Type"))
+	// The name the client asked for, before any rewrite for the first route.
+	// Failover resolves chains by this name: it is the identity the routes
+	// slice knows, and it stays the same while every attempt speaks the
+	// upstream name of whichever provider is serving.
+	publicModel := model
 	route, err := server.routes.Current(ctx, model)
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "Relay route is unavailable")
@@ -319,7 +338,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			// Kept so the answer's headers can be checked against it: a provider that
 			// echoes the key we sent it must not hand that key to the client.
 			secrets = sensitiveCredentialMarkers(credential)
-		}, &chatActive, &upstreamDetail)
+		}, &chatActive, &upstreamDetail, publicModel)
 	}
 	var response *http.Response
 	// A refused answer is a wasted attempt, not a dead request. The rules match shell
@@ -589,7 +608,12 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	var upstreamDetail string
 	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
-	}, &chatActive, &upstreamDetail)
+	}, &chatActive, &upstreamDetail, "")
+	// The empty public model above is deliberate: Dispatch is pinned routing —
+	// the tunnel and the model test ask for one provider by name, and the
+	// tunnel's privacy markers are computed for exactly that route. A chain
+	// switch mid-dispatch would serve a provider the public boundary never
+	// vetted, so terminal verdicts stay final here.
 	if err != nil {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, Cancelled: errors.Is(err, context.Canceled),
@@ -699,7 +723,7 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 	return loaded
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string, publicModel string) (*http.Response, error) {
 	// A retried call starts wordless: the detail below always describes the
 	// attempt this call ended on, never a previous call's verdict.
 	if upstreamDetail != nil {
@@ -728,7 +752,46 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	// right now, and rotationStatus is the rejection it ends on when none is.
 	rotateImmediate := false
 	rotationStatus := http.StatusBadGateway
-	for attempt := 0; ; attempt++ {
+	// routeFailures counts failover switches: the chain is finite, and a
+	// request that walked it must not walk it again on a later verdict. Each
+	// switch resets the per-class budgets — the new provider is a fresh
+	// context, and its key pool has not refused anything yet.
+	routeFailures := 0
+	attempt := 0
+	// switchRoute walks the failover chain past a provider that answered
+	// terminally: a verdict no key and no retry of this provider can change.
+	// The body is rewritten to the sibling's upstream model, and the failed
+	// provider is parked behind its siblings for the routes slice's TTL so the
+	// next request starts where this one ended up.
+	switchRoute := func(status int) bool {
+		if server.failovers == nil || publicModel == "" || routeFailures >= maxRouteFailovers {
+			return false
+		}
+		server.failovers.Degrade(route.ProviderID)
+		next, ok, err := server.failovers.Next(ctx, route.ProviderID, publicModel)
+		if err != nil || !ok {
+			return false
+		}
+		if next.UpstreamModel != "" && next.UpstreamModel != requestModel(body, incoming.Header.Get("Content-Type")) {
+			body = rewriteRequestModel(body, incoming.Header.Get("Content-Type"), next.UpstreamModel)
+			model = next.UpstreamModel
+		}
+		if server.routeEvents != nil {
+			server.routeEvents.FailoverOccurred(route.ProviderName, next.ProviderName, publicModel)
+		}
+		route = next
+		routeFailures++
+		serverFailures, credentialFailures, requestFailures = 0, 0, 0
+		rotateImmediate = false
+		// The new provider's dialect is unknown to the probe cache: let the
+		// endpoint-missing logic re-evaluate instead of trusting the old one.
+		if chatActive != nil {
+			*chatActive = false
+		}
+		server.observeRetry(activityID, attempt, status, 0)
+		return true
+	}
+	for ; ; attempt++ {
 		var lease relayapp.CredentialLease
 		var credential relayapp.Credential
 		if rotateImmediate {
@@ -1086,6 +1149,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
+				if switchRoute(status) {
+					continue
+				}
 				return genericErrorResponse(status), nil
 			}
 			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
@@ -1096,21 +1162,31 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// The batch quota is the provider's, not any key's: rotating would
 			// walk the request through keys that all answer the same way, and
 			// the midnight ban this class used to file froze every working
-			// model behind a verdict no key was responsible for. The request
-			// ends on the refusal; the next one tries the pool fresh.
+			// model behind a verdict no key was responsible for. A sibling
+			// provider still hosts the model, so the chain is worth one walk.
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			if switchRoute(status) {
+				continue
+			}
 			return genericErrorResponse(status), nil
 		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelMissing(errorBody, model):
-			// The provider does not host the model at all. Retrying is pointless
-			// and blocking the keys would only stall the next request as well.
-			// Some gateways answer this with 403 rather than 404, so the check
-			// runs before the authentication rotation below.
+			// The provider does not host the model at all. Retrying this
+			// provider is pointless and blocking the keys would only stall the
+			// next request as well. Some gateways answer this with 403 rather
+			// than 404, so the check runs before the authentication rotation
+			// below. The chain's whole point is that a sibling hosts it.
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			if switchRoute(status) {
+				continue
+			}
 			return genericErrorResponse(status), nil
 		case (status == http.StatusNotFound || status == http.StatusForbidden) && modelUnavailable(errorBody, model, status):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
+				if switchRoute(status) {
+					continue
+				}
 				return genericErrorResponse(status), nil
 			}
 			// Same rule as the authentication rotation below: the next attempt
@@ -1126,8 +1202,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// A verdict about the client, not the credential: every key answers
 			// it identically, so rotation is wasted attempts and the first
 			// refusal's cooldown would freeze models that work behind one
-			// probe that does not.
+			// probe that does not. The provider is gone for this client — the
+			// chain is the only move left.
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+			if switchRoute(status) {
+				continue
+			}
 			return genericErrorResponse(status), nil
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			// The first refusal cools the key that produced it. A second refusal
@@ -1141,6 +1221,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
+				// The whole pool refused to authenticate: no key of this
+				// provider will change that, but a sibling's might.
+				if switchRoute(status) {
+					continue
+				}
 				return genericErrorResponse(status), nil
 			}
 			// The rotation takes over only from a key that is free right now.

@@ -987,6 +987,55 @@ func TestATerminalVerdictFailoversToTheSiblingProvider(t *testing.T) {
 
 // recordingChain is the routes half of a chain: fixed order, recorded
 // degradations.
+// A 402 balance verdict parks the key for a short re-check and tells the
+// operator in plain words: the verdict is the one failure only the operator
+// can change, and before this it silently showed up as a cooldown timer.
+func TestABalanceVerdictTellsTheOperator(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusPaymentRequired)
+		_, _ = writer.Write([]byte(`{"error":"Your balance has run out. Please top it up in your account."}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	events := &recordingRouteEvents{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "alpha-relay", ProviderName: "Alpha Relay", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		RouteEvents: events,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "alpha-relay", UpstreamModel: "claude-opus-5",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"claude-opus-5"}`),
+	})
+	if err != nil || response.Status != http.StatusPaymentRequired {
+		t.Fatalf("the billing verdict did not surface: status=%d err=%v", response.Status, err)
+	}
+	if len(events.balance) == 0 || events.balance[0] != "Alpha Relay" {
+		t.Fatalf("the operator was not told about the balance: %v", events.balance)
+	}
+	// Rotations may re-report the same verdict; the feed deduplicates them.
+	for _, name := range events.balance {
+		if name != "Alpha Relay" {
+			t.Fatalf("a foreign provider was blamed: %v", events.balance)
+		}
+	}
+}
+
+type recordingRouteEvents struct {
+	failover []string
+	balance  []string
+}
+
+func (events *recordingRouteEvents) FailoverOccurred(from, to, publicModel string) {
+	events.failover = append(events.failover, from+"->"+to)
+}
+
+func (events *recordingRouteEvents) BalanceExhausted(providerName string) {
+	events.balance = append(events.balance, providerName)
+}
+
 type recordingChain struct {
 	routes   []relayapp.ModelRoute
 	degraded []string

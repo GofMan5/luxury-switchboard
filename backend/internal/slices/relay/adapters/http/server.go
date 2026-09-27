@@ -1146,6 +1146,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 		switch {
 		case balanceUnavailable(status, errorBody, rateLimited) && !sharedPoolExhausted(errorBody):
+			if server.routeEvents != nil {
+				server.routeEvents.BalanceExhausted(route.ProviderName)
+			}
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted})
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {

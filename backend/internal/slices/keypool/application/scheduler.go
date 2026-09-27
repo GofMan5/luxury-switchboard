@@ -33,6 +33,11 @@ const (
 	// dead credential (the notifications domain carries the same number for
 	// its wording): two might be a flaky provider, three is a verdict.
 	deadKeyThreshold = 3
+	// balanceCooldown is the re-check interval for a 402: the verdict is
+	// honest, but money returns when the operator tops up, not on a schedule
+	// the relay could name. Ten minutes bounds a broken account to one cheap
+	// 402 per interval while letting a top-up matter almost immediately.
+	balanceCooldown = 10 * time.Minute
 )
 
 type Scheduler struct {
@@ -389,7 +394,15 @@ func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outc
 			key.blockedModels[outcome.Model] = now.Add(modelCooldown)
 		}
 	case domain.OutcomeBalanceExhausted:
-		key.balanceUntil = nextMoscowMidnight(now)
+		// The balance verdict is honest but not scheduled: money comes back
+		// when the operator tops up, not at any hour the relay could name.
+		// Until-midnight used to park a key for most of a day after a single
+		// 402 — measured: 1414 minutes, straight through an evening of use —
+		// and a top-up five minutes later changed nothing until the clock
+		// said so. Ten minutes is a re-check interval: an empty account costs
+		// one cheap 402 per interval, and a topped-up one is serving again
+		// almost immediately.
+		key.balanceUntil = now.Add(balanceCooldown)
 	case domain.OutcomeAuthentication:
 		key.cooldownUntil = maxTime(key.cooldownUntil, now.Add(authCooldown))
 	default:
@@ -547,15 +560,6 @@ func activeBlocks(blocks map[string]time.Time, now time.Time) int {
 		}
 	}
 	return count
-}
-
-func nextMoscowMidnight(now time.Time) time.Time {
-	location, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		location = time.FixedZone("MSK", 3*60*60)
-	}
-	local := now.In(location)
-	return time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, location)
 }
 
 func minTime(left, right time.Time) time.Time {

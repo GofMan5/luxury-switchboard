@@ -30,3 +30,21 @@ func (sink *Sink) FailoverOccurred(fromProvider, toProvider, publicModel string)
 		"The provider serving "+publicModel+" ("+from+") answered with a verdict no retry could change, so the request moved to the next provider in its route chain.",
 	)
 }
+
+// BalanceExhausted reports the provider's own billing verdict. The key parks
+// for a short re-check interval, and only the operator can change the verdict
+// — which is exactly why the toast must say so.
+func (sink *Sink) BalanceExhausted(providerName string) {
+	if sink.service == nil {
+		return
+	}
+	name := providerName
+	if name == "" {
+		name = "A provider"
+	}
+	_ = sink.service.Raise(
+		domain.KindBalanceExhausted, domain.SeverityDanger,
+		name+" reports an empty balance",
+		"The provider answered 402: the account behind this key has no money left. Top it up at the provider and the key starts serving again within minutes.",
+	)
+}

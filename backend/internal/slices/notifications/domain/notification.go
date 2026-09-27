@@ -32,6 +32,7 @@ const (
 	KindProviderFailover Kind = "provider_failover"
 	KindProviderHealth   Kind = "provider_health"
 	KindKeyHealth        Kind = "key_dead"
+	KindBalanceExhausted Kind = "balance_exhausted"
 )
 
 // Notification is one thing the operator should know happened. Titles and

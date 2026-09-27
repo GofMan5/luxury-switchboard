@@ -274,6 +274,35 @@ func TestAnAuthenticationRefusalCoolsTheKeyForThirtySeconds(t *testing.T) {
 	}
 }
 
+// A balance verdict re-checks in ten minutes, not at midnight: money returns
+// when the operator tops up, and a top-up five minutes after a 402 must matter
+// (measured before this bound: one verdict parked a key for 1414 minutes).
+func TestABalanceVerdictRechecksInTenMinutes(t *testing.T) {
+	scheduler := NewScheduler(10)
+	clock := time.Unix(0, 0)
+	scheduler.now = func() time.Time { return clock }
+	key := testKey(t, "echo", "Solo", "solo-secret", 0, 0)
+	if err := scheduler.Configure("echo", 0, 0, []domain.Key{key}); err != nil {
+		t.Fatal(err)
+	}
+	lease, _, err := scheduler.Acquire(context.Background(), "echo", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Finish(domain.Outcome{Kind: domain.OutcomeBalanceExhausted})
+	if _, ok := scheduler.TryAcquire("echo", "model"); ok {
+		t.Fatal("a balance-refused key was still dispatchable")
+	}
+	clock = clock.Add(9 * time.Minute)
+	if _, ok := scheduler.TryAcquire("echo", "model"); ok {
+		t.Fatal("the balance cooldown lapsed early")
+	}
+	clock = clock.Add(2 * time.Minute)
+	if _, ok := scheduler.TryAcquire("echo", "model"); !ok {
+		t.Fatal("the balance cooldown did not lapse after ten minutes")
+	}
+}
+
 // A dead key announces itself once: the listener fires at the threshold and
 // not again until the streak breaks and rebuilds.
 func TestADeadKeyAnnouncesItselfOncePerStreak(t *testing.T) {

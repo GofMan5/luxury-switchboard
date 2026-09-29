@@ -4,7 +4,6 @@ import type { ApiKeysModel } from '../features/api-keys/application/api-keys-mod
 import type { ProvidersModel } from '../features/providers/application/providers-model'
 import type { RelayModel } from '../features/relay/application/relay-model'
 import type { SettingsModel } from '../features/settings/application/settings-model'
-import type { StatisticsModel } from '../features/statistics/application/statistics-model'
 import type { InsightsModel } from '../features/insights/application/insights-model'
 import type { RoutesModel } from '../features/model-routes/application/routes-model'
 import type { GuardrailsModel } from '../features/guardrails/application/guardrails-model'
@@ -21,7 +20,6 @@ export interface AppServices {
   readonly activity: ActivityModel
   readonly apiKeys: ApiKeysModel
   readonly settings: SettingsModel
-  readonly statistics: StatisticsModel
   readonly insights: InsightsModel
   readonly routes: RoutesModel
   readonly models: ModelsModel

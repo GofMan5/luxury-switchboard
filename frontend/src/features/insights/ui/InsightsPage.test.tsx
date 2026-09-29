@@ -67,7 +67,7 @@ beforeEach(() => {
 
 describe('InsightsPage', () => {
   it('renders the report the model holds', () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '' })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
     expect(screen.getByText('Alpha')).toBeTruthy()
     // The model shows in the breakdown and in the pricing gap list; both are
     // the honest places for it.
@@ -77,25 +77,25 @@ describe('InsightsPage', () => {
   })
 
   it('shows the skeleton while loading and never a fake zero', () => {
-    show({ phase: 'loading', period: '24h', report: null, prices: [], pricesPhase: 'idle', error: '' })
+    show({ phase: 'loading', period: '24h', report: null, prices: [], pricesPhase: 'idle', error: '', recent: [] })
     expect(screen.getByText('Loading insights…')).toBeTruthy()
     // Placeholders, not zeros: a first-load failure must not read as measured.
     expect(screen.queryByText('$0.00')).toBeNull()
   })
 
   it('surfaces the error state', () => {
-    show({ phase: 'error', period: '24h', report: null, prices: [], pricesPhase: 'ready', error: 'Insights are unavailable' })
+    show({ phase: 'error', period: '24h', report: null, prices: [], pricesPhase: 'ready', error: 'Insights are unavailable', recent: [] })
     expect(screen.getByRole('alert').textContent).toContain('Insights are unavailable')
   })
 
   it('switches the period on demand', () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '' })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
     fireEvent.click(screen.getByRole('button', { name: '48h' }))
     expect(mockLoad).toHaveBeenCalledWith('48h')
   })
 
   it('opens the price editor and saves a draft through the model', async () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '' })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
     fireEvent.click(screen.getByRole('button', { name: /prices/i }))
     const modelInput = await screen.findByPlaceholderText('gpt-6-astra')
     fireEvent.change(modelInput, { target: { value: 'gpt-6-astra' } })
@@ -110,10 +110,42 @@ describe('InsightsPage', () => {
   })
 
   it('dismisses the price editor with Escape like every other modal', async () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '' })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
     fireEvent.click(screen.getByRole('button', { name: /prices/i }))
     const dialog = await screen.findByRole('dialog')
     fireEvent.keyDown(dialog, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('renders the persisted request rows behind the numbers', () => {
+    show({
+      phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '',
+      recent: [{
+        id: 'r1', state: 'failed', model: 'glm-5.3-prime', providerId: 'alpha-relay', status: 402,
+        latencyMs: 79, totalTokens: 0, cachedTokens: 0, updatedAt: '2026-09-28T01:30:34Z',
+        errorCode: 'balance_exhausted', errorDetail: 'Your balance has run out.',
+      }],
+    })
+    const table = screen.getByRole('table', { name: 'Recent persisted requests' })
+    expect(table.textContent).toContain('glm-5.3-prime')
+    expect(table.textContent).toContain('402')
+    // The diagnostic is its own section, not a tooltip nobody opens.
+    expect(screen.getByText(/Your balance has run out/)).toBeTruthy()
+  })
+
+  it('sorts the model breakdown when a column header is clicked', () => {
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
+    const table = screen.getByRole('table', { name: 'Model breakdown' })
+    const rows = () => [...table.querySelectorAll('tbody tr')].map((row) => row.querySelector('td')?.textContent)
+    // Default sort: tokens, descending — gpt-6-astra (90k) before claude-opus-5 (10k).
+    expect(rows()[0]).toBe('gpt-6-astra')
+    // Click Model: alphabetical ascending.
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    expect(rows()[0]).toBe('claude-opus-5')
+    expect(table.querySelector('th[aria-sort="ascending"]')).toBeTruthy()
+    // Click Model again: descending.
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    expect(rows()[0]).toBe('gpt-6-astra')
+    expect(table.querySelector('th[aria-sort="descending"]')).toBeTruthy()
   })
 })

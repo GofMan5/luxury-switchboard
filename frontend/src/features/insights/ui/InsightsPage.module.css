@@ -37,6 +37,19 @@
 .errorCount { color: var(--text-muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .unpriced { margin: 0; padding: 14px 16px 16px; color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
 .skeleton { display: block; height: 14px; border-radius: 4px; background: var(--bg-raised); animation: insights-skeleton-pulse var(--motion-standard) var(--ease-standard) infinite alternate; }
+.skeletonRow td { height: 42px; }
+.sortButton { display: inline-flex; gap: 4px; align-items: center; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; font-weight: 620; cursor: pointer; }
+.sortButton:hover { color: var(--text-primary); }
+.sortButton:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.sortArrow { display: inline-block; width: 12px; color: var(--text-muted); font-size: 10px; opacity: 0; transition: opacity var(--motion-fast) var(--ease-standard); }
+.sortArrow[data-visible] { opacity: 1; color: var(--text-primary); }
+.state { display: inline-flex; align-items: center; gap: 7px; }
+.errorList { display: grid; gap: 8px; padding: 12px 16px 16px; }
+.errorItem { display: grid; gap: 5px; border-left: 2px solid var(--status-danger); padding: 9px 10px; background: color-mix(in srgb, var(--status-danger) 6%, var(--bg-surface)); }
+.errorItem strong { color: color-mix(in srgb, var(--status-danger) 72%, var(--text-primary)); font-family: var(--font-mono); font-size: 12px; font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.errorItem strong:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.errorItem small { color: var(--text-muted); }
+.empty { color: var(--text-muted); text-align: center !important; }
 @keyframes insights-skeleton-pulse {
   from { opacity: .45; }
   to { opacity: 1; }

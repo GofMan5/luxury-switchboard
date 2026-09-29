@@ -1,11 +1,12 @@
-import type { InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
+import type { HistoryRequest, InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
 import type { InsightsPort, PriceDraft } from './insights-port'
 
 export interface InsightsState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'error'
   readonly period: InsightsPeriod
   readonly report: InsightsReport | null
-  /** The price catalog as of the last successful fetch or edit. */
+  /** The persisted request rows behind the numbers: the same period, the same honesty. */
+  readonly recent: readonly HistoryRequest[]
   readonly prices: readonly ModelPrice[]
   readonly pricesPhase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly error: string
@@ -14,7 +15,7 @@ export interface InsightsState {
 /** Reload the report after a price edit: the cost columns are the point. */
 export class InsightsModel {
   readonly #port: InsightsPort
-  #state: InsightsState = { phase: 'idle', period: '24h', report: null, prices: [], pricesPhase: 'idle', error: '' }
+  #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], prices: [], pricesPhase: 'idle', error: '' }
   #listeners = new Set<() => void>()
   #generation = 0
   constructor(port: InsightsPort) { this.#port = port }
@@ -23,13 +24,14 @@ export class InsightsModel {
 
   async load(period: InsightsPeriod): Promise<void> {
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, error: '' })
+    this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, recent: period === this.#state.period ? this.#state.recent : [], error: '' })
     try {
-      const [report, prices] = await Promise.all([
+      const [report, recent, prices] = await Promise.all([
         this.#port.report(period),
+        this.#port.recent(period),
         this.#state.pricesPhase === 'idle' ? this.#port.prices() : Promise.resolve(this.#state.prices),
       ])
-      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, prices, pricesPhase: 'ready', error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent, prices, pricesPhase: 'ready', error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Insights are unavailable' })
     }

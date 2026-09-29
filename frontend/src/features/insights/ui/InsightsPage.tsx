@@ -1,14 +1,31 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Coins, RefreshCw } from 'lucide-react'
-import type { InsightsPeriod } from '../domain/insights'
+import type { InsightsPeriod, InsightsProvider, InsightsModel, HistoryRequest } from '../domain/insights'
 import { useInsights } from './useInsights'
 import { PriceEditor } from './PriceEditor'
 import { DailyChart } from './DailyChart'
+import { formatClock } from '../../../shared/format/metrics'
+import { StatusDot } from '../../../shared/ui/StatusDot'
 import styles from './InsightsPage.module.css'
 
 const periods: readonly InsightsPeriod[] = ['24h', '48h', '72h', 'all']
 
-const skeletonMetrics = ['Requests', 'Success rate', 'Estimated cost', 'p95 latency', 'Generation speed']
+const skeletonMetrics = ['Requests', 'Success rate', 'Estimated cost', 'p95 latency', 'Tokens']
+
+const stateLabels: Record<HistoryRequest['state'], string> = {
+  active: 'Streaming',
+  retrying: 'Retrying',
+  completed: 'Complete',
+  failed: 'Error',
+  cancelled: 'Cancelled',
+}
+
+// Error previews stay short: a persisted diagnostic can run to thousands of
+// runes, and the full text lives behind the row's tooltip.
+const errorPreviewLimit = 180
+
+type ProviderSortKey = 'name' | 'requests' | 'success' | 'latency' | 'retries' | 'tokens' | 'cost'
+type ModelSortKey = 'model' | 'requests' | 'success' | 'tokens' | 'tps' | 'cost'
 
 export default function InsightsPage() {
   const { model, state } = useInsights()
@@ -20,6 +37,20 @@ export default function InsightsPage() {
   const pricedShare = overview && overview.volume.requests > 0
     ? Math.round(100 * overview.pricedRequests / Math.max(overview.volume.completed, 1))
     : 0
+  const [providerSort, setProviderSort] = useSort<ProviderSortKey>('tokens')
+  const [modelSort, setModelSort] = useSort<ModelSortKey>('tokens')
+  const providers = useMemo(
+    () => sortProviders(report?.providers ?? [], providerSort),
+    [report?.providers, providerSort],
+  )
+  const models = useMemo(
+    () => sortModels(report?.models ?? [], modelSort),
+    [report?.models, modelSort],
+  )
+  const failedRequests = useMemo(
+    () => state.recent.filter((request) => request.errorDetail || request.errorCode),
+    [state.recent],
+  )
   return (
     <section className={styles.page}>
       <header className="page-header">
@@ -80,12 +111,17 @@ export default function InsightsPage() {
       ) : null}
       {report && report.providers.length > 0 ? (
         <section className={styles.panel} aria-label="Provider breakdown">
-          <header><div><h2>Providers</h2><span>Reliability and speed per provider</span></div></header>
+          <header><div><h2>Providers</h2><span>Reliability and speed per provider — click a column to sort</span></div></header>
           <div className={styles.tableWrap}><table aria-label="Provider breakdown"><thead><tr>
-            <th scope="col">Provider</th><th scope="col">Requests</th><th scope="col">Success</th>
-            <th scope="col">p50 / p95</th><th scope="col">Retries</th><th scope="col">Tokens</th><th scope="col">Est. cost</th>
+            <SortHeader<ProviderSortKey> label="Provider" sortKey="name" active={providerSort} onSort={setProviderSort} />
+            <SortHeader<ProviderSortKey> label="Requests" sortKey="requests" active={providerSort} onSort={setProviderSort} />
+            <SortHeader<ProviderSortKey> label="Success" sortKey="success" active={providerSort} onSort={setProviderSort} />
+            <SortHeader<ProviderSortKey> label="p50 / p95" sortKey="latency" active={providerSort} onSort={setProviderSort} />
+            <SortHeader<ProviderSortKey> label="Retries" sortKey="retries" active={providerSort} onSort={setProviderSort} />
+            <SortHeader<ProviderSortKey> label="Tokens" sortKey="tokens" active={providerSort} onSort={setProviderSort} />
+            <SortHeader<ProviderSortKey> label="Est. cost" sortKey="cost" active={providerSort} onSort={setProviderSort} />
           </tr></thead><tbody>
-            {report.providers.map((provider) => (
+            {providers.map((provider) => (
               <tr key={provider.id}>
                 <td title={provider.id}>{provider.name || provider.id}</td>
                 <td>{formatInteger(provider.volume.requests)}</td>
@@ -101,19 +137,23 @@ export default function InsightsPage() {
       ) : null}
       {report && report.models.length > 0 ? (
         <section className={styles.panel} aria-label="Model breakdown">
-          <header><div><h2>Models</h2><span>What the tokens were spent on</span></div></header>
+          <header><div><h2>Models</h2><span>What the tokens were spent on — click a column to sort</span></div></header>
           <div className={styles.tableWrap}><table aria-label="Model breakdown"><thead><tr>
-            <th scope="col">Model</th><th scope="col">Requests</th><th scope="col">Success</th>
-            <th scope="col">Tokens</th><th scope="col">Tok/s</th><th scope="col">Est. cost</th>
+            <SortHeader<ModelSortKey> label="Model" sortKey="model" active={modelSort} onSort={setModelSort} />
+            <SortHeader<ModelSortKey> label="Requests" sortKey="requests" active={modelSort} onSort={setModelSort} />
+            <SortHeader<ModelSortKey> label="Success" sortKey="success" active={modelSort} onSort={setModelSort} />
+            <SortHeader<ModelSortKey> label="Tokens" sortKey="tokens" active={modelSort} onSort={setModelSort} />
+            <SortHeader<ModelSortKey> label="Tok/s" sortKey="tps" active={modelSort} onSort={setModelSort} />
+            <SortHeader<ModelSortKey> label="Est. cost" sortKey="cost" active={modelSort} onSort={setModelSort} />
           </tr></thead><tbody>
-            {report.models.map((model) => (
-              <tr key={model.model}>
-                <td title={model.model}>{model.model}</td>
-                <td>{formatInteger(model.volume.requests)}</td>
-                <td>{formatRate(model.volume.completed, model.volume.requests)}</td>
-                <td>{formatInteger(model.volume.totalTokens)}</td>
-                <td>{model.tokensPerSecond > 0 ? formatDecimal(model.tokensPerSecond) : '—'}</td>
-                <td>{model.volume.isPriced ? formatCost(model.volume.cost) : formatPartialCost(model.volume.cost)}</td>
+            {models.map((entry) => (
+              <tr key={entry.model}>
+                <td title={entry.model}>{entry.model}</td>
+                <td>{formatInteger(entry.volume.requests)}</td>
+                <td>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
+                <td>{formatInteger(entry.volume.totalTokens)}</td>
+                <td>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond) : '—'}</td>
+                <td>{entry.volume.isPriced ? formatCost(entry.volume.cost) : formatPartialCost(entry.volume.cost)}</td>
               </tr>
             ))}
           </tbody></table></div>
@@ -142,12 +182,143 @@ export default function InsightsPage() {
           <p className={styles.unpriced}>{report.unpricedModels.join(' · ')}</p>
         </section>
       ) : null}
+      {state.phase !== 'idle' || loading ? (
+        <section className={styles.panel} aria-label="Recent persisted requests">
+          <header><div><h2>Recent requests</h2><span>{state.recent.length > 0 ? `${state.recent.length} rows in ${state.period === 'all' ? 'history' : `the last ${state.period}`}` : 'No persisted requests in this period'}</span></div></header>
+          <div className={styles.tableWrap}><table aria-label="Recent persisted requests"><thead><tr>
+            <th scope="col">State</th><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">HTTP</th><th scope="col">Latency</th><th scope="col">Processed</th><th scope="col">Cached</th><th scope="col">Time</th>
+          </tr></thead><tbody>
+            {loading && state.recent.length === 0
+              ? [0, 1, 2].map((row) => <tr key={row} className={styles.skeletonRow} aria-hidden="true"><td colSpan={8}><span className={styles.skeleton} /></td></tr>)
+              : state.recent.map((request) => (
+                <tr key={request.id} data-failed={request.state === 'failed' || undefined}>
+                  <td><span className={styles.state}><StatusDot state={request.state} />{stateLabels[request.state]}</span></td>
+                  <td title={request.model}>{request.model || '—'}</td>
+                  <td>{request.providerId || '—'}</td>
+                  <td>{request.status || '—'}</td>
+                  <td>{formatDuration(request.latencyMs)}</td>
+                  <td>{formatInteger(request.totalTokens)}</td>
+                  <td>{formatInteger(request.cachedTokens)}</td>
+                  <td>{formatClock(request.updatedAt)}</td>
+                </tr>
+              ))}
+            {!loading && state.recent.length === 0 ? <tr><td colSpan={8} className={styles.empty}>No persisted requests in this period.</td></tr> : null}
+          </tbody></table></div>
+        </section>
+      ) : null}
+      {failedRequests.length > 0 ? (
+        <section className={styles.panel} aria-label="Request errors">
+          <header><div><h2>Request errors</h2><span>Full diagnostics from the persisted rows</span></div></header>
+          <div className={styles.errorList}>
+            {failedRequests.map((request) => {
+              const full = request.errorDetail || request.errorCode || ''
+              return (
+                <article key={request.id} className={styles.errorItem}>
+                  <strong title={full} tabIndex={0} aria-label={full}>{previewError(full)}</strong>
+                  <small>{request.model || 'Unknown model'} — {formatClock(request.updatedAt)}</small>
+                </article>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
     </section>
   )
 }
 
 function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
   return <div className={styles.metric}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+}
+
+function useSort<Key extends string>(initial: Key): [{ key: Key; descending: boolean }, (key: Key) => void] {
+  const [sort, setSort] = useState({ key: initial, descending: true })
+  const choose = (key: Key) => setSort((current) => {
+    if (current.key === key) return { key, descending: !current.descending }
+    // Numbers start biggest-first, names start alphabetical: the direction
+    // a person means when they reach for a column.
+    const textFirst = key === 'name' || key === 'model'
+    return { key, descending: !textFirst }
+  })
+  return [sort, choose]
+}
+
+function SortHeader<Key extends string>({ label, sortKey, active, onSort }: {
+  label: string
+  sortKey: Key
+  active: { key: Key; descending: boolean }
+  onSort: (key: Key) => void
+}) {
+  const isActive = active.key === sortKey
+  return (
+    <th
+      scope="col"
+      aria-sort={isActive ? (active.descending ? 'descending' : 'ascending') : 'none'}
+    >
+      <button type="button" className={styles.sortButton} data-active={isActive || undefined} onClick={() => onSort(sortKey)}>
+        {label}
+        <span aria-hidden="true" className={styles.sortArrow} data-visible={isActive || undefined}>{isActive && !active.descending ? '↑' : '↓'}</span>
+      </button>
+    </th>
+  )
+}
+
+function sortProviders(rows: readonly InsightsProvider[], sort: { key: ProviderSortKey; descending: boolean }): InsightsProvider[] {
+  const sorted = [...rows]
+  sorted.sort((left, right) => {
+    let comparison = 0
+    switch (sort.key) {
+      case 'name':
+        comparison = (left.name || left.id).localeCompare(right.name || right.id)
+        break
+      case 'requests':
+        comparison = left.volume.requests - right.volume.requests
+        break
+      case 'success':
+        comparison = successRate(left.volume) - successRate(right.volume)
+        break
+      case 'latency':
+        comparison = left.p95Ms - right.p95Ms
+        break
+      case 'retries':
+        comparison = left.volume.retries - right.volume.retries
+        break
+      case 'cost':
+        comparison = left.volume.cost - right.volume.cost
+        break
+      default:
+        comparison = left.volume.totalTokens - right.volume.totalTokens
+    }
+    return sort.descending ? -comparison : comparison
+  })
+  return sorted
+}
+
+function sortModels(rows: readonly InsightsModel[], sort: { key: ModelSortKey; descending: boolean }): InsightsModel[] {
+  const sorted = [...rows]
+  sorted.sort((left, right) => {
+    let comparison = 0
+    switch (sort.key) {
+      case 'model':
+        comparison = left.model.localeCompare(right.model)
+        break
+      case 'requests':
+        comparison = left.volume.requests - right.volume.requests
+        break
+      case 'success':
+        comparison = successRate(left.volume) - successRate(right.volume)
+        break
+      case 'tps':
+        comparison = left.tokensPerSecond - right.tokensPerSecond
+        break
+      case 'cost':
+        comparison = left.volume.cost - right.volume.cost
+        break
+      default:
+        comparison = left.volume.totalTokens - right.volume.totalTokens
+    }
+    return sort.descending ? -comparison : comparison
+  })
+  return sorted
 }
 
 function formatInteger(value: number | undefined): string {
@@ -157,6 +328,11 @@ function formatInteger(value: number | undefined): string {
 function formatRate(part: number, total: number): string {
   if (total <= 0) return '—'
   return `${Math.round(100 * part / total)}%`
+}
+
+function successRate(volume: { requests: number; completed: number }): number {
+  if (volume.requests <= 0) return 0
+  return volume.completed / volume.requests
 }
 
 function formatDuration(ms: number): string {
@@ -180,4 +356,8 @@ function formatPartialCost(cost: number): string {
 
 function formatDecimal(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+}
+
+function previewError(value: string): string {
+  return value.length > errorPreviewLimit ? `${value.slice(0, errorPreviewLimit)}…` : value
 }

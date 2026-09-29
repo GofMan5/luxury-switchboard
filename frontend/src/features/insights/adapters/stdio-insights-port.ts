@@ -1,5 +1,5 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
-import type { InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
+import type { HistoryRequest, InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
 import type { InsightsPort, PriceDraft } from '../application/insights-port'
 
 export class StdioInsightsPort implements InsightsPort {
@@ -8,6 +8,11 @@ export class StdioInsightsPort implements InsightsPort {
 
   async report(period: InsightsPeriod, signal?: AbortSignal): Promise<InsightsReport> {
     return this.#session.call<InsightsReport>('analytics.report', { period }, signal)
+  }
+
+  async recent(period: InsightsPeriod, signal?: AbortSignal): Promise<readonly HistoryRequest[]> {
+    const answer = await this.#session.call<{ requests: readonly HistoryRequest[] }>('history.recent', { period, limit: 100 }, signal)
+    return answer.requests ?? []
   }
 
   async prices(signal?: AbortSignal): Promise<readonly ModelPrice[]> {

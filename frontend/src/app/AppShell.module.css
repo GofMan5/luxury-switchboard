@@ -61,6 +61,26 @@
   padding: 10px 8px;
 }
 
+.navSection {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.navSection + .navSection {
+  margin-top: 10px;
+}
+
+.navSectionLabel {
+  padding: 0 10px 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 640;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
 .navItem {
   position: relative;
   display: flex;

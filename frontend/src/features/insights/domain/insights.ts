@@ -80,3 +80,18 @@ export interface ModelPrice {
   readonly reasoning: number
   readonly updatedAt: string
 }
+
+/** One persisted request row, as the history slice sanitized it. */
+export interface HistoryRequest {
+  readonly id: string
+  readonly state: 'active' | 'retrying' | 'completed' | 'failed' | 'cancelled'
+  readonly model: string
+  readonly providerId: string
+  readonly status: number
+  readonly latencyMs: number
+  readonly totalTokens: number
+  readonly cachedTokens: number
+  readonly updatedAt: string
+  readonly errorCode: string
+  readonly errorDetail: string
+}

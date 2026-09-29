@@ -57,25 +57,30 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
           <span className={styles.brandMark} aria-hidden="true">L</span>
           <span className={styles.brandName}>Luxury Switchboard</span>
         </div>
-        <nav className={styles.navigation}>
-          {navigation.map((item) => {
-            const Icon = item.icon
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className={styles.navItem}
-                data-active={route === item.id}
-                aria-current={route === item.id ? 'page' : undefined}
-                aria-label={item.label}
-                title={item.label}
-                onClick={() => onNavigate(item.id)}
-              >
-                <Icon size={19} strokeWidth={1.8} />
-                <span>{item.label}</span>
-              </button>
-            )
-          })}
+        <nav className={styles.navigation} aria-label="Main navigation">
+          {navigation.map((section, sectionIndex) => (
+            <div key={section.label || `section-${sectionIndex}`} className={styles.navSection}>
+              {section.label ? <span className={styles.navSectionLabel}>{section.label}</span> : null}
+              {section.items.map((item) => {
+                const Icon = item.icon
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={styles.navItem}
+                    data-active={route === item.id}
+                    aria-current={route === item.id ? 'page' : undefined}
+                    aria-label={item.label}
+                    title={item.label}
+                    onClick={() => onNavigate(item.id)}
+                  >
+                    <Icon size={19} strokeWidth={1.8} />
+                    <span>{item.label}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ))}
         </nav>
         <div className={styles.sidebarFooter}>
           <PanelLeftClose size={17} aria-hidden="true" />

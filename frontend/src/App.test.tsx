@@ -23,10 +23,10 @@ beforeAll(async () => {
     import('./features/model-routes/ui/ModelRoutesPage'),
     import('./features/tunnel/ui/TunnelPage'),
     import('./features/clients/ui/ClientsPage'),
-    import('./features/statistics/ui/StatisticsPage'),
     import('./features/shared-control/ui/SharedControlPage'),
     import('./features/settings/ui/SettingsPage'),
     import('./features/guardrails/ui/GuardrailsPage'),
+    import('./features/insights/ui/InsightsPage'),
   ])
 }, 20_000)
 
@@ -56,6 +56,12 @@ function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://
         'models.discover': { models: [] },
         'history.stats': { requests: 0, completed: 0, failed: 0, cancelled: 0, retries: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, processedTokens: 0, nonCachedTokens: 0, p95Ms: 0, tokensPerSecond: 0 },
         'history.recent': { requests: [] },
+        'analytics.report': {
+          period: '24h', generatedAt: '2026-09-29T00:00:00Z',
+          overview: { volume: { requests: 42, completed: 40, failed: 2, cancelled: 0, retries: 1, inputTokens: 1000, outputTokens: 2000, cachedTokens: 0, reasoningTokens: 0, totalTokens: 3000, generationMs: 8000, cost: 0, isPriced: false }, successRate: 40 / 42, p50Ms: 120, p95Ms: 300, tokensPerSecond: 250, pricedRequests: 0, topErrorCode: '' },
+          providers: [], models: [], daily: [], errors: [], unpricedModels: [],
+        },
+        'analytics.prices.get': { prices: [] },
         'guardrails.status': { mode: 'monitor', ruleCount: 106, indicatorCount: 11, ruleSetVersion: 7, findingCount: 0 },
         'guardrails.findings': { findings: [] },
         ...overrides,
@@ -88,6 +94,7 @@ describe('App navigation', () => {
     await renderPages([
       ['Overview', 'Overview'],
       ['Live Activity', 'Live Activity'],
+      ['Insights', 'Insights'],
       ['Providers', 'Providers'],
       ['API Keys', 'API Keys'],
       ['Model Routes', 'Model Routes'],
@@ -98,8 +105,7 @@ describe('App navigation', () => {
     await renderPages([
       ['Tunnel', 'Tunnel'],
       ['Clients', 'Tunnel Clients'],
-      ['Statistics', 'Statistics'],
-      ['Shared Control', 'Shared Control'],
+            ['Shared Control', 'Shared Control'],
       ['Guardrails', 'Guardrails'],
       ['Settings', 'Settings'],
     ])
@@ -116,6 +122,20 @@ describe('App navigation', () => {
     expect(await screen.findByRole('heading', { name: 'Guardrails', level: 1 })).toBeTruthy()
     expect(await screen.findByText(/106 detection rules and 11 known indicators/u)).toBeTruthy()
     expect(screen.queryByRole('alert')).toBeNull()
+    view.unmount()
+  })
+
+  // The 24-hour strip is the overview's answer to "what did the relay do
+  // while I was away": it must come from the persisted history, not from a
+  // dashboard of zeros that a failed fetch would happily render.
+  it('serves the overview with yesterday\'s numbers from the history', async () => {
+    window.location.hash = ''
+    createSession.mockResolvedValue(fakeSession())
+    const view = render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Overview', level: 1 })).toBeTruthy()
+    const today = await screen.findByRole('region', { name: 'Last 24 hours' })
+    expect(today.textContent).toContain('42')
+    expect(today.textContent).toContain('95%')
     view.unmount()
   })
 

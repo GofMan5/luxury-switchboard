@@ -1,8 +1,10 @@
-import { ArrowRight, Clock3, Gauge } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { ArrowRight, Check, Clock3, Copy, Gauge } from 'lucide-react'
 import { useActivity } from '../../activity/ui/useActivity'
 import { activityLabels } from '../../activity/ui/activity-view'
 import { useProviders } from '../../providers/ui/useProviders'
 import { useRelay } from '../../relay/ui/useRelay'
+import { useInsights } from '../../insights/ui/useInsights'
 import { formatClock, formatDecimal, formatDuration } from '../../../shared/format/metrics'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import styles from './OverviewPage.module.css'
@@ -11,8 +13,23 @@ export default function OverviewPage() {
   const activity = useActivity()
   const { state: providers } = useProviders()
   const { state: relay } = useRelay()
+  const { model: insights, state: insightsState } = useInsights()
+  // The same model the Insights tab reads: one source of truth, and opening
+  // the tab after this is instant because the report is already in memory.
+  useEffect(() => { void insights.load('24h') }, [insights])
   const summary = activity.summary
   const recent = activity.requests.slice(0, 7)
+  const overview = insightsState.report?.overview
+  const address = relay.snapshot.state === 'live' ? relay.snapshot.address : ''
+  const [copied, setCopied] = useState(false)
+  const copyAddress = async () => {
+    if (!address) return
+    try {
+      await navigator.clipboard.writeText(address)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch { /* clipboard is a courtesy, not a guarantee */ }
+  }
 
   return (
     <section className={styles.page}>
@@ -31,6 +48,28 @@ export default function OverviewPage() {
         <Metric label="Success rate" value={`${formatDecimal(summary.successRate)}%`} />
         <Metric label="p95 latency" value={formatDuration(summary.p95Ms)} />
       </div>
+
+      <section className={styles.today} aria-label="Last 24 hours">
+        <header>
+          <div>
+            <h2>Last 24 hours</h2>
+            <span>{insightsState.phase === 'loading' || insightsState.phase === 'idle' ? 'Reading history…' : overview ? 'From the persisted request history' : 'History is unavailable'}</span>
+          </div>
+          <button type="button" className={styles.linkButton} onClick={() => { window.location.hash = 'insights' }}>
+            Open Insights <ArrowRight size={14} aria-hidden="true" />
+          </button>
+        </header>
+        <div className={styles.todayGrid}>
+          <Metric label="Requests" value={overview ? formatInteger(overview.volume.requests) : '—'} />
+          <Metric label="Completed" value={overview ? formatInteger(overview.volume.completed) : '—'} />
+          <Metric label="Success rate" value={overview ? `${Math.round(overview.successRate * 100)}%` : '—'} />
+          <Metric
+            label="Estimated cost"
+            value={overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost) : overview.volume.cost > 0 ? `≥ ${formatCost(overview.volume.cost)}` : '—') : '—'}
+          />
+          <Metric label="Tokens" value={overview ? formatInteger(overview.volume.totalTokens) : '—'} />
+        </div>
+      </section>
 
       <div className={styles.grid}>
         <section className={styles.activityPane} aria-labelledby="recent-title">
@@ -99,7 +138,20 @@ export default function OverviewPage() {
           </div>
           <div className={styles.relayFoot}>
             <span>Listener</span>
-            <strong>{relay.snapshot.state === 'live' ? relay.snapshot.address : relay.snapshot.state === 'error' ? 'Error' : 'Stopped'}</strong>
+            <span className={styles.listenerValue}>
+              <strong>{relay.snapshot.state === 'live' ? relay.snapshot.address : relay.snapshot.state === 'error' ? 'Error' : 'Stopped'}</strong>
+              {address ? (
+                <button
+                  type="button"
+                  className={styles.copyButton}
+                  onClick={() => void copyAddress()}
+                  aria-label={copied ? 'Relay address copied' : `Copy relay address ${address}`}
+                  disabled={copied}
+                >
+                  {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+                </button>
+              ) : null}
+            </span>
           </div>
         </section>
       </div>
@@ -114,4 +166,15 @@ function Metric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   )
+}
+
+function formatInteger(value: number | undefined): string {
+  return (value ?? 0).toLocaleString()
+}
+
+function formatCost(cost: number): string {
+  if (cost === 0) return '$0'
+  if (cost < 0.01) return `$${cost.toFixed(4)}`
+  if (cost < 1000) return `$${cost.toFixed(2)}`
+  return `$${Math.round(cost).toLocaleString()}`
 }

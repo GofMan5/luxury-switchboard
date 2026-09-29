@@ -126,8 +126,13 @@ func TestFactsOnlyRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	// query_only is the adapter's own safety net: an accidental write fails
-	// loudly here instead of corrupting the writer's database.
-	if _, err := facts.DB().Exec("INSERT INTO requests (request_id) VALUES ('probe')"); err == nil {
+	// loudly here instead of corrupting the writer's database. The probe is
+	// a CREATE TABLE on a fresh name: it has no NOT NULL or CHECK constraint
+	// to fail on its own, so the only thing that can refuse it is the
+	// read-only pragma itself. (An INSERT into requests was tried first and
+	// was vacuous: the schema's NOT NULL columns refused the write with or
+	// without the pragma — caught by a mutation probe, not by reading.)
+	if _, err := facts.DB().Exec("CREATE TABLE probe_write_refusal (x INTEGER)"); err == nil {
 		t.Fatal("a read-only connection accepted a write")
 	}
 }

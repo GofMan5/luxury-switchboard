@@ -108,4 +108,12 @@ describe('InsightsPage', () => {
     expect(mockSavePrice.mock.calls[0][0].model).toBe('gpt-6-astra')
     expect(mockSavePrice.mock.calls[0][0].input).toBe(1.25)
   })
+
+  it('dismisses the price editor with Escape like every other modal', async () => {
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '' })
+    fireEvent.click(screen.getByRole('button', { name: /prices/i }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
 })

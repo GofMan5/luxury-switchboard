@@ -82,9 +82,11 @@ GROUP BY provider_id, model_id LIMIT ?`
 }
 
 func (facts *Facts) Latencies(ctx context.Context, since int64) ([]domain.LatencySample, error) {
+	// Newest first: when the cap bites, the percentiles describe the traffic
+	// the operator is actually living in, not the oldest month of it.
 	rows, err := facts.db.QueryContext(ctx,
 		`SELECT provider_id, model_id, latency_ms FROM requests
-WHERE state='completed' AND (? = 0 OR started_at_ms >= ?) LIMIT 100000`,
+WHERE state='completed' AND (? = 0 OR started_at_ms >= ?) ORDER BY started_at_ms DESC LIMIT 100000`,
 		since, since)
 	if err != nil {
 		return nil, errors.New("analytics latency query failed")

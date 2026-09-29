@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/domain"
@@ -63,6 +64,10 @@ type Service struct {
 	facts  Facts
 	prices PriceStore
 	now    func() time.Time
+	// The catalog is read-modify-write: without the lock, two concurrent
+	// price edits race on Load-then-Save and one silently loses. The shell
+	// can issue commands concurrently, so the service owns the merge.
+	writeMu sync.Mutex
 }
 
 func NewService(facts Facts, prices PriceStore) *Service {
@@ -142,6 +147,8 @@ func (service *Service) SetPrice(ctx context.Context, price domain.Price) (domai
 	if err := price.Validate(); err != nil {
 		return domain.Catalog{}, err
 	}
+	service.writeMu.Lock()
+	defer service.writeMu.Unlock()
 	current, err := service.prices.Load(ctx)
 	if err != nil {
 		return domain.Catalog{}, err
@@ -158,6 +165,8 @@ func (service *Service) RemovePrice(ctx context.Context, model string) (domain.C
 	if service.prices == nil {
 		return domain.Catalog{}, ErrUnavailable
 	}
+	service.writeMu.Lock()
+	defer service.writeMu.Unlock()
 	current, err := service.prices.Load(ctx)
 	if err != nil {
 		return domain.Catalog{}, err

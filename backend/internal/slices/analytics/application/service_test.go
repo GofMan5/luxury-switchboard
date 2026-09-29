@@ -3,7 +3,9 @@ package application_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,6 +265,35 @@ func TestRemovePriceDropsTheModel(t *testing.T) {
 	catalog, err := service.RemovePrice(context.Background(), "m")
 	if err != nil || len(catalog.Models()) != 0 {
 		t.Fatalf("remove failed: %v %v", err, catalog.Models())
+	}
+}
+
+// The catalog is read-modify-write: concurrent edits must merge, not race.
+// Run under -race, two writers, both models must survive.
+func TestConcurrentPriceEditsMerge(t *testing.T) {
+	prices := &fakePrices{}
+	service := newService(&fakeFacts{}, prices)
+	const writers = 8
+	var group sync.WaitGroup
+	for index := range writers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := service.SetPrice(context.Background(), domain.Price{
+				Model: "model-" + strconv.Itoa(index), Input: 1, Output: 2,
+			})
+			if err != nil {
+				t.Errorf("a concurrent edit failed: %v", err)
+			}
+		}()
+	}
+	group.Wait()
+	catalog, err := service.Prices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models()) != writers {
+		t.Fatalf("concurrent edits lost entries: %d of %d", len(catalog.Models()), writers)
 	}
 }
 

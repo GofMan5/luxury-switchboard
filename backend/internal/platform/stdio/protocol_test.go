@@ -30,6 +30,40 @@ func TestServerDispatchesVersionedCommand(t *testing.T) {
 	}
 }
 
+// A panicking handler must cost one failed command, not the process: the
+// worker goroutine an unrecovered panic would take down shares the binary
+// with the relay, and the whole desktop app above it.
+func TestAPanickingHandlerFailsOneCommandAndKeepsServing(t *testing.T) {
+	input := strings.NewReader(strings.Join([]string{
+		`{"v":1,"id":"req_1","type":"command","method":"boom"}`,
+		`{"v":1,"id":"req_2","type":"command","method":"ok"}`,
+	}, "\n") + "\n")
+	output := &strings.Builder{}
+	server := NewServer(input, output, 2)
+	server.Handle("boom", func(context.Context, json.RawMessage) (any, error) {
+		panic("handler exploded")
+	})
+	server.Handle("ok", func(context.Context, json.RawMessage) (any, error) {
+		return map[string]bool{"alive": true}, nil
+	})
+	if err := server.Serve(context.Background()); err != nil {
+		t.Fatalf("serve died on a panicking handler: %v", err)
+	}
+	if !strings.Contains(output.String(), `"code":"handler_panicked"`) {
+		t.Fatalf("the panic did not answer with its own code: %s", output.String())
+	}
+	var second Response
+	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+		var response Response
+		if json.Unmarshal([]byte(line), &response) == nil && response.ID == "req_2" {
+			second = response
+		}
+	}
+	if !second.OK {
+		t.Fatalf("the server did not survive the panic: %s", output.String())
+	}
+}
+
 func TestRequestValidationRejectsUntrustedEnvelope(t *testing.T) {
 	tests := []Request{
 		{Version: 2, ID: "req", Type: "command", Method: "ok"},

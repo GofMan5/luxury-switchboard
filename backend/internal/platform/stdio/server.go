@@ -136,6 +136,16 @@ func (server *Server) Emit(topic string, payload any) error {
 }
 
 func (server *Server) handleRequest(pending job) {
+	// A panicking handler must cost one failed command, not the process:
+	// the workers share the sidecar with the relay and the desktop shell
+	// above it, and an unrecovered panic in a goroutine aborts the whole
+	// binary. The shell stays up for exactly the same reason the frontend
+	// shell survives a throwing workspace.
+	defer func() {
+		if problem := recover(); problem != nil {
+			_ = server.write(Failure(pending.request, "handler_panicked", "Command failed unexpectedly"))
+		}
+	}()
 	defer server.finishJob(pending)
 	request := pending.request
 	handler := server.handlers[request.Method]

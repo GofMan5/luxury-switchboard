@@ -64,6 +64,14 @@ jobs:
           go -C backend vet ./...
           go -C backend mod verify
           cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Race the concurrent slices
+        # The plain runs above catch logic; only -race catches the data races
+        # in the code that owns shared state. The whole tree under race is
+        # minutes of CI for little extra signal, so the list is the slices
+        # that actually run goroutines sharing memory: the relay, the pools,
+        # the queues, the stdio server and the composition that wires them.
+        if: runner.os == 'Linux'
+        run: go -C backend test -race ./internal/platform/... ./internal/slices/keypool/... ./internal/slices/relay/... ./internal/slices/analytics/... ./internal/slices/activity/... ./internal/slices/publictunnel/... ./internal/app/...
       - run: pnpm build
       # Both edition folders travel, so the upload root is artifacts/ and the
       # download below restores release/ and release-public/ as they were built.

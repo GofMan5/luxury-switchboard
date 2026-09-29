@@ -45,6 +45,10 @@ func (facts *Facts) Close() error {
 	return facts.db.Close()
 }
 
+// DB exposes the read-only handle to this slice's own tests so they can
+// assert the connection really refuses writes. Nothing else should need it.
+func (facts *Facts) DB() *sql.DB { return facts.db }
+
 // maxGroupRows is a safety ceiling on each GROUP BY. Retention and period
 // bounds keep real results far below it; a result set past this means
 // something upstream is wrong, and cutting it off is safer than shipping it.

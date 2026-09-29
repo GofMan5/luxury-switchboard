@@ -34,7 +34,7 @@ func Register(server *platform.Server, service *application.Service) {
 	server.Handle("analytics.prices.get", func(ctx context.Context, _ json.RawMessage) (any, error) {
 		catalog, err := service.Prices(ctx)
 		if err != nil {
-			return nil, reportError(err)
+			return nil, priceError(err)
 		}
 		return catalogResponse(catalog), nil
 	})
@@ -94,6 +94,12 @@ func reportError(err error) platform.MethodError {
 func priceError(err error) platform.MethodError {
 	if errors.Is(err, application.ErrUnavailable) {
 		return platform.MethodError{Code: "analytics_unavailable", Message: "Analytics is unavailable"}
+	}
+	// Validation and persistence refuse differently: telling an operator
+	// their rate is invalid when the catalog file failed to load sends them
+	// editing numbers that were never the problem.
+	if errors.Is(err, domain.ErrCatalogUnreadable) {
+		return platform.MethodError{Code: "price_catalog_failed", Message: "The price catalog could not be read or written"}
 	}
 	return platform.MethodError{Code: "invalid_price", Message: "Invalid price entry"}
 }

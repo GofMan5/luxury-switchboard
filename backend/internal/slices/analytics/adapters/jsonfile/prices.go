@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -39,15 +40,15 @@ func (store *Store) Load(_ context.Context) (domain.Catalog, error) {
 		return catalog, nil
 	}
 	if err != nil {
-		return domain.Catalog{}, errors.New("price catalog is unreadable")
+		return domain.Catalog{}, fmt.Errorf("%w: read failed", domain.ErrCatalogUnreadable)
 	}
 	var doc document
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Version != 1 {
-		return domain.Catalog{}, errors.New("price catalog is invalid")
+		return domain.Catalog{}, fmt.Errorf("%w: invalid document", domain.ErrCatalogUnreadable)
 	}
 	for _, price := range doc.Prices {
 		if price.Validate() != nil {
-			return domain.Catalog{}, errors.New("price catalog contains invalid data")
+			return domain.Catalog{}, fmt.Errorf("%w: invalid entry", domain.ErrCatalogUnreadable)
 		}
 		catalog.Prices[price.Model] = price
 	}
@@ -67,18 +68,18 @@ func (store *Store) Save(_ context.Context, catalog domain.Catalog) error {
 	}
 	encoded, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return errors.New("price catalog could not be encoded")
+		return fmt.Errorf("%w: encode failed", domain.ErrCatalogUnreadable)
 	}
 	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
-		return errors.New("price catalog directory could not be created")
+		return fmt.Errorf("%w: mkdir failed", domain.ErrCatalogUnreadable)
 	}
 	temp := store.path + ".tmp"
 	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
-		return errors.New("price catalog could not be written")
+		return fmt.Errorf("%w: write failed", domain.ErrCatalogUnreadable)
 	}
 	if err := os.Rename(temp, store.path); err != nil {
 		os.Remove(temp)
-		return errors.New("price catalog could not be replaced")
+		return fmt.Errorf("%w: replace failed", domain.ErrCatalogUnreadable)
 	}
 	return nil
 }

@@ -7,8 +7,8 @@ interface PriceEditorProps {
   readonly prices: readonly ModelPrice[]
   readonly phase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly knownModels: readonly string[]
-  readonly onSave: (draft: PriceDraft) => Promise<void>
-  readonly onRemove: (model: string) => Promise<void>
+  readonly onSave: (draft: PriceDraft) => Promise<boolean>
+  readonly onRemove: (model: string) => Promise<boolean>
 }
 
 type EditorState =
@@ -30,11 +30,13 @@ export function PriceEditor({ prices, phase, knownModels, onSave, onRemove }: Pr
 
   const open = (draft: EditorState) => setState(draft)
   const close = () => setState({ kind: 'closed' })
-  const submit = () => {
+  // The editor closes only on a confirmed save: a failed one keeps the
+  // operator's typed rates on screen next to the error.
+  const submit = async () => {
     if (state.kind !== 'open') return
     const draft = normalizeDraft(state, existing)
     if (!draft) return
-    void onSave(draft).then(close)
+    if (await onSave(draft)) close()
   }
 
   return (
@@ -61,6 +63,7 @@ export function PriceEditor({ prices, phase, knownModels, onSave, onRemove }: Pr
                 list="price-models"
                 value={state.model}
                 placeholder="gpt-6-astra"
+                maxLength={128}
                 autoFocus
                 onChange={(event) => setState({ ...state, model: event.target.value })}
               />
@@ -81,7 +84,7 @@ export function PriceEditor({ prices, phase, knownModels, onSave, onRemove }: Pr
                   type="button"
                   className="price-remove"
                   disabled={busy}
-                  onClick={() => { void onRemove(existing.model).then(close) }}
+                  onClick={async () => { if (await onRemove(existing.model)) close() }}
                 >
                   <Trash2 size={14} aria-hidden="true" />Remove
                 </button>

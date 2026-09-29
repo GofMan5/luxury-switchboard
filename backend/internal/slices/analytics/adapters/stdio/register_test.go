@@ -3,6 +3,7 @@ package analyticsstdio_test
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -165,6 +166,28 @@ func TestAnUnknownPeriodIsInvalidPayload(t *testing.T) {
 	frames := exchange(t, service, `"method":"analytics.report","payload":{"period":"forever"}`)
 	if len(frames) != 1 || frames[0]["ok"] != false || frameError(t, frames[0])["code"] != "invalid_payload" {
 		t.Fatalf("an unknown period was accepted: %+v", frames)
+	}
+}
+
+// A broken catalog file must not blame the operator's rates: the code says
+// the catalog itself failed, not that a number was wrong.
+func TestABrokenCatalogRefusesByItsOwnCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := application.NewService(&fakeFacts{}, jsonfile.New(path))
+	frames := exchange(t, service,
+		`"method":"analytics.prices.set","payload":{"model":"m","input":1}`,
+		`"method":"analytics.prices.get"`,
+	)
+	if len(frames) != 2 {
+		t.Fatalf("commands did not answer: %d frames", len(frames))
+	}
+	for _, frame := range frames {
+		if frame["ok"] != false || frameError(t, frame)["code"] != "price_catalog_failed" {
+			t.Fatalf("a broken catalog was misreported: %+v", frame)
+		}
 	}
 }
 

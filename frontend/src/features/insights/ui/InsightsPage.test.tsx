@@ -61,8 +61,8 @@ function show(state: InsightsState) {
 
 beforeEach(() => {
   mockLoad.mockReset()
-  mockSavePrice.mockReset().mockResolvedValue(undefined)
-  mockRemovePrice.mockReset().mockResolvedValue(undefined)
+  mockSavePrice.mockReset().mockResolvedValue(true)
+  mockRemovePrice.mockReset().mockResolvedValue(true)
 })
 
 describe('InsightsPage', () => {

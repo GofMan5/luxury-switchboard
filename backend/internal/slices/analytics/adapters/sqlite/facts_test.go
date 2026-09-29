@@ -122,9 +122,12 @@ func TestFactsOnlyRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer facts.Close()
-	// query_only is the adapter's own safety net: an accidental write fails
-	// loudly here instead of corrupting the writer's database.
 	if _, err := facts.Grouped(context.Background(), 0); err != nil {
 		t.Fatal(err)
+	}
+	// query_only is the adapter's own safety net: an accidental write fails
+	// loudly here instead of corrupting the writer's database.
+	if _, err := facts.DB().Exec("INSERT INTO requests (request_id) VALUES ('probe')"); err == nil {
+		t.Fatal("a read-only connection accepted a write")
 	}
 }

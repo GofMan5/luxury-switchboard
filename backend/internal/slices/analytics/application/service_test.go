@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,6 +186,11 @@ func TestAnInvalidPriceIsRefusedNotSaved(t *testing.T) {
 	}
 	if _, err := service.SetPrice(context.Background(), domain.Price{Model: "m", Input: domain.MaxPrice + 1}); err == nil {
 		t.Fatal("an impossible rate was accepted")
+	}
+	// A model key long enough to grow the frame unchecked is refused the
+	// same way: real model ids are far shorter than this.
+	if _, err := service.SetPrice(context.Background(), domain.Price{Model: strings.Repeat("m", domain.MaxModelName+1), Input: 1}); err == nil {
+		t.Fatal("an oversized model name was accepted")
 	}
 	if prices.saved != 0 {
 		t.Fatal("a refused price still saved")

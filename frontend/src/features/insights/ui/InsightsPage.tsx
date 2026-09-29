@@ -64,7 +64,7 @@ export default function InsightsPage() {
               <Metric label="Success rate" value={overview ? `${Math.round(overview.successRate * 100)}%` : '—'} detail={`${formatInteger(overview?.volume.retries)} retries${overview?.topErrorCode ? ` · ${overview.topErrorCode}` : ''}`} />
               <Metric
                 label="Estimated cost"
-                value={overview?.volume.isPriced || (overview?.volume.cost ?? 0) > 0 ? formatCost(overview?.volume.cost) : '—'}
+                value={overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost) : formatPartialCost(overview.volume.cost)) : '—'}
                 detail={overview?.volume.isPriced ? 'priced estimate' : `${pricedShare}% of requests priced`}
               />
               <Metric label="p95 latency" value={formatDuration(overview?.p95Ms ?? 0)} detail={`p50 ${formatDuration(overview?.p50Ms ?? 0)}`} />

@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// ErrCatalogUnreadable is the store's own failure — not bad input. Callers
+// must not blame the operator's rates for it.
+var ErrCatalogUnreadable = errors.New("price catalog is unreadable")
+
 // Price is what one model costs, per one million tokens, in the operator's
 // own currency of account. Providers bill four kinds of token differently:
 // plain input, cached input (cheaper), output, and reasoning (normally the
@@ -28,9 +32,18 @@ type Price struct {
 // displaying a spend estimate six orders of magnitude wrong.
 const MaxPrice = 100_000.0
 
+// MaxModelName bounds a catalog key. Model IDs run long but not that long
+// ("anthropic/claude-3-7-sonnet-20250219:thinking-high" is 50 runes); an
+// unbounded key would let one entry grow the catalog, the report's gap list
+// and the protocol frame without any limit voting on it.
+const MaxModelName = 128
+
 func (price Price) Validate() error {
 	if price.Model == "" {
 		return errors.New("model is empty")
+	}
+	if len([]rune(price.Model)) > MaxModelName {
+		return errors.New("model name is too long")
 	}
 	for _, rate := range []float64{price.Input, price.CachedInput, price.Output, price.Reasoning} {
 		if math.IsNaN(rate) || rate < 0 || rate > MaxPrice {

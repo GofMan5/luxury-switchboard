@@ -35,7 +35,8 @@ export class InsightsModel {
     }
   }
 
-  async savePrice(draft: PriceDraft): Promise<void> {
+  /** True when the price reached the catalog; false leaves the editor open. */
+  async savePrice(draft: PriceDraft): Promise<boolean> {
     const generation = this.#generation
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
@@ -44,20 +45,25 @@ export class InsightsModel {
       // The estimate only changes once the backend re-reads the catalog, so
       // the report is refreshed, not patched client-side.
       await this.load(this.#state.period)
+      return true
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, pricesPhase: 'error', error: 'The price was not saved' })
+      return false
     }
   }
 
-  async removePrice(model: string): Promise<void> {
+  /** True when the model was dropped; false leaves the editor open. */
+  async removePrice(model: string): Promise<boolean> {
     const generation = this.#generation
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
       const prices = await this.#port.removePrice(model)
       if (generation === this.#generation) this.#set({ ...this.#state, prices, pricesPhase: 'ready' })
       await this.load(this.#state.period)
+      return true
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, pricesPhase: 'error', error: 'The price was not removed' })
+      return false
     }
   }
 

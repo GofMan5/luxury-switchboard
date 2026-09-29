@@ -191,3 +191,43 @@ func TestAProviderCannotHandTheClientItsOwnKey(t *testing.T) {
 		t.Errorf("an ordinary provider header was lost, so this is stripping more than secrets: %q", got)
 	}
 }
+
+// x-provider-switch-* is the tunnel's vocabulary for addressing a provider and
+// a model through the public gateway, and the gateway sets those headers
+// itself. A client that sends them to the local relay is either confused or
+// probing: letting them through would hand it the tunnel's steering wheel on
+// the local path. The copy to upstream must drop them like a hop header.
+// (Pinned after a mutation probe: removing the prefix check survived the
+// whole suite unnoticed.)
+func TestAClientCannotSmuggleTunnelControlHeaders(t *testing.T) {
+	var seen []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		for name := range request.Header {
+			if strings.HasPrefix(strings.ToLower(name), "x-provider-switch-") {
+				seen = append(seen, name)
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"r","status":"completed","output":[{"id":"m","type":"message",` +
+			`"role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"sk-key"}},
+		Config: Config{
+			RetryBase: time.Microsecond, RetryMax: time.Microsecond,
+			StreamIdleTimeout: time.Second, PermanentAttempts: 2,
+		},
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Provider-Switch-Model", "someone-elses-model")
+	request.Header.Set("X-Provider-Switch-Tunnel", "someone-elses-tunnel")
+	server.ServeHTTP(recorder, request)
+	if len(seen) != 0 {
+		t.Fatalf("the client steered the relay through its own headers: %v", seen)
+	}
+}

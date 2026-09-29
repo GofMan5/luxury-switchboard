@@ -5,7 +5,7 @@ import { activityLabels } from '../../activity/ui/activity-view'
 import { useProviders } from '../../providers/ui/useProviders'
 import { useRelay } from '../../relay/ui/useRelay'
 import { useInsights } from '../../insights/ui/useInsights'
-import { formatClock, formatDecimal, formatDuration } from '../../../shared/format/metrics'
+import { formatClock, formatCost, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import styles from './OverviewPage.module.css'
 
@@ -166,15 +166,4 @@ function Metric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   )
-}
-
-function formatInteger(value: number | undefined): string {
-  return (value ?? 0).toLocaleString()
-}
-
-function formatCost(cost: number): string {
-  if (cost === 0) return '$0'
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  if (cost < 1000) return `$${cost.toFixed(2)}`
-  return `$${Math.round(cost).toLocaleString()}`
 }

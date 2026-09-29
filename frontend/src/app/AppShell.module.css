@@ -195,6 +195,8 @@
   .brandName,
   .navItem span,
   .sidebarFooter span { display: none; }
+  .navSectionLabel { display: none; }
+  .navSection + .navSection { margin-top: 6px; }
   .navigation { gap: 0; padding: 4px 6px; }
   .navItem { justify-content: center; min-height: 42px; padding: 0; }
   .navItem[data-active='true']::before { height: 20px; }

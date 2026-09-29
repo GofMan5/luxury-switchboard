@@ -19,6 +19,21 @@ export function formatBytes(value: number): string {
   return `${(value / 1_048_576).toFixed(1)} MiB`
 }
 
+export function formatInteger(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return '—'
+  return value.toLocaleString()
+}
+
+/** Money as the operator reads it: cents under a dollar, whole dollars above a thousand. */
+export function formatCost(cost: number | undefined): string {
+  const value = cost ?? 0
+  if (!Number.isFinite(value)) return '—'
+  if (value === 0) return '$0'
+  if (value < 0.01) return `$${value.toFixed(4)}`
+  if (value < 1_000) return `$${value.toFixed(2)}`
+  return `$${Math.round(value).toLocaleString()}`
+}
+
 export function formatClock(value: string): string {
   const date = new Date(value)
   // A zero timestamp means "never seen", not the year 1: never invent a clock for it.

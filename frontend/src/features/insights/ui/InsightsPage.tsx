@@ -4,7 +4,7 @@ import type { InsightsPeriod, InsightsProvider, InsightsModel, HistoryRequest } 
 import { useInsights } from './useInsights'
 import { PriceEditor } from './PriceEditor'
 import { DailyChart } from './DailyChart'
-import { formatClock } from '../../../shared/format/metrics'
+import { formatClock, formatCost, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import styles from './InsightsPage.module.css'
 
@@ -152,7 +152,7 @@ export default function InsightsPage() {
                 <td>{formatInteger(entry.volume.requests)}</td>
                 <td>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
                 <td>{formatInteger(entry.volume.totalTokens)}</td>
-                <td>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond) : '—'}</td>
+                <td>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond, 0) : '—'}</td>
                 <td>{entry.volume.isPriced ? formatCost(entry.volume.cost) : formatPartialCost(entry.volume.cost)}</td>
               </tr>
             ))}
@@ -182,7 +182,7 @@ export default function InsightsPage() {
           <p className={styles.unpriced}>{report.unpricedModels.join(' · ')}</p>
         </section>
       ) : null}
-      {state.phase !== 'idle' || loading ? (
+      {state.phase !== 'idle' && state.phase !== 'error' ? (
         <section className={styles.panel} aria-label="Recent persisted requests">
           <header><div><h2>Recent requests</h2><span>{state.recent.length > 0 ? `${state.recent.length} rows in ${state.period === 'all' ? 'history' : `the last ${state.period}`}` : 'No persisted requests in this period'}</span></div></header>
           <div className={styles.tableWrap}><table aria-label="Recent persisted requests"><thead><tr>
@@ -321,10 +321,6 @@ function sortModels(rows: readonly InsightsModel[], sort: { key: ModelSortKey; d
   return sorted
 }
 
-function formatInteger(value: number | undefined): string {
-  return (value ?? 0).toLocaleString()
-}
-
 function formatRate(part: number, total: number): string {
   if (total <= 0) return '—'
   return `${Math.round(100 * part / total)}%`
@@ -335,28 +331,10 @@ function successRate(volume: { requests: number; completed: number }): number {
   return volume.completed / volume.requests
 }
 
-function formatDuration(ms: number): string {
-  if (ms <= 0) return '—'
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.round(ms / 60_000)}m`
-}
-
-function formatCost(cost: number | undefined): string {
-  const value = cost ?? 0
-  if (value === 0) return '$0'
-  if (value < 0.01) return `$${value.toFixed(4)}`
-  if (value < 1000) return `$${value.toFixed(2)}`
-  return `$${Math.round(value).toLocaleString()}`
-}
-
 function formatPartialCost(cost: number): string {
   return cost > 0 ? `≥ ${formatCost(cost)}` : '—'
 }
 
-function formatDecimal(value: number): string {
-  return value.toLocaleString(undefined, { maximumFractionDigits: 0 })
-}
 
 function previewError(value: string): string {
   return value.length > errorPreviewLimit ? `${value.slice(0, errorPreviewLimit)}…` : value

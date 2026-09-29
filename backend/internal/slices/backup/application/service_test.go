@@ -1,6 +1,7 @@
 package application
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ type memorySources struct {
 	providers []domain.ProviderEntry
 	keys      []domain.KeyEntry
 	routes    []domain.RouteEntry
+	prices    []domain.PriceEntry
 }
 
 func (sources *memorySources) Providers() ([]domain.ProviderEntry, error) {
@@ -21,15 +23,18 @@ func (sources *memorySources) Providers() ([]domain.ProviderEntry, error) {
 }
 func (sources *memorySources) Keys() ([]domain.KeyEntry, error)     { return sources.keys, nil }
 func (sources *memorySources) Routes() ([]domain.RouteEntry, error) { return sources.routes, nil }
+func (sources *memorySources) Prices() ([]domain.PriceEntry, error) { return sources.prices, nil }
 
 type memorySinks struct {
 	providers map[string]bool
 	keys      map[string]bool
 	routes    map[string]bool
+	prices    map[string]domain.PriceEntry
+	refuse    map[string]bool
 }
 
 func newMemorySinks() *memorySinks {
-	return &memorySinks{providers: map[string]bool{}, keys: map[string]bool{}, routes: map[string]bool{}}
+	return &memorySinks{providers: map[string]bool{}, keys: map[string]bool{}, routes: map[string]bool{}, prices: map[string]domain.PriceEntry{}, refuse: map[string]bool{}}
 }
 
 func (sinks *memorySinks) AddProvider(entry domain.ProviderEntry) (bool, error) {
@@ -60,6 +65,14 @@ func (sinks *memorySinks) UpsertRoute(entry domain.RouteEntry) (bool, error) {
 }
 
 func (sinks *memorySinks) ProviderExists(id string) bool { return sinks.providers[id] }
+
+func (sinks *memorySinks) RestorePrice(entry domain.PriceEntry) error {
+	if sinks.refuse[entry.Model] {
+		return errors.New("rate is out of range")
+	}
+	sinks.prices[entry.Model] = entry
+	return nil
+}
 
 func TestExportWritesPlainJSONAndImportRestoresIt(t *testing.T) {
 	sources := &memorySources{
@@ -124,4 +137,80 @@ func TestExportWritesPlainJSONAndImportRestoresIt(t *testing.T) {
 		t.Fatal("garbage was accepted as a backup")
 	}
 	_ = filepath.Join
+}
+
+// The price catalog travels with the backup: an export carries it, a restore
+// lands it, and an impossible rate is counted as failed instead of silently
+// dropped — the same accounting every other entry gets.
+func TestPricesTravelWithTheBackupAndRefuseLikeAnyEntry(t *testing.T) {
+	sources := &memorySources{
+		providers: []domain.ProviderEntry{{ID: "alpha-relay", Name: "Alpha Relay", BaseURL: "https://alpha-relay.example/v1", AuthMode: "bearer", Format: "responses", Enabled: true}},
+		prices: []domain.PriceEntry{
+			{Model: "glm-5.3-prime", Input: 1, CachedInput: 0.1, Output: 2, Reasoning: 2},
+			{Model: "claude-opus-5", Input: 3, Output: 15},
+		},
+	}
+	service, err := NewService(sources, newMemorySinks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := service.Export(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "glm-5.3-prime") || !strings.Contains(string(raw), `"prices"`) {
+		t.Fatalf("the price catalog did not travel: %s", string(raw))
+	}
+
+	sinks := newMemorySinks()
+	restoring, err := NewService(sources, sinks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := restoring.Import(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.PricesRestored != 2 || report.Failed != 0 || len(sinks.prices) != 2 {
+		t.Fatalf("prices did not restore: %+v", report)
+	}
+	// A rate the analytics service would refuse is counted, not dropped.
+	sinks.refuse["glm-5.3-prime"] = true
+	report, err = restoring.Import(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.PricesRestored != 1 || report.Failed != 1 {
+		t.Fatalf("a refused rate was not accounted: %+v", report)
+	}
+}
+
+// A backup written before prices existed is still a valid backup: the field
+// is optional, so an import restores everything it always carried and leaves
+// the live catalog untouched.
+func TestAPrePriceBackupImportsWithoutTouchingTheCatalog(t *testing.T) {
+	sources := &memorySources{
+		providers: []domain.ProviderEntry{{ID: "alpha-relay", Name: "Alpha Relay", BaseURL: "https://alpha-relay.example/v1", AuthMode: "bearer", Format: "responses", Enabled: true}},
+	}
+	sinks := newMemorySinks()
+	sinks.prices["glm-5.3-prime"] = domain.PriceEntry{Model: "glm-5.3-prime", Input: 1, Output: 2}
+	service, err := NewService(sources, sinks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := `{"version":1,"exportedAt":"` + time.Now().Format(time.RFC3339) + `","providers":[{"id":"alpha-relay","name":"Alpha Relay","baseUrl":"https://alpha-relay.example/v1","authMode":"bearer","format":"responses","enabled":true}]}`
+	report, err := service.Import(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ProvidersAdded != 1 || report.PricesRestored != 0 {
+		t.Fatalf("the old-format import misbehaved: %+v", report)
+	}
+	if _, kept := sinks.prices["glm-5.3-prime"]; !kept {
+		t.Fatal("an old backup overwrote the live price catalog")
+	}
 }

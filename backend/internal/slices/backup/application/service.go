@@ -19,15 +19,18 @@ type Sources interface {
 	Providers() ([]domain.ProviderEntry, error)
 	Keys() ([]domain.KeyEntry, error)
 	Routes() ([]domain.RouteEntry, error)
+	Prices() ([]domain.PriceEntry, error)
 }
 
 // Sinks restore entries into their slices' own managers, so validation and
 // persistence stay where they always were. A sink reports whether the entry
-// was added; false means it already existed.
+// was added; false means it already existed. A price is a setting, so its
+// restore reports only an error.
 type Sinks interface {
 	AddProvider(entry domain.ProviderEntry) (bool, error)
 	AddKey(entry domain.KeyEntry) (bool, error)
 	UpsertRoute(entry domain.RouteEntry) (bool, error)
+	RestorePrice(entry domain.PriceEntry) error
 	ProviderExists(id string) bool
 }
 
@@ -60,6 +63,10 @@ func (service *Service) Export(folder string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("routes could not be read: %w", err)
 	}
+	prices, err := service.sources.Prices()
+	if err != nil {
+		return "", fmt.Errorf("prices could not be read: %w", err)
+	}
 	sort.SliceStable(providers, func(i, j int) bool { return providers[i].ID < providers[j].ID })
 	sort.SliceStable(keys, func(i, j int) bool {
 		if keys[i].ProviderID != keys[j].ProviderID {
@@ -74,6 +81,7 @@ func (service *Service) Export(folder string) (string, error) {
 		Providers:  providers,
 		Keys:       keys,
 		Routes:     routes,
+		Prices:     prices,
 	}
 	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -148,6 +156,15 @@ func (service *Service) Import(content string) (domain.ImportReport, error) {
 		} else {
 			report.RoutesSkipped++
 		}
+	}
+	// An old backup carries no prices at all: the empty slice restores
+	// nothing and the live catalog stays as the operator set it.
+	for _, entry := range document.Prices {
+		if err := service.sinks.RestorePrice(entry); err != nil {
+			report.Failed++
+			continue
+		}
+		report.PricesRestored++
 	}
 	return report, nil
 }

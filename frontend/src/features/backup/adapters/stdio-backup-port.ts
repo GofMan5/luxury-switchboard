@@ -4,6 +4,7 @@ export interface BackupReport {
   readonly providersAdded: number
   readonly keysAdded: number
   readonly routesAdded: number
+  readonly pricesRestored: number
   readonly providersSkipped: number
   readonly keysSkipped: number
   readonly routesSkipped: number

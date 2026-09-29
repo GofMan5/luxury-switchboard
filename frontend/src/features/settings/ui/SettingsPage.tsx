@@ -100,7 +100,7 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
           <ToggleField label="Animations" checked={settings.animationsEnabled} onChange={toggle('animationsEnabled')} note="The system's reduced-motion setting always wins over this switch." />
         </SettingsSection>
 
-        <SettingsSection icon={<ArchiveRestore />} title="Backup" description="Carry providers, keys and routes to another machine or another install.">
+        <SettingsSection icon={<ArchiveRestore />} title="Backup" description="Carry providers, keys, routes and model prices to another machine or another install.">
           <BackupPanel />
         </SettingsSection>
 
@@ -176,6 +176,7 @@ function BackupPanel() {
             Restored {state.lastReport.providersAdded} provider{state.lastReport.providersAdded === 1 ? '' : 's'},
             {' '}{state.lastReport.keysAdded} key{state.lastReport.keysAdded === 1 ? '' : 's'},
             {' '}{state.lastReport.routesAdded} route{state.lastReport.routesAdded === 1 ? '' : 's'}
+            {state.lastReport.pricesRestored > 0 ? `, ${state.lastReport.pricesRestored} price${state.lastReport.pricesRestored === 1 ? '' : 's'}` : ''}
             {state.lastReport.providersSkipped + state.lastReport.keysSkipped + state.lastReport.routesSkipped > 0 ? ` (already present: ${state.lastReport.providersSkipped + state.lastReport.keysSkipped + state.lastReport.routesSkipped})` : ''}
             {state.lastReport.failed > 0 ? `, ${state.lastReport.failed} entries could not be restored` : ''}
             .

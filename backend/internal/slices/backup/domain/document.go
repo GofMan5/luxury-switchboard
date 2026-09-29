@@ -45,6 +45,11 @@ type Document struct {
 	Providers  []ProviderEntry `json:"providers"`
 	Keys       []KeyEntry      `json:"keys"`
 	Routes     []RouteEntry    `json:"routes"`
+	// Prices is the analytics price catalog: market rates, not secrets, so it
+	// travels in the clear with everything else. The field is optional and the
+	// format version stays 1 — a backup written before prices existed imports
+	// as one written after, with an empty catalog left as it is.
+	Prices []PriceEntry `json:"prices,omitempty"`
 }
 
 // RouteEntry is one assignment, the same shape the routes slice persists;
@@ -61,6 +66,18 @@ type RouteEntry struct {
 	Priority        int      `json:"priority"`
 }
 
+// PriceEntry is one model's per-million rates, the same fields the analytics
+// catalog validates on entry. A restore overwrites whatever rate is set: a
+// price is a setting, not an identity, so there is no "already exists" to
+// skip.
+type PriceEntry struct {
+	Model       string  `json:"model"`
+	Input       float64 `json:"input"`
+	CachedInput float64 `json:"cachedInput"`
+	Output      float64 `json:"output"`
+	Reasoning   float64 `json:"reasoning"`
+}
+
 // ImportReport says what a restore did. Entries that already existed — the
 // same provider ID, the same derived key ID, the same route row — are counted
 // as skipped, not errors: restoring over a live setup must be repeatable.
@@ -68,6 +85,7 @@ type ImportReport struct {
 	ProvidersAdded   int `json:"providersAdded"`
 	KeysAdded        int `json:"keysAdded"`
 	RoutesAdded      int `json:"routesAdded"`
+	PricesRestored   int `json:"pricesRestored"`
 	ProvidersSkipped int `json:"providersSkipped"`
 	KeysSkipped      int `json:"keysSkipped"`
 	RoutesSkipped    int `json:"routesSkipped"`

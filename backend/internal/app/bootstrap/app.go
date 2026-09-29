@@ -118,15 +118,6 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if routeLoadErr != nil {
 		logger.Printf("encrypted model routes could not be loaded; using active provider")
 	}
-	// The backup reads the same encrypted stores the managers own and restores
-	// through the same managers: nothing bypasses validation on the way back.
-	backupService, err := backupapp.NewService(
-		backuplive.NewSources(providerRepository, keyRepository, routeRepository),
-		backuplive.NewSinks(providerManager, keyManager, routeService, catalog),
-	)
-	if err != nil {
-		return nil, err
-	}
 	providerManager.SetRouteUsage(routeService)
 	routeResolver := relayroutes.NewResolver(routeService)
 	routes := relayproviders.NewSource(catalog, routeResolver, routeResolver)
@@ -207,7 +198,20 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	analyticsstdio.Register(protocol, analyticsapp.NewService(factsPort, analyticsjsonfile.New(analyticsPricePath)))
+	priceStore := analyticsjsonfile.New(analyticsPricePath)
+	analyticsService := analyticsapp.NewService(factsPort, priceStore)
+	analyticsstdio.Register(protocol, analyticsService)
+	// The backup reads the same encrypted stores the managers own and restores
+	// through them; the analytics price catalog travels with it, so a restore
+	// on a new machine does not leave the cost estimate blind.
+	backupService, err := backupapp.NewService(
+		backuplive.NewSources(providerRepository, keyRepository, routeRepository, priceStore),
+		backuplive.NewSinks(providerManager, keyManager, routeService, catalog, analyticsService),
+	)
+	if err != nil {
+		return nil, err
+	}
+	backupstdio.Register(protocol, backupService)
 	settingsstdio.Register(protocol, settingsService)
 	guardrailstdio.Register(protocol, guardrails)
 	notificationsstdio.Register(protocol, notifications)
@@ -257,7 +261,6 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	routes.SetFailoverEnabled(settings.FailoverEnabled)
 	routestdio.Register(protocol, routeService)
 	modelstdio.Register(protocol, modelService)
-	backupstdio.Register(protocol, backupService)
 	edition, err := registerEdition(protocol, editionDependencies{
 		catalog: catalog, keys: keyManager, routes: routeService,
 		relay: httpRuntime, settings: settings, logger: logger,

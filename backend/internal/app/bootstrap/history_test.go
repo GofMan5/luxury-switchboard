@@ -15,7 +15,7 @@ func TestUnusableHistoryDegradesInsteadOfCrashingStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SWITCHBOARD_HISTORY_PATH", broken)
-	requests, err := defaultHistory(30)
+	requests, _, err := defaultHistory(30)
 	if err == nil {
 		t.Fatal("a corrupt request history opened successfully")
 	}

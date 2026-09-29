@@ -1,0 +1,66 @@
+import type { InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
+import type { InsightsPort, PriceDraft } from './insights-port'
+
+export interface InsightsState {
+  readonly phase: 'idle' | 'loading' | 'ready' | 'error'
+  readonly period: InsightsPeriod
+  readonly report: InsightsReport | null
+  /** The price catalog as of the last successful fetch or edit. */
+  readonly prices: readonly ModelPrice[]
+  readonly pricesPhase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
+  readonly error: string
+}
+
+/** Reload the report after a price edit: the cost columns are the point. */
+export class InsightsModel {
+  readonly #port: InsightsPort
+  #state: InsightsState = { phase: 'idle', period: '24h', report: null, prices: [], pricesPhase: 'idle', error: '' }
+  #listeners = new Set<() => void>()
+  #generation = 0
+  constructor(port: InsightsPort) { this.#port = port }
+  snapshot = (): InsightsState => this.#state
+  subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
+
+  async load(period: InsightsPeriod): Promise<void> {
+    const generation = ++this.#generation
+    this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, error: '' })
+    try {
+      const [report, prices] = await Promise.all([
+        this.#port.report(period),
+        this.#state.pricesPhase === 'idle' ? this.#port.prices() : Promise.resolve(this.#state.prices),
+      ])
+      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, prices, pricesPhase: 'ready', error: '' })
+    } catch {
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Insights are unavailable' })
+    }
+  }
+
+  async savePrice(draft: PriceDraft): Promise<void> {
+    const generation = this.#generation
+    this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
+    try {
+      const prices = await this.#port.setPrice(draft)
+      if (generation === this.#generation) this.#set({ ...this.#state, prices, pricesPhase: 'ready' })
+      // The estimate only changes once the backend re-reads the catalog, so
+      // the report is refreshed, not patched client-side.
+      await this.load(this.#state.period)
+    } catch {
+      if (generation === this.#generation) this.#set({ ...this.#state, pricesPhase: 'error', error: 'The price was not saved' })
+    }
+  }
+
+  async removePrice(model: string): Promise<void> {
+    const generation = this.#generation
+    this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
+    try {
+      const prices = await this.#port.removePrice(model)
+      if (generation === this.#generation) this.#set({ ...this.#state, prices, pricesPhase: 'ready' })
+      await this.load(this.#state.period)
+    } catch {
+      if (generation === this.#generation) this.#set({ ...this.#state, pricesPhase: 'error', error: 'The price was not removed' })
+    }
+  }
+
+  dispose(): void { this.#listeners.clear() }
+  #set(state: InsightsState): void { this.#state = state; for (const listener of this.#listeners) listener() }
+}

@@ -15,6 +15,10 @@ import (
 	activitysqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/sqlite"
 	activitystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/adapters/stdio"
 	activityapp "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
+	analyticsjsonfile "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/adapters/jsonfile"
+	analyticssqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/adapters/sqlite"
+	analyticsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/adapters/stdio"
+	analyticsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/application"
 	backuplive "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/live"
 	backupstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/stdio"
 	backupapp "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/application"
@@ -63,6 +67,7 @@ type App struct {
 	protocol      *platform.Server
 	relay         *relayapp.Service
 	history       activityapp.History
+	analytics     *analyticssqlite.Facts
 	edition       editionRuntime
 	logger        *log.Logger
 	healthMonitor *providerapp.HealthMonitor
@@ -127,7 +132,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	routes := relayproviders.NewSource(catalog, routeResolver, routeResolver)
 	credentials := relaykeypool.NewSource(keyScheduler)
 	activity := activityapp.NewService(settings.ActivityCapacity)
-	history, historyErr := defaultHistory(settings.HistoryRetentionDays)
+	history, historyPath, historyErr := defaultHistory(settings.HistoryRetentionDays)
 	if historyErr != nil {
 		logger.Printf("request history is unavailable; relay will continue")
 	}
@@ -180,6 +185,29 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	keystdio.Register(protocol, keyManager, keyprobe.NewProber(catalog))
 	relaystdio.Register(protocol, relay)
 	activitystdio.Register(protocol, activity, history)
+	// Analytics reads the same database the history slice writes: the
+	// composition root is the one place that knows they share a file. When
+	// history could not open, analytics answers unavailable rather than
+	// drawing a dashboard of zeros.
+	var analyticsFacts *analyticssqlite.Facts
+	if historyErr == nil {
+		analyticsFacts, err = analyticssqlite.Open(historyPath)
+		if err != nil {
+			analyticsFacts = nil
+			logger.Printf("analytics is unavailable; request history is unaffected")
+		}
+	}
+	// The interface must stay a true nil when facts are absent: a typed nil
+	// pointer would pass the service's unavailable guard and crash on use.
+	var factsPort analyticsapp.Facts
+	if analyticsFacts != nil {
+		factsPort = analyticsFacts
+	}
+	analyticsPricePath, err := analyticsjsonfile.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	analyticsstdio.Register(protocol, analyticsapp.NewService(factsPort, analyticsjsonfile.New(analyticsPricePath)))
 	settingsstdio.Register(protocol, settingsService)
 	guardrailstdio.Register(protocol, guardrails)
 	notificationsstdio.Register(protocol, notifications)
@@ -241,6 +269,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		protocol:      protocol,
 		relay:         relay,
 		history:       history,
+		analytics:     analyticsFacts,
 		edition:       edition,
 		logger:        logger,
 		healthMonitor: healthMonitor,
@@ -276,6 +305,11 @@ func (app *App) Run(ctx context.Context) error {
 			app.logger.Printf("request history did not close cleanly")
 		}
 		cancelHistory()
+	}
+	if app.analytics != nil {
+		if err := app.analytics.Close(); err != nil {
+			app.logger.Printf("analytics did not close cleanly")
+		}
 	}
 	editionHistoryCtx, cancelEditionHistory := context.WithTimeout(context.Background(), 5*time.Second)
 	if historyErr := app.edition.Close(editionHistoryCtx); historyErr != nil {
@@ -382,24 +416,24 @@ func defaultSettingsService() (*settingsapp.Service, error, error) {
 	return service, loadErr, nil
 }
 
-func defaultHistory(retentionDays int) (activityapp.History, error) {
+func defaultHistory(retentionDays int) (activityapp.History, string, error) {
 	path := os.Getenv("SWITCHBOARD_HISTORY_PATH")
 	var err error
 	if path == "" {
 		path, err = activitysqlite.DefaultPath()
 	} else if !filepath.IsAbs(path) {
-		return nil, errors.New("history path must be absolute")
+		return nil, "", errors.New("history path must be absolute")
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// The concrete store is unwrapped so a failure returns a truly nil interface;
 	// otherwise every downstream nil guard would pass on a nil pointer.
 	store, err := activitysqlite.Open(path, retentionDays)
 	if err != nil {
-		return nil, err
+		return nil, path, err
 	}
-	return store, nil
+	return store, path, nil
 }
 
 func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, *routedpapi.Repository, error, error) {

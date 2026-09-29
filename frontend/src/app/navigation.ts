@@ -3,6 +3,7 @@ import {
   Activity,
   ChartNoAxesCombined,
   CircleGauge,
+  Coins,
   Database,
   KeyRound,
   Network,
@@ -23,6 +24,7 @@ export type AppRoute =
   | 'tunnel'
   | 'clients'
   | 'statistics'
+  | 'insights'
   | 'shared'
   | 'settings'
 
@@ -50,6 +52,7 @@ export const navigation: readonly NavigationItem[] = [
       ] as const satisfies readonly NavigationItem[])
     : []),
   { id: 'statistics', label: 'Statistics', icon: ChartNoAxesCombined },
+  { id: 'insights', label: 'Insights', icon: Coins },
   ...(__OWNER_EDITION__
     ? ([{ id: 'shared', label: 'Shared Control', icon: Network }] as const satisfies readonly NavigationItem[])
     : []),

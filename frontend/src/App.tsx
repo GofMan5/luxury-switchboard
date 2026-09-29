@@ -9,6 +9,7 @@ const ProvidersPage = lazy(() => import('./features/providers/ui/ProvidersPage')
 const ApiKeysPage = lazy(() => import('./features/api-keys/ui/ApiKeysPage'))
 const SettingsPage = lazy(() => import('./features/settings/ui/SettingsPage'))
 const StatisticsPage = lazy(() => import('./features/statistics/ui/StatisticsPage'))
+const InsightsPage = lazy(() => import('./features/insights/ui/InsightsPage'))
 const ModelRoutesPage = lazy(() => import('./features/model-routes/ui/ModelRoutesPage'))
 const GuardrailsPage = lazy(() => import('./features/guardrails/ui/GuardrailsPage'))
 
@@ -51,6 +52,7 @@ function Switchboard() {
         {route === 'keys' ? <ApiKeysPage /> : null}
         {route === 'settings' ? <SettingsPage /> : null}
         {route === 'statistics' ? <StatisticsPage /> : null}
+        {route === 'insights' ? <InsightsPage /> : null}
         {route === 'routes' ? <ModelRoutesPage /> : null}
         {route === 'guardrails' ? <GuardrailsPage /> : null}
         {route === 'tunnel' && TunnelPage ? <TunnelPage /> : null}

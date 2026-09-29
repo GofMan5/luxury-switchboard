@@ -11,6 +11,8 @@ import { StdioSettingsPort } from '../features/settings/adapters/stdio-settings-
 import { SettingsModel } from '../features/settings/application/settings-model'
 import { StdioStatisticsPort } from '../features/statistics/adapters/stdio-statistics-port'
 import { StatisticsModel } from '../features/statistics/application/statistics-model'
+import { StdioInsightsPort } from '../features/insights/adapters/stdio-insights-port'
+import { InsightsModel } from '../features/insights/application/insights-model'
 import { StdioGuardrailsPort } from '../features/guardrails/adapters/stdio-guardrails-port'
 import { GuardrailsModel } from '../features/guardrails/application/guardrails-model'
 import { StdioRoutesPort } from '../features/model-routes/adapters/stdio-routes-port'
@@ -56,6 +58,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       const routes = current.routes.snapshot()
       const models = current.models.snapshot()
       const statistics = current.statistics.snapshot()
+      const insights = current.insights.snapshot()
       current.models.connect()
       reconnecting = Promise.all([
         current.relay.connect(),
@@ -71,6 +74,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
         models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
         statistics.phase !== 'idle' ? current.statistics.load(statistics.period) : Promise.resolve(),
+        insights.phase !== 'idle' ? current.insights.load(insights.period) : Promise.resolve(),
       ]).then(() => undefined).finally(() => { reconnecting = null })
       return reconnecting
     }
@@ -84,6 +88,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.settings.dispose()
       services?.guardrails.dispose()
       services?.statistics.dispose()
+      services?.insights.dispose()
       services?.routes.dispose()
       services?.notifications.dispose()
       services?.tunnel?.dispose()
@@ -107,6 +112,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           apiKeys: new ApiKeysModel(new StdioApiKeysPort(session)),
           settings: new SettingsModel(new StdioSettingsPort(session)),
           statistics: new StatisticsModel(new StdioStatisticsPort(session)),
+          insights: new InsightsModel(new StdioInsightsPort(session)),
           routes: new RoutesModel(new StdioRoutesPort(session), { tracksBothTargets: __OWNER_EDITION__ }),
           models: new ModelsModel(new StdioModelsPort(session)),
           guardrails: new GuardrailsModel(new StdioGuardrailsPort(session)),

@@ -1078,7 +1078,17 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// on the same ceiling a 429 uses. The verdict cools nothing: every key
 		// answers it identically, so pool damage would only spread the wait to
 		// models that work.
-		if status >= 500 && serviceOverloaded(failureText) {
+		//
+		// 502 and 504 join that class by status alone: nginx answers a
+		// bare HTML page with no wording to read, and "my upstream did not
+		// answer me" is the same news as "no channel available" — the edge
+		// could not reach what serves the model (measured on alpha-relay: twelve
+		// consecutive bare 502s, two attempts, dead request). 503 and 500
+		// stay on the plain budget unless their wording says congestion: the
+		// application answered, so the failure can be its own deterministic
+		// decision, and a wordless 5xx riding the ceiling used to hang a
+		// request for thirty minutes on a dead upstream.
+		if status >= 500 && (serviceOverloaded(failureText) || gatewayCongestion(status)) {
 			delay := retryDelay(attempt, response, server.config)
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			if !canRetry(attempt, attemptLimit) {
@@ -2762,13 +2772,32 @@ func serviceOverloaded(text string) bool {
 		"overloaded", "overload", "no channel", "try again later", "try again",
 		"resource exhausted", "temporarily unavailable", "server is busy",
 		"capacity", "saturated", "backpressure",
-		"负载已饱和", "请稍后再试", "无可用渠道", "繁忙",
+		// new-api answers congestion in its own words, in Chinese and English
+		// (measured on the reseller and GLM resellers). The previous entries
+		// here had been written as corrupted bytes: they matched nothing real,
+		// and their replacement-char runs could false-positive on ordinary
+		// text. Real wording, real bytes.
+		"无可用渠道", "负载已饱和", "请稍后再试",
 	} {
 		if strings.Contains(text, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// gatewayCongestion reports whether the status itself says the provider's
+// edge could not reach its upstream: 502 and 504 are the proxy's own "no
+// channel available" (nginx answers a bare HTML page with no wording at
+// all - measured on alpha-relay: twelve consecutive 502s while the wording-based
+// classifier read nothing and the plain-5xx budget gave up after two
+// attempts). A 503 stays on the plain budget unless its wording says
+// congestion: "service unavailable" can be maintenance the caller cannot
+// wait out, and a wordless 5xx riding the full ceiling used to hang a
+// request for thirty minutes on a dead upstream.
+func gatewayCongestion(status int) bool {
+	return status == http.StatusBadGateway ||
+		status == http.StatusGatewayTimeout
 }
 
 func genericErrorResponse(status int) *http.Response {

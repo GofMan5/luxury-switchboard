@@ -1118,6 +1118,88 @@ func TestEnglishOverloadWordingIsRetried(t *testing.T) {
 	}
 }
 
+// A bare nginx 502 page carries no wording at all, and the status is the only
+// signal: "my upstream did not answer me" is congestion the same way "no
+// channel available" is (measured live: twelve consecutive bare 502s, two
+// attempts, dead request - the wording-only classifier read an HTML page as
+// silence).
+func TestABareGatewayErrorIsCongestionByStatus(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "text/html")
+		if attempts <= 4 {
+			writer.WriteHeader(http.StatusBadGateway)
+			_, _ = writer.Write([]byte("<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx/1.24.0 (Ubuntu)</center>\r\n</body>\r\n</html>"))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "alpha-relay", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "alpha-relay", UpstreamModel: "glm-5.3-prime",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"glm-5.3-prime"}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("the bare 502 was surfaced instead of waited out: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 5 {
+		t.Fatalf("expected the bare gateway error to ride the retry ceiling, saw %d attempts", attempts)
+	}
+}
+
+// A 500 keeps the short budget: the application answered, so the failure can
+// be its own deterministic bug rather than the edge failing to reach it.
+func TestABareInternalErrorKeepsTheShortBudget(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "edge", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "edge", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusInternalServerError {
+		t.Fatalf("a deterministic 500 was not surfaced on the short budget: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("a bare 500 must spend exactly the permanent budget, saw %d attempts", attempts)
+	}
+}
+
+// The congestion markers answer real wording only. The corrupted-byte
+// entries they replace could match replacement-character runs in ordinary
+// text, and one of them was literally "??".
+func TestTheCongestionMarkersMatchWordingNotPunctuation(t *testing.T) {
+	if serviceOverloaded("what?? seriously??") {
+		t.Fatal("question marks read as congestion")
+	}
+	if serviceOverloaded("<html><title>502 Bad Gateway</title></html>") {
+		t.Fatal("a bare HTML page read as congestion by wording")
+	}
+	if !serviceOverloaded("The current group 上游负载已饱和, please try again later") {
+		t.Fatal("new-api's own saturation wording did not match")
+	}
+	if !serviceOverloaded("no channel available") || !serviceOverloaded("The service is overloaded") {
+		t.Fatal("the English congestion wording stopped matching")
+	}
+}
+
 // A terminal verdict moves the request to the chain's next provider instead of
 // surfacing: the whole point of a chain is that the client never learns a
 // provider died. The failed provider is degraded so the next request starts

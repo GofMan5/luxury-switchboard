@@ -1125,6 +1125,18 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				server.observeRetry(activityID, attempt, status, 0)
 				continue
 			}
+			if repaired, changed := repairDeveloperRole(body, errorBody); changed {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				body = repaired
+				server.observeRetry(activityID, attempt, status, 0)
+				continue
+			}
+			if repaired, changed := repairReasoningEffort(body, errorBody); changed {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				body = repaired
+				server.observeRetry(activityID, attempt, status, 0)
+				continue
+			}
 			if freeformToolRejected(errorBody) {
 				if downgraded, changed := downgradeFreeformTools(body); changed {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
@@ -2338,6 +2350,186 @@ func repairRejectedParameters(body, errorBody []byte) ([]byte, bool) {
 		return body, false
 	}
 	return repaired, true
+}
+
+// repairDeveloperRole rewrites a request a provider turned down over the
+// "developer" message role, and reports whether anything changed. OpenAI's
+// newer clients send the system prompt as a "developer" message (the o-series
+// convention), while chat-only upstreams validate roles against the classic
+// five, so the same system prompt that works everywhere else answers 400 here
+// (measured: "developer is not one of ['system', 'assistant', 'user', 'tool',
+// 'function']"). The rewrite only happens when the error names the role and
+// the body actually carries it, so a genuine 400 still fails at once and the
+// retry cannot cycle: every pass renames a role it can never rename again.
+func repairDeveloperRole(body, errorBody []byte) ([]byte, bool) {
+	if len(body) == 0 || len(errorBody) == 0 {
+		return body, false
+	}
+	text := strings.ToLower(string(errorBody))
+	if !strings.Contains(text, "developer") {
+		return body, false
+	}
+	roleComplaint := false
+	for _, marker := range []string{"is not one of", "role", "not supported", "unsupported", "must be one of"} {
+		if strings.Contains(text, marker) {
+			roleComplaint = true
+			break
+		}
+	}
+	if !roleComplaint {
+		return body, false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
+		return body, false
+	}
+	messages, _ := payload["messages"].([]any)
+	changed := false
+	for _, entry := range messages {
+		message, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := message["role"].(string); role == "developer" {
+			message["role"] = "system"
+			changed = true
+		}
+	}
+	if !changed {
+		return body, false
+	}
+	repaired, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return repaired, true
+}
+
+// reasoningEffortRanks orders the effort spellings the market uses, lowest
+// first. The rank is what "nearest" means when a provider rejects an effort:
+// a client that asked for a level the provider does not host gets the closest
+// level below its ask, never one above it — a repair must not spend more
+// thinking tokens than the caller asked for.
+var reasoningEffortRanks = map[string]int{
+	"minimal": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5,
+}
+
+// repairReasoningEffort rewrites a request a provider turned down over its
+// reasoning-effort spelling, and reports whether anything changed. GLM's edge
+// accepts exactly low, high and max while OpenAI's clients say medium or
+// xhigh (measured: "'reasoning_effort' must be one of: 'low', 'high', 'max'",
+// after the developer-role repair had already spent the first attempt). The
+// provider names its accepted values in the very complaint, so the rewrite
+// maps to the nearest accepted rank at or below the ask; an ask below
+// everything accepted takes the lowest; a complaint without a readable list
+// drops the field and lets the provider's own default decide. Either way the
+// retry cannot cycle: the new value is on the provider's list, or the field
+// is gone.
+func repairReasoningEffort(body, errorBody []byte) ([]byte, bool) {
+	if len(body) == 0 || len(errorBody) == 0 {
+		return body, false
+	}
+	text := strings.ToLower(string(errorBody))
+	if !strings.Contains(text, "reasoning_effort") {
+		return body, false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
+		return body, false
+	}
+	requested, _ := payload["reasoning_effort"].(string)
+	if requested == "" {
+		return body, false
+	}
+	accepted := rankableEfforts(quotedValues(text))
+	requestedRank, known := reasoningEffortRanks[requested]
+	if !known {
+		// A spelling this relay does not rank cannot be mapped: drop it
+		// rather than guess what the provider meant by accepting it.
+		delete(payload, "reasoning_effort")
+	} else if len(accepted) > 0 {
+		replacement, changed := nearestReasoningEffort(requestedRank, accepted)
+		if !changed {
+			// The requested effort is already on the provider's list:
+			// nothing to repair, and rewriting it would loop on a complaint
+			// about something else.
+			return body, false
+		}
+		payload["reasoning_effort"] = replacement
+	} else {
+		// No readable list — or a list nothing in this relay can rank: the
+		// provider's default is the only honest substitute for a level it
+		// refused to name.
+		delete(payload, "reasoning_effort")
+	}
+	repaired, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return repaired, true
+}
+
+// quotedValues reads the single-quoted words out of a complaint like
+// "'reasoning_effort' must be one of: 'low', 'high', 'max'". The field's own
+// name comes out of the same split, but it can never rank as an effort, so
+// the mapping below ignores it naturally.
+func quotedValues(text string) []string {
+	values := make([]string, 0, 6)
+	for _, field := range strings.Split(text, "'") {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			values = append(values, field)
+		}
+	}
+	return values
+}
+
+// rankableEfforts keeps only the words the relay knows how to rank: a
+// complaint without quotes splits into one long sentence, and a sentence is
+// not a list of levels.
+func rankableEfforts(values []string) []string {
+	ranked := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, known := reasoningEffortRanks[value]; known {
+			ranked = append(ranked, value)
+		}
+	}
+	return ranked
+}
+
+// nearestReasoningEffort picks the accepted effort closest to the ask from
+// below, or the lowest accepted one when the ask sits under the whole list.
+// The second return says whether a change is needed at all.
+func nearestReasoningEffort(asked int, accepted []string) (string, bool) {
+	best := ""
+	bestRank := -1
+	for _, candidate := range accepted {
+		rank, known := reasoningEffortRanks[candidate]
+		if !known {
+			continue
+		}
+		if rank <= asked && rank > bestRank {
+			best, bestRank = candidate, rank
+		}
+	}
+	if best != "" {
+		return best, bestRank != asked
+	}
+	// Nothing at or below the ask: take the cheapest the provider offers.
+	for _, candidate := range accepted {
+		rank, known := reasoningEffortRanks[candidate]
+		if known && (bestRank == -1 || rank < bestRank) {
+			best, bestRank = candidate, rank
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
 }
 
 // modelMissing reports a 404 that names the requested model and says it simply

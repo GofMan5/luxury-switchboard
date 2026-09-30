@@ -499,6 +499,191 @@ func TestRejectedParametersAreRepairedOnce(t *testing.T) {
 	}
 }
 
+// A chat-only upstream validates message roles against the classic five, while
+// OpenAI-compatible clients send the system prompt as "developer" (the o-series
+// convention). The relay renames the role and retries instead of handing the
+// client a 400 for a system prompt that works everywhere else.
+func TestADeveloperRoleTheProviderRefusesIsSentAsSystemInstead(t *testing.T) {
+	var seen []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		body, _ := io.ReadAll(request.Body)
+		_ = json.Unmarshal(body, &payload)
+		seen = append(seen, payload)
+		messages, _ := payload["messages"].([]any)
+		for _, entry := range messages {
+			message, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if role, _ := message["role"].(string); role == "developer" {
+				writer.WriteHeader(http.StatusBadRequest)
+				_, _ = writer.Write([]byte(`{"error":{"message":"developer is not one of ['system', 'assistant', 'user', 'tool', 'function']","type":"invalid_request_error"}}`))
+				return
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"chatcmpl-1","choices":[]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "bridge", BaseURL: parsed, AuthMode: "passthrough"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/chat/completions", ProviderID: "bridge", UpstreamModel: "glm-5.3-prime",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"glm-5.3-prime","messages":[{"role":"developer","content":"You are helpful."},{"role":"user","content":"Say OK"}]}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("the developer role was not repaired: status=%d err=%v", response.Status, err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("expected one repair attempt, saw %d attempts", len(seen))
+	}
+	messages, _ := seen[1]["messages"].([]any)
+	first, _ := messages[0].(map[string]any)
+	if role, _ := first["role"].(string); role != "system" {
+		t.Fatalf("the developer role was not sent as system: %q", role)
+	}
+	if content, _ := first["content"].(string); content != "You are helpful." {
+		t.Fatalf("the repair dropped the system prompt content: %q", content)
+	}
+	for _, entry := range messages {
+		if message, ok := entry.(map[string]any); ok {
+			if role, _ := message["role"].(string); role == "developer" {
+				t.Fatal("the developer role survived the repair")
+			}
+		}
+	}
+}
+
+// The repair fires on a complaint about the role, not on any prose that happens
+// to contain the word, and only when the body carries the role it renames.
+func TestTheDeveloperRoleRepairOnlyFiresOnARoleComplaint(t *testing.T) {
+	body := []byte(`{"model":"x","messages":[{"role":"developer","content":"sys"},{"role":"user","content":"hi"}]}`)
+	if _, changed := repairDeveloperRole(body, []byte(`{"error":{"message":"developer quota exhausted"}}`)); changed {
+		t.Fatal("a quota complaint about a developer tier renamed the role")
+	}
+	if _, changed := repairDeveloperRole(body, []byte(`{"error":{"message":"all good"}}`)); changed {
+		t.Fatal("a friendly answer renamed the role")
+	}
+	repaired, changed := repairDeveloperRole(body, []byte(`{"error":{"message":"developer is not one of ['system','user']"}}`))
+	if !changed {
+		t.Fatal("a role complaint did not rename the developer role")
+	}
+	if !strings.Contains(string(repaired), `"role":"system"`) || strings.Contains(string(repaired), `"developer"`) {
+		t.Fatalf("the repair left the role wrong: %s", repaired)
+	}
+	plain := []byte(`{"model":"x","messages":[{"role":"system","content":"sys"}]}`)
+	if _, changed := repairDeveloperRole(plain, []byte(`{"error":{"message":"developer is not one of ['system','user']"}}`)); changed {
+		t.Fatal("a body without the role was rewritten anyway")
+	}
+}
+
+// The full harness failure this repair was born from: the client is OpenAI's
+// newer convention on both counts at once — a "developer" system message AND
+// a reasoning_effort the provider does not host. GLM's edge answers the
+// second complaint with its accepted values named in quotes, the client
+// asked for medium, and the turn used to die after the role repair had
+// already spent the first attempt (measured on the live relay: 400, one
+// retry, "The request could not be completed").
+func TestAnEffortTheProviderDoesNotHostIsRepairedAfterTheRole(t *testing.T) {
+	var seen []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		var payload map[string]any
+		_ = json.Unmarshal(body, &payload)
+		seen = append(seen, payload)
+		for _, entry := range payload["messages"].([]any) {
+			if message, ok := entry.(map[string]any); ok {
+				if role, _ := message["role"].(string); role == "developer" {
+					writer.WriteHeader(http.StatusBadRequest)
+					_, _ = writer.Write([]byte(`{"error":{"message":"developer is not one of ['system', 'assistant', 'user', 'tool', 'function']","type":"invalid_request_error"}}`))
+					return
+				}
+			}
+		}
+		if effort, _ := payload["reasoning_effort"].(string); effort != "low" && effort != "high" && effort != "max" {
+			writer.WriteHeader(http.StatusBadRequest)
+			// Verbatim from the live provider: the values are named, quoted.
+			_, _ = writer.Write([]byte(`{"error":{"message":"'reasoning_effort' must be one of: 'low', 'high', 'max'","type":"invalid_request_error","param":null,"code":"invalid_parameter_error"}}`))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{ProviderID: "bridge", BaseURL: parsed, AuthMode: "passthrough"}},
+		Config: Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 4},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/chat/completions", ProviderID: "bridge", UpstreamModel: "glm-5.3-prime",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"glm-5.3-prime","reasoning_effort":"medium","messages":[{"role":"developer","content":"You are helpful."},{"role":"user","content":"Say OK"}]}`),
+	})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("the harness request was not carried home: status=%d err=%v", response.Status, err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("expected role then effort repairs, saw %d attempts", len(seen))
+	}
+	if effort, _ := seen[2]["reasoning_effort"].(string); effort != "low" {
+		t.Fatalf("medium did not map to the nearest accepted effort below it: %q", effort)
+	}
+	if _, carries := seen[2]["messages"].([]any)[0].(map[string]any)["role"]; !carries {
+		t.Fatal("the repaired body lost its messages")
+	}
+}
+
+// The effort mapping answers the provider's own list, and only when the ask is
+// not already on it — a value the provider accepts must not be rewritten, or
+// a complaint about something else would loop through the repair forever.
+func TestTheEffortRepairMapsByRankAndNeverLoops(t *testing.T) {
+	const complaint = `'reasoning_effort' must be one of: 'low', 'high', 'max'`
+	ask := func(effort string) string {
+		repaired, changed := repairReasoningEffort([]byte(`{"model":"x","reasoning_effort":"`+effort+`","messages":[]}`), []byte(`{"error":{"message":"`+complaint+`"}}`))
+		if !changed {
+			t.Fatalf("%q was not repaired", effort)
+		}
+		var payload map[string]any
+		_ = json.Unmarshal(repaired, &payload)
+		mapped, _ := payload["reasoning_effort"].(string)
+		return mapped
+	}
+	if got := ask("medium"); got != "low" {
+		t.Fatalf("medium mapped to %q, want low", got)
+	}
+	if got := ask("xhigh"); got != "high" {
+		t.Fatalf("xhigh mapped to %q, want high", got)
+	}
+	if got := ask("minimal"); got != "low" {
+		t.Fatalf("minimal mapped to %q, want the lowest the provider offers", got)
+	}
+	// The ask is on the provider's list: no repair may fire.
+	if _, changed := repairReasoningEffort([]byte(`{"model":"x","reasoning_effort":"max","messages":[]}`), []byte(`{"error":{"message":"`+complaint+`"}}`)); changed {
+		t.Fatal("an accepted effort was rewritten anyway")
+	}
+	// A complaint that names no list cannot be mapped: the field is dropped
+	// so the provider's own default decides, and the turn survives.
+	repaired, changed := repairReasoningEffort([]byte(`{"model":"x","reasoning_effort":"medium","messages":[]}`), []byte(`{"error":{"message":"reasoning_effort is not supported"}}`))
+	if !changed || strings.Contains(string(repaired), "reasoning_effort") {
+		t.Fatalf("a listless complaint did not drop the field: %s", repaired)
+	}
+	// An effort spelling this relay does not rank is dropped, not guessed.
+	repaired, changed = repairReasoningEffort([]byte(`{"model":"x","reasoning_effort":"turbo","messages":[]}`), []byte(`{"error":{"message":"`+complaint+`"}}`))
+	if !changed || strings.Contains(string(repaired), "turbo") {
+		t.Fatalf("an unrankable spelling was not dropped: %s", repaired)
+	}
+	// Complaints about other fields leave the request alone.
+	if _, changed := repairReasoningEffort([]byte(`{"model":"x","reasoning_effort":"medium","messages":[]}`), []byte(`{"error":{"message":"seed is unsupported"}}`)); changed {
+		t.Fatal("an unrelated complaint rewrote the effort")
+	}
+}
+
 // A 400 the relay cannot explain must reach the client immediately.
 func TestUnrelatedBadRequestIsNotRetried(t *testing.T) {
 	attempts := 0

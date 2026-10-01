@@ -9,13 +9,15 @@ import (
 	"path/filepath"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/atomicfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/domain"
 )
 
 // Store keeps the price catalog as a plain JSON file. Prices are market
 // rates, not secrets: they carry no credential, no endpoint, no identity —
 // the same reason the backup slice writes them in the clear. The write is
-// atomic (temp file, rename), so a crash never leaves half a catalog.
+// atomic and durable (temp, fsync, rename), so neither a crash nor a power
+// loss leaves half a catalog.
 type Store struct{ path string }
 
 type document struct {
@@ -70,16 +72,12 @@ func (store *Store) Save(_ context.Context, catalog domain.Catalog) error {
 	if err != nil {
 		return fmt.Errorf("%w: encode failed", domain.ErrCatalogUnreadable)
 	}
-	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
-		return fmt.Errorf("%w: mkdir failed", domain.ErrCatalogUnreadable)
-	}
-	temp := store.path + ".tmp"
-	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
+	// The platform's atomic writer (temp + fsync + rename, MOVEFILE_WRITE_THROUGH
+	// on Windows): the price catalog is human-diffed and tool-compared, and a
+	// power-loss mid-write must not cost the last edit — the hand-rolled
+	// temp+rename here was atomic against crashes but not against power.
+	if err := atomicfile.Replace(store.path, encoded, 0o600); err != nil {
 		return fmt.Errorf("%w: write failed", domain.ErrCatalogUnreadable)
-	}
-	if err := os.Rename(temp, store.path); err != nil {
-		os.Remove(temp)
-		return fmt.Errorf("%w: replace failed", domain.ErrCatalogUnreadable)
 	}
 	return nil
 }

@@ -7,6 +7,11 @@
   --bg-hover: #2c2c2c;
   --bg-selected: #26313d;
   --bg-nav-selected: #262626;
+  /* The field vocabulary: the tinted controls (inputs, selects, textareas) that
+   * sit one step below a surface. Kept as tokens because the forms of six
+   * workspaces had drifted into five near-identical private spellings of each. */
+  --bg-field: #252525;
+  --border-field: #565656;
   --border-subtle: #303030;
   --border-strong: #444444;
   --border-focus: #709bc7;
@@ -14,6 +19,12 @@
   --text-secondary: #c7c7c7;
   --text-muted: #8c8c8c;
   --text-disabled: #626262;
+  /* Danger as TEXT (soft rose), distinct from --status-danger fills: tables and
+   * error lists read in it, and four private spellings had drifted apart. */
+  --text-danger: #ffaaa4;
+  /* The accent blue for inline links and clickable literals. Three private
+   * spellings existed within four rgb points of one another. */
+  --accent-blue: #74a1d0;
   --action-primary: #eeeeee;
   --action-hover: #ffffff;
   --action-pressed: #d8d8d8;
@@ -150,7 +161,7 @@ h1 {
 }
 
 .button:hover:not(:disabled) {
-  border-color: #565656;
+  border-color: var(--border-field);
   background: var(--bg-hover);
   box-shadow: inset 0 1px rgb(255 255 255 / 4%);
 }
@@ -184,7 +195,7 @@ h1 {
 
 .button-danger {
   border-color: color-mix(in srgb, var(--status-danger) 62%, var(--border-strong));
-  color: #f3aaa5;
+  color: var(--text-danger);
   background: color-mix(in srgb, var(--status-danger) 6%, transparent);
 }
 

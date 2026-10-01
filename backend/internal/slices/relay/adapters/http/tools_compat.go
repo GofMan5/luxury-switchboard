@@ -452,8 +452,9 @@ func downgradeFreeformTools(body []byte) ([]byte, bool) {
 	return downgraded, true
 }
 
-// stripEncryptedReasoning removes the reasoning history a Responses client
-// replays, together with the include entry that asks for it.
+// stripEncryptedReasoning unseals the reasoning history a Responses client
+// replays — the encrypted blob leaves, the item stays — together with the
+// include entry that asks for it.
 //
 // Encrypted reasoning is sealed for the account that produced it. The relay
 // rotates keys per attempt and providers pool accounts of their own, so the very
@@ -462,9 +463,12 @@ func downgradeFreeformTools(body []byte) ([]byte, bool) {
 // reasoning and always succeeds; every follow-up dies, which is why an agent
 // appears to run one tool and then start narrating instead of acting.
 //
-// Dropping it costs the model its private chain of thought from earlier turns; the
-// summaries, the tool calls and their outputs all survive, so the turn continues.
-// That is strictly better than a turn that never happens.
+// Only the seal is removed. Dropping the whole item used to take the plaintext
+// summary with it — the only surviving account of the earlier turns — so every
+// follow-up after the repair answered a conversation it no longer remembered
+// anything about, while this comment and the README both said the summaries
+// survive. The summary is unsealed text about the turn, not a sealed blob, and
+// the provider that refused the seal reads it fine.
 func stripEncryptedReasoning(body []byte) ([]byte, bool) {
 	if !bytes.Contains(body, []byte("encrypted_content")) {
 		return body, false
@@ -480,16 +484,24 @@ func stripEncryptedReasoning(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	kept := make([]any, 0, len(input))
+	modified := false
 	for _, entry := range input {
 		item, _ := entry.(map[string]any)
 		if item != nil && item["type"] == "reasoning" {
 			if _, sealed := item["encrypted_content"]; sealed {
+				unsealed := make(map[string]any, len(item))
+				for key, value := range item {
+					unsealed[key] = value
+				}
+				delete(unsealed, "encrypted_content")
+				kept = append(kept, unsealed)
+				modified = true
 				continue
 			}
 		}
 		kept = append(kept, entry)
 	}
-	if len(kept) == len(input) {
+	if !modified {
 		return body, false
 	}
 	payload["input"] = kept
@@ -497,6 +509,7 @@ func stripEncryptedReasoning(body []byte) ([]byte, bool) {
 		remaining := make([]any, 0, len(include))
 		for _, entry := range include {
 			if name, _ := entry.(string); name == "reasoning.encrypted_content" {
+				modified = true
 				continue
 			}
 			remaining = append(remaining, entry)
@@ -570,8 +583,13 @@ func restoreClientToolCalls(body []byte, compat toolCompat, path string, eventSt
 		return body
 	}
 	// Most streams need no repair at all; one scan for the only two triggers keeps
-	// them from being split and reassembled for nothing.
-	if compat.empty() && !bytes.Contains(body, []byte("response.output_item.added")) && !bytes.Contains(body, []byte("response.output_text.delta")) {
+	// them from being split and reassembled for nothing. The scan runs on the
+	// DEFRAMED bytes — framing removed — because a provider may split one event
+	// across several `data:` lines, and the trigger literal split that way is
+	// invisible to a raw scan while being the one thing the repair exists for.
+	// A false positive from the deframing is inert: the full repair joins the
+	// lines properly and changes nothing.
+	if compat.empty() && !streamAnnouncesRepairableEvents(body) {
 		return body
 	}
 	if !eventStream {
@@ -939,18 +957,66 @@ func restoreResponseToolCalls(response *http.Response, compat toolCompat, path s
 	}
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
 	eventStream := strings.Contains(contentType, "event-stream")
-	if !eventStream && (compat.empty() || !strings.Contains(contentType, "json")) {
+	// The restore owns only the answers it can repair: a stream by the label
+	// the relay's own buffering produced, a JSON answer, or anything at all
+	// from a client that declared folded tools — those aliases must come back
+	// whatever the provider wrote on the answer. Everything else streams
+	// through untouched: reading it here would buffer file-sized bodies into
+	// memory, and a body past the ceiling or a broken read must not become a
+	// complete-looking partial answer.
+	if !eventStream && !strings.Contains(contentType, "json") && compat.empty() {
 		return
 	}
 	limit := responseBufferLimit(config)
 	buffered, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	response.Body.Close()
-	if err == nil && int64(len(buffered)) <= limit {
-		buffered = restoreClientToolCalls(buffered, compat, path, eventStream)
+	if err != nil || int64(len(buffered)) > limit {
+		// Spliced back exactly the way the guardrail layer splices its
+		// inspection prefix: the bytes stay owned by the original body, the
+		// answer keeps streaming, and a broken read surfaces through the copy
+		// loop instead of being masked as a complete shorter answer.
+		response.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buffered), response.Body), Closer: response.Body}
+		return
 	}
+	response.Body.Close()
+	// The bytes decide the framing, not the label: a raw newline before "data:"
+	// cannot occur inside valid JSON, so a JSON answer labelled text/event-stream
+	// reads as the JSON it is and gets the rewrite the label used to suppress —
+	// and a real stream reads as a stream whatever the provider wrote on it.
+	buffered = restoreClientToolCalls(buffered, compat, path, bodyLooksLikeEventStream(buffered))
 	response.Body = io.NopCloser(bytes.NewReader(buffered))
 	response.ContentLength = int64(len(buffered))
 	if response.Header.Get("Content-Length") != "" {
 		response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
 	}
+}
+
+// streamAnnouncesRepairableEvents reports whether an SSE body carries either
+// of the two lifecycles the repair owns. The scan strips the framing first —
+// the `data:` marker with or without its space, then every newline, with
+// \r\n and a bare \r normalized the way the repair itself reads them — so a
+// type literal split across several data lines of one event becomes
+// contiguous again: exactly the shape the W3C allows and the repair must not
+// miss. A false positive from the deframing is inert: the full repair joins
+// the lines properly and changes nothing.
+func streamAnnouncesRepairableEvents(body []byte) bool {
+	deframed := bytes.ReplaceAll(body, []byte("data: "), nil)
+	deframed = bytes.ReplaceAll(deframed, []byte("data:"), nil)
+	deframed = bytes.ReplaceAll(deframed, []byte("\r\n"), []byte("\n"))
+	deframed = bytes.ReplaceAll(deframed, []byte("\r"), []byte("\n"))
+	deframed = bytes.ReplaceAll(deframed, []byte("\n"), nil)
+	return bytes.Contains(deframed, []byte("response.output_item.added")) ||
+		bytes.Contains(deframed, []byte("response.output_text.delta"))
+}
+
+// bodyLooksLikeEventStream reports whether the bytes themselves carry SSE
+// framing: a line that opens a data field. A JSON string can contain a newline
+// followed by "data:", but a false positive is inert — the repair only ever
+// rewrites blocks whose lines open with `data:`, so a JSON body passes through
+// untouched — while a false negative skips the repair on a real stream, which
+// is the direction that loses tool names.
+func bodyLooksLikeEventStream(body []byte) bool {
+	if bytes.HasPrefix(bytes.TrimLeft(body, " \t\r\n"), []byte("data:")) {
+		return true
+	}
+	return bytes.Contains(body, []byte("\ndata:"))
 }

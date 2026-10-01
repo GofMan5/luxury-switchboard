@@ -2,8 +2,9 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ServicesContext, type AppServices } from '../../../app/services'
 import type { Settings } from '../domain/settings'
-import { SettingsForm } from './SettingsPage'
+import { BackupPanel, SettingsForm } from './SettingsPage'
 
 // Auto-cleanup needs vitest globals, which this project does not enable, so each
 // render is torn down explicitly. Without it a later query matches two forms.
@@ -82,5 +83,73 @@ describe('SettingsForm', () => {
     )
     fireEvent.click(screen.getByRole('button', { name: 'Restart now' }))
     expect(onRestart).toHaveBeenCalledOnce()
+  })
+})
+
+// A store with the backup model's public surface: the panel's contract is that
+// it re-renders when the store notifies, so the fake notifies exactly like the
+// real one and nothing else can carry the update into the tree.
+interface FakeBackupSnapshot {
+  readonly exporting: boolean
+  readonly importing: boolean
+  readonly lastExportPath: string
+  readonly lastReport: object | null
+  readonly error: string
+}
+
+class FakeBackupStore {
+  #listeners = new Set<() => void>()
+  #state: FakeBackupSnapshot = { exporting: false, importing: false, lastExportPath: '', lastReport: null, error: '' }
+  #pending: (() => void) | undefined
+  snapshot = (): FakeBackupSnapshot => this.#state
+  subscribe = (listener: () => void): (() => void) => {
+    this.#listeners.add(listener)
+    return () => this.#listeners.delete(listener)
+  }
+  async export(): Promise<string> {
+    this.#set({ ...this.#state, exporting: true })
+    await new Promise<void>((resolve) => { this.#pending = resolve })
+    this.#set({ ...this.#state, exporting: false, lastExportPath: 'C:/backups/switchboard.json' })
+    return 'C:/backups/switchboard.json'
+  }
+  async import(): Promise<object | null> { return null }
+  /** The test decides when the write settles, so the in-flight state is
+   * asserted while it is genuinely in flight. */
+  async settle(): Promise<void> {
+    this.#pending?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  #set(state: FakeBackupSnapshot): void {
+    this.#state = state
+    for (const listener of this.#listeners) listener()
+  }
+}
+
+describe('BackupPanel', () => {
+  it('shows the backup outcome as it happens, not on the next unrelated render', async () => {
+    // The panel used to read one bare snapshot() per render with no
+    // subscription: the model notified, nobody listened, and "Writing…" or the
+    // written-path notice appeared only if some other state happened to
+    // re-render the form. Nothing did, so the feedback never showed at all.
+    const store = new FakeBackupStore()
+    render(
+      <ServicesContext.Provider value={{ backup: store } as unknown as AppServices}>
+        <BackupPanel />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /export backup/i }))
+    // In flight, from the store's own notification:
+    expect((await screen.findByRole('button', { name: /writing…/i }) as HTMLButtonElement).disabled).toBe(true)
+    await store.settle()
+    // Settled, without any other state touching the form:
+    expect(await screen.findByText(/backup written to/i)).toBeTruthy()
+    expect(screen.getByText(/switchboard\.json/)).toBeTruthy()
+    expect((screen.getByRole('button', { name: /export backup/i }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('explains the format when the services context is absent', () => {
+    render(<BackupPanel />)
+    expect(screen.getByText('Plain text, no passphrase')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /export backup/i })).toBeNull()
   })
 })

@@ -3,14 +3,21 @@ name: Build desktop
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  pull_request:
 
 permissions:
   contents: read
 
+# A release tag (or a manual dispatch) builds both editions and uploads the
+# installers. A branch push or a pull request runs the same checks and stops
+# there: a broken bump or an owner command that leaked into the public binary
+# must fail the commit, not the release it was cut for.
 concurrency:
-  group: build-desktop-${{ github.ref }}
+  group: build-desktop-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -51,10 +58,23 @@ jobs:
         with:
           workspaces: src-tauri -> target
       - run: pnpm install --frozen-lockfile
+      - name: Check Go formatting
+        # Cheap and deterministic, so it runs first and only once: a formatting
+        # drift should fail the commit before twenty minutes of tests spend
+        # themselves on it. The definition of done names gofmt alongside vet.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l backend)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-formatted:" && echo "$unformatted"
+            exit 1
+          fi
       - name: Check source
         run: |
           pnpm version:check
           pnpm --dir frontend lint
+          pnpm --dir frontend typecheck
           pnpm --dir frontend test
           go -C backend test ./...
           # The public build tag is where the edition contract test asserts the
@@ -62,6 +82,7 @@ jobs:
           # a command that leaked into the public binary would ship unnoticed.
           go -C backend test -tags public ./...
           go -C backend vet ./...
+          go -C backend vet -tags public ./...
           go -C backend mod verify
           cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Race the concurrent slices
@@ -72,12 +93,15 @@ jobs:
         # the queues, the stdio server and the composition that wires them.
         if: runner.os == 'Linux'
         run: go -C backend test -race ./internal/platform/... ./internal/slices/keypool/... ./internal/slices/relay/... ./internal/slices/analytics/... ./internal/slices/activity/... ./internal/slices/publictunnel/... ./internal/app/...
-      - run: pnpm build
+      - name: Build both editions
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: pnpm build
       # Both edition folders travel, so the upload root is artifacts/ and the
       # download below restores release/ and release-public/ as they were built.
       # Uploading only artifacts/release would silently drop the public
       # installer, and the collect job writes checksums for both editions.
       - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -93,6 +117,7 @@ jobs:
   collect:
     name: One release folder
     needs: build
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5

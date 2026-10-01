@@ -56,6 +56,10 @@ func NewService(history History) *Service {
 // LoadProfiles restores owner decisions so a restart keeps every ban in force.
 // No store means the decisions of every earlier session are unreachable, not that
 // there were none, so this reports it rather than starting with a clean slate.
+// A stored row that cannot be read is counted and reported too: a ban that
+// dropped off the list reads as "never existed", which is the same lie with a
+// different cause — the operator should stop the tunnel and look, not trust a
+// silently partial list.
 func (service *Service) LoadProfiles(ctx context.Context) error {
 	if service.store == nil {
 		return errors.New("client profiles cannot be read")
@@ -65,14 +69,19 @@ func (service *Service) LoadProfiles(ctx context.Context) error {
 		return err
 	}
 	service.mu.Lock()
+	rejected := 0
 	for _, profile := range stored {
 		canonical, err := profile.Canonical()
 		if err != nil || canonical.Empty() {
+			rejected++
 			continue
 		}
 		service.profiles[canonical.IP] = canonical
 	}
 	service.mu.Unlock()
+	if rejected > 0 {
+		return fmt.Errorf("%d stored client profile(s) could not be read", rejected)
+	}
 	return nil
 }
 

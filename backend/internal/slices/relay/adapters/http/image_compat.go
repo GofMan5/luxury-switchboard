@@ -46,6 +46,15 @@ func prepareImageRequest(method, path string, body []byte, contentType, upstream
 			tool[field] = value
 		}
 	}
+	// n travels: a client asking for three pictures must not be answered with
+	// one and a shrug. The answer conversion returns every image the provider
+	// produced, so the count the provider honors is the count the client gets.
+	// response_format does not: the bridge always answers b64_json, because it
+	// has no storage to publish URLs from — the one field the translation
+	// fixes in shape rather than carries.
+	if count, ok := payload["n"]; ok && count != nil {
+		tool["n"] = count
+	}
 	encoded, err := json.Marshal(map[string]any{
 		"model": upstreamModel, "input": prompt, "tools": []any{tool},
 		"stream": true, "store": false,
@@ -60,7 +69,8 @@ func imagesResponse(body []byte) ([]byte, error) {
 	if len(body) == 0 || len(body) > maxImageResponse {
 		return nil, errInvalidImageResponse
 	}
-	image := ""
+	images := []string{}
+	partial := ""
 	created := int64(0)
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -69,32 +79,43 @@ func imagesResponse(body []byte) ([]byte, error) {
 		if responseFailed(value) {
 			return nil, errInvalidImageResponse
 		}
-		image, _ = imageCandidates(value)
+		images, partial = imageCollection(value)
 		created = createdAt(value)
 	} else {
 		var err error
-		image, created, err = sseImage(body)
+		images, partial, created, err = sseImages(body)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if image == "" {
+	if len(images) == 0 && partial == "" {
 		return nil, errInvalidImageResponse
+	}
+	// A partial image stands in for a final one that never arrived; a final
+	// answer with several images is several entries, because the client asked
+	// for n and paid for n.
+	if len(images) == 0 {
+		images = []string{partial}
 	}
 	if created == 0 {
 		created = time.Now().Unix()
 	}
-	encoded, err := json.Marshal(map[string]any{"created": created, "data": []any{map[string]string{"b64_json": image}}})
+	data := make([]any, 0, len(images))
+	for _, image := range images {
+		data = append(data, map[string]string{"b64_json": image})
+	}
+	encoded, err := json.Marshal(map[string]any{"created": created, "data": data})
 	if err != nil {
 		return nil, errInvalidImageResponse
 	}
 	return encoded, nil
 }
 
-func sseImage(body []byte) (string, int64, error) {
+func sseImages(body []byte) ([]string, string, int64, error) {
 	blocks := bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n"))
 	parsed, terminals := false, 0
-	final, partial := "", ""
+	images := []string{}
+	partial := ""
 	created := int64(0)
 	for _, block := range blocks {
 		data := sseData(block)
@@ -109,15 +130,13 @@ func sseImage(body []byte) (string, int64, error) {
 		}
 		parsed = true
 		if responseFailed(value) {
-			return "", 0, errInvalidImageResponse
+			return nil, "", 0, errInvalidImageResponse
 		}
 		if object, ok := value.(map[string]any); ok && object["type"] == "response.completed" {
 			terminals++
 		}
-		candidate, candidatePartial := imageCandidates(value)
-		if len(candidate) > len(final) {
-			final = candidate
-		}
+		candidates, candidatePartial := imageCollection(value)
+		images = append(images, candidates...)
 		if candidatePartial != "" {
 			partial = candidatePartial
 		}
@@ -125,13 +144,10 @@ func sseImage(body []byte) (string, int64, error) {
 			created = createdAt(value)
 		}
 	}
-	if !parsed || terminals != 1 || (final == "" && partial == "") {
-		return "", 0, errInvalidImageResponse
+	if !parsed || terminals != 1 || (len(images) == 0 && partial == "") {
+		return nil, "", 0, errInvalidImageResponse
 	}
-	if final != "" {
-		return final, created, nil
-	}
-	return partial, created, nil
+	return images, partial, created, nil
 }
 
 func sseData(block []byte) []byte {
@@ -178,9 +194,16 @@ func createdAt(value any) int64 {
 	return 0
 }
 
-func imageCandidates(value any) (string, string) {
+// imageCollection walks one decoded value (a buffered answer or one SSE event)
+// and collects every final image it carries, first-seen order, duplicates
+// collapsed: an answer that produced n pictures has n distinct results, and
+// the client asked for exactly that many. The partial preview is reported
+// alongside for the answer that never finished.
+func imageCollection(value any) ([]string, string) {
 	stack := []any{value}
-	final, partial := "", ""
+	finals := make([]string, 0, 1)
+	seen := make(map[string]struct{})
+	partial := ""
 	for visited := 0; len(stack) > 0 && visited < 100000; visited++ {
 		last := len(stack) - 1
 		current := stack[last]
@@ -189,20 +212,36 @@ func imageCandidates(value any) (string, string) {
 		case map[string]any:
 			for key, child := range current {
 				if text, ok := child.(string); ok {
-					if (key == "result" || key == "b64_json") && len(text) > len(final) && validBase64(text) {
-						final = strings.TrimSpace(text)
+					trimmed := strings.TrimSpace(text)
+					if (key == "result" || key == "b64_json") && validBase64(trimmed) {
+						if _, duplicate := seen[trimmed]; !duplicate {
+							seen[trimmed] = struct{}{}
+							finals = append(finals, trimmed)
+						}
 					}
-					if (key == "partial_image" || key == "partial_image_b64") && validBase64(text) {
-						partial = strings.TrimSpace(text)
+					if (key == "partial_image" || key == "partial_image_b64") && validBase64(trimmed) {
+						partial = trimmed
 					}
 				}
 				stack = append(stack, child)
 			}
 		case []any:
-			stack = append(stack, current...)
+			// Prepending the items reversed, so the stack pops them in the
+			// order the provider wrote them: several pictures in one answer
+			// come back the way they were sent, not shuffled by a depth-first
+			// walk. The new stack is built in one allocation: appending onto
+			// items with its own capacity would reallocate per array on a
+			// hostile nested body, and the walk is quadratic before either
+			// budget cap notices.
+			merged := make([]any, 0, len(current)+len(stack))
+			for index := len(current) - 1; index >= 0; index-- {
+				merged = append(merged, current[index])
+			}
+			merged = append(merged, stack...)
+			stack = merged
 		}
 	}
-	return final, partial
+	return finals, partial
 }
 
 func validBase64(value string) bool {

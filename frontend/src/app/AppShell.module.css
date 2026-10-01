@@ -115,7 +115,7 @@
   width: 2px;
   height: 18px;
   border-radius: 2px;
-  background: #74a1d0;
+  background: var(--accent-blue);
   content: '';
   inset-inline-start: 0;
 }

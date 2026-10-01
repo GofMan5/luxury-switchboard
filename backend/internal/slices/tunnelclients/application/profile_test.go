@@ -69,6 +69,37 @@ func TestBansAndNotesSurviveRestartAndStayVisibleWhenIdle(t *testing.T) {
 	}
 }
 
+// An unreadable stored row costs exactly itself: the readable bans still come
+// back into force, and the count of what could not be read is reported — a
+// dropped ban must read as "could not be read", not as "never existed".
+func TestAnUnreadableStoredRowIsReportedButCostsOnlyItself(t *testing.T) {
+	store := newProfileStore()
+	service := NewService(store)
+	if err := service.SetProfile(context.Background(), domain.Profile{IP: "203.0.113.7", Banned: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetProfile(context.Background(), domain.Profile{IP: "198.51.100.4", Banned: true}); err != nil {
+		t.Fatal(err)
+	}
+	// A row the canonicalizer refuses — an address no gateway would report.
+	store.saved["garbage"] = domain.Profile{IP: "not an address at all", Banned: true}
+
+	restarted := NewService(store)
+	err := restarted.LoadProfiles(context.Background())
+	if err == nil {
+		t.Fatal("an unreadable stored row was read as a clean restore")
+	}
+	if !strings.Contains(err.Error(), "1") {
+		t.Fatalf("the report does not name the number of unreadable rows: %v", err)
+	}
+	if !restarted.Banned("203.0.113.7") || !restarted.Banned("198.51.100.4") {
+		t.Fatal("the failure of one row cost the readable bans their force")
+	}
+	if restarted.Banned("not an address at all") {
+		t.Fatal("an uncanonicalizable row became an enforced ban")
+	}
+}
+
 func TestProfileAddressIsStoredExactlyAsTheGatewayReportsIt(t *testing.T) {
 	store := newProfileStore()
 	service := NewService(store)

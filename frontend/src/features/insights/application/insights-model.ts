@@ -7,6 +7,8 @@ export interface InsightsState {
   readonly report: InsightsReport | null
   /** The persisted request rows behind the numbers: the same period, the same honesty. */
   readonly recent: readonly HistoryRequest[]
+  /** How many rows the period actually holds; the list is bounded to one frame. */
+  readonly recentAvailable: number
   readonly prices: readonly ModelPrice[]
   readonly pricesPhase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly error: string
@@ -15,7 +17,7 @@ export interface InsightsState {
 /** Reload the report after a price edit: the cost columns are the point. */
 export class InsightsModel {
   readonly #port: InsightsPort
-  #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], prices: [], pricesPhase: 'idle', error: '' }
+  #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], recentAvailable: 0, prices: [], pricesPhase: 'idle', error: '' }
   #listeners = new Set<() => void>()
   #generation = 0
   constructor(port: InsightsPort) { this.#port = port }
@@ -24,14 +26,14 @@ export class InsightsModel {
 
   async load(period: InsightsPeriod): Promise<void> {
     const generation = ++this.#generation
-    this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, recent: period === this.#state.period ? this.#state.recent : [], error: '' })
+    this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, recent: period === this.#state.period ? this.#state.recent : [], recentAvailable: period === this.#state.period ? this.#state.recentAvailable : 0, error: '' })
     try {
       const [report, recent, prices] = await Promise.all([
         this.#port.report(period),
         this.#port.recent(period),
         this.#state.pricesPhase === 'idle' ? this.#port.prices() : Promise.resolve(this.#state.prices),
       ])
-      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent, prices, pricesPhase: 'ready', error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent: recent.rows, recentAvailable: recent.available, prices, pricesPhase: 'ready', error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Insights are unavailable' })
     }

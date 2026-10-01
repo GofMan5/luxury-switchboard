@@ -15,5 +15,13 @@ __pycache__
 *.db-wal
 *.dpapi
 *.log
+# Key formats .gitignore already refuses: COPY . . would bake a stray one into the build-stage layers the daemon cache keeps.
+*.pem
+*.key
+*.p12
+*.pfx
+model-tunnel*_ed25519*
+id_ed25519*
+id_rsa*
 tui-*.png
 tui-*.svg

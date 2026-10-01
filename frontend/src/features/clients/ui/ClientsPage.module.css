@@ -1,5 +1,5 @@
 .page { min-height: 100%; }
-.error { padding: 10px 28px; color: #ffaaa4; background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
+.error { padding: 10px 28px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
 .metrics { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); overflow: hidden; margin: 18px 28px 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
 .metric { min-width: 0; border-right: 1px solid var(--border-subtle); padding: 15px 18px; }
 .metric:last-child { border-right: 0; }
@@ -30,7 +30,7 @@
 .actions { display: flex; gap: 4px; }
 .actions button { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--border-subtle); border-radius: 6px; color: var(--text-secondary); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast); }
 .actions button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
-.actions button[data-danger]:hover:not(:disabled) { border-color: color-mix(in srgb, var(--status-danger) 55%, var(--border-subtle)); color: #ffaaa4; }
+.actions button[data-danger]:hover:not(:disabled) { border-color: color-mix(in srgb, var(--status-danger) 55%, var(--border-subtle)); color: var(--text-danger); }
 .actions button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .actions button:disabled { opacity: .45; cursor: default; }
 .dialogActions { display: flex; align-items: center; gap: 8px; }

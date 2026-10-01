@@ -20,7 +20,7 @@ function request(id: string): HistoryRequest {
 
 class FakePort implements InsightsPort {
   report = vi.fn(async (period: InsightsPeriod): Promise<InsightsReport> => emptyReport(period))
-  recent = vi.fn(async (period: InsightsPeriod): Promise<readonly HistoryRequest[]> => [request(`r-${period}`)])
+  recent = vi.fn(async (period: InsightsPeriod): Promise<{ rows: readonly HistoryRequest[]; available: number }> => ({ rows: [request(`r-${period}`)], available: 1 }))
   prices = vi.fn(async (): Promise<readonly ModelPrice[]> => [])
   setPrice = vi.fn(async (): Promise<readonly ModelPrice[]> => [])
   removePrice = vi.fn(async (): Promise<readonly ModelPrice[]> => [])
@@ -45,18 +45,26 @@ describe('InsightsModel', () => {
 
   it('clears the stale rows while a new period loads, and keeps them on a plain refresh', async () => {
     await model.load('24h')
-    let release: ((rows: readonly HistoryRequest[]) => void) | undefined
-    const rows = new Promise<readonly HistoryRequest[]>((resolve) => { release = resolve })
+    let release: ((rows: { rows: readonly HistoryRequest[]; available: number }) => void) | undefined
+    const rows = new Promise<{ rows: readonly HistoryRequest[]; available: number }>((resolve) => { release = resolve })
     port.recent.mockImplementationOnce(async () => rows)
     const loading = model.load('48h')
     // The old period's rows must not sit under the new period's label while
     // its own answer is still in flight.
     expect(model.snapshot().recent).toEqual([])
-    release?.([request('r-48h')])
+    release?.({ rows: [request('r-48h')], available: 1 })
     await loading
     expect(model.snapshot().recent[0]?.id).toBe('r-48h')
     await model.load('48h')
     expect(model.snapshot().recent[0]?.id).toBe('r-48h')
+  })
+
+  it('carries the untruncated row count so a short list reads as the newest part', async () => {
+    port.recent.mockResolvedValueOnce({ rows: [request('r-24h')], available: 250 })
+    await model.load('24h')
+    const state = model.snapshot()
+    expect(state.recentAvailable).toBe(250)
+    expect(state.recent.length).toBe(1)
   })
 
   it('answers an error phase without inventing rows', async () => {

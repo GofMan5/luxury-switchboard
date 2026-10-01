@@ -52,7 +52,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
 
   return (
     <div className={styles.shell}>
-      <aside className={styles.sidebar} aria-label="Main navigation">
+      <aside className={styles.sidebar} aria-label="Sidebar">
         <div className={styles.brand}>
           <span className={styles.brandMark} aria-hidden="true">L</span>
           <span className={styles.brandName}>Luxury Switchboard</span>

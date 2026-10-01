@@ -25,7 +25,7 @@ func migrateLegacySettings(logger *log.Logger) {
 	keyPath, keyErr := keydpapi.DefaultPath()
 	routePath, routeErr := routedpapi.DefaultPath()
 	tunnelPath, tunnelErr := tunneldpapi.DefaultPath()
-	if providerErr != nil || keyErr != nil || routeErr != nil || tunnelErr != nil || anyExists(providerPath, keyPath, routePath, tunnelPath) {
+	if providerErr != nil || keyErr != nil || routeErr != nil || tunnelErr != nil {
 		return
 	}
 	legacy, found, err := pythonconfig.LoadDefault()
@@ -36,67 +36,68 @@ func migrateLegacySettings(logger *log.Logger) {
 		return
 	}
 	ctx := context.Background()
-	suffix := ".migration-" + strconv.Itoa(os.Getpid())
-	providerTemp, keyTemp, routeTemp, tunnelTemp := providerPath+suffix, keyPath+suffix, routePath+suffix, tunnelPath+suffix
-	temporary := []string{providerTemp, keyTemp, routeTemp, tunnelTemp}
-	defer func() {
-		for _, path := range temporary {
-			_ = os.Remove(path)
-		}
-	}()
-	if err := providerdpapi.New(providerTemp).Save(ctx, providerapp.SavedState{Providers: legacy.Providers, ActiveID: legacy.ActiveID}); err != nil {
-		logger.Printf("legacy settings could not be imported")
-		return
+	// The publish is per-file (importEachMissing below), and deliberately so.
+	// An all-or-nothing rename sequence left a crash between renames
+	// half-done forever: this gate used to answer "a destination exists" with
+	// "never migrate again", so the files a crash HAD landed barred the ones
+	// it never wrote from ever arriving — the operator kept half a migration
+	// with no way to finish it. importEachMissing skips what already landed
+	// and goes silent when nothing is missing, so a fully migrated install
+	// stays a no-op; a half-migrated one completes.
+	destinations := []migrationDestination{
+		{providerPath, func(temp string) error {
+			return providerdpapi.New(temp).Save(ctx, providerapp.SavedState{Providers: legacy.Providers, ActiveID: legacy.ActiveID})
+		}},
+		{keyPath, func(temp string) error { return keydpapi.New(temp).Save(ctx, legacy.Keys) }},
+		{routePath, func(temp string) error { return routedpapi.New(temp).Save(ctx, legacy.Routes) }},
 	}
-	if err := keydpapi.New(keyTemp).Save(ctx, legacy.Keys); err != nil {
-		logger.Printf("legacy settings import was incomplete")
-		return
-	}
-	if err := routedpapi.New(routeTemp).Save(ctx, legacy.Routes); err != nil {
-		logger.Printf("legacy settings import was incomplete")
-		return
-	}
-	files := []stagedMigration{{providerTemp, providerPath}, {keyTemp, keyPath}, {routeTemp, routePath}}
 	if legacy.HasTunnel {
-		if err := tunneldpapi.New(tunnelTemp).Save(ctx, legacy.Tunnel); err != nil {
-			logger.Printf("legacy settings import was incomplete")
-			return
-		}
-		files = append(files, stagedMigration{tunnelTemp, tunnelPath})
+		destinations = append(destinations, migrationDestination{tunnelPath, func(temp string) error {
+			return tunneldpapi.New(temp).Save(ctx, legacy.Tunnel)
+		}})
 	}
-	if err := publishMigration(files); err != nil {
-		logger.Printf("legacy settings import was incomplete")
+	importEachMissing(logger, destinations)
+}
+
+// migrationDestination is one file the legacy import still owes: where it must
+// land and how to write its staged copy.
+type migrationDestination struct {
+	final string
+	save  func(temp string) error
+}
+
+// importEachMissing publishes every destination that has not landed yet, one
+// file at a time. A failure costs exactly the file it happened on: the run
+// logs it and moves to the next, because the previous all-or-nothing sequence
+// is what stranded half a migration forever — anyExists then saw the files
+// that HAD landed and refused to run again, so the ones the same crash never
+// wrote were never coming.
+func importEachMissing(logger *log.Logger, destinations []migrationDestination) {
+	imported, attempted := 0, 0
+	for _, destination := range destinations {
+		if _, err := os.Stat(destination.final); err == nil || !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		attempted++
+		temp := destination.final + ".migration-" + strconv.Itoa(os.Getpid())
+		if err := destination.save(temp); err != nil {
+			_ = os.Remove(temp)
+			logger.Printf("legacy settings import was incomplete")
+			continue
+		}
+		if err := os.Rename(temp, destination.final); err != nil {
+			_ = os.Remove(temp)
+			logger.Printf("legacy settings import was incomplete")
+			continue
+		}
+		imported++
+	}
+	if attempted == 0 {
 		return
 	}
-	logger.Printf("legacy settings imported into encrypted Go storage")
-}
-
-type stagedMigration struct{ temporary, final string }
-
-func publishMigration(files []stagedMigration) error {
-	for _, file := range files {
-		if _, err := os.Stat(file.final); err == nil || !errors.Is(err, os.ErrNotExist) {
-			return errors.New("migration destination already exists")
-		}
+	if imported == attempted {
+		logger.Printf("legacy settings imported into encrypted Go storage")
+	} else {
+		logger.Printf("legacy settings partially imported; the rest retries on the next launch")
 	}
-	published := make([]string, 0, len(files))
-	for _, file := range files {
-		if err := os.Rename(file.temporary, file.final); err != nil {
-			for _, path := range published {
-				_ = os.Remove(path)
-			}
-			return err
-		}
-		published = append(published, file.final)
-	}
-	return nil
-}
-
-func anyExists(paths ...string) bool {
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
-			return true
-		}
-	}
-	return false
 }

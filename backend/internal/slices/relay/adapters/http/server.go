@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	keypooldomain "github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/relay/domain"
 )
@@ -280,6 +281,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			declareBetaFeature(upstreamRequest.Header, extendedCacheTTLBeta)
 		}
 	}
+	// The path this request starts on: whatever the entry translations above
+	// chose, before requestWithRetry rewrites it in place. A guardrail re-roll
+	// restores it, because the retry ladder can only re-derive a translation
+	// from the path it started on.
+	entryPath := upstreamRequest.URL.Path
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Method: request.Method, Path: request.URL.Path, BytesIn: int64(len(body)),
@@ -358,6 +364,23 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// answer was still generated and still billed, so those tokens are kept.
 		errorCode = ""
 		errorDetail = ""
+		// A re-roll is a fresh request, not the tail of the attempt that was refused.
+		// The non-streaming fallback flips bufferTerminal for the rest of ONE attempt;
+		// leaving it flipped ran the re-roll as a non-stream request while the body
+		// still said stream:true, so a gateway that answers JSON to that body went raw
+		// into the committed text/event-stream — no terminal event, a client hanging
+		// on a lifecycle that never ends, and an SSE answer failing JSON parsing with
+		// no fallback counter left to rescue it. The same rule restores the entry
+		// path and the entry dialect flag: an attempt that discovered a chat-only
+		// gateway translated its body and rewrote the upstream path in place, and
+		// the re-roll used to re-send the ORIGINAL Responses body to the REWRITTEN
+		// chat path — a payload the chat endpoint can only refuse, on a path the
+		// discovery trigger no longer matches. Restoring the entry path lets the
+		// ladder re-derive the translation exactly as the first attempt did.
+		bufferTerminal = clientStream || imageCompat || chatCompat
+		upstreamRequest.URL.Path = entryPath
+		upstreamRequest.URL.RawPath = ""
+		chatActive = chatCompat
 		refusedUsage := usage
 		if clientStream {
 			response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
@@ -394,21 +417,21 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		switch {
 		case terminal == terminalRefused:
 			errorCode = "policy_refusal"
-			errorDetail = responseErrorDetail(response, "Provider response was refused", secrets)
+			errorDetail = filedErrorDetail(response, "Provider response was refused", secrets, body)
 		case terminal == "response.incomplete":
 			errorCode = "stream_incomplete"
-			errorDetail = responseErrorDetail(response, "Provider stream ended incomplete", secrets)
+			errorDetail = filedErrorDetail(response, "Provider stream ended incomplete", secrets, body)
 		case terminal == "response.failed":
 			errorCode = "upstream_status"
-			errorDetail = responseErrorDetail(response, "Provider reported a failed response", secrets)
+			errorDetail = filedErrorDetail(response, "Provider reported a failed response", secrets, body)
 		case status >= 400:
 			errorCode = "request_rejected"
 			// Prefer the provider's own words when it gave any; the fallback
 			// below only covers verdicts without a readable body (429s, empty
 			// answers). The client still receives the neutral error body.
-			errorDetail = truncateErrorDetail(redactSecrets(upstreamDetail, secrets))
+			errorDetail = upstreamErrorDetail(upstreamDetail, secrets, body)
 			if errorDetail == "" {
-				errorDetail = responseErrorDetail(response, fmt.Sprintf("provider returned HTTP %d", status), secrets)
+				errorDetail = filedErrorDetail(response, fmt.Sprintf("provider returned HTTP %d", status), secrets, body)
 			}
 		}
 		if status >= 400 && committed {
@@ -483,6 +506,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		code, blocked := server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
 			ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
 			ClientDeclaredTools: clientDeclaredTools,
+			// The markers of the credential in flight, so a provider that echoes
+			// the key it was sent does not get it recorded as evidence: the
+			// findings page shows excerpts of the answer, and an excerpt is the
+			// answer.
+			Secrets: secrets,
 		})
 		if !blocked {
 			break
@@ -497,6 +525,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				cancelled = true
 				errorCode = "cancelled"
 				errorDetail = waitErr.Error()
+				// Every other exit on a committed stream ends it in the
+				// dialect the client opened: headers went out with the first
+				// byte, and silence after them hangs a lifecycle-watching
+				// caller instead of failing it.
+				if committed {
+					writeStreamFailure(writer, request.URL.Path, model)
+				}
 				return
 			}
 			continue
@@ -563,9 +598,12 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if err != nil || !strings.HasPrefix(urlValue.Path, "/") {
 		return relayapp.DispatchResponse{}, errors.New("invalid dispatch path")
 	}
-	// Same ownership rule as ServeHTTP: the upstream request carries its own URL,
-	// because requestWithRetry rewrites the path in place and urlValue.Path is what
-	// tells restoreClientToolCalls which dialect the caller asked for.
+	// Same ownership rule as ServeHTTP: the upstream request carries its own
+	// URL because requestWithRetry rewrites the path in place. The caller's
+	// own request.Path — not this rewritten one — is what tells the tool
+	// restore which dialect the caller asked for: an image dispatch rewrites
+	// the upstream path to /v1/responses, and the restore must not read that
+	// as a Responses caller.
 	targetURL := *urlValue
 	incoming := &http.Request{Method: request.Method, URL: &targetURL, Header: request.Headers.Clone()}
 	streamRequested := requiresStreamTerminal(incoming, request.Body)
@@ -673,13 +711,21 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	terminal := response.Header.Get("X-Switchboard-Terminal")
 	removeUsageHeaders(response.Header)
 	response.Header.Del("X-Switchboard-Terminal")
-	responseBody = restoreClientToolCalls(responseBody, clientTools, urlValue.Path, strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "event-stream"))
+	// The label is not evidence about the bytes (see bodyLooksLikeEventStream),
+	// and the dialect is decided by the caller's path, not the rewritten
+	// upstream one: a dispatch answer that is an event stream under a json
+	// label still gets the stream repair, and a json body under a stream label
+	// the rewrite.
+	responseBody = restoreClientToolCalls(responseBody, clientTools, request.Path, bodyLooksLikeEventStream(responseBody))
 	// Tunnel traffic reaches the relay through here, so the same review protects it.
 	// A refusal leaves as a plain dispatch error, which every public caller already
 	// receives as one neutral message.
 	if code, blocked := server.reviewBody(responseBody, response.Header.Get("Content-Type"), response.StatusCode, relayapp.GuardrailSubject{
 		ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: request.PublicModel,
 		ClientDeclaredTools: clientDeclaredTools,
+		// Same rule as the local path: the markers travel so the journal can
+		// scrub an echoed key out of the evidence it keeps.
+		Secrets: markers,
 	}); blocked {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, ErrorCode: code, ErrorDetail: code,
@@ -695,11 +741,14 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if response.StatusCode >= 400 {
 		dispatchError = "request_rejected"
 		// Same rule as the local path above: the provider's own words when it
-		// gave any, redacted with the attempt's markers before filing. The
-		// dispatch body itself stays neutral.
-		dispatchDetail = truncateErrorDetail(redactSecrets(upstreamDetail, markers))
+		// gave any — reason extracted, secrets and request echoes scrubbed
+		// before filing. The dispatch body itself stays neutral.
+		dispatchDetail = upstreamErrorDetail(upstreamDetail, markers, body)
 		if dispatchDetail == "" {
-			dispatchDetail = jsonErrorDetail(responseBody, markers)
+			// Unbounded first, scrub, bound last — the same order the local
+			// path files in: a truncated prefix of a quoted prompt is exactly
+			// the leak that order exists to prevent.
+			dispatchDetail = truncateErrorDetail(redactRequestEchoes(jsonErrorDetailUnbounded(responseBody, markers), body))
 		}
 		if dispatchDetail == "" {
 			dispatchDetail = fmt.Sprintf("provider returned HTTP %d", response.StatusCode)
@@ -857,7 +906,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if chatActive != nil && *chatActive {
 					ssePath = defaultChatCompletionsPath
 				}
-				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config)
+				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config, chatActive != nil && *chatActive)
 				if bufferErr != nil {
 					outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport}
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
@@ -922,7 +971,16 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				}
 				response.Body = io.NopCloser(bytes.NewReader(buffered))
 				response.ContentLength = -1
-				response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+				// The label must tell the truth about the bytes even before
+				// the chat conversion rewrites them: a chat JSON answer
+				// labelled as an event stream is the one lie the guardrail
+				// layer has been promised never to see, and this branch is
+				// the only place that could have written it.
+				if terminal == "chat.completed" {
+					response.Header.Set("Content-Type", "application/json")
+				} else {
+					response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+				}
 				response.Header.Del("Content-Length")
 				response.Header.Del("Content-Encoding")
 				response.Header.Set("X-Switchboard-Terminal", terminal)
@@ -1097,6 +1155,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// request for thirty minutes on a dead upstream.
 		if status >= 500 && (serviceOverloaded(failureText) || gatewayCongestion(status)) {
 			congestionAnswers++
+			// The lease is finished once, before both exits this branch owns:
+			// the `continue` past a failover switch used to skip it entirely —
+			// the one bookkeeping path the pool has for what the key lived
+			// through, lost exactly on the flagship flapping feature.
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			if congestionAnswers >= 3 {
 				// Three congestion answers in one request is a provider
 				// saying "not now" faster than the backoff can wait it out —
@@ -1110,7 +1173,6 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				}
 			}
 			delay := retryDelay(attempt, response, server.config)
-			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
@@ -1552,8 +1614,12 @@ func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
 	if rawURL == "" {
 		return server.client, nil
 	}
+	// The scheme list is the keypool domain's own contract, named once there:
+	// the relay's transport, the key's write-time validation and the pool
+	// check accept exactly the same forwarding schemes, and three
+	// hand-maintained copies of one rule drift.
 	proxyURL, err := url.Parse(rawURL)
-	if err != nil || proxyURL.Host == "" || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https" && proxyURL.Scheme != "socks5" && proxyURL.Scheme != "socks5h") {
+	if err != nil || proxyURL.Host == "" || !keypooldomain.ProxySchemeAllowed(proxyURL.Scheme) {
 		return nil, errors.New("invalid credential proxy")
 	}
 	server.mu.Lock()
@@ -1729,7 +1795,7 @@ type bodyRead struct {
 	err   error
 }
 
-func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config) (string, []byte, relayapp.TokenUsage, error) {
+func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool) (string, []byte, relayapp.TokenUsage, error) {
 	defer response.Body.Close()
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
@@ -1801,10 +1867,47 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 					}
 					return inspector.reason(), buffered, inspector.usage, nil
 				}
+				// An aggregator that ignores the stream flag answers the request
+				// as one JSON chat completion. That body is the answer, not a
+				// broken stream: treating it as one retried a complete answer
+				// into the ground — the request died after a minute of attempts
+				// with the answer in hand the whole time. It is accepted only in
+				// the translated dialect, where the chat conversion above turns
+				// it into whichever framing the caller opened the connection in;
+				// outside it (a native caller, a dialect-mismatched answer) a
+				// JSON body under this branch's event-stream label is a lie the
+				// guardrails would trust, and the answer is safer dead in the
+				// retry ladder than delivered uninspected.
+				if terminal, usage, complete := chatCompletionBody(buffered); complete && chatDialect {
+					return terminal, buffered, usage, nil
+				}
 				return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
 			}
 		}
 	}
+}
+
+// chatCompletionBody reports a buffered answer that is a complete chat
+// completion: one JSON object carrying choices. The usage is read from the
+// same body, because no SSE event ever carried it.
+func chatCompletionBody(buffered []byte) (string, relayapp.TokenUsage, bool) {
+	trimmed := bytes.TrimSpace(buffered)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return "", relayapp.TokenUsage{}, false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil || payload == nil {
+		return "", relayapp.TokenUsage{}, false
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return "", relayapp.TokenUsage{}, false
+	}
+	if choices, ok := payload["choices"].([]any); !ok || len(choices) == 0 {
+		return "", relayapp.TokenUsage{}, false
+	}
+	return "chat.completed", usageFromJSON(trimmed), true
 }
 
 func bufferJSONResponse(ctx context.Context, response *http.Response, config Config) ([]byte, error) {
@@ -2323,16 +2426,48 @@ func refusalText(payload map[string]any) string {
 
 // freeformToolRejected reports a refusal aimed at the freeform ("custom") tool
 // type rather than at the request in general. Only a complaint that names the
-// type or its grammar counts: a wrong guess would downgrade the tools of a
-// provider that supports them, and the model would lose the grammar its payload
-// has to follow.
+// type in tool-shaped company counts — "custom" beside tool, type, format,
+// input_schema or a declaration of the word itself: a wrong guess would
+// downgrade the tools of a provider that supports them, and the model would
+// lose the grammar its payload has to follow. A bare "custom" used to count,
+// and a provider complaining about custom instructions or a custom alias
+// spent a downgrade it never earned.
 func freeformToolRejected(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false
 	}
 	text := strings.ToLower(string(errorBody))
 	for _, marker := range []string{"custom", "freeform", "grammar", "lark"} {
-		if strings.Contains(text, marker) {
+		position := 0
+		for {
+			found := strings.Index(text[position:], marker)
+			if found < 0 {
+				break
+			}
+			at := position + found
+			if markerInToolContext(text, at, len(marker)) {
+				return true
+			}
+			position = at + len(marker)
+		}
+	}
+	return false
+}
+
+// markerInToolContext reports whether the marker at text[at:] sits in wording
+// that talks about a tool: one of the tool-shaped words within a bounded
+// neighborhood of it. "Unsupported tool type: custom" carries both, and so
+// does "custom tool type is not supported"; an error about custom
+// instructions or a custom alias carries only the marker and does not count.
+// "type" is deliberately not on the neighbor list: it is a field of the
+// standard error envelope ("type":"invalid_request_error"), so counting it
+// would let the envelope re-open the door the words were chosen to close.
+func markerInToolContext(text string, at, length int) bool {
+	const window = 64
+	low := max(at-window, 0)
+	high := min(at+length+window, len(text))
+	for _, neighbor := range []string{"tool", "format", "input_schema", "function"} {
+		if strings.Contains(text[low:high], neighbor) {
 			return true
 		}
 	}
@@ -2873,6 +3008,28 @@ func responseErrorDetail(response *http.Response, fallback string, secrets []str
 	return fallback
 }
 
+// filedErrorDetail reads the reason out of a terminal answer the way the SSE
+// path files it — scalar extraction, secrets redacted — and applies the same
+// request-echo scrub the 4xx path applies, before the rune bound, so a long
+// quoted prompt is scrubbed whole rather than truncated into an unmatchable
+// prefix. A provider that quotes the caller's request inside its failure
+// message does not get to file the quote.
+func filedErrorDetail(response *http.Response, fallback string, secrets []string, requestBody []byte) string {
+	if response == nil || response.Body == nil {
+		return fallback
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	response.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(body), response.Body), Closer: response.Body}
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return fallback
+	}
+	detail := terminalErrorDetailUnbounded(body, secrets)
+	if detail == "" {
+		detail = fallback
+	}
+	return truncateErrorDetail(redactRequestEchoes(detail, requestBody))
+}
+
 func terminalErrorDetail(body []byte, secrets []string) string {
 	for _, block := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
 		data := sseData(block)
@@ -2884,6 +3041,23 @@ func terminalErrorDetail(body []byte, secrets []string) string {
 		}
 	}
 	return jsonErrorDetail(body, secrets)
+}
+
+// terminalErrorDetailUnbounded is the same walk without the rune bound, for
+// the filing paths that scrub request echoes before they bound: a quoted
+// prompt longer than the budget would otherwise truncate into a prefix no
+// exact match can reach.
+func terminalErrorDetailUnbounded(body []byte, secrets []string) string {
+	for _, block := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+		data := sseData(block)
+		if len(data) == 0 {
+			continue
+		}
+		if detail := jsonErrorDetailUnbounded(data, secrets); detail != "" {
+			return detail
+		}
+	}
+	return jsonErrorDetailUnbounded(body, secrets)
 }
 
 // maxErrorDetailRunes bounds the provider text filed in activity history. It
@@ -2901,12 +3075,12 @@ const redactedSecret = "[redacted]"
 const minSecretMatchBytes = 8
 
 // noteUpstreamDetail keeps the terminal failure's raw upstream body for the
-// call that ends on it. No extract, no field filter: every error the provider
-// answered travels — a code, a message, a reseller envelope, plain prose. It
-// always overwrites, even with an empty body: a later attempt that answered
-// unreadably must not leave an earlier attempt's words filed as this
-// request's reason. Redaction and the rune bound apply at the boundary before
-// filing, never here.
+// call that ends on it: a code, a message, a reseller envelope, plain prose —
+// whatever the provider answered, unfiltered. It always overwrites, even with
+// an empty body: a later attempt that answered unreadably must not leave an
+// earlier attempt's words filed as this request's reason. What travels further
+// is decided at the boundary, never here: the filing path extracts the reason
+// and scrubs secrets and request echoes before history sees a byte.
 func noteUpstreamDetail(into *string, body []byte) {
 	if into == nil {
 		return
@@ -2914,7 +3088,89 @@ func noteUpstreamDetail(into *string, body []byte) {
 	*into = strings.TrimSpace(string(body))
 }
 
+// upstreamErrorDetail files the provider's own words for a failed request,
+// the same way the terminal path files them: a structured answer contributes
+// only its reason — code, message, incomplete_details — and a prose answer
+// travels as prose. The raw body used to be filed whole, and providers answer
+// a rejected request by quoting it back — param objects, debug fields, whole
+// bodies, and the offending value inside the message itself. The reason is
+// the operator's to read; the request is the caller's, and it does not become
+// history because a provider chose to repeat it, so whatever the request
+// contained is scrubbed out — BEFORE the rune bound, because a quote longer
+// than the remaining budget would leave a prefix no exact match can ever
+// reach, and a half-prompt in history is the leak this whole function exists
+// to stop.
+func upstreamErrorDetail(raw string, secrets []string, requestBody []byte) string {
+	detail := jsonErrorDetailUnbounded([]byte(raw), secrets)
+	if detail == "" {
+		detail = redactSecrets(raw, secrets)
+	}
+	detail = redactRequestEchoes(detail, requestBody)
+	return truncateErrorDetail(detail)
+}
+
+// requestEchoRedaction replaces a fragment of the caller's request inside a
+// filed reason. The word says what was removed without repeating it.
+const requestEchoRedaction = "[request]"
+
+// minRequestEchoBytes is the shortest request fragment worth scrubbing out of
+// a filed reason. Shorter strings are model ids, codes and ordinary words, and
+// editing those out would leave the reason unreadable; prompt sentences are
+// what the scrub exists for, and they are longer.
+const minRequestEchoBytes = 24
+
+// redactRequestEchoes removes fragments of the caller's request from a reason
+// about to be filed. A body that does not parse leaves the reason alone: the
+// scrub failing open costs a quote surviving in an already-extracted reason,
+// while failing closed would cost the reason itself.
+func redactRequestEchoes(detail string, requestBody []byte) string {
+	if len(detail) == 0 || len(requestBody) == 0 {
+		return detail
+	}
+	var payload any
+	decoder := json.NewDecoder(bytes.NewReader(requestBody))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil {
+		return detail
+	}
+	echoes := make([]string, 0, 8)
+	collectRequestEchoes(payload, &echoes, 0)
+	for _, echo := range echoes {
+		detail = strings.ReplaceAll(detail, echo, requestEchoRedaction)
+	}
+	return detail
+}
+
+func collectRequestEchoes(value any, echoes *[]string, depth int) {
+	if depth > 16 || len(*echoes) >= 32 {
+		return
+	}
+	switch value := value.(type) {
+	case string:
+		if len(value) >= minRequestEchoBytes {
+			*echoes = append(*echoes, value)
+		}
+	case map[string]any:
+		for _, item := range value {
+			collectRequestEchoes(item, echoes, depth+1)
+		}
+	case []any:
+		for _, item := range value {
+			collectRequestEchoes(item, echoes, depth+1)
+		}
+	}
+}
+
 func jsonErrorDetail(body []byte, secrets []string) string {
+	return truncateErrorDetail(jsonErrorDetailUnbounded(body, secrets))
+}
+
+// jsonErrorDetailUnbounded extracts the reason the same way jsonErrorDetail
+// does, without the rune bound. The bound belongs after the request-echo
+// scrub: a provider quoting a prompt longer than the budget would otherwise
+// leave a truncated prefix no exact match can reach, filing a half-prompt
+// into history — the leak the scrub exists to close.
+func jsonErrorDetailUnbounded(body []byte, secrets []string) string {
 	var payload map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -2933,7 +3189,7 @@ func jsonErrorDetail(body []byte, secrets []string) string {
 	candidates = append(candidates, payload, payload["message"], payload["msg"])
 	for _, candidate := range candidates {
 		if detail := errorCandidateDetail(candidate); detail != "" {
-			return truncateErrorDetail(redactSecrets(detail, secrets))
+			return redactSecrets(detail, secrets)
 		}
 	}
 	return ""
@@ -3244,19 +3500,37 @@ const extendedCacheTTLBeta = "extended-cache-ttl-2025-04-11"
 
 // declareBetaFeature appends a capability to the header the client sent instead of
 // replacing it. The client picks its own beta features - Claude Code sends several
-// - and overwriting the list to add one would switch the others off.
+// - and overwriting the list to add one would switch the others off. A client may
+// send them on one comma-joined line or on several header lines: both are legal,
+// so the values are read as lines and answered the same way, and a single Set on
+// the joined form used to silently drop every line after the first.
 func declareBetaFeature(header http.Header, feature string) {
-	existing := header.Get("Anthropic-Beta")
-	if existing == "" {
+	// A present-but-empty line is not a feature: it used to join into a
+	// leading comma, which the provider reads as an unnamed capability.
+	values := make([]string, 0, 2)
+	for _, declared := range header.Values("Anthropic-Beta") {
+		if declared != "" {
+			values = append(values, declared)
+		}
+	}
+	if len(values) == 0 {
 		header.Set("Anthropic-Beta", feature)
 		return
 	}
-	for _, declared := range strings.Split(existing, ",") {
-		if strings.TrimSpace(declared) == feature {
-			return
+	for _, declared := range values {
+		for _, item := range strings.Split(declared, ",") {
+			if strings.TrimSpace(item) == feature {
+				return
+			}
 		}
 	}
-	header.Set("Anthropic-Beta", existing+","+feature)
+	if len(values) == 1 {
+		header.Set("Anthropic-Beta", values[0]+","+feature)
+		return
+	}
+	// Several header lines: append the feature as its own line rather than
+	// rewriting the client's framing.
+	header.Add("Anthropic-Beta", feature)
 }
 
 // extendCacheValue reports, in order: whether it raised a breakpoint, whether the

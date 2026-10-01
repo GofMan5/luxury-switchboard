@@ -3,7 +3,7 @@
 .statusActions { display: flex; align-items: center; gap: 8px; }
 .error,
 .notice { border-bottom: 1px solid var(--border-subtle); padding: 10px 28px; font-size: 12px; }
-.error { color: #f2aaa5; background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
+.error { color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
 .notice { color: #9bd3a2; background: color-mix(in srgb, var(--status-success) 6%, var(--bg-canvas)); }
 .content { display: grid; gap: 14px; padding: 18px 28px 28px; }
 .status,
@@ -21,8 +21,8 @@
 .fields { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); }
 .fields > label { display: grid; gap: 7px; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); padding: 14px 18px; }
 .fields > label:nth-child(3) { border-right: 0; }
-.fields input { height: 39px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 10px; color: var(--text-primary); background: #252525; transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast); }
-.fields input:hover:not(:disabled) { border-color: #565656; background: #282828; }
+.fields input { height: 39px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 10px; color: var(--text-primary); background: var(--bg-field); transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast); }
+.fields input:hover:not(:disabled) { border-color: var(--border-field); background: var(--bg-raised); }
 .fields input:focus { border-color: var(--border-focus); outline: 0; box-shadow: 0 0 0 3px rgb(112 155 199 / 9%); }
 .fields input[aria-invalid='true'] { border-color: color-mix(in srgb, var(--status-danger) 72%, var(--border-strong)); }
 .fields input:disabled { color: var(--text-disabled); background: #202020; }
@@ -42,7 +42,7 @@
 .privacyHint,
 .privacyError { margin: 0; border-top: 1px solid var(--border-subtle); padding: 11px 18px; font-size: 12px; }
 .privacyHint { color: var(--text-muted); background: #1d1d1d; }
-.privacyError { color: #f2aaa5; background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
+.privacyError { color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
 .privacyResult { display: grid; gap: 12px; border-top: 1px solid var(--border-subtle); padding: 14px 18px 18px; background: #1b1b1b; }
 .verdict { display: flex; align-items: center; gap: 10px; border: 1px solid color-mix(in srgb, var(--status-success) 34%, var(--border-subtle)); border-radius: var(--radius-control); padding: 10px 12px; color: #9bd3a2; background: color-mix(in srgb, var(--status-success) 6%, #1b1b1b); }
 .verdict[data-risk='review'] { border-color: color-mix(in srgb, var(--status-warning) 38%, var(--border-subtle)); color: #e4c98e; background: color-mix(in srgb, var(--status-warning) 6%, #1b1b1b); }

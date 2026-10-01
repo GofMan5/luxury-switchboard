@@ -9,6 +9,7 @@ import { useModels } from '../../models/ui/useModels'
 import { useProviders } from '../../providers/ui/useProviders'
 import { publishedModels, selectionChanges, type ModelRoute, type RouteTarget } from '../domain/route'
 import { useRoutes } from './useRoutes'
+import { addChainEntry, moveChainEntry, patchChainEntry, removeChainEntry, seedChainEntries, type ChainEntry, type ChainEntryPatch } from './chain-entries'
 import styles from './ModelRoutesPage.module.css'
 
 const MODEL_RENDER_BATCH = 180
@@ -35,12 +36,21 @@ export default function ModelRoutesPage() {
   const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase())
   const [modelWindow, setModelWindow] = useState(() => ({ catalog: models.models, query: '', filter, limit: MODEL_RENDER_BATCH }))
   const defaultProvider = providers.catalog.activeId || providers.catalog.providers[0]?.id || ''
-  const selectedProviderAvailable = providers.catalog.providers.some((provider) => provider.enabled && provider.id === models.providerId)
 
   useEffect(() => { if (state.phase === 'idle') void model.load('relay') }, [model, state.phase])
+  const autoDiscovered = useRef('')
   useEffect(() => {
-    if (defaultProvider && (models.phase === 'idle' || !selectedProviderAvailable)) void modelsModel.discover(defaultProvider)
-  }, [defaultProvider, models.phase, modelsModel, selectedProviderAvailable])
+    // Auto-discovery answers one question once per provider: what the default
+    // provider serves. It used to re-fire on every phase change while the
+    // current provider was unavailable, so a fallback provider outside the
+    // enabled set looped discover against its own abort — polling with no
+    // backoff and a catalog that never settled. A failed discovery is the
+    // Refresh button's job, not this effect's.
+    if (!defaultProvider || autoDiscovered.current === defaultProvider) return
+    if (models.phase !== 'idle' && models.providerId === defaultProvider) return
+    autoDiscovered.current = defaultProvider
+    void modelsModel.discover(defaultProvider)
+  }, [defaultProvider, models.phase, models.providerId, modelsModel])
 
   const publication = useMemo(() => {
     const map = new Map<string, ModelPublication>()
@@ -293,16 +303,11 @@ function RouteEditor({ target, route, providers, pending, operationError, onClos
   return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Also match</span><input value={aliases} maxLength={1024} placeholder="claude-opus-5[1m], alias-2" onChange={event => setAliases(event.currentTarget.value)} /><small>Extra requested names that route to this same upstream model, comma or space separated.{target === 'tunnel' ? ' Accepted by the tunnel, but /v1/models lists only the public alias above, which is also the name every answer carries.' : ''}</small></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>{target === 'relay' ? <label><span>Failover order</span><span className={styles.suffixed}><input type="number" min="0" max="1000" step="1" required value={priority} onChange={event => setPriority(event.currentTarget.value)} /><small>lower first</small></span><small>Add the same requested model on another provider with a higher number and a request that gets a final refusal here moves there on its own.</small></label> : null}<label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
 }
 
-interface ChainEntry {
-  readonly providerId: string
-  upstreamModel: string
-}
-
 /** Builds a failover chain in one pass: one public model, several providers in
  * order, upstream models picked from each provider's discovered catalog. The
  * manual Add-route editor stays for aliases and context caps; this exists so
  * the chain feature is one dialog instead of three careful edits. */
-function ChainWizard({ providers, initialPublicModel, pending, operationError, onClose, discover, onSave }: {
+export function ChainWizard({ providers, initialPublicModel, pending, operationError, onClose, discover, onSave }: {
   providers: readonly { id: string; name: string }[]
   initialPublicModel: string
   pending: boolean
@@ -312,37 +317,51 @@ function ChainWizard({ providers, initialPublicModel, pending, operationError, o
   onSave: (routes: readonly ModelRoute[]) => Promise<unknown>
 }) {
   const [publicModel, setPublicModel] = useState(initialPublicModel)
-  const [entries, setEntries] = useState<ChainEntry[]>(() => providers.slice(0, 2).map((provider) => ({ providerId: provider.id, upstreamModel: '' })))
+  const [entries, setEntries] = useState<readonly ChainEntry[]>(() => seedChainEntries(providers))
   const [catalogs, setCatalogs] = useState<ReadonlyMap<string, readonly string[]>>(() => new Map())
-  const [loadingProvider, setLoadingProvider] = useState('')
+  // Loading is per provider, not one string: the seed fires a discover for
+  // each row back-to-back, and a single slot let the first resolution clear
+  // the indicator while other rows were still pending — a waiting row read as
+  // a catalog that had come back empty. The set is also the guard that keeps
+  // the effect from re-firing a provider that has not answered yet.
+  const [loadingProviders, setLoadingProviders] = useState<ReadonlySet<string>>(() => new Set())
   const [error, setError] = useState('')
   const dialogRef = useModalFocus<HTMLFormElement>(onClose, pending)
 
   useEffect(() => {
     for (const entry of entries) {
-      if (catalogs.has(entry.providerId) || entry.providerId === '') continue
-      setLoadingProvider(entry.providerId)
-      void discover(entry.providerId).then((models) => {
-        setCatalogs((current) => new Map(current).set(entry.providerId, models))
-        setLoadingProvider('')
-      })
+      if (catalogs.has(entry.providerId) || entry.providerId === '' || loadingProviders.has(entry.providerId)) continue
+      const { providerId } = entry
+      setLoadingProviders((current) => new Set(current).add(providerId))
+      // The settle path is shared by both outcomes: a rejected discover must
+      // leave the row a usable empty catalog, not a "Loading…" that never
+      // ends — the production wiring never rejects, but the wizard accepts
+      // any discover function and a hung row reads as a broken wizard.
+      const settle = () => {
+        setLoadingProviders((current) => {
+          const settled = new Set(current)
+          settled.delete(providerId)
+          return settled
+        })
+      }
+      void discover(providerId)
+        .then((models) => {
+          setCatalogs((current) => new Map(current).set(providerId, models))
+          settle()
+        })
+        .catch(() => {
+          setCatalogs((current) => new Map(current).set(providerId, []))
+          settle()
+        })
     }
     // Catalogs load once per provider; entries changing providers reload theirs.
-  }, [catalogs, discover, entries])
+  }, [catalogs, discover, entries, loadingProviders])
 
-  const setEntry = (index: number, patch: Partial<ChainEntry>) => {
-    setEntries((current) => current.map((entry, position) => position === index ? { ...entry, ...patch } : entry))
+  const setEntry = (index: number, patch: ChainEntryPatch) => {
+    setEntries((current) => patchChainEntry(current, index, patch))
   }
   const moveEntry = (index: number, direction: -1 | 1) => {
-    setEntries((current) => {
-      const next = [...current]
-      const target = index + direction
-      if (target < 0 || target >= next.length) return current
-      const moved = next[target]
-      next[target] = next[index]
-      next[index] = moved
-      return next
-    })
+    setEntries((current) => moveChainEntry(current, index, direction))
   }
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -385,7 +404,7 @@ function ChainWizard({ providers, initialPublicModel, pending, operationError, o
             {entries.map((entry, index) => {
               const catalog = catalogs.get(entry.providerId) ?? []
               return (
-                <div key={index} className={styles.chainRow} role="listitem">
+                <div key={entry.id} className={styles.chainRow} role="listitem">
                   <span className={styles.chainPosition} aria-hidden="true">{index + 1}</span>
                   <label>
                     <span>Provider</span>
@@ -397,32 +416,28 @@ function ChainWizard({ providers, initialPublicModel, pending, operationError, o
                     <span>Upstream model</span>
                     {catalog.length > 0 ? (
                       <select value={entry.upstreamModel} onChange={(event) => setEntry(index, { upstreamModel: event.currentTarget.value })}>
-                        <option value="">{loadingProvider === entry.providerId ? 'Loading�' : 'Pick a model'}</option>
+                        <option value="">{loadingProviders.has(entry.providerId) ? 'Loading…' : 'Pick a model'}</option>
                         {catalog.map((model) => <option key={model} value={model}>{model}</option>)}
                       </select>
                     ) : (
-                      <input value={entry.upstreamModel} maxLength={128} placeholder={loadingProvider === entry.providerId ? 'Loading�' : 'Model name on this provider'} onChange={(event) => setEntry(index, { upstreamModel: event.currentTarget.value })} />
+                      <input value={entry.upstreamModel} maxLength={128} placeholder={loadingProviders.has(entry.providerId) ? 'Loading…' : 'Model name on this provider'} onChange={(event) => setEntry(index, { upstreamModel: event.currentTarget.value })} />
                     )}
                   </label>
                   <div className={styles.chainRowActions}>
                     <button type="button" aria-label="Move earlier in the chain" disabled={index === 0} onClick={() => moveEntry(index, -1)}><ArrowUp size={14} /></button>
                     <button type="button" aria-label="Move later in the chain" disabled={index === entries.length - 1} onClick={() => moveEntry(index, 1)}><ArrowDown size={14} /></button>
-                    <button type="button" aria-label="Remove from the chain" disabled={entries.length <= 2} onClick={() => setEntries((current) => current.filter((_, position) => position !== index))}><Trash2 size={14} /></button>
+                    <button type="button" aria-label="Remove from the chain" disabled={entries.length <= 2} onClick={() => setEntries((current) => removeChainEntry(current, index))}><Trash2 size={14} /></button>
                   </div>
                 </div>
               )
             })}
           </div>
-          <Button type="button" disabled={entries.length >= providers.length} onClick={() => setEntries((current) => {
-            const used = new Set(current.map((entry) => entry.providerId))
-            const next = providers.find((provider) => !used.has(provider.id))
-            return next ? [...current, { providerId: next.id, upstreamModel: '' }] : current
-          })}><Plus size={14} />Add provider</Button>
+          <Button type="button" disabled={entries.length >= providers.length} onClick={() => setEntries((current) => addChainEntry(current, providers))}><Plus size={14} />Add provider</Button>
           {error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}
         </div>
         <footer>
           <Button type="button" disabled={pending} onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={pending || !publicModel.trim()}>{pending ? 'Saving�' : `Save chain of ${entries.length}`}</Button>
+          <Button type="submit" variant="primary" disabled={pending || !publicModel.trim()}>{pending ? 'Saving…' : `Save chain of ${entries.length}`}</Button>
         </footer>
       </form>
     </div>

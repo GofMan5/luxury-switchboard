@@ -26,6 +26,31 @@ const (
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
 
+// TrimToPayloadBudget drops the tail of a list until it fits the byte budget
+// a handler may answer with (MaxPayloadBytes, one constant the whole platform
+// measures against). It is the shared body of the four stdio lists that carry
+// bounded journals — keys, activity rows, guardrail findings, tunnel clients —
+// each of which says so honestly with an untruncated count beside the trimmed
+// list. The shrink is proportional then verified, never halved: rows are
+// within an order of magnitude of each other, so one estimate normally lands,
+// and taking at least one off guarantees this ends. The caller owns which end
+// is least valuable and orders its list accordingly: newest-first lists drop
+// the oldest rows here, priority-ordered lists drop the lowest priority.
+func TrimToPayloadBudget[T any](items []T) []T {
+	for len(items) > 0 {
+		encoded, err := json.Marshal(items)
+		if err != nil {
+			return nil
+		}
+		if len(encoded) <= MaxPayloadBytes {
+			return items
+		}
+		next := len(items) * MaxPayloadBytes / len(encoded)
+		items = items[:min(next, len(items)-1)]
+	}
+	return items
+}
+
 type Request struct {
 	Version int             `json:"v"`
 	ID      string          `json:"id"`

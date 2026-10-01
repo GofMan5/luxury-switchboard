@@ -47,7 +47,10 @@ func registerEdition(protocol *platform.Server, dependencies editionDependencies
 	}
 	clients := clientapp.NewService(history)
 	if err := clients.LoadProfiles(context.Background()); err != nil && historyErr == nil {
-		logger.Printf("tunnel client bans could not be restored")
+		// The report carries the number of rows that could not be read: one
+		// dropped ban and fifty are different mornings, and the readable bans
+		// are in force either way — the message says so.
+		logger.Printf("tunnel client bans could not all be restored: %v; readable bans are in force", err)
 	}
 	gateway := tunnelhttp.NewRuntime(routes, markers, dependencies.relay, publicactivity.NewRecorder(clients), clients)
 	publisher := tunnelssh.NewRuntime(gateway, routes, func(ctx context.Context) error {

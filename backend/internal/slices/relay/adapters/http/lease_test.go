@@ -142,6 +142,59 @@ func TestEveryCredentialLeaseIsFinished(t *testing.T) {
 	}
 }
 
+// The congestion failover is the one exit the balance above could not see: its
+// `continue` fires only when a failover chain actually hands the request to a
+// sibling, which the single-provider table cannot express. The lease used to be
+// left unfinished exactly there — the flagship flapping feature walked past the
+// outcome bookkeeping for every key it leased.
+func TestTheCongestionFailoverAlsoFinishesItsLease(t *testing.T) {
+	congestion := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		congestion++
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":{"message":"当前分组上游负载已饱和，请稍后再试"}}`))
+	}))
+	defer primary.Close()
+	sibling := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"served"}]}]}`))
+	}))
+	defer sibling.Close()
+	primaryURL, _ := url.Parse(primary.URL)
+	siblingURL, _ := url.Parse(sibling.URL)
+	chain := &recordingChain{
+		routes: []relayapp.ModelRoute{{ProviderID: "primary", UpstreamModel: "glm-5.3-primary"}, {ProviderID: "sibling", UpstreamModel: "glm-5.3-sibling"}},
+	}
+	failovers := &switchingFailovers{chain: chain, routes: map[string]relayapp.Route{
+		"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+		"sibling": {ProviderID: "sibling", BaseURL: siblingURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-sibling"},
+	}}
+	credentials := &countingCredentials{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: multiRoute{routes: map[string]relayapp.Route{
+			"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+			"sibling": {ProviderID: "sibling", BaseURL: siblingURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-sibling"},
+		}, first: "primary"},
+		Credentials: credentials,
+		Failovers:   failovers,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"glm","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "served") {
+		t.Fatalf("the flapping provider's sibling never reached the client: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if congestion != 3 {
+		t.Fatalf("expected exactly three congestion answers before the switch, saw %d", congestion)
+	}
+	acquired, finished := credentials.counts()
+	if finished != acquired {
+		t.Fatalf("%d leases taken, %d returned: the congestion failover leaves the pool thinking a key is still in flight", acquired, finished)
+	}
+}
+
 // The client authenticates to Switchboard, never to the provider: that separation is
 // the reason the relay exists. A provider that echoes the key we sent it back in a
 // response header used to hand that key straight to the client, because every header

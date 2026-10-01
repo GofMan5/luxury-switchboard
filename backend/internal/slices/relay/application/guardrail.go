@@ -16,12 +16,16 @@ type Guardrail interface {
 	ClientDeclaredTools(requestBody []byte) bool
 }
 
-// GuardrailSubject is the safe context of one answer: identifiers only.
+// GuardrailSubject is the safe context of one answer: identifiers only — and
+// the markers of the credential in flight, which travel so the journal can
+// scrub them out of the evidence it keeps rather than echo them back in the
+// findings UI.
 type GuardrailSubject struct {
 	ProviderID          string
 	ProviderName        string
 	Model               string
 	ClientDeclaredTools bool
+	Secrets             []string
 }
 
 // GuardrailVerdict is what the relay acts on.

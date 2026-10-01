@@ -71,7 +71,7 @@ func NewKey(params Params) (Key, error) {
 			return Key{}, errors.New("invalid proxy URL")
 		}
 		parsed.Scheme = strings.ToLower(parsed.Scheme)
-		if parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5" && parsed.Scheme != "socks5h" {
+		if !ProxySchemeAllowed(parsed.Scheme) {
 			return Key{}, errors.New("invalid proxy URL")
 		}
 		proxyURL = parsed.String()

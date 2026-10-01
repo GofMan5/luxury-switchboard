@@ -3,6 +3,7 @@ package tunnelhttp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -347,6 +348,34 @@ func TestShortCredentialMarkerFailsClosed(t *testing.T) {
 	}, "/v1/responses", "public-model", []string{"x"}, brand)
 	if err == nil {
 		t.Fatal("short credential marker was allowed through public output")
+	}
+}
+
+// Image bytes are opaque to JSON, but they are not unmarked: PNG text chunks
+// and JPEG comment segments carry generator metadata, and image backends
+// embed the model that produced the picture — the identifier the structural
+// rename exists to hide. The sweep reads the decoded payload, so an image
+// carrying the marker is refused, and a clean one of the same shape passes.
+func TestAnImageCarryingAMarkerInItsMetadataIsRefused(t *testing.T) {
+	marked := append([]byte("\x89PNG\r\n\x1a\n"), []byte("tEXt\x00\x00\x00parameters model=claude-opus-5-secret")...)
+	_, _, err := sanitizeResponse(relayapp.DispatchResponse{
+		Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{"data":[{"b64_json":"` + base64.StdEncoding.EncodeToString(marked) + `"}]}`),
+	}, "/v1/images/generations", "public-fast", []string{"claude-opus-5-secret"}, brand)
+	if err == nil {
+		t.Fatal("an image carrying the upstream model id in its metadata was published")
+	}
+
+	clean := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, 256)...)
+	body, _, err := sanitizeResponse(relayapp.DispatchResponse{
+		Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{"data":[{"b64_json":"` + base64.StdEncoding.EncodeToString(clean) + `"}]}`),
+	}, "/v1/images/generations", "public-fast", []string{"claude-opus-5-secret"}, brand)
+	if err != nil {
+		t.Fatalf("a clean image was refused: %v", err)
+	}
+	if !strings.Contains(string(body), "b64_json") {
+		t.Fatalf("the clean image did not survive byte for byte: %s", body)
 	}
 }
 

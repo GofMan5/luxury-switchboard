@@ -1,5 +1,5 @@
 .page { min-height: 100%; }
-.error { padding: 10px 28px; color: #ffaaa4; background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
+.error { padding: 10px 28px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
 .headerActions { display: flex; align-items: center; gap: 8px; }
 
 .metrics { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); overflow: hidden; margin: 18px 28px 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
@@ -58,7 +58,7 @@
 .empty svg { display: block; margin: 0 auto 8px; color: var(--status-success); }
 
 .severity { display: inline-block; border: 1px solid var(--border-subtle); border-radius: 5px; padding: 2px 7px; font-size: 10px; font-weight: 620; letter-spacing: .02em; text-transform: uppercase; }
-.severity[data-severity='high'] { border-color: color-mix(in srgb, var(--status-danger) 55%, var(--border-subtle)); color: #ffaaa4; }
+.severity[data-severity='high'] { border-color: color-mix(in srgb, var(--status-danger) 55%, var(--border-subtle)); color: var(--text-danger); }
 .severity[data-severity='medium'] { border-color: color-mix(in srgb, var(--status-warning) 55%, var(--border-subtle)); color: var(--status-warning); }
 .severity[data-severity='low'] { color: var(--text-muted); }
 
@@ -89,7 +89,7 @@
 .detection small { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
 /* The evidence is provider output, so it wraps rather than being cut: a truncated
    payload is exactly the part an operator needs to read. */
-.detection code { display: block; padding: 10px 12px; color: #ffc9c3; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.detection code { display: block; padding: 10px 12px; color: #ffc9c3; /* deliberately lighter than --text-danger: evidence blocks are quoted material, not verdicts */ font-family: var(--font-mono); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .detection p { border-top: 1px solid var(--border-subtle); padding: 9px 12px; color: var(--text-secondary); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 
 @media (max-width: 1279px) {

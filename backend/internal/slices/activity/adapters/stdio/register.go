@@ -48,7 +48,15 @@ func Register(server *platform.Server, service *application.Service, history app
 		if err != nil {
 			return nil, platform.MethodError{Code: "history_query_failed", Message: "History query failed"}
 		}
-		return map[string]any{"requests": requests}, nil
+		// The same bound activity.list answers under: persisted rows carry the
+		// same 4096-rune error detail, and a provider incident fills them with
+		// exactly that. `available` carries the untruncated count so a short
+		// table reads as the newest part of a longer journal, not as the whole
+		// of it.
+		return map[string]any{
+			"requests":  withinOneFrame(requests),
+			"available": len(requests),
+		}, nil
 	})
 	server.Handle("history.stats", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		if history == nil {
@@ -93,19 +101,5 @@ func Register(server *platform.Server, service *application.Service, history app
 // worst case), so this never answers empty because the newest one alone did
 // not fit.
 func withinOneFrame(requests []domain.Request) []domain.Request {
-	for len(requests) > 0 {
-		encoded, err := json.Marshal(requests)
-		if err != nil {
-			return nil
-		}
-		if len(encoded) <= platform.MaxPayloadBytes {
-			return requests
-		}
-		// Proportional, then verified: rows are within an order of magnitude of
-		// each other, so one estimate normally lands; taking at least one off
-		// guarantees this ends.
-		next := len(requests) * platform.MaxPayloadBytes / len(encoded)
-		requests = requests[:min(next, len(requests)-1)]
-	}
-	return requests
+	return platform.TrimToPayloadBudget(requests)
 }

@@ -67,7 +67,7 @@ beforeEach(() => {
 
 describe('InsightsPage', () => {
   it('renders the report the model holds', () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
     expect(screen.getByText('Alpha')).toBeTruthy()
     // The model shows in the breakdown and in the pricing gap list; both are
     // the honest places for it.
@@ -77,25 +77,25 @@ describe('InsightsPage', () => {
   })
 
   it('shows the skeleton while loading and never a fake zero', () => {
-    show({ phase: 'loading', period: '24h', report: null, prices: [], pricesPhase: 'idle', error: '', recent: [] })
+    show({ phase: 'loading', period: '24h', report: null, prices: [], pricesPhase: 'idle', error: '', recent: [], recentAvailable: 0 })
     expect(screen.getByText('Loading insights…')).toBeTruthy()
     // Placeholders, not zeros: a first-load failure must not read as measured.
     expect(screen.queryByText('$0.00')).toBeNull()
   })
 
   it('surfaces the error state', () => {
-    show({ phase: 'error', period: '24h', report: null, prices: [], pricesPhase: 'ready', error: 'Insights are unavailable', recent: [] })
+    show({ phase: 'error', period: '24h', report: null, prices: [], pricesPhase: 'ready', error: 'Insights are unavailable', recent: [], recentAvailable: 0 })
     expect(screen.getByRole('alert').textContent).toContain('Insights are unavailable')
   })
 
   it('switches the period on demand', () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
     fireEvent.click(screen.getByRole('button', { name: '48h' }))
     expect(mockLoad).toHaveBeenCalledWith('48h')
   })
 
   it('opens the price editor and saves a draft through the model', async () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
     fireEvent.click(screen.getByRole('button', { name: /prices/i }))
     const modelInput = await screen.findByPlaceholderText('gpt-6-astra')
     fireEvent.change(modelInput, { target: { value: 'gpt-6-astra' } })
@@ -110,7 +110,7 @@ describe('InsightsPage', () => {
   })
 
   it('dismisses the price editor with Escape like every other modal', async () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
     fireEvent.click(screen.getByRole('button', { name: /prices/i }))
     const dialog = await screen.findByRole('dialog')
     fireEvent.keyDown(dialog, { key: 'Escape' })
@@ -119,7 +119,7 @@ describe('InsightsPage', () => {
 
   it('renders the persisted request rows behind the numbers', () => {
     show({
-      phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '',
+      phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recentAvailable: 1,
       recent: [{
         id: 'r1', state: 'failed', model: 'glm-5.3-prime', providerId: 'alpha-relay', status: 402,
         latencyMs: 79, totalTokens: 0, cachedTokens: 0, updatedAt: '2026-09-28T01:30:34Z',
@@ -133,8 +133,21 @@ describe('InsightsPage', () => {
     expect(screen.getByText(/Your balance has run out/)).toBeTruthy()
   })
 
+  it('names a bounded row list as the newest part, never as the whole journal', () => {
+    show({
+      phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '',
+      recentAvailable: 250,
+      recent: [{
+        id: 'r1', state: 'failed', model: 'glm-5.3-prime', providerId: 'alpha-relay', status: 502,
+        latencyMs: 30, totalTokens: 0, cachedTokens: 0, updatedAt: '2026-09-28T01:30:34Z',
+        errorCode: 'upstream_status', errorDetail: '',
+      }],
+    })
+    expect(screen.getByText('Newest 1 of 250 rows in the last 24h')).toBeTruthy()
+  })
+
   it('sorts the model breakdown when a column header is clicked', () => {
-    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [] })
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
     const table = screen.getByRole('table', { name: 'Model breakdown' })
     const rows = () => [...table.querySelectorAll('tbody tr')].map((row) => row.querySelector('td')?.textContent)
     // Default sort: tokens, descending — gpt-6-astra (90k) before claude-opus-5 (10k).

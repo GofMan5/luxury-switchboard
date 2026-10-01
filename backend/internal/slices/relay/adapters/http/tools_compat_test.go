@@ -159,6 +159,19 @@ func TestAnUnrelatedRefusalKeepsFreeformToolsIntact(t *testing.T) {
 	if !freeformToolRejected([]byte(`{"error":{"message":"tools[0].format: lark grammar is not supported"}}`)) {
 		t.Fatal("a grammar refusal was not recognised")
 	}
+	// A bare "custom" is not about the tool type: providers complain about
+	// custom instructions, custom aliases and custom models, and each of those
+	// used to spend a downgrade the provider never asked for.
+	if freeformToolRejected([]byte(`{"error":{"message":"custom instructions are limited to 256 characters"}}`)) {
+		t.Fatal("a complaint about custom instructions was read as a freeform refusal")
+	}
+	if freeformToolRejected([]byte(`{"error":{"message":"custom model alias is unknown"}}`)) {
+		t.Fatal("a complaint about a custom alias was read as a freeform refusal")
+	}
+	// The naming form providers actually use, both orders.
+	if !freeformToolRejected([]byte(`{"error":{"message":"custom tool type is not supported"}}`)) {
+		t.Fatal("a freeform refusal naming the type was not recognised")
+	}
 	if !strings.Contains(string(body), `"type":"custom"`) {
 		t.Fatalf("the freeform tool was downgraded without any refusal: %s", body)
 	}
@@ -266,7 +279,12 @@ func TestASealedReasoningRefusalIsRetriedWithoutTheSeal(t *testing.T) {
 	if strings.Contains(retried, "encrypted_content") || strings.Contains(retried, "reasoning.encrypted_content") {
 		t.Fatalf("the retry still carried the sealed reasoning: %s", retried)
 	}
-	// Only the seal goes. The tool exchange is what the turn is about.
+	// Only the seal goes. The summary is unsealed text about the turn — the only
+	// surviving account of it, dropped with the seal before — and the tool
+	// exchange is what the turn is about.
+	if !strings.Contains(retried, `"type":"reasoning"`) || !strings.Contains(retried, `"text":"planning"`) {
+		t.Fatalf("the retry dropped the reasoning summary with the seal: %s", retried)
+	}
 	if !strings.Contains(retried, `"call_id":"c1"`) || !strings.Contains(retried, `"output":"done"`) {
 		t.Fatalf("the retry dropped the tool exchange with the seal: %s", retried)
 	}
@@ -301,6 +319,65 @@ func TestNestedToolCallNamesAreRestoredForTheClient(t *testing.T) {
 	}
 	if strings.Count(body, `"name":"collaboration.spawn_agent"`) != 2 {
 		t.Fatalf("nested tool name was not restored in every event: %s", body)
+	}
+}
+
+// The label a provider puts on the answer is not evidence about the bytes —
+// the guardrail layer reads text/plain answers precisely because the client
+// reads the body, not the header. The tool restore used to trust the header
+// both ways, and each direction lost the client its tool names.
+func TestToolNamesAreRestoredWhateverTheAnswerIsLabelled(t *testing.T) {
+	streamBytes := "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"collaboration__spawn_agent\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"name\":\"collaboration__spawn_agent\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}]}}\n\n"
+	for _, testCase := range []struct {
+		name   string
+		label  string
+		body   string
+		stream bool
+	}{
+		{name: "an event stream labelled json", label: "application/json", body: streamBytes, stream: true},
+		{name: "an event stream labelled text/plain", label: "text/plain", body: streamBytes, stream: true},
+		{name: "a json answer labelled text/plain", label: "text/plain", body: `{"status":"completed","output":[{"type":"function_call","name":"collaboration__spawn_agent","call_id":"call_1","arguments":"{}"}]}`},
+		// The fourth corner: a JSON body under a stream label. The label alone
+		// used to route it into the stream repair, which found no data lines
+		// and returned the body unrewritten — the client kept provider
+		// aliases. The bytes decide, not the label.
+		{name: "a json answer labelled event-stream", label: "text/event-stream", body: `{"status":"completed","output":[{"type":"function_call","name":"collaboration__spawn_agent","call_id":"call_1","arguments":"{}"}]}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, _ := upstreamCapture(t, func(writer http.ResponseWriter) {
+				writer.Header().Set("Content-Type", testCase.label)
+				_, _ = writer.Write([]byte(testCase.body))
+			})
+			request := codexToolRequest
+			if testCase.stream {
+				request = strings.Replace(codexToolRequest, `"stream":false`, `"stream":true`, 1)
+			}
+			incoming := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(request))
+			incoming.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, incoming)
+			if testCase.stream {
+				// A stream the client asked for stays a stream even when the
+				// provider labelled the answer wrong: the dialect is the caller's.
+				if !strings.Contains(response.Header().Get("Content-Type"), "event-stream") {
+					t.Fatalf("the answer stopped being an event stream: %s", response.Header().Get("Content-Type"))
+				}
+			}
+			body := response.Body.String()
+			if strings.Contains(body, "collaboration__spawn_agent") {
+				t.Fatalf("client received the provider alias instead of its own tool name: %s", body)
+			}
+			expected := 2
+			if !testCase.stream {
+				// The buffered JSON answer carries one item; the stream
+				// announces it in the item event and again on completion.
+				expected = 1
+			}
+			if strings.Count(body, `"name":"collaboration.spawn_agent"`) != expected {
+				t.Fatalf("nested tool name was not restored in every place: %s", body)
+			}
+		})
 	}
 }
 
@@ -592,6 +669,24 @@ func TestAnEventSplitAcrossDataLinesIsRepairedLikeAnyOther(t *testing.T) {
 				t.Fatalf("neither repair happened, so this proves nothing:\n%s", got)
 			}
 		})
+	}
+}
+
+// The fast-path trigger scan reads the deframed bytes, because the framing is
+// exactly what the repair removes: a literal broken up by `data:` markers and
+// newlines is still a trigger for attempting the repair, and the attempt is
+// inert when the event turns out unreadable. A raw scan skipped the repair
+// entirely on framing alone — the decision the code's own comment forbids.
+func TestTheTriggerScanReadsTheDeframedBytes(t *testing.T) {
+	split := "data: {\"type\":\"response.output_\ndata: item.added\",\"output_index\":0}\n\n"
+	if !streamAnnouncesRepairableEvents([]byte(split)) {
+		t.Fatal("a trigger literal broken by the framing was invisible to the fast-path scan")
+	}
+	if !streamAnnouncesRepairableEvents([]byte("data: {\"type\":\"response.output_text.delta\"}\n\n")) {
+		t.Fatal("a plain delta stopped being a trigger")
+	}
+	if streamAnnouncesRepairableEvents([]byte("data: {\"type\":\"response.completed\"}\n\n")) {
+		t.Fatal("a stream with no repairable lifecycle tripped the fast path")
 	}
 }
 

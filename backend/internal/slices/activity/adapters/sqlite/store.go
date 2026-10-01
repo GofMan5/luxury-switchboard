@@ -30,6 +30,29 @@ type Store struct {
 	closeMu       sync.Mutex
 	dbClosed      bool
 	retentionDays int
+	dropMu        sync.Mutex
+	onDrop        func(cause string)
+}
+
+// OnDrop registers the listener told when a history record is dropped or a
+// write fails. History is the operator's record of what actually happened, and
+// a sqlite outage used to stop it silently: the queue filled, Record answered
+// false to nobody, the retry loop ground on with no surface at all, and the
+// only symptom was a journal that quietly stopped growing. The listener must
+// not block — the notification slice raises from it on the queue's own thread.
+func (store *Store) OnDrop(listener func(cause string)) {
+	store.dropMu.Lock()
+	store.onDrop = listener
+	store.dropMu.Unlock()
+}
+
+func (store *Store) reportDrop(cause string) {
+	store.dropMu.Lock()
+	listener := store.onDrop
+	store.dropMu.Unlock()
+	if listener != nil {
+		listener(cause)
+	}
 }
 
 func DefaultPath() (string, error) {
@@ -70,11 +93,37 @@ func Open(path string, retentionDays int) (*Store, error) {
 	return store, nil
 }
 
+// Drop causes are a contract with whoever wires OnDrop: the notification's
+// title and body are chosen per cause, so the strings are named rather than
+// re-typed on each side of the boundary.
+const (
+	// CauseQueueFull: requests arrived faster than the journal could file
+	// them, and the newest records were dropped.
+	CauseQueueFull = "queue_full"
+	// CauseWriteFailed: the database refused a write; the batch is queued and
+	// retried, and nothing lands until it succeeds.
+	CauseWriteFailed = "write_failed"
+)
+
 func (store *Store) Record(request domain.Request) bool {
 	if store.closed.Load() || !domain.IsTerminal(request.State) {
 		return false
 	}
-	return store.queue.Add(request)
+	if !store.queue.Add(request) {
+		// A refusal during shutdown is the queue closing underneath a record
+		// that passed the check above: nothing was dropped, the app is on its
+		// way out, and a "records were dropped" toast on exit would claim data
+		// loss that did not happen.
+		if store.closed.Load() {
+			return false
+		}
+		// The queue is genuinely full: these records never reach the journal.
+		// Reported, because the relay keeps working and nothing else would
+		// say so.
+		store.reportDrop(CauseQueueFull)
+		return false
+	}
+	return true
 }
 
 func (store *Store) Recent(ctx context.Context, period application.Period, limit int) ([]domain.Request, error) {
@@ -166,6 +215,16 @@ func (store *Store) Close(ctx context.Context) error {
 }
 
 func (store *Store) writeBatch(batch []domain.Request) error {
+	if err := store.insertBatch(batch); err != nil {
+		// The batch stays queued and is retried; the report is the operator's
+		// only signal that the journal is not being persisted right now.
+		store.reportDrop(CauseWriteFailed)
+		return err
+	}
+	return nil
+}
+
+func (store *Store) insertBatch(batch []domain.Request) error {
 	tx, err := store.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err

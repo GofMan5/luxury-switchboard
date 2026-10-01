@@ -22,12 +22,12 @@ var errGuardrailBlocked = errors.New("provider response was refused by the local
 // WHETHER an answer is inspected follows the path the client called and not only the
 // provider's Content-Type: a hostile provider would otherwise label its answer
 // `text/plain`, skip inspection, and still be parsed by any client that reads the body
-// rather than the header. WHICH dialect it is read as follows the Content-Type, and
-// that is sound because by this point the header is no longer the provider's: every
-// answer here has been through the relay's own buffering, stream repair and dialect
-// translation, and each of those sets the header to match the bytes it produced. An
-// answer whose framing contradicted its label never reaches the guardrails at all —
-// the layer that normalises it rejects it first.
+// rather than the header. WHICH dialect it is read as follows the bytes themselves:
+// the label once looked sound here because every upstream layer sets it to match
+// what it produced, but that promise is exactly what a buggy layer breaks, and the
+// extractor pays nothing to look — an event-stream body read as JSON still extracts
+// through the concatenated-object fallback, while a JSON body read as an event
+// stream extracts nothing at all. The framing decides, not the header.
 //
 // The body is buffered under the same ceiling as every other rewrite on this path —
 // for streams and translated answers it is already a byte slice in memory, so this
@@ -37,8 +37,8 @@ func (server *Server) reviewResponse(response *http.Response, path string, subje
 		return "", false
 	}
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
-	eventStream := strings.Contains(contentType, "event-stream")
-	if !eventStream && !strings.Contains(contentType, "json") && !expectsJSONResponse(path) {
+	labelledStream := strings.Contains(contentType, "event-stream")
+	if !labelledStream && !strings.Contains(contentType, "json") && !expectsJSONResponse(path) {
 		return "", false
 	}
 	limit := responseBufferLimit(server.config)
@@ -54,11 +54,11 @@ func (server *Server) reviewResponse(response *http.Response, path string, subje
 	// ceiling first.
 	if err != nil || int64(len(buffered)) > limit {
 		response.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buffered), response.Body), Closer: response.Body}
-		verdict := server.guardrail.Review(buffered, eventStream, subject)
+		verdict := server.guardrail.Review(buffered, bodyLooksLikeEventStream(buffered), subject)
 		return verdict.Code, verdict.Blocked
 	}
 	response.Body.Close()
-	verdict := server.guardrail.Review(buffered, eventStream, subject)
+	verdict := server.guardrail.Review(buffered, bodyLooksLikeEventStream(buffered), subject)
 	response.Body = io.NopCloser(bytes.NewReader(buffered))
 	response.ContentLength = int64(len(buffered))
 	if response.Header.Get("Content-Length") != "" {

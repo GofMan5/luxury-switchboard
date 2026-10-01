@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +68,57 @@ func TestHistoryRejectsUnknownPeriod(t *testing.T) {
 	defer store.Close(context.Background()) //nolint:errcheck
 	if _, err := store.Stats(context.Background(), application.Period("week")); err == nil {
 		t.Fatal("unknown period was accepted")
+	}
+}
+
+// A storage outage used to stop history in silence: the flush failed forever
+// with no surface, the queue filled, and Record answered false to nobody. The
+// listener is the operator's only signal, so both drop paths have to reach it.
+func TestHistoryReportsDropsAndFailedWrites(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "history.db"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bounded close: the drain below retries a failing flush, and this test
+	// leaves the database broken on purpose.
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelClose()
+	defer store.Close(closeCtx) //nolint:errcheck
+	var mu sync.Mutex
+	causes := map[string]int{}
+	store.OnDrop(func(cause string) {
+		mu.Lock()
+		causes[cause]++
+		mu.Unlock()
+	})
+	// Break the database underneath the queue: the flush fails and is retried,
+	// nothing drains, and the queue fills for real.
+	if err := store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := domain.Request{ID: "r", State: domain.StateCompleted, Model: "gpt-test", Method: "POST", Path: "/v1/responses"}
+	if err := store.writeBatch([]domain.Request{request}); err == nil {
+		t.Fatal("a write against a closed database succeeded")
+	}
+	dropped := 0
+	// The channel buffer holds queueCapacity items and the retained batch
+	// holds batchSize more while the failing flush retries, so the fill has to
+	// pass both before Add starts refusing.
+	for range queueCapacity + batchSize + 16 {
+		if !store.Record(request) {
+			dropped++
+		}
+	}
+	if dropped == 0 {
+		t.Fatal("the queue never filled, so this test measured nothing")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if causes[CauseWriteFailed] == 0 {
+		t.Fatalf("a failed write was not reported: %v", causes)
+	}
+	if causes[CauseQueueFull] == 0 {
+		t.Fatalf("dropped records were not reported: %v", causes)
 	}
 }
 

@@ -36,8 +36,14 @@ type PoolReport struct {
 func (manager *Manager) CheckPool(ctx context.Context, providerID string, prober PoolProber) (PoolReport, error) {
 	manager.mu.RLock()
 	userKeys := manager.combinedLocked(manager.userKeys)
+	// The map is read under the same lock its writers hold: EnsureProvider and
+	// RemoveProvider run on other stdio workers while a check is in flight, and
+	// an unlocked read of a concurrently written map is a runtime fatal that no
+	// recover() in the protocol server can catch — it would take the whole
+	// sidecar down with the window still open.
+	_, known := manager.providerRates[providerID]
 	manager.mu.RUnlock()
-	if _, exists := manager.providerRates[providerID]; !exists {
+	if !known {
 		return PoolReport{}, ErrUnknownProvider
 	}
 	candidates := make([]domain.Key, 0, len(userKeys))

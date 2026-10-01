@@ -16,7 +16,9 @@ export default function OverviewPage() {
   const { model: insights, state: insightsState } = useInsights()
   // The same model the Insights tab reads: one source of truth, and opening
   // the tab after this is instant because the report is already in memory.
-  useEffect(() => { void insights.load('24h') }, [insights])
+  // Only a first visit loads it — a report already held is fresh enough, and
+  // every remount refetching it bought nothing but a round-trip.
+  useEffect(() => { if (insightsState.phase === 'idle') void insights.load('24h') }, [insights, insightsState.phase])
   const summary = activity.summary
   const recent = activity.requests.slice(0, 7)
   const overview = insightsState.report?.overview

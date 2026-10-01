@@ -32,6 +32,11 @@ type Server struct {
 	maxWorkers int
 	cancelMu   sync.Mutex
 	cancels    map[string]context.CancelFunc
+	// diagnostics receives protocol-level delivery failures. Events that
+	// cannot be delivered are dropped either way — the shell breaks its read
+	// loop on a frame it cannot carry — but "dropped" and "silently dropped"
+	// are different things for the operator watching the feed go quiet.
+	diagnostics io.Writer
 }
 
 type job struct {
@@ -53,6 +58,15 @@ func NewServer(reader io.Reader, writer io.Writer, maxConcurrent int) *Server {
 	}
 }
 
+// Diagnostics sets where delivery failures are reported. The shell does not
+// forward stderr to the WebView, so an io.Discard default costs the packaged
+// app nothing while tests and the bootstrap wire it to os.Stderr.
+func (server *Server) Diagnostics(writer io.Writer) {
+	server.writeMu.Lock()
+	server.diagnostics = writer
+	server.writeMu.Unlock()
+}
+
 func (server *Server) Handle(method string, handler Handler) {
 	if method == "" || handler == nil {
 		panic("stdio: invalid handler")
@@ -61,6 +75,11 @@ func (server *Server) Handle(method string, handler Handler) {
 		panic("stdio: duplicate handler " + method)
 	}
 	server.handlers[method] = handler
+}
+
+type frame struct {
+	request   Request
+	decodeErr error
 }
 
 func (server *Server) Serve(ctx context.Context) error {
@@ -84,55 +103,105 @@ func (server *Server) Serve(ctx context.Context) error {
 		close(jobs)
 		group.Wait()
 	}()
-	for scanner.Scan() {
-		if err := serveCtx.Err(); err != nil {
-			return err
+	// The read runs in its own goroutine so a cancelled context can end Serve
+	// while the caller's stdin has nothing more to say. A signal exit used to
+	// park the whole drain in a blocked read until something killed the process,
+	// losing the buffered history that drain exists to flush. The reader is
+	// abandoned when Serve returns: the process is on its way out either way,
+	// and the goroutine leaves with the reader's own EOF.
+	frames := make(chan frame)
+	readErr := make(chan error, 1)
+	go func() {
+		defer close(frames)
+		for scanner.Scan() {
+			request, err := decodeRequest(scanner.Bytes())
+			select {
+			case frames <- frame{request: request, decodeErr: err}:
+			case <-serveCtx.Done():
+				return
+			}
 		}
-		request, err := decodeRequest(scanner.Bytes())
-		if err != nil {
-			_ = server.write(Failure(request, "invalid_request", "Malformed protocol frame"))
-			continue
+		if err := scanner.Err(); err != nil {
+			readErr <- fmt.Errorf("read stdio frame: %w", err)
 		}
-		if request.Method == "system.cancel" {
-			server.cancelRequest(request)
-			continue
-		}
-		if request.Method == "system.shutdown" {
-			_ = server.write(Response{Version: ProtocolVersion, ID: request.ID, Type: "result", Method: request.Method, OK: true})
-			return nil
-		}
-		pending, err := server.prepareJob(serveCtx, request)
-		if err != nil {
-			_ = server.write(Failure(request, "duplicate_id", "Request id is already active"))
-			continue
-		}
+	}()
+	for {
 		select {
-		case jobs <- pending:
 		case <-serveCtx.Done():
-			server.finishJob(pending)
 			return serveCtx.Err()
-		default:
-			server.finishJob(pending)
-			_ = server.write(Failure(request, "busy", "Control plane is busy"))
+		case pending, ok := <-frames:
+			if !ok {
+				// EOF. A read failure, if any, was filed before the close.
+				select {
+				case err := <-readErr:
+					return err
+				default:
+					return nil
+				}
+			}
+			if pending.decodeErr != nil {
+				_ = server.write(Failure(pending.request, "invalid_request", "Malformed protocol frame"))
+				continue
+			}
+			request := pending.request
+			if request.Method == "system.cancel" {
+				server.cancelRequest(request)
+				continue
+			}
+			if request.Method == "system.shutdown" {
+				_ = server.write(Response{Version: ProtocolVersion, ID: request.ID, Type: "result", Method: request.Method, OK: true})
+				return nil
+			}
+			pendingJob, err := server.prepareJob(serveCtx, request)
+			if err != nil {
+				_ = server.write(Failure(request, "duplicate_id", "Request id is already active"))
+				continue
+			}
+			select {
+			case jobs <- pendingJob:
+			case <-serveCtx.Done():
+				server.finishJob(pendingJob)
+				return serveCtx.Err()
+			default:
+				server.finishJob(pendingJob)
+				_ = server.write(Failure(request, "busy", "Control plane is busy"))
+			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read stdio frame: %w", err)
-	}
-	return nil
 }
 
 func (server *Server) Emit(topic string, payload any) error {
 	if topic == "" {
 		return errors.New("event topic is required")
 	}
-	return server.write(Event{
+	err := server.write(Event{
 		Version: ProtocolVersion,
 		Type:    "event",
 		Topic:   topic,
 		Seq:     server.sequence.Add(1),
 		Payload: payload,
 	})
+	if err != nil {
+		// The shell breaks its read loop on a frame it cannot carry, so an
+		// over-sized event is dropped no matter what — but every caller
+		// ignores Emit's error, and a feed that goes quiet deserves a word
+		// on the owner's console rather than nothing at all.
+		server.report(topic, err)
+	}
+	return err
+}
+
+// report files a delivery failure to the diagnostics writer, if one was set.
+func (server *Server) report(topic string, err error) {
+	// The writer is held across the write: two concurrently-failing events
+	// would otherwise interleave on a writer that is not line-atomic, and the
+	// one production wiring is os.Stderr today only by choice.
+	server.writeMu.Lock()
+	defer server.writeMu.Unlock()
+	if server.diagnostics == nil {
+		return
+	}
+	fmt.Fprintf(server.diagnostics, "switchboard: event %s could not be delivered: %v\n", topic, err)
 }
 
 func (server *Server) handleRequest(pending job) {

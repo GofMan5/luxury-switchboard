@@ -26,8 +26,13 @@ func NewHTTPProber() *HTTPProber {
 }
 
 func (prober *HTTPProber) ProbeReachability(ctx context.Context, provider providerdomain.Provider) (bool, string) {
-	endpoint := provider.BaseURL.JoinPath("models")
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	// The catalog the provider actually serves, not a guess at where "models"
+	// lives: the configured path is part of the provider's surface, and every
+	// other catalog reader joins it the same way.
+	target := *provider.BaseURL
+	target.Path = providerdomain.JoinCatalogPath(target.Path, provider.ModelsPath)
+	target.RawPath = ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return false, "endpoint is invalid"
 	}

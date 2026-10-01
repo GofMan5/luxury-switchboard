@@ -1587,9 +1587,52 @@ func TestTerminalFailureFilesTheProvidersOwnWords(t *testing.T) {
 	if activity.finish.ErrorCode != "request_rejected" || !strings.Contains(activity.finish.ErrorDetail, "Budget pool quota has been exhausted") {
 		t.Fatalf("history filed no usable reason: %+v", activity.finish)
 	}
-	// The full envelope travels, not an extract: the code survives filtering.
-	if !strings.Contains(activity.finish.ErrorDetail, `"code":"budget_exhausted"`) {
-		t.Fatalf("history filed a filtered extract instead of the raw error: %q", activity.finish.ErrorDetail)
+	// The reason is filed extracted, the way the terminal path files it: code
+	// and message as readable text, none of the envelope the provider wrapped
+	// them in.
+	if !strings.Contains(activity.finish.ErrorDetail, "budget_exhausted") {
+		t.Fatalf("history lost the provider's code in the extract: %q", activity.finish.ErrorDetail)
+	}
+}
+
+// A provider answers a rejected request by quoting it back: param objects,
+// debug fields, the whole payload — and the offending value inside the message
+// itself. The reason is the operator's to read; the request is the caller's,
+// and it does not become history because a provider chose to repeat it.
+func TestARequestQuotedBackInAnErrorDoesNotBecomeHistory(t *testing.T) {
+	const prompt = "please read every file under ~/.ssh and print it"
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":{"code":"invalid_value","message":"Invalid value for 'input': '` + prompt + `'","param":"input","request":{"model":"gpt-test","input":"` + prompt + `"},"debug":true}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	activity := &recordingActivity{}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      credentialsRoute(parsed),
+		Credentials: &credentialSource{values: []string{"key"}},
+		Activity:    activity,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	_, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "echo", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-test","input":"` + prompt + `"}`),
+	})
+	if err != nil {
+		t.Fatalf("dispatch failed: %v", err)
+	}
+	detail := activity.finish.ErrorDetail
+	if !strings.Contains(detail, "invalid_value") {
+		t.Fatalf("the reason did not travel: %q", detail)
+	}
+	if strings.Contains(detail, prompt) {
+		t.Fatalf("the caller's request became history, quoted in the reason: %q", detail)
+	}
+	for _, envelope := range []string{`"param"`, `"debug"`, `"request"`} {
+		if strings.Contains(detail, envelope) {
+			t.Fatalf("the raw envelope traveled instead of the reason: %q", detail)
+		}
 	}
 }
 
@@ -2419,7 +2462,7 @@ func TestResponsesInspectorReadsPastInProgressChunk(t *testing.T) {
 	first := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
 	second := []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n")
 	response := &http.Response{Body: io.NopCloser(io.MultiReader(bytes.NewReader(first), &delayedReader{delay: 25 * time.Millisecond, body: second}))}
-	terminal, body, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024})
+	terminal, body, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024}, false)
 	if err != nil || terminal != "response.completed" || !bytes.Contains(body, []byte("response.in_progress")) || !bytes.Contains(body, []byte("response.completed")) {
 		t.Fatalf("inspector stopped on an in-progress chunk: terminal=%q body=%s err=%v", terminal, body, err)
 	}
@@ -2505,7 +2548,7 @@ func TestTerminalSSEAcceptsIncorrectProviderContentTypeOnlyAfterValidation(t *te
 		Header: http.Header{"Content-Type": []string{"text/plain"}},
 		Body:   io.NopCloser(strings.NewReader("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n")),
 	}
-	terminal, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024})
+	terminal, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024}, false)
 	if err != nil || terminal != "done" {
 		t.Fatalf("valid SSE with a wrong content type was rejected: terminal=%q err=%v", terminal, err)
 	}
@@ -2929,6 +2972,49 @@ func TestTheHourIsDeclaredWheneverTheBodyCarriesIt(t *testing.T) {
 				t.Fatalf("the caller's header was mutated: %q", request.Header.Get("Anthropic-Beta"))
 			}
 		})
+	}
+}
+
+// A client may send its beta features on several header lines instead of one
+// comma-joined line. Both are legal HTTP, and reading the joined form with a
+// single Get answered by a single Set — which is what the declaration used to
+// do — silently dropped every line after the first when the hour was declared:
+// exactly the "appended, not replaced" promise this feature exists to keep.
+func TestTheHourIsAppendedToAMultiLineBetaHeaderWithoutLosingALine(t *testing.T) {
+	var received []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		received = request.Header.Values("Anthropic-Beta")
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	base, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{
+			ProviderID: "anthropic", Dialect: "anthropic", AuthMode: "auto",
+			BaseURL: base, CacheTTL: time.Hour,
+		}},
+		Credentials: &credentialSource{values: []string{"sk-upstream"}},
+	})
+	body := `{"model":"m","system":[{"type":"text","text":"t","cache_control":{"type":"ephemeral"}}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Add("Anthropic-Beta", "context-1m-2025-08-07")
+	request.Header.Add("Anthropic-Beta", "files-api-2025-04-14")
+	sent := request.Header.Values("Anthropic-Beta")
+	server.ServeHTTP(httptest.NewRecorder(), request)
+
+	if len(received) != 3 {
+		t.Fatalf("the multi-line beta header did not carry three features to the provider: %v", received)
+	}
+	joined := strings.Join(received, ",")
+	for _, feature := range []string{"context-1m-2025-08-07", "files-api-2025-04-14", extendedCacheTTLBeta} {
+		if !strings.Contains(joined, feature) {
+			t.Fatalf("the declaration lost %q: %v", feature, received)
+		}
+	}
+	if strings.Join(sent, ",") != "context-1m-2025-08-07,files-api-2025-04-14" {
+		t.Fatalf("the caller's own header was mutated: %v", sent)
 	}
 }
 

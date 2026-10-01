@@ -1,4 +1,4 @@
-import { useContext, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { useContext, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
 import { restartApp } from '../../../platform/lifecycle/restart-app'
 import { Button } from '../../../shared/ui/Button'
@@ -112,14 +112,28 @@ export function SettingsForm({ initial, pending, restartRequired, error, onSave,
 
 /** Plain-text backup, on request: one button writes the file, one file picker
  * restores it. The warning about the format is stated here and in the file
- * itself, because the operator asked for exactly this trade. */
-function BackupPanel() {
+ * itself, because the operator asked for exactly this trade. Exported for its
+ * test, like the form itself. */
+const idleBackup = { exporting: false, importing: false, lastExportPath: '', lastReport: null, error: '' }
+// Module-level so the hook sees the same function identities on every render
+// while no store exists: rebuilt closures would re-subscribe each time.
+const idleBackupSubscribe = (): (() => void) => () => {}
+const idleBackupSnapshot = (): typeof idleBackup => idleBackup
+
+export function BackupPanel() {
   const [copied, setCopied] = useState(false)
   const importInput = useRef<HTMLInputElement | null>(null)
   // The form is also rendered in isolation by its own tests, without the
   // services context; the panel then shows its explanation and no controls.
   const services = useContext(ServicesContext)
-  if (!services) {
+  const backup = services?.backup ?? null
+  // The backup model notifies like every other store, and this panel is the one
+  // place that read a bare snapshot() instead of subscribing: the model's own
+  // re-render was the only thing that could show "Writing…", the export path or
+  // the restore report, and nothing triggered one — the feedback stayed in the
+  // model until some unrelated render came by, which never came.
+  const state = useSyncExternalStore(backup?.subscribe ?? idleBackupSubscribe, backup?.snapshot ?? idleBackupSnapshot)
+  if (!backup) {
     return (
       <div className={styles.backupNote}>
         <strong>Plain text, no passphrase</strong>
@@ -127,8 +141,6 @@ function BackupPanel() {
       </div>
     )
   }
-  const backup = services.backup
-  const state = backup.snapshot()
 
   const pickFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0]

@@ -54,18 +54,5 @@ func Register(server *platform.Server, service *application.Service) {
 // short list. No single client row can outgrow the budget, so the newest one
 // always fits.
 func withinOneFrame(clients []domain.Client) []domain.Client {
-	for len(clients) > 0 {
-		encoded, err := json.Marshal(clients)
-		if err != nil {
-			return nil
-		}
-		if len(encoded) <= platform.MaxPayloadBytes {
-			return clients
-		}
-		// Proportional, then verified; taking at least one off guarantees this
-		// ends.
-		next := len(clients) * platform.MaxPayloadBytes / len(encoded)
-		clients = clients[:min(next, len(clients)-1)]
-	}
-	return clients
+	return platform.TrimToPayloadBudget(clients)
 }

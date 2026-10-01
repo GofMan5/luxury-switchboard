@@ -138,13 +138,10 @@ pub fn begin_graceful_exit(app: &AppHandle) -> bool {
     if state.exiting.swap(true, Ordering::AcqRel) {
         return false;
     }
-    if let Ok(mut guard) = state.child.lock()
-        && let Some(child) = guard.as_mut()
-    {
-        let _ = child.write(
-            b"{\"v\":1,\"id\":\"native_shutdown\",\"type\":\"command\",\"method\":\"system.shutdown\"}\n",
-        );
-    }
+    // The watchdog is armed before the shutdown frame is written, not after: a
+    // wedged sidecar with a full pipe blocks that write forever, so a watchdog
+    // spawned only once the write returns would never start and neither would
+    // the ten-second force-kill behind it.
     let app = app.clone();
     thread::spawn(move || {
         for _ in 0..200 {
@@ -163,6 +160,13 @@ pub fn begin_graceful_exit(app: &AppHandle) -> bool {
         stop_on_exit(&app);
         app.exit(0);
     });
+    if let Ok(mut guard) = state.child.lock()
+        && let Some(child) = guard.as_mut()
+    {
+        let _ = child.write(
+            b"{\"v\":1,\"id\":\"native_shutdown\",\"type\":\"command\",\"method\":\"system.shutdown\"}\n",
+        );
+    }
     true
 }
 

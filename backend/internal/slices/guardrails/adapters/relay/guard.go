@@ -26,6 +26,7 @@ func (guard *Guard) Review(body []byte, eventStream bool, subject relayapp.Guard
 		ProviderName:        subject.ProviderName,
 		Model:               subject.Model,
 		ClientDeclaredTools: subject.ClientDeclaredTools,
+		Secrets:             subject.Secrets,
 	})
 	if !decision.Blocked() {
 		return relayapp.GuardrailVerdict{}

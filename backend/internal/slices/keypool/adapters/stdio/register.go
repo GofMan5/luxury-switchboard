@@ -174,18 +174,7 @@ func invalidPayload() platform.MethodError {
 // instead of a short list passing for the whole pool. List already orders by
 // priority, so what stays is what the scheduler would use first.
 func withinOneFrame(keys []domain.PublicKey) []domain.PublicKey {
-	for len(keys) > 0 {
-		encoded, err := json.Marshal(keys)
-		if err != nil {
-			return nil
-		}
-		if len(encoded) <= platform.MaxPayloadBytes {
-			return keys
-		}
-		next := len(keys) * platform.MaxPayloadBytes / len(encoded)
-		keys = keys[:min(next, len(keys)-1)]
-	}
-	return keys
+	return platform.TrimToPayloadBudget(keys)
 }
 
 func managementError(err error) platform.MethodError {

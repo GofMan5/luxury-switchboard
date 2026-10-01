@@ -3,8 +3,15 @@ package stdio
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestServerDispatchesVersionedCommand(t *testing.T) {
@@ -144,5 +151,84 @@ func TestShutdownAcknowledgesThenStopsDispatch(t *testing.T) {
 	var response Response
 	if err := json.Unmarshal([]byte(output.String()), &response); err != nil || !response.OK || response.ID != "shutdown" || called {
 		t.Fatalf("shutdown did not stop cleanly: response=%+v called=%v err=%v", response, called, err)
+	}
+}
+
+// A cancelled context must end Serve even while the reader has nothing more to
+// say. The read used to run inline: a signal exit parked the whole drain in a
+// blocked read until something killed the process, losing the buffered history
+// the drain exists to flush. The reader may stay blocked — the process is on
+// its way out — but Serve itself has to come back.
+func TestCancellationEndsServeWhileTheReaderIsQuiet(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	server := NewServer(reader, io.Discard, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("serve returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled context could not end Serve: the drain behind it never ran")
+	}
+}
+
+// The shell and the sidecar enforce one frame limit between them, and each
+// side spells the number out on its own: Rust's MAX_FRAME_BYTES against Go's
+// MaxFrameBytes. The command allowlist got a cross-side drift test that reads
+// sidecar.rs; the frame limit got none — if Go ever raises its limit, the
+// shell kills the sidecar on legitimate frames, and if Rust raises its own,
+// every response_too_large answer Go sends becomes a lie about what the shell
+// accepts.
+func TestTheShellAcceptsTheFramesTheProtocolWrites(t *testing.T) {
+	shell, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "src-tauri", "src", "sidecar.rs"))
+	if err != nil {
+		t.Skipf("desktop shell is unavailable: %v", err)
+	}
+	pattern := regexp.MustCompile(`MAX_FRAME_BYTES[^=\n]*=\s*(\d+)\s*\*\s*(\d+)\s*;`)
+	match := pattern.FindSubmatch(shell)
+	if match == nil {
+		t.Fatal("the shell's frame limit could not be read; update this test with the new spelling")
+	}
+	shellLimit := 1
+	for _, digits := range match[1:] {
+		value, parseErr := strconv.Atoi(string(digits))
+		if parseErr != nil {
+			t.Fatalf("unreadable frame limit: %v", parseErr)
+		}
+		shellLimit *= value
+	}
+	if shellLimit != MaxFrameBytes {
+		t.Fatalf("the shell accepts frames of %d bytes while the protocol writes at most %d", shellLimit, MaxFrameBytes)
+	}
+}
+
+// An event the frame cannot carry is dropped — the shell would kill the
+// sidecar on it — but "dropped" and "silently dropped" are different things
+// for the operator watching a feed go quiet. The diagnostics writer hears
+// about it, and an event that fits still says nothing.
+func TestAnUndeliverableEventIsReportedToDiagnostics(t *testing.T) {
+	var output strings.Builder
+	server := NewServer(strings.NewReader(""), io.Discard, 1)
+	server.Diagnostics(&output)
+	if err := server.Emit("too.big", map[string]string{"payload": strings.Repeat("x", MaxFrameBytes)}); err == nil {
+		t.Fatal("an oversized event was delivered")
+	}
+	if !strings.Contains(output.String(), "too.big") {
+		t.Fatalf("the dropped event left no word on the console: %q", output.String())
+	}
+
+	server = NewServer(strings.NewReader(""), io.Discard, 1)
+	server.Diagnostics(&output)
+	if err := server.Emit("fits", map[string]string{"payload": "small"}); err != nil {
+		t.Fatalf("a small event failed: %v", err)
+	}
+	if strings.Contains(output.String(), "fits") {
+		t.Fatalf("a delivered event was reported as dropped: %q", output.String())
 	}
 }

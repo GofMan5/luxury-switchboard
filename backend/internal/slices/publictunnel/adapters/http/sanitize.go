@@ -74,8 +74,21 @@ func sanitizeJSONPath(value any, publicModel string, redactor markerRedactor, pa
 			}
 			if opaqueImageField(path, key, value) {
 				encoded, ok := item.(string)
-				if !ok || !validImageBase64(encoded) {
+				if !ok {
 					return nil, errors.New("invalid image data")
+				}
+				decoded, valid := decodeImageData(encoded)
+				if !valid {
+					return nil, errors.New("invalid image data")
+				}
+				// Image bytes are opaque to JSON, but they are not unmarked:
+				// PNG text chunks and JPEG comment segments carry generator
+				// metadata, and image backends commonly embed the model that
+				// produced the picture — the exact identifier the structural
+				// rename exists to hide. The answer is refused, fail-closed
+				// like every other marker that survives.
+				if redactor.contains(decoded) {
+					return nil, errors.New("sensitive image marker remains")
 				}
 				clean[key] = encoded
 				continue
@@ -115,23 +128,33 @@ func opaqueImageField(path, key string, object map[string]any) bool {
 	return key == "result" || key == "b64_json" || key == "partial_image" || key == "partial_image_b64"
 }
 
-func validImageBase64(value string) bool {
+// decodeImageData validates and decodes one base64 image payload. The decoded
+// bytes are returned so callers can sweep them for markers: the magic-byte
+// check proves the value is an image, not that it is a clean one.
+func decodeImageData(value string) ([]byte, bool) {
 	if value == "" || len(value)%4 != 0 {
-		return false
+		return nil, false
 	}
 	decoder := base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(value))
 	header := make([]byte, 12)
 	count, err := io.ReadFull(decoder, header)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return false
+		return nil, false
 	}
-	if _, err = io.Copy(io.Discard, decoder); err != nil {
-		return false
+	// The full body is decoded into memory: it has already been buffered as
+	// base64 in the response, so this holds one transient copy of bytes the
+	// relay already holds, bounded by the same response ceiling.
+	rest, err := io.ReadAll(decoder)
+	if err != nil {
+		return nil, false
 	}
 	header = header[:count]
-	return bytes.HasPrefix(header, []byte("\x89PNG\r\n\x1a\n")) ||
-		bytes.HasPrefix(header, []byte("\xff\xd8\xff")) ||
-		(len(header) >= 12 && bytes.Equal(header[:4], []byte("RIFF")) && bytes.Equal(header[8:12], []byte("WEBP")))
+	if !bytes.HasPrefix(header, []byte("\x89PNG\r\n\x1a\n")) &&
+		!bytes.HasPrefix(header, []byte("\xff\xd8\xff")) &&
+		!(len(header) >= 12 && bytes.Equal(header[:4], []byte("RIFF")) && bytes.Equal(header[8:12], []byte("WEBP"))) {
+		return nil, false
+	}
+	return append(header, rest...), true
 }
 
 func containsSensitiveJSON(value any, redactor markerRedactor, path string) bool {
@@ -507,6 +530,12 @@ type markerReplacement struct {
 
 type markerRedactor []markerReplacement
 
+// newMarkerRedactor builds the replacement table for one answer. The width
+// below is the same constant the identifier hand-off points filter by: a
+// marker shorter than it cannot be replaced out of prose without mangling the
+// prose, so it is only ever checked — and an identifier that short never
+// arrives here, because identifyingMarkers dropped it first. A credential of
+// any width does arrive, and survives as a refusal.
 func newMarkerRedactor(markers []string, brand string) markerRedactor {
 	if brand == "" {
 		brand = "Luxury Private"
@@ -526,7 +555,7 @@ func newMarkerRedactor(markers []string, brand string) markerRedactor {
 		}
 		pattern, err := regexp.Compile("(?i:" + regexp.QuoteMeta(marker) + ")")
 		if err == nil {
-			redactor = append(redactor, markerReplacement{pattern: pattern, replacement: replacement, replace: len(marker) >= 4})
+			redactor = append(redactor, markerReplacement{pattern: pattern, replacement: replacement, replace: len(marker) >= relayapp.MinRedactableMarkerBytes})
 		}
 	}
 	return redactor

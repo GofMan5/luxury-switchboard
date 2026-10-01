@@ -86,6 +86,9 @@ export function assertVersionsAgree(root, expected) {
 
 // replaceJSONVersion keeps the manifest's own formatting and key order: these
 // files are hand maintained, so re-serialising would reformat unrelated lines.
+// The match is anchored to a line-start key: every manifest states its
+// top-level "version" before any nested object, so the first anchored match is
+// that key, and a nested "version" field can never be the one rewritten.
 function replaceJSONVersion(text, version) {
-  return text.replace(/("version"\s*:\s*)"[^"]+"/u, `$1"${version}"`)
+  return text.replace(/^(\s*"version"\s*:\s*)"[^"]+"/mu, `$1"${version}"`)
 }

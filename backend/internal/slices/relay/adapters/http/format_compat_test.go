@@ -136,6 +136,62 @@ func TestResponsesRequestTranslatesToChatCompletions(t *testing.T) {
 	}
 }
 
+// The chat translation drops reasoning items, summaries included — a price the
+// translator states where it is paid, because the same summary is exactly what
+// stripEncryptedReasoning fights to keep on the Responses path. The drop is
+// pinned so the day it becomes a mapping, the decision is made here rather
+// than by accident.
+func TestTheChatTranslationDropsReasoningSummariesDeliberately(t *testing.T) {
+	request := `{"model":"m","input":[
+	 {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"planning the next step"}]},
+	 {"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}
+	]}`
+	converted, err := responsesToChat([]byte(request))
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+	if strings.Contains(string(converted), "planning the next step") {
+		t.Fatalf("the reasoning summary leaked into the chat context: %s", converted)
+	}
+	messages := translatedBody(t, converted)["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("the reasoning item became a message: %v", messages)
+	}
+}
+
+// Structured output travels: a client that declared text.format keeps its
+// schema on a chat-only provider, both the bare json_object and the full
+// json_schema shapes. Losing it silently handed free-form prose to a caller
+// that asked for parseable JSON.
+func TestTheChatTranslationCarriesStructuredOutput(t *testing.T) {
+	request := `{"model":"m","text":{"format":{"type":"json_object"}},"input":"hi"}`
+	converted, err := responsesToChat([]byte(request))
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+	if format := translatedBody(t, converted)["response_format"].(map[string]any); format["type"] != "json_object" {
+		t.Fatalf("the json_object shape was lost: %v", format)
+	}
+
+	request = `{"model":"m","text":{"format":{"type":"json_schema","name":"result","strict":true,"schema":` +
+		`{"type":"object","properties":{"ok":{"type":"boolean"}}}}},"input":"hi"}`
+	converted, err = responsesToChat([]byte(request))
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+	format := translatedBody(t, converted)["response_format"].(map[string]any)
+	if format["type"] != "json_schema" {
+		t.Fatalf("the json_schema shape was lost: %v", format)
+	}
+	inner := format["json_schema"].(map[string]any)
+	if inner["name"] != "result" || inner["strict"] != true {
+		t.Fatalf("the schema envelope lost its name or strictness: %v", inner)
+	}
+	if _, ok := inner["schema"]; !ok {
+		t.Fatalf("the schema body itself was lost: %v", inner)
+	}
+}
+
 // The chat dialect knows only documented functions, so a freeform tool has to be
 // re-expressed rather than dropped: a model given no definition for the tool it
 // is about to be asked to use answers by narrating the call in its prose, which

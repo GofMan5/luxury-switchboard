@@ -94,13 +94,65 @@ func responsesToChat(body []byte) ([]byte, error) {
 			chat["reasoning_effort"] = effort
 		}
 	}
+	if format := chatResponseFormat(payload["text"]); format != nil {
+		chat["response_format"] = format
+	}
 	chat["messages"] = messages
 	return json.Marshal(chat)
 }
 
+// chatResponseFormat converts the Responses text.format onto the chat
+// response_format. Both dialects carry the same two shapes — a bare
+// json_object and a full json_schema — so the translation is exact, and a
+// structured-output client on a chat-only provider keeps its schema instead
+// of silently receiving free-form prose. previous_response_id has no chat
+// equivalent: the chat dialect has no server-side state to chain, so the
+// follow-up turns of a store-based client lose the earlier context — an
+// inherent loss of the translation, not a dropped field that could be mapped.
+func chatResponseFormat(text any) any {
+	object, ok := text.(map[string]any)
+	if !ok {
+		return nil
+	}
+	format, _ := object["format"].(map[string]any)
+	if format == nil {
+		return nil
+	}
+	switch kind, _ := format["type"].(string); kind {
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	case "json_schema":
+		converted := map[string]any{"type": "json_schema"}
+		if schema, ok := format["schema"]; ok && schema != nil {
+			converted["json_schema"] = map[string]any{"schema": schema}
+		}
+		if name, ok := format["name"].(string); ok && name != "" {
+			if schema, exists := converted["json_schema"].(map[string]any); exists {
+				schema["name"] = name
+			} else {
+				converted["json_schema"] = map[string]any{"name": name}
+			}
+		}
+		if strict, ok := format["strict"].(bool); ok {
+			if schema, exists := converted["json_schema"].(map[string]any); exists {
+				schema["strict"] = strict
+			}
+		}
+		return converted
+	default:
+		return nil
+	}
+}
+
 // inputItemsToChat maps Responses input items onto chat messages. Unsupported
 // item kinds (reasoning transcripts, file uploads) are dropped; the chat format
-// has no place for them.
+// has no place for them. That price is named here because the reasoning item
+// also carries the plaintext summary of the earlier turns — the same summary
+// stripEncryptedReasoning exists to keep on the Responses path — and on a
+// chat-only provider the turn that follows answers a conversation it only
+// knows from the messages and tool exchange. Mapping the summary text into
+// the chat context would be a semantic invention, not a translation: it is
+// dropped, deliberately, and pinned by test.
 //
 // Freeform call history maps onto the same chat shapes as a documented call: the
 // tool it names was translated into a documented function, so replaying its turn

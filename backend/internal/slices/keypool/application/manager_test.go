@@ -142,18 +142,22 @@ func TestManagerDoesNotCommitFailedPersistence(t *testing.T) {
 	}
 }
 
-func TestManagerRejectsDuplicatePersistedKeysWithoutMutatingRuntime(t *testing.T) {
+func TestManagerDeduplicatesPersistedRowsAndKeepsOneCopy(t *testing.T) {
 	key := testKey(t, "echo", "Duplicate", "same-secret", 1, 10)
 	repository := &memoryRepository{keys: []domain.Key{key, key}}
 	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Load(context.Background()); !errors.Is(err, ErrDuplicateKey) {
-		t.Fatalf("duplicate persisted keys were accepted: %v", err)
+	// A duplicate stored row is one secret filed twice: refusing the whole
+	// load used to lock the pool forever behind a "secure storage unavailable"
+	// misdiagnosis with no recovery from inside the app. The pool takes one
+	// copy and works; the extra row is simply not a second key.
+	if err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("a duplicated stored row locked the pool: %v", err)
 	}
-	if keys := manager.List("echo"); len(keys) != 0 {
-		t.Fatalf("failed load mutated the scheduler: %+v", keys)
+	if keys := manager.List("echo"); len(keys) != 1 {
+		t.Fatalf("the duplicate row became a second key (or vanished): %+v", keys)
 	}
 }
 

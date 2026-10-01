@@ -2,8 +2,6 @@ package live
 
 import (
 	"context"
-	"errors"
-	"net/url"
 	"time"
 
 	analyticsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/domain"
@@ -15,9 +13,6 @@ import (
 	routeapp "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/application"
 	routedomain "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
 )
-
-var _ = errors.New
-var _ = url.Parse
 
 // Sources reads the live configuration: the encrypted stores each slice
 // already owns, decrypted here only long enough to write the plain backup.

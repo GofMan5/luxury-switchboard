@@ -121,8 +121,14 @@ func (manager *Manager) load(ctx context.Context) error {
 	}
 	loadedBuiltins := slices.Clone(manager.builtins)
 	loadedUsers := make([]domain.Key, 0, len(keys))
+	manager.mu.RLock()
+	knownProviders := make(map[string]struct{}, len(manager.providerRates))
+	for providerID := range manager.providerRates {
+		knownProviders[providerID] = struct{}{}
+	}
+	manager.mu.RUnlock()
 	for _, key := range keys {
-		if _, exists := manager.providerRates[key.ProviderID]; !exists {
+		if _, exists := knownProviders[key.ProviderID]; !exists {
 			return ErrUnknownProvider
 		}
 		if key.Pinned {
@@ -140,9 +146,24 @@ func (manager *Manager) load(ctx context.Context) error {
 		}
 		loadedUsers = append(loadedUsers, key)
 	}
-	if duplicateKeyID(append(slices.Clone(loadedBuiltins), loadedUsers...)) {
-		return ErrDuplicateKey
+	// A duplicate key id used to fail the whole load, which refused every
+	// mutation forever with "secure storage unavailable" — a misdiagnosis for
+	// one row, and no recovery from inside the app. A collision means the
+	// same secret is stored twice under one provider: one copy is enough, the
+	// duplicate is dropped, and the pool works.
+	deduplicated := make([]domain.Key, 0, len(loadedUsers))
+	seen := make(map[string]struct{}, len(loadedUsers)+len(loadedBuiltins))
+	for _, key := range loadedBuiltins {
+		seen[key.ID] = struct{}{}
 	}
+	for _, key := range loadedUsers {
+		if _, duplicate := seen[key.ID]; duplicate {
+			continue
+		}
+		seen[key.ID] = struct{}{}
+		deduplicated = append(deduplicated, key)
+	}
+	loadedUsers = deduplicated
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
 	manager.mu.Lock()
@@ -509,17 +530,6 @@ func keyByID(keys []domain.Key, id string) (*domain.Key, bool) {
 func containsKey(keys []domain.Key, id string) bool {
 	key, _ := keyByID(keys, id)
 	return key != nil
-}
-
-func duplicateKeyID(keys []domain.Key) bool {
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		if _, duplicate := seen[key.ID]; duplicate {
-			return true
-		}
-		seen[key.ID] = struct{}{}
-	}
-	return false
 }
 
 func nextPriority(keys []domain.Key, providerID string) int {

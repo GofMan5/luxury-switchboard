@@ -70,21 +70,5 @@ func status(inspector *application.Inspector) map[string]any {
 // real flood measured 60. No single record can outgrow the budget, so this never
 // answers empty because the newest one alone did not fit.
 func withinOneFrame(records []application.Record) []application.Record {
-	for len(records) > 0 {
-		encoded, err := json.Marshal(records)
-		if err != nil {
-			return nil
-		}
-		// The platform constant, not the frame limit: what is measured here is the
-		// record array, and the frame that carries it adds its envelope on top.
-		if len(encoded) <= platform.MaxPayloadBytes {
-			return records
-		}
-		// Proportional, then verified. Records are within an order of magnitude of
-		// each other in size, so one estimate normally lands; taking at least one off
-		// guarantees this ends. Halving instead would answer 100 where 190 fit.
-		next := len(records) * platform.MaxPayloadBytes / len(encoded)
-		records = records[:min(next, len(records)-1)]
-	}
-	return records
+	return platform.TrimToPayloadBudget(records)
 }

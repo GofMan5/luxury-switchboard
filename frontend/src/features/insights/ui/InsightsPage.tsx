@@ -184,7 +184,7 @@ export default function InsightsPage() {
       ) : null}
       {state.phase !== 'idle' && state.phase !== 'error' ? (
         <section className={styles.panel} aria-label="Recent persisted requests">
-          <header><div><h2>Recent requests</h2><span>{state.recent.length > 0 ? `${state.recent.length} rows in ${state.period === 'all' ? 'history' : `the last ${state.period}`}` : 'No persisted requests in this period'}</span></div></header>
+          <header><div><h2>Recent requests</h2><span>{state.recent.length > 0 ? `${state.recentAvailable > state.recent.length ? `Newest ${state.recent.length} of ${state.recentAvailable} rows` : `${state.recent.length} rows`} in ${state.period === 'all' ? 'history' : `the last ${state.period}`}` : 'No persisted requests in this period'}</span></div></header>
           <div className={styles.tableWrap}><table aria-label="Recent persisted requests"><thead><tr>
             <th scope="col">State</th><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">HTTP</th><th scope="col">Latency</th><th scope="col">Processed</th><th scope="col">Cached</th><th scope="col">Time</th>
           </tr></thead><tbody>

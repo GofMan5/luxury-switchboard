@@ -54,3 +54,54 @@ func TestImagesResponseAcceptsOneCompletedImage(t *testing.T) {
 		t.Fatal("duplicate terminal image response was accepted")
 	}
 }
+
+// A client that asked for three pictures is answered with three: n travels to
+// the tool, and every image the provider produced comes back as its own data
+// entry, in the order the answer carried them.
+func TestSeveralRequestedImagesTravelAndComeBack(t *testing.T) {
+	_, body, matched, err := prepareImageRequest("POST", "/v1/images/generations", []byte(`{"model":"gpt-image-2","prompt":"blue robot","n":3}`), "application/json", "custom-image-model", true)
+	if err != nil || !matched {
+		t.Fatalf("request was not adapted: matched=%v err=%v", matched, err)
+	}
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		t.Fatalf("unreadable image request: %s", body)
+	}
+	tool := payload["tools"].([]any)[0].(map[string]any)
+	if tool["n"] != float64(3) {
+		t.Fatalf("the requested image count was dropped from the tool: %v", tool)
+	}
+
+	sse := []byte("data: {\"type\":\"response.created\",\"response\":{\"created_at\":1780000000}}\n\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"YQ==\"}}\n\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"Yg==\"}}\n\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"Yw==\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+	converted, err := imagesResponse(sse)
+	if err != nil {
+		t.Fatalf("a three-image answer was refused: %v", err)
+	}
+	var answer struct {
+		Data []map[string]string `json:"data"`
+	}
+	if json.Unmarshal(converted, &answer) != nil || len(answer.Data) != 3 {
+		t.Fatalf("expected three images, got: %s", converted)
+	}
+	for index, want := range []string{"YQ==", "Yg==", "Yw=="} {
+		if answer.Data[index]["b64_json"] != want {
+			t.Fatalf("image %d was %q, want %q: %s", index, answer.Data[index]["b64_json"], want, converted)
+		}
+	}
+
+	// The buffered JSON form carries the same three images in one output
+	// array, and the order the provider chose is the order the client reads.
+	buffered := []byte(`{"created_at":1780000000,"status":"completed","output":[` +
+		`{"type":"image_generation_call","result":"YQ=="},{"type":"image_generation_call","result":"Yg=="},{"type":"image_generation_call","result":"Yw=="}]}`)
+	converted, err = imagesResponse(buffered)
+	if err != nil {
+		t.Fatalf("a three-image buffered answer was refused: %v", err)
+	}
+	if json.Unmarshal(converted, &answer) != nil || len(answer.Data) != 3 || answer.Data[0]["b64_json"] != "YQ==" || answer.Data[2]["b64_json"] != "Yw==" {
+		t.Fatalf("the buffered images lost their order: %s", converted)
+	}
+}

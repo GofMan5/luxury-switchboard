@@ -110,6 +110,16 @@ type collector struct {
 	itemTools map[string]string
 	textBytes int
 	toolBytes int
+	// anonymous counts items that arrived with no identity of any kind — no id,
+	// no name, no index. Each is its own item: two unnamed items sharing one
+	// accumulator would concatenate unrelated payloads and invent a match at
+	// the seam.
+	anonymous int
+	// anthropicStarts counts content_block_start events per index. The same
+	// index reused for a second block (start after stop, which the spec
+	// permits) is a different block, and its arguments must not splice onto
+	// the previous block's.
+	anthropicStarts map[string]int
 	// added counts accepted writes, so a payload no dialect understood can be
 	// recognised and read as plain JSON instead of being dropped.
 	added int
@@ -215,8 +225,16 @@ func (state *collector) noteTool(name string) {
 // wraps its output at any column would hand the guardrails nothing to judge.
 // Blocks that pack independent objects instead are not legal SSE, but their
 // output still has to be inspected, so they are read line by line as a fallback.
+//
+// The spec also allows a bare carriage return as a line terminator. A CR-only
+// body never splits on \n\n without that normalization, so it would arrive as
+// one giant unparseable data value and degrade to the raw scan — word-boundary
+// rules lose escaped payloads there, which is the cheapest framing trick there
+// is. Both \r\n and lone \r are normalized before the split.
 func (state *collector) readEventStream(body []byte) {
-	for _, block := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+	normalized := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+	normalized = bytes.ReplaceAll(normalized, []byte("\r"), []byte("\n"))
+	for _, block := range bytes.Split(normalized, []byte("\n\n")) {
 		values := make([][]byte, 0, 4)
 		for _, line := range bytes.Split(block, []byte("\n")) {
 			if bytes.HasPrefix(line, []byte("data:")) {
@@ -372,7 +390,32 @@ func (state *collector) readResponsesShape(payload []byte) {
 	}
 	key := event.ItemID
 	if key == "" {
-		key = "output_" + event.OutputIndex.String()
+		if event.OutputIndex.String() != "" {
+			key = "output_" + event.OutputIndex.String()
+		} else if strings.HasSuffix(event.Type, ".done") {
+			// A completed value, not a fragment: two unnamed done events for
+			// two different items must not share an accumulator, or their full
+			// payloads splice and invent a match at the seam — the same
+			// reason the item path gives unnamed items keys of their own.
+			key = "anon_" + itoa(state.anonymous)
+			state.anonymous++
+		} else {
+			// A fragment with no identity: it joins the shared accumulator.
+			// Deltas are fragments by definition — a payload split across
+			// unnamed events is exactly the evasion the accumulator exists to
+			// close, and framing (or the absence of an id) must not decide
+			// what gets inspected. The .done branch above is what keeps
+			// complete values from ever landing here.
+			key = "output_"
+		}
+	}
+	// A .done event carries the complete value, not one more fragment. The
+	// item-level path keeps its completed payloads apart from the delta stream
+	// for exactly this reason: splicing the full text onto the accumulated
+	// one doubles every compliant streamed answer and invents a match at the
+	// seam between the delta tail and the full copy.
+	if strings.HasSuffix(event.Type, ".done") {
+		key += "_done"
 	}
 	switch {
 	case strings.HasPrefix(event.Type, "response.output_text"),
@@ -382,7 +425,10 @@ func (state *collector) readResponsesShape(payload []byte) {
 		state.add("responses_reasoning_"+key, sourceReasoning, jsonString(event.Delta)+jsonString(event.Text))
 	case strings.HasPrefix(event.Type, "response.function_call_arguments"),
 		strings.HasPrefix(event.Type, "response.custom_tool_call_input"):
-		state.add("responses_args_"+key, state.toolSource(key), jsonString(event.Delta)+jsonString(event.Arguments))
+		// The tool name was remembered for the item id the announcement
+		// carried; the done event's suffixed key would otherwise look up a
+		// name nobody stored and label the piece "unknown".
+		state.add("responses_args_"+key, state.toolSource(strings.TrimSuffix(key, "_done")), jsonString(event.Delta)+jsonString(event.Arguments))
 	}
 }
 
@@ -390,6 +436,12 @@ func (state *collector) readResponsesItem(item responsesItem) {
 	key := item.ID
 	if key == "" {
 		key = item.Name
+	}
+	if key == "" {
+		// No identity at all: its own accumulator, for the same reason the
+		// event path gives unnamed items one each.
+		key = "anon_" + itoa(state.anonymous)
+		state.anonymous++
 	}
 	// Item-level content is kept apart from the delta stream of the same item. A
 	// completed item repeats everything its deltas already carried, and splicing
@@ -568,7 +620,18 @@ func (state *collector) readAnthropicShape(object map[string]json.RawMessage, pa
 		return
 	}
 	key := event.Index.String()
-	if block := event.ContentBlock; block != nil {
+	block := event.ContentBlock
+	if block != nil {
+		// The spec permits a second block with an index that a stopped block
+		// already used. That is a different block, and its arguments must not
+		// splice onto the previous one's: a generation counter keyed by index
+		// gives each start its own accumulator, and the deltas that follow it
+		// read the same generation.
+		if state.anthropicStarts == nil {
+			state.anthropicStarts = make(map[string]int, 4)
+		}
+		state.anthropicStarts[key]++
+		key = key + "_" + itoa(state.anthropicStarts[event.Index.String()])
 		switch block.Type {
 		case "tool_use":
 			state.noteTool(block.Name)
@@ -581,13 +644,22 @@ func (state *collector) readAnthropicShape(object map[string]json.RawMessage, pa
 		}
 	}
 	if delta := event.Delta; delta != nil {
+		// The delta rides the generation its start opened; a stream that only
+		// sends deltas for an index no start ever named reads the way it
+		// always did.
+		deltaKey := key
+		if block == nil {
+			if generation := state.anthropicStarts[event.Index.String()]; generation > 0 {
+				deltaKey = key + "_" + itoa(generation)
+			}
+		}
 		switch delta.Type {
 		case "input_json_delta":
-			state.add("anthropic_args_"+key, state.toolSource("anthropic_"+key), delta.PartialJSON)
+			state.add("anthropic_args_"+deltaKey, state.toolSource("anthropic_"+deltaKey), delta.PartialJSON)
 		case "thinking_delta":
-			state.add("anthropic_reasoning_"+key, sourceReasoning, delta.Thinking)
+			state.add("anthropic_reasoning_"+deltaKey, sourceReasoning, delta.Thinking)
 		case "text_delta":
-			state.add("anthropic_text_"+key, sourceAssistant, delta.Text)
+			state.add("anthropic_text_"+deltaKey, sourceAssistant, delta.Text)
 		}
 	}
 	for index, block := range event.Content {

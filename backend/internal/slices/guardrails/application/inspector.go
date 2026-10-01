@@ -2,6 +2,7 @@ package application
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,11 @@ type Subject struct {
 	Model        string
 	// ClientDeclaredTools says whether the request offered the model any tool.
 	ClientDeclaredTools bool
+	// Secrets are the markers of the credential in flight: a provider that
+	// echoes the key it was sent back inside its answer must not have that key
+	// recorded as evidence. The findings page shows excerpts of the answer,
+	// and an excerpt is the answer.
+	Secrets []string
 }
 
 // Decision is the outcome for one answer.
@@ -243,7 +249,7 @@ func (inspector *Inspector) record(decision Decision, subject Subject) {
 		ProviderID:   providerID,
 		ProviderName: truncate(subject.ProviderName, 80),
 		Model:        model,
-		Findings:     decision.Findings,
+		Findings:     redactEvidence(decision.Findings, subject.Secrets),
 		Occurrences:  1,
 	}
 	inspector.records = append([]Record{record}, inspector.records...)
@@ -267,6 +273,42 @@ func bookkeepingOnly(findings []domain.Finding) bool {
 		}
 	}
 	return true
+}
+
+// minEvidenceSecretBytes is the shortest credential fragment worth scrubbing out of
+// recorded evidence. Shorter fragments also match ordinary prose, so editing those
+// would mangle the evidence; the relay's own filed-text redaction uses the same
+// width.
+const minEvidenceSecretBytes = 8
+
+// redactEvidence scrubs the markers of the attempt in flight out of every
+// field of a recorded finding that carries answer bytes: the match, the
+// excerpt, and the source. The source is built from the answer's tool names,
+// which the provider picks — an echoed key can travel as a name just as
+// easily as inside an argument. The verdict is unaffected: the decision was
+// made on the real bytes, and only what the journal keeps — and the findings
+// page then shows — is cleaned.
+func redactEvidence(findings []domain.Finding, secrets []string) []domain.Finding {
+	if len(findings) == 0 || len(secrets) == 0 {
+		return findings
+	}
+	redacted := make([]domain.Finding, len(findings))
+	for index, finding := range findings {
+		finding.Match = redactSecretText(finding.Match, secrets)
+		finding.Excerpt = redactSecretText(finding.Excerpt, secrets)
+		finding.Source = redactSecretText(finding.Source, secrets)
+		redacted[index] = finding
+	}
+	return redacted
+}
+
+func redactSecretText(value string, secrets []string) string {
+	for _, secret := range secrets {
+		if len(secret) >= minEvidenceSecretBytes && strings.Contains(value, secret) {
+			value = strings.ReplaceAll(value, secret, "[redacted]")
+		}
+	}
+	return value
 }
 
 func (inspector *Inspector) notify(record Record) {

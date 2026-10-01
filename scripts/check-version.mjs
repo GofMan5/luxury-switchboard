@@ -1,4 +1,4 @@
-// Fails when the five version surfaces disagree or the version is not a patch
+// Fails when the version surfaces disagree or the version is not a patch
 // release, so `pnpm check` catches a drifted version long before a release build
 // spends twenty minutes discovering it.
 import { dirname } from 'node:path'

@@ -123,7 +123,23 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	routes := relayproviders.NewSource(catalog, routeResolver, routeResolver)
 	credentials := relaykeypool.NewSource(keyScheduler)
 	activity := activityapp.NewService(settings.ActivityCapacity)
-	history, historyPath, historyErr := defaultHistory(settings.HistoryRetentionDays)
+	notifications := notificationsapp.NewService()
+	// History is the operator's record of what happened, and a storage outage
+	// used to stop it in silence: the queue filled, records dropped, and the
+	// only symptom was a journal that quietly stopped growing. The store says
+	// so through the notification feed — the channel that exists for exactly
+	// this — in words that name the price, not the file. Each cause carries
+	// its own title, because the feed deduplicates on kind+title and one
+	// outage reliably produces both.
+	history, historyPath, historyErr := defaultHistory(settings.HistoryRetentionDays, func(cause string) {
+		title, body := "Request history is not being persisted",
+			"The history database refused a write and the records are queued for retry. If this keeps repeating, the journal is not being persisted."
+		if cause == activitysqlite.CauseQueueFull {
+			title, body = "Request history is dropping new records",
+				"Requests arrived faster than the history database could file them, and the newest records were dropped. Live activity is unaffected; the persisted journal is missing these rows."
+		}
+		_ = notifications.Raise(notificationsdomain.KindHistoryDrop, notificationsdomain.SeverityWarning, title, body)
+	})
 	if historyErr != nil {
 		logger.Printf("request history is unavailable; relay will continue")
 	}
@@ -132,7 +148,6 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	notifications := notificationsapp.NewService()
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(settings.ListenerPort)))
 	httpRuntime := relayhttp.NewServer(address, relayhttp.Dependencies{
 		Routes: routes, Credentials: credentials, Activity: recorder,
@@ -163,6 +178,10 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	})
 
 	protocol := platform.NewServer(stdin, stdout, 32)
+	// Event delivery failures ride the same stderr the rest of the app logs
+	// to: the shell drops them either way, but the owner's console gets the
+	// word instead of a feed that quietly went quiet.
+	protocol.Diagnostics(stderr)
 	systemstdio.Register(protocol)
 	// The health monitor probes enabled providers on an interval the settings
 	// gate. It runs in both editions: a public user's providers die the same
@@ -419,7 +438,7 @@ func defaultSettingsService() (*settingsapp.Service, error, error) {
 	return service, loadErr, nil
 }
 
-func defaultHistory(retentionDays int) (activityapp.History, string, error) {
+func defaultHistory(retentionDays int, onDrop func(cause string)) (activityapp.History, string, error) {
 	path := os.Getenv("SWITCHBOARD_HISTORY_PATH")
 	var err error
 	if path == "" {
@@ -436,6 +455,9 @@ func defaultHistory(retentionDays int) (activityapp.History, string, error) {
 	if err != nil {
 		return nil, path, err
 	}
+	// Registered before the store can be handed to anything that records, so
+	// no drop can happen unwitnessed.
+	store.OnDrop(onDrop)
 	return store, path, nil
 }
 

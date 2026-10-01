@@ -1254,6 +1254,98 @@ func TestATerminalVerdictFailoversToTheSiblingProvider(t *testing.T) {
 
 // recordingChain is the routes half of a chain: fixed order, recorded
 // degradations.
+// A flapping provider answers congestion three times in one request: that is
+// a flap, not a backlog, and the chain exists precisely so the caller never
+// learns a provider is flapping (measured on alpha-relay: requests alternating
+// between five-retry recoveries and clients cancelling mid-wait). One or two
+// congestion answers are still waited out where they stand — a blip drains
+// in seconds and moving the request for it would park a healthy provider.
+func TestAFlappingProviderFailoversAfterThreeCongestionAnswers(t *testing.T) {
+	congestion := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		congestion++
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":{"message":"当前分组上游负载已饱和，请稍后再试"}}`))
+	}))
+	defer primary.Close()
+	sibling := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"served"}]}]}`))
+	}))
+	defer sibling.Close()
+	primaryURL, _ := url.Parse(primary.URL)
+	siblingURL, _ := url.Parse(sibling.URL)
+	chain := &recordingChain{
+		routes: []relayapp.ModelRoute{{ProviderID: "primary", UpstreamModel: "glm-5.3-primary"}, {ProviderID: "sibling", UpstreamModel: "glm-5.3-sibling"}},
+	}
+	failovers := &switchingFailovers{chain: chain, routes: map[string]relayapp.Route{
+		"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+		"sibling": {ProviderID: "sibling", BaseURL: siblingURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-sibling"},
+	}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: multiRoute{routes: map[string]relayapp.Route{
+			"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+			"sibling": {ProviderID: "sibling", BaseURL: siblingURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-sibling"},
+		}, first: "primary"},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Failovers:   failovers,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"glm","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "served") {
+		t.Fatalf("the flapping provider's sibling never reached the client: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if congestion != 3 {
+		t.Fatalf("expected exactly three congestion answers before the switch, saw %d", congestion)
+	}
+	if len(chain.degraded) != 1 || chain.degraded[0] != "primary" {
+		t.Fatalf("the flapping provider was not degraded: %v", chain.degraded)
+	}
+}
+
+// Two congestion answers are a blip: the request stays with its provider and
+// the wait-out is allowed to deliver.
+func TestABlippishProviderIsWaitedOutNotSwitched(t *testing.T) {
+	attempts := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.Header().Set("Content-Type", "application/json")
+		if attempts <= 2 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte(`{"error":{"message":"The service is overloaded. No channel available, please try again later."}}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"recovered"}]}]}`))
+	}))
+	defer primary.Close()
+	primaryURL, _ := url.Parse(primary.URL)
+	chain := &recordingChain{
+		routes: []relayapp.ModelRoute{{ProviderID: "primary", UpstreamModel: "glm-5.3-primary"}, {ProviderID: "sibling", UpstreamModel: "glm-5.3-sibling"}},
+	}
+	failovers := &switchingFailovers{chain: chain, routes: map[string]relayapp.Route{
+		"primary": {ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"},
+	}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "primary", BaseURL: primaryURL, AuthMode: "bearer", UpstreamModel: "glm-5.3-primary"}},
+		Credentials: &credentialSource{values: []string{"key"}},
+		Failovers:   failovers,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"glm","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "recovered") {
+		t.Fatalf("a two-answer blip was not waited out: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(chain.degraded) != 0 {
+		t.Fatalf("a blip degraded a provider that recovered: %v", chain.degraded)
+	}
+}
+
 // A 402 balance verdict parks the key for a short re-check and tells the
 // operator in plain words: the verdict is the one failure only the operator
 // can change, and before this it silently showed up as a cooldown timer.

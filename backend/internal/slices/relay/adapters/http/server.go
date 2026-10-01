@@ -758,6 +758,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	// context, and its key pool has not refused anything yet.
 	routeFailures := 0
 	attempt := 0
+	// congestionAnswers counts how many times this provider answered the
+	// request with congestion. Three is a flap, not a blip: one or two are
+	// waited out where they stand (the backlog usually drains in seconds),
+	// and the third moves the request down the chain instead of handing the
+	// caller a minutes-long wait on a provider that keeps saying "later".
+	congestionAnswers := 0
 	// switchRoute walks the failover chain past a provider that answered
 	// terminally: a verdict no key and no retry of this provider can change.
 	// The body is rewritten to the sibling's upstream model, and the failed
@@ -781,6 +787,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 		route = next
 		routeFailures++
+		congestionAnswers = 0
 		serverFailures, credentialFailures, requestFailures = 0, 0, 0
 		rotateImmediate = false
 		// The new provider's dialect is unknown to the probe cache: let the
@@ -1089,6 +1096,19 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// decision, and a wordless 5xx riding the ceiling used to hang a
 		// request for thirty minutes on a dead upstream.
 		if status >= 500 && (serviceOverloaded(failureText) || gatewayCongestion(status)) {
+			congestionAnswers++
+			if congestionAnswers >= 3 {
+				// Three congestion answers in one request is a provider
+				// saying "not now" faster than the backoff can wait it out —
+				// measured on alpha-relay: requests alternating between
+				// five-retry recoveries and clients cancelling mid-wait. A
+				// chain exists precisely so the caller never learns a
+				// provider is flapping; without one this falls through to the
+				// same wait-out as before.
+				if switchRoute(status) {
+					continue
+				}
+			}
 			delay := retryDelay(attempt, response, server.config)
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			if !canRetry(attempt, attemptLimit) {

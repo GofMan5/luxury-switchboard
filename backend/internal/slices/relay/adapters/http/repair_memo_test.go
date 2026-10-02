@@ -1,9 +1,11 @@
 package relayhttp
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -178,5 +180,71 @@ func TestTheMemoRewritesExactlyWhatTheRepairsDo(t *testing.T) {
 	// An unknown provider is untouched too.
 	if got := string(memo.apply("other", []byte(`{"max_tokens":512}`))); got != `{"max_tokens":512}` {
 		t.Fatalf("another provider's body was rewritten: %s", got)
+	}
+}
+
+// The learned shape survives a restart: the probe a shape cost is a full
+// round trip on the first request of every launch otherwise, and the memo
+// was in-memory only. The file carries no secret — provider ids, field
+// names, and effort levels a provider's own error message named.
+func TestTheLearnedShapeSurvivesARestart(t *testing.T) {
+	var requests, effort400s atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		body, _ := io.ReadAll(request.Body)
+		if strings.Contains(string(body), `"reasoning_effort":"medium"`) {
+			effort400s.Add(1)
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"message":"'reasoning_effort' must be one of: 'low', 'high', 'max'"}}`))
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\ndata: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	memoPath := filepath.Join(t.TempDir(), "repair-memo.json")
+
+	build := func() *Server {
+		engine, err := guardraildomain.NewEngine(guardrailruleset.RulesJSON, guardrailruleset.BlocklistJSON)
+		if err != nil {
+			t.Fatalf("engine: %v", err)
+		}
+		inspector, err := guardrailapp.NewInspector(engine, guardraildomain.ModeMonitor, 16)
+		if err != nil {
+			t.Fatalf("inspector: %v", err)
+		}
+		return NewServer("127.0.0.1:0", Dependencies{
+			Routes:         fixedRoute{route: relayapp.Route{ProviderID: "edge", ProviderName: "Edge", BaseURL: parsed, AuthMode: "bearer", Format: "chat"}},
+			Credentials:    &credentialSource{values: []string{"key"}},
+			Guardrail:      guardrailrelay.New(inspector),
+			RepairMemoPath: memoPath,
+			Config:         Config{RetryBase: time.Millisecond, RetryMax: 5 * time.Millisecond, StreamIdleTimeout: time.Second},
+		})
+	}
+	call := func(server *Server) {
+		request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(
+			`{"model":"glm-5.3","stream":true,"instructions":"be brief","input":"hi","reasoning":{"effort":"medium"}}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("the request was not delivered: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+
+	// Launch one: pays the probe, learns, persists.
+	call(build())
+	if effort400s.Load() != 1 {
+		t.Fatalf("the first launch did not exercise the probe: effort=%d", effort400s.Load())
+	}
+	// Launch two: the persisted shape is loaded before any request leaves,
+	// so the probe is not re-paid.
+	call(build())
+	if effort400s.Load() != 1 {
+		t.Fatalf("the restart re-paid the probe the memo exists to prepay: effort=%d", effort400s.Load())
+	}
+	if requests.Load() != 3 {
+		t.Fatalf("attempts=%d, want probe+answer then answer alone", requests.Load())
 	}
 }

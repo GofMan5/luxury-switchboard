@@ -3,8 +3,11 @@ package relayhttp
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/atomicfile"
 )
 
 // providerAdjustments is the request shape one provider has been measured to
@@ -32,9 +35,12 @@ type providerAdjustments struct {
 // probe — the provider's 400 is the only honest source of what it accepts —
 // but every request after the successful retry sends the shape that already
 // worked. The chat-endpoint discovery caches exactly this way, and for the
-// same reason: one probe, then memory. Nothing persists across restarts, so a
-// provider that changes its API is re-learned in one request, not stuck on a
-// stale shape.
+// same reason: one probe, then memory. When a path is wired, the memo also
+// survives restarts: the probe was a full round trip on the first request of
+// every launch, and the shape it bought is not a secret worth forgetting.
+// A provider that changes its API is re-learned the moment its accepted shape
+// stops working: the probe 400 comes back, the ladder repairs reactively,
+// and the new shape replaces the stale one.
 type repairMemo struct {
 	mu          sync.Mutex
 	adjustments map[string]providerAdjustments
@@ -44,17 +50,89 @@ func newRepairMemo() *repairMemo {
 	return &repairMemo{adjustments: make(map[string]providerAdjustments, 8)}
 }
 
+// RepairProfile is the persisted form of one provider's learned shape. It
+// carries no secret — provider ids, field names, and the effort levels a
+// provider's own error message named.
+type RepairProfile struct {
+	DeveloperRole bool     `json:"developerRole"`
+	MaxTokens     bool     `json:"maxTokens"`
+	DropFields    []string `json:"dropFields,omitempty"`
+	Efforts       []string `json:"efforts,omitempty"`
+}
+
+// snapshot copies the memo into its persisted form.
+func (memo *repairMemo) snapshot() map[string]RepairProfile {
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	profiles := make(map[string]RepairProfile, len(memo.adjustments))
+	for providerID, adjustments := range memo.adjustments {
+		profiles[providerID] = RepairProfile{
+			DeveloperRole: adjustments.developerRole,
+			MaxTokens:     adjustments.maxTokens,
+			DropFields:    append([]string(nil), adjustments.dropFields...),
+			Efforts:       append([]string(nil), adjustments.efforts...),
+		}
+	}
+	return profiles
+}
+
+// restore loads a persisted snapshot into the memo.
+func (memo *repairMemo) restore(profiles map[string]RepairProfile) {
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	for providerID, profile := range profiles {
+		memo.adjustments[providerID] = providerAdjustments{
+			developerRole: profile.DeveloperRole,
+			maxTokens:     profile.MaxTokens,
+			dropFields:    append([]string(nil), profile.DropFields...),
+			efforts:       append([]string(nil), profile.Efforts...),
+		}
+	}
+}
+
+// loadRepairMemo reads the persisted shape. Any failure yields an empty memo:
+// the file is an optimization, and the honest fallback is one probe.
+func loadRepairMemo(path string) *repairMemo {
+	memo := newRepairMemo()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return memo
+	}
+	var profiles map[string]RepairProfile
+	if json.Unmarshal(payload, &profiles) != nil {
+		return memo
+	}
+	memo.restore(profiles)
+	return memo
+}
+
+// persist writes the memo atomically. Rare by construction — once per
+// provider — so the whole snapshot per write costs nothing.
+func (memo *repairMemo) persist(path string) error {
+	payload, err := json.MarshalIndent(memo.snapshot(), "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicfile.Replace(path, payload, 0o600)
+}
+
 // merge folds what one exchange learned into the provider's record. The
 // caller only invokes this after the request finally succeeded, so a failure
 // chain teaches nothing — a provider that is simply down does not get its
-// parameters "repaired" out of the next request.
-func (memo *repairMemo) merge(providerID string, learned providerAdjustments) {
+// parameters "repaired" out of the next request. It reports whether the
+// record changed, so the caller persists only when there is something new.
+func (memo *repairMemo) merge(providerID string, learned providerAdjustments) bool {
 	if !learned.developerRole && !learned.maxTokens && len(learned.dropFields) == 0 && len(learned.efforts) == 0 {
-		return
+		return false
 	}
 	memo.mu.Lock()
 	defer memo.mu.Unlock()
 	known := memo.adjustments[providerID]
+	before := RepairProfile{
+		DeveloperRole: known.developerRole, MaxTokens: known.maxTokens,
+		DropFields: append([]string(nil), known.dropFields...),
+		Efforts:    append([]string(nil), known.efforts...),
+	}
 	if learned.developerRole {
 		known.developerRole = true
 	}
@@ -70,6 +148,13 @@ func (memo *repairMemo) merge(providerID string, learned providerAdjustments) {
 		known.efforts = learned.efforts
 	}
 	memo.adjustments[providerID] = known
+	after := RepairProfile{
+		DeveloperRole: known.developerRole, MaxTokens: known.maxTokens,
+		DropFields: append([]string(nil), known.dropFields...),
+		Efforts:    append([]string(nil), known.efforts...),
+	}
+	return after.DeveloperRole != before.DeveloperRole || after.MaxTokens != before.MaxTokens ||
+		len(after.DropFields) != len(before.DropFields) || len(after.Efforts) != len(before.Efforts)
 }
 
 // apply rewrites a request body into the shape this provider already

@@ -71,10 +71,12 @@ type Server struct {
 	chatOnly     sync.Map
 	// repairs remembers, per provider, the request shapes a successful
 	// exchange needed, so the second request does not pay for the first
-	// one's probe 400s.
-	repairs     *repairMemo
-	mu          sync.Mutex
-	server      *http.Server
+	// one's probe 400s. memoPath persists them across restarts when wired.
+	repairs  *repairMemo
+	memoPath string
+	mu       sync.Mutex
+	server   *http.Server
+
 	listener    net.Listener
 	routeCtx    context.Context
 	cancelRoute context.CancelFunc
@@ -91,7 +93,13 @@ type Dependencies struct {
 	// RouteEvents is optional: when set, a failover switch is reported with
 	// the provider names the operator knows.
 	RouteEvents relayapp.RouteEventSink
-	Config      Config
+	// RepairMemoPath is optional: when set, the learned request shapes
+	// survive restarts — the probe a shape cost is a full round trip on the
+	// first request of every launch otherwise. The file carries no secret:
+	// provider ids, field names, and effort levels a provider's own error
+	// message named.
+	RepairMemoPath string
+	Config         Config
 }
 
 type Config struct {
@@ -114,7 +122,12 @@ func NewServer(address string, dependencies Dependencies) *Server {
 	transport.ForceAttemptHTTP2 = true
 	transport.MaxIdleConns = 128
 	transport.MaxIdleConnsPerHost = 32
-	transport.IdleConnTimeout = 90 * time.Second
+	// Ten minutes, not ninety seconds: agent traffic is bursty — a turn
+	// finishes, the user reads, the next turn comes minutes later — and a
+	// closed idle connection pays a fresh TLS handshake on the next request.
+	// The provider closes its side when it wants to; this side just keeps
+	// what is still alive available.
+	transport.IdleConnTimeout = 10 * time.Minute
 	config := dependencies.Config
 	if config.MaxRequestBytes <= 0 || config.MaxRequestBytes > absoluteMaxRequestBytes {
 		config.MaxRequestBytes = 64 * 1024 * 1024
@@ -149,6 +162,14 @@ func NewServer(address string, dependencies Dependencies) *Server {
 	if dependencies.Guardrail != nil {
 		guardrail = dependencies.Guardrail
 	}
+	// The persisted shape loads before any request can leave: the first
+	// request of a launch then skips the probe the last launch already paid.
+	// A missing or unreadable file is not an error — the memo is an
+	// optimization, and the honest fallback is one probe.
+	repairs := newRepairMemo()
+	if dependencies.RepairMemoPath != "" {
+		repairs = loadRepairMemo(dependencies.RepairMemoPath)
+	}
 	return &Server{
 		address:      address,
 		routes:       dependencies.Routes,
@@ -162,7 +183,8 @@ func NewServer(address string, dependencies Dependencies) *Server {
 		transport:    transport,
 		proxyClients: make(map[string]*http.Client),
 		chatOnly:     sync.Map{},
-		repairs:      newRepairMemo(),
+		repairs:      repairs,
+		memoPath:     dependencies.RepairMemoPath,
 		routeCtx:     ctx,
 		cancelRoute:  cancel,
 	}
@@ -606,21 +628,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			// A break before any content, with budget left, is invisible:
 			// re-request. The failure event is deliberately NOT written —
 			// the next attempt is about to replace what would have ended the
-			// stream.
+			// stream. The retry waits nothing on top of the RPM queue: the
+			// client is already waiting, the key's own budget paces the
+			// re-request, and half a second of artificial backoff on every
+			// invisible break was half a second of pure TTFT.
 			if live.delivered == 0 && liveStreamRetries < maxStreamFailuresBeforeFallback && errorCode != "client_disconnected" && !cancelled {
 				liveStreamRetries++
 				_ = live.Close()
-				delay := retryDelay(attempt, nil, server.config)
-				server.observeRetry(activityID, attempt, http.StatusOK, delay)
-				if waitErr := waitRetry(ctx, delay); waitErr != nil {
-					cancelled = true
-					errorCode = "cancelled"
-					errorDetail = waitErr.Error()
-					if committed {
-						writeStreamFailure(writer, request.URL.Path, model)
-					}
-					return
-				}
+				server.observeRetry(activityID, attempt, http.StatusOK, 0)
 				continue
 			}
 			if committed && errorCode != "client_disconnected" {
@@ -908,6 +923,19 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 	return loaded
 }
 
+// noteLearnedShape folds what one exchange taught into the memo and persists
+// it when a path is wired. Called only from the success exits, so a shape is
+// written exactly when it proved itself.
+func (server *Server) noteLearnedShape(providerID string, learned providerAdjustments) {
+	if !server.repairs.merge(providerID, learned) {
+		return
+	}
+	if server.memoPath == "" {
+		return
+	}
+	_ = server.repairs.persist(server.memoPath)
+}
+
 func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string, publicModel string, liveAllowed bool) (*http.Response, error) {
 	// A retried call starts wordless: the detail below always describes the
 	// attempt this call ended on, never a previous call's verdict.
@@ -1077,7 +1105,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					// too: a probe 400 repaired into a live success teaches
 					// the next request, or it re-pays the probe the memo
 					// exists to prepay.
-					server.repairs.merge(route.ProviderID, learned)
+					server.noteLearnedShape(route.ProviderID, learned)
 					response.Body = liveBody
 					return response, nil
 				}
@@ -1160,7 +1188,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.Header.Set("X-Switchboard-Terminal", terminal)
 				addDiscardedUsage(&discarded, streamUsage)
 				setUsageHeaders(response.Header, discarded, time.Since(attemptStarted))
-				server.repairs.merge(route.ProviderID, learned)
+				server.noteLearnedShape(route.ProviderID, learned)
 				return response, nil
 			}
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") || expectsJSONResponse(incoming.URL.Path) {
@@ -1241,11 +1269,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				}
 				response.Header.Del("Content-Encoding")
 				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), time.Since(attemptStarted))
-				server.repairs.merge(route.ProviderID, learned)
+				server.noteLearnedShape(route.ProviderID, learned)
 				return response, nil
 			}
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
-			server.repairs.merge(route.ProviderID, learned)
+			server.noteLearnedShape(route.ProviderID, learned)
 			return response, nil
 		}
 

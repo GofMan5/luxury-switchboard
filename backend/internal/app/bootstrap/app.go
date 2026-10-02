@@ -153,6 +153,10 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		Routes: routes, Credentials: credentials, Activity: recorder,
 		Guardrail: guardrailrelay.New(guardrails), Failovers: routes,
 		RouteEvents: notificationsrelay.NewSink(notifications),
+		// The learned request shapes persist beside the history database:
+		// a probe 400 is a full round trip on the first request of every
+		// launch otherwise. The file carries no secret.
+		RepairMemoPath: repairMemoPath(historyPath),
 		Config: relayhttp.Config{
 			MaxRequestBytes:       int64(settings.MaxRequestMiB) * 1024 * 1024,
 			ResponseHeaderTimeout: time.Duration(settings.HeaderTimeoutSeconds) * time.Second,
@@ -449,8 +453,8 @@ func defaultHistory(retentionDays int, onDrop func(cause string)) (activityapp.H
 	if err != nil {
 		return nil, "", err
 	}
-	// The concrete store is unwrapped so a failure returns a truly nil interface;
-	// otherwise every downstream nil guard would pass on a nil pointer.
+	// Registered before the store can be handed to anything that records, so
+	// no drop can happen unwitnessed.
 	store, err := activitysqlite.Open(path, retentionDays)
 	if err != nil {
 		return nil, path, err
@@ -459,6 +463,15 @@ func defaultHistory(retentionDays int, onDrop func(cause string)) (activityapp.H
 	// no drop can happen unwitnessed.
 	store.OnDrop(onDrop)
 	return store, path, nil
+}
+
+// repairMemoPath places the relay's learned-shape file beside the history
+// database: same volume, same backup story, no secret in it either way.
+func repairMemoPath(historyPath string) string {
+	if historyPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(historyPath), "repair-memo.json")
 }
 
 func defaultRouteService(catalog *providerapp.Catalog) (*routeapp.Service, *routedpapi.Repository, error, error) {

@@ -1,6 +1,7 @@
 package relayhttp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -92,7 +93,11 @@ type liveStreamBody struct {
 	started time.Time
 	// idle aborts the source when the provider stalls mid-stream: the
 	// buffered path had the idle timeout of its reader loop; a live read
-	// would otherwise block the client on a silent connection forever.
+	// would otherwise block the client on a silent connection forever. The
+	// reset rides the client's reads, so a backpressured writer can abort a
+	// healthy provider after the timeout — the documented trade of live
+	// delivery: the bytes were already delivered, and the alternative was
+	// holding the whole answer back.
 	idle    *time.Timer
 	idleFor time.Duration
 	// abort closes the provider's body (unblocking a stalled read), cancel
@@ -113,12 +118,19 @@ type liveStreamBody struct {
 }
 
 func (body *liveStreamBody) Read(into []byte) (int, error) {
+	// The probation already fed the prefix to this inspector and counted
+	// its usage: serving the prefix again would corrupt the parser mid-event
+	// and double the review's body. The collected copy still takes every
+	// byte the client receives — the review judges the whole answer.
+	prefixServing := len(body.source.prefix) > 0
 	count, err := body.source.Read(into)
 	if count > 0 {
 		if body.idle != nil {
 			body.idle.Reset(body.idleFor)
 		}
-		body.inspector.Feed(into[:count])
+		if !prefixServing {
+			body.inspector.Feed(into[:count])
+		}
 		// The copy stays bounded: the review at the end reads the prefix,
 		// the way the buffered path inspects an over-long answer. The wire
 		// flows as the provider writes it — a proxy's memory is the bound,
@@ -187,6 +199,27 @@ func (server *Server) canStreamLive(request *http.Request, body []byte, chatActi
 		return false
 	}
 	return requiresStreamTerminal(request, body)
+}
+
+// livePrefixReady reports whether the probation's bytes show a stream the
+// tool repair will never need to rewrite. Chat-family dialects have no
+// Responses item lifecycle to repair, so the window alone decides. A
+// Responses stream goes live only on positive evidence: its output lifecycle
+// already opened — an item announcement that is not pre-completed. Anything
+// else (deltas without their announcement, a pre-completed announcement,
+// nothing arrived yet) keeps the buffered path, because the announcement
+// that arrives later is exactly what the repair exists to rewrite.
+func livePrefixReady(path string, buffered []byte) bool {
+	if chatDialectPath(path) || completionsDialectPath(path) || messagesDialectPath(path) {
+		return true
+	}
+	deframed := deframedStreamBytes(buffered)
+	if !bytes.Contains(deframed, []byte("response.output_item.added")) {
+		return false
+	}
+	// An announcement already carrying "completed" is the repair's own case:
+	// the client would drop every delta after it.
+	return !bytes.Contains(deframed, []byte(`"status":"completed"`))
 }
 
 // liveStreamProbation is how long a stream must survive before the relay

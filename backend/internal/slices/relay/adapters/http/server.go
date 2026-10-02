@@ -599,7 +599,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
 				ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
 			})
-			if terminal == "" {
+			// Only when nothing more specific was already filed: a client
+			// that walked away mid-stream already carries the real cause,
+			// and overwriting it with "ended without a terminal" would
+			// misattribute the break.
+			if terminal == "" && errorCode == "" {
 				errorCode = "stream_incomplete"
 				errorDetail = "the provider's stream ended without a terminal event"
 			}
@@ -2051,12 +2055,15 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			response.Body.Close()
 			return "", nil, relayapp.TokenUsage{}, nil, ctx.Err()
 		case <-probation:
-			// A stream the tool repair owns never goes live: the repair
-			// rewrites events split across data lines and restores tool
-			// aliases, and the client must receive the rewritten bytes, not
-			// the raw ones. The announcement is in the prefix by now — these
-			// lifecycles open the stream — so the check is cheap and sure.
-			if streamAnnouncesRepairableEvents(buffered) {
+			// The gate reads the prefix for positive evidence, not absence
+			// of triggers: chat-family dialects have no Responses item
+			// lifecycle to repair, so the window alone decides; a Responses
+			// stream goes live only when its lifecycle is already properly
+			// opened — an announcement that is not pre-completed — because
+			// the announcement that arrives later, or arrives already
+			// finished, is exactly what the repair exists to rewrite, and a
+			// client cannot read raw bytes the relay was going to fix.
+			if !livePrefixReady(canonicalPath(path), buffered) {
 				probation = nil
 				continue
 			}
@@ -2071,10 +2078,13 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				// The probation's bytes are delivered first, then the
 				// goroutine's chunks as they keep arriving: the client's
 				// stream is the whole answer, not the part that postdates
-				// the window.
+				// the window. collected starts empty — Read appends every
+				// byte the client receives, prefix included — and the
+				// inspector skips the prefix, which the probation already
+				// fed it.
 				source:    &channelReader{prefix: buffered, reads: reads},
 				inspector: inspector,
-				collected: buffered,
+				collected: make([]byte, 0, min(limit, 64*1024)),
 				limit:     limit,
 				idleFor:   config.StreamIdleTimeout,
 				// abort closes the provider's body — snapshotted, for the

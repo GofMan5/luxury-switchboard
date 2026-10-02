@@ -99,6 +99,44 @@ func TestChannelReaderServesLargeChunksAcrossSmallBuffers(t *testing.T) {
 	}
 }
 
+// The (n>0, err) read: a chunk carrying both bytes and its terminal error
+// serves the bytes first and the error only with — or after — the last of
+// them, never discarding either. And a closed channel with a pending tail
+// drains the tail before reporting the abort.
+func TestChannelReaderServesBytesAndErrorAndClosedChannels(t *testing.T) {
+	reads := make(chan bodyRead, 1)
+	reads <- bodyRead{chunk: []byte("final-bytes"), err: io.EOF}
+	close(reads)
+	reader := &channelReader{reads: reads}
+	buffer := make([]byte, 5)
+	count, err := reader.Read(buffer)
+	if count != 5 || err != nil || string(buffer[:count]) != "final" {
+		t.Fatalf("a chunk's bytes were not served before its error: count=%d err=%v", count, err)
+	}
+	count, err = reader.Read(buffer)
+	if count != 5 || err != nil || string(buffer[:count]) != "-byte" {
+		t.Fatalf("the chunk's middle was mangled: count=%d err=%v %q", count, err, buffer[:count])
+	}
+	// The last byte travels WITH the error: (n>0, err) is the contract.
+	count, err = reader.Read(buffer)
+	if count != 1 || err != io.EOF || string(buffer[:count]) != "s" {
+		t.Fatalf("the last byte and the error did not travel together: count=%d err=%v", count, err)
+	}
+
+	// A closed channel with a pending tail: the tail is served, then the
+	// abort — the consumer is never parked on a channel nobody feeds.
+	closed := make(chan bodyRead)
+	close(closed)
+	draining := &channelReader{pending: []byte("tail"), reads: closed}
+	count, err = draining.Read(make([]byte, 16))
+	if count != 4 || err != nil {
+		t.Fatalf("the pending tail was not drained first: count=%d err=%v", count, err)
+	}
+	if _, err := draining.Read(make([]byte, 4)); err != errLiveStreamAborted {
+		t.Fatalf("the closed channel did not report the abort: %v", err)
+	}
+}
+
 func mustRead(t *testing.T, reader io.Reader, size int) []byte {
 	t.Helper()
 	buffer := make([]byte, size)

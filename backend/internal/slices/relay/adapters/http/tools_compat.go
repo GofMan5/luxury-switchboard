@@ -999,13 +999,22 @@ func restoreResponseToolCalls(response *http.Response, compat toolCompat, path s
 // miss. A false positive from the deframing is inert: the full repair joins
 // the lines properly and changes nothing.
 func streamAnnouncesRepairableEvents(body []byte) bool {
+	deframed := deframedStreamBytes(body)
+	return bytes.Contains(deframed, []byte("response.output_item.added")) ||
+		bytes.Contains(deframed, []byte("response.output_text.delta"))
+}
+
+// deframedStreamBytes strips the SSE framing — the `data:` marker with or
+// without its space, then every newline, with \r\n and a bare \r normalized
+// the way the repair itself reads them — so a literal broken up by the
+// framing becomes contiguous again. Shared by the repair's trigger scan and
+// the live-delivery gate.
+func deframedStreamBytes(body []byte) []byte {
 	deframed := bytes.ReplaceAll(body, []byte("data: "), nil)
 	deframed = bytes.ReplaceAll(deframed, []byte("data:"), nil)
 	deframed = bytes.ReplaceAll(deframed, []byte("\r\n"), []byte("\n"))
 	deframed = bytes.ReplaceAll(deframed, []byte("\r"), []byte("\n"))
-	deframed = bytes.ReplaceAll(deframed, []byte("\n"), nil)
-	return bytes.Contains(deframed, []byte("response.output_item.added")) ||
-		bytes.Contains(deframed, []byte("response.output_text.delta"))
+	return bytes.ReplaceAll(deframed, []byte("\n"), nil)
 }
 
 // bodyLooksLikeEventStream reports whether the bytes themselves carry SSE

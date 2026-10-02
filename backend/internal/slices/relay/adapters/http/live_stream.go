@@ -2,12 +2,64 @@ package relayhttp
 
 import (
 	"context"
-	"io"
+	"errors"
 	"net/http"
 	"time"
 
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
+
+// channelReader is the live body's source: the probation's buffered prefix
+// first, then the reader goroutine's chunks as they keep arriving. It honors
+// the io.Reader contract — a chunk larger than the caller's buffer is served
+// across successive Reads, its tail held in pending, because production
+// readers grow their buffers incrementally (io.ReadAll starts at 512 bytes)
+// and a discarded tail is a silently corrupted answer. A closed channel —
+// the goroutine left, its terminal error possibly dropped by the exit race —
+// ends the stream with an explicit error instead of parking the consumer on
+// a channel nobody will ever feed.
+type channelReader struct {
+	prefix     []byte
+	reads      <-chan bodyRead
+	pending    []byte
+	pendingErr error
+}
+
+func (reader *channelReader) Read(into []byte) (int, error) {
+	if len(reader.prefix) > 0 {
+		count := copy(into, reader.prefix)
+		reader.prefix = reader.prefix[count:]
+		return count, nil
+	}
+	if len(reader.pending) == 0 {
+		if reader.pendingErr != nil {
+			err := reader.pendingErr
+			reader.pendingErr = nil
+			return 0, err
+		}
+		value, open := <-reader.reads
+		if !open {
+			return 0, errLiveStreamAborted
+		}
+		reader.pending = value.chunk
+		reader.pendingErr = value.err
+	}
+	count := copy(into, reader.pending)
+	reader.pending = reader.pending[count:]
+	if len(reader.pending) > 0 {
+		// The tail is served before the error it shares a chunk with.
+		return count, nil
+	}
+	err := reader.pendingErr
+	reader.pendingErr = nil
+	return count, err
+}
+
+// errLiveStreamAborted says the reader goroutine ended without delivering a
+// terminal: the request was cancelled under it. The copy loop files it as a
+// stream failure and the client sees the dialect failure event — the row
+// settles instead of hanging active forever.
+var errLiveStreamAborted = errors.New("live stream aborted")
 
 // defaultLiveStreamProbation is the window a stream must survive before the
 // relay commits to live delivery. Short enough that the client's wait stays
@@ -26,14 +78,18 @@ const defaultLiveStreamProbation = 250 * time.Millisecond
 // Every chunk that passes through feeds the sseInspector — usage, terminal,
 // lifecycle — and lands in the collected copy; the accounting and the review
 // run when the stream ends. Whether this body exists at all is a two-gate
-// decision: the mode and dialect gate (canStreamLive) says the answer MAY be
-// delivered live, and the probation window says it earned it.
+// decision: the mode and dialect gate (canStreamLive plus the caller's
+// liveAllowed) says the answer MAY be delivered live, and the probation
+// window says it earned it.
 type liveStreamBody struct {
-	source    io.Reader
+	source    *channelReader
 	inspector *sseInspector
 	collected []byte
 	limit     int64
 	completed bool
+	// started is the attempt's start: generation time is measured to the
+	// stream's end, not to the handoff.
+	started time.Time
 	// idle aborts the source when the provider stalls mid-stream: the
 	// buffered path had the idle timeout of its reader loop; a live read
 	// would otherwise block the client on a silent connection forever.
@@ -44,22 +100,16 @@ type liveStreamBody struct {
 	// the body.
 	abort  func()
 	cancel context.CancelFunc
+	// release finishes the credential lease: a live generation is still
+	// generating after the handoff, and the key's concurrency accounting
+	// must count it for as long as it runs — the buffered path held the
+	// lease through the whole answer, and live delivery is not a license to
+	// overbook the key.
+	release func()
 	// onEnd runs once, on the stream's natural end or its break, with the
-	// assembled copy, the usage read from it, and the terminal the provider
-	// reached ("" when it reached none).
-	onEnd func(collected []byte, usage relayapp.TokenUsage, terminal string)
-}
-
-// channelReader is the live body's source: the reader goroutine's channel.
-// A Read parks until the goroutine delivers the provider's next chunk.
-type channelReader struct {
-	reads <-chan bodyRead
-}
-
-func (reader channelReader) Read(into []byte) (int, error) {
-	value := <-reader.reads
-	count := copy(into, value.chunk)
-	return count, value.err
+	// assembled copy, the usage read from it, the terminal the provider
+	// reached ("" when it reached none), and the generation time.
+	onEnd func(collected []byte, usage relayapp.TokenUsage, terminal string, generation time.Duration)
 }
 
 func (body *liveStreamBody) Read(into []byte) (int, error) {
@@ -69,6 +119,10 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 			body.idle.Reset(body.idleFor)
 		}
 		body.inspector.Feed(into[:count])
+		// The copy stays bounded: the review at the end reads the prefix,
+		// the way the buffered path inspects an over-long answer. The wire
+		// flows as the provider writes it — a proxy's memory is the bound,
+		// not the answer's length.
 		if int64(len(body.collected))+int64(count) <= body.limit {
 			body.collected = append(body.collected, into[:count]...)
 		}
@@ -100,8 +154,11 @@ func (body *liveStreamBody) Close() error {
 func (body *liveStreamBody) complete() {
 	body.completed = true
 	terminal := body.inspector.Finish()
+	if body.release != nil {
+		body.release()
+	}
 	if body.onEnd != nil {
-		body.onEnd(body.collected, body.inspector.usage, terminal)
+		body.onEnd(body.collected, body.inspector.usage, terminal, time.Since(body.started))
 	}
 }
 
@@ -111,11 +168,13 @@ func (body *liveStreamBody) terminal() string {
 }
 
 // canStreamLive decides whether this answer may be delivered as it arrives.
-// The dialect must be the caller's own — translation and the image bridge
-// convert the whole answer before re-emitting it — the request must have
-// asked for a stream in the first place, and the guardrails must be unable
-// to refuse anything: monitor mode's verdicts are recorded, never enforced,
-// so withholding bytes buys nothing the client could observe.
+// The dialect must be the caller's own — translation converts the whole
+// answer before re-emitting it — the request must have asked for a stream in
+// the first place, and the guardrails must be unable to refuse anything:
+// monitor mode's verdicts are recorded, never enforced, so withholding bytes
+// buys nothing the client could observe. The caller adds the entries this
+// cannot see: the image bridge and the tool repair (their caller knows the
+// compat flags), and the tunnel's dispatch (it reads the whole answer back).
 func (server *Server) canStreamLive(request *http.Request, body []byte, chatActive *bool) bool {
 	if server.guardrail == nil || server.guardrail.CanBlock() {
 		return false

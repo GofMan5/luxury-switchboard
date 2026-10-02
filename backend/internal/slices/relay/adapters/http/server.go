@@ -346,7 +346,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		committed = true
 		heartbeat = func() error {
 			payload := []byte(": switchboard keep-alive\n\n")
-			if canonicalPath(request.URL.Path) == "/v1/responses" {
+			if responsesDialectPath(canonicalPath(request.URL.Path)) {
 				payload = []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{}}\n\n")
 			}
 			if _, err := writer.Write(payload); err != nil {
@@ -359,11 +359,16 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 	}
 	requestUpstream := func(requestCtx context.Context) (*http.Response, error) {
+		// Live delivery needs the whole answer converted or repaired: the
+		// image bridge rewrites the request and the answer, and declared
+		// tools may need the stream repair — the entry knows both flags,
+		// and the path requestWithRetry sees is already rewritten.
+		liveAllowed := !imageCompat && clientTools.empty()
 		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, &bufferTerminal, 0, func(credential relayapp.Credential) {
 			// Kept so the answer's headers can be checked against it: a provider that
 			// echoes the key we sent it must not hand that key to the client.
 			secrets = sensitiveCredentialMarkers(credential)
-		}, &chatActive, &upstreamDetail, publicModel)
+		}, &chatActive, &upstreamDetail, publicModel, liveAllowed)
 	}
 	var response *http.Response
 	// A refused answer is a wasted attempt, not a dead request. The rules match shell
@@ -587,8 +592,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// land in the journal either way, and in monitor mode they were never
 	// going to hold a byte back.
 	if live, ok := response.Body.(*liveStreamBody); ok {
-		live.onEnd = func(collected []byte, streamUsage relayapp.TokenUsage, terminal string) {
+		live.onEnd = func(collected []byte, streamUsage relayapp.TokenUsage, terminal string, streamGeneration time.Duration) {
 			usage = streamUsage
+			generation = streamGeneration
 			server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
 				ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
 				ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
@@ -706,7 +712,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	var upstreamDetail string
 	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
-	}, &chatActive, &upstreamDetail, "")
+	}, &chatActive, &upstreamDetail, "", false)
 	// The empty public model above is deliberate: Dispatch is pinned routing —
 	// the tunnel and the model test ask for one provider by name, and the
 	// tunnel's privacy markers are computed for exactly that route. A chain
@@ -832,7 +838,7 @@ func (server *Server) chatOnlyLoaded(providerID string) bool {
 	return loaded
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string, publicModel string) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string, publicModel string, liveAllowed bool) (*http.Response, error) {
 	// A retried call starts wordless: the detail below always describes the
 	// attempt this call ended on, never a previous call's verdict.
 	if upstreamDetail != nil {
@@ -980,14 +986,28 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				// provider's own pacing into a wait followed by a burst.
 				// Streams that end inside the window — a flaky provider's
 				// truncation — never reach the client, and the repair ladder
-				// below keeps working exactly as it did.
+				// below keeps working exactly as it did. liveAllowed carries
+				// what this gate cannot see: the image bridge and the tool
+				// repair need the whole answer (the caller knows the compat
+				// flags — the path here is already rewritten), and the
+				// tunnel's dispatch reads the body back for sanitization.
 				liveAfter := time.Duration(0)
-				if server.canStreamLive(incoming, body, chatActive) {
+				if liveAllowed && server.canStreamLive(incoming, body, chatActive) {
 					liveAfter = server.liveStreamProbation()
 				}
 				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config, chatActive != nil && *chatActive, liveAfter)
 				if liveBody != nil {
-					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
+					// A live generation is still generating: the lease rides
+					// the stream's end, not the handoff, so the key's
+					// concurrency accounting counts it for as long as it
+					// runs — exactly what the buffered path's hold bought.
+					liveBody.started = attemptStarted
+					liveBody.release = func() { finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess}) }
+					// The shape the provider accepted is worth learning here
+					// too: a probe 400 repaired into a live success teaches
+					// the next request, or it re-pays the probe the memo
+					// exists to prepay.
+					server.repairs.merge(route.ProviderID, learned)
 					response.Body = liveBody
 					return response, nil
 				}
@@ -1003,7 +1023,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if errors.Is(bufferErr, errResponseTooLarge) {
 						return nil, bufferErr
 					}
-					if errors.Is(bufferErr, errIncompleteSSE) && fallbackPath == responsesPath && (chatActive == nil || !*chatActive) {
+					if errors.Is(bufferErr, errIncompleteSSE) && responsesDialectPath(fallbackPath) && (chatActive == nil || !*chatActive) {
 						streamFailures++
 						if streamFailures >= maxStreamFailuresBeforeFallback && canRetry(attempt, attemptLimit) {
 							if fallback, ok := nonStreamingResponsesRequest(body, server.config.MaxRequestBytes); ok {
@@ -1469,7 +1489,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			server.chatOnly.Delete(route.ProviderID)
 			return genericErrorResponse(status), nil
-		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && canonicalPath(incoming.URL.Path) == responsesPath:
+		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && responsesDialectPath(canonicalPath(incoming.URL.Path)):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			server.chatOnly.Store(route.ProviderID, struct{}{})
 			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)
@@ -1837,7 +1857,9 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		request.Header.Del("Authorization")
 		request.Header.Del("x-api-key")
 		path := canonicalPath(request.URL.Path)
-		anthropic := route.Dialect == "anthropic" || (route.Dialect != "openai" && (path == "/v1/messages" || strings.HasSuffix(path, "/v1/messages") || strings.Contains(path, "/v1/messages/") || request.Header.Get("Anthropic-Version") != ""))
+		// Both spellings: the client may mount the dialect bare, and the
+		// upstream path here is the base-URL join of whatever it called.
+		anthropic := route.Dialect == "anthropic" || (route.Dialect != "openai" && (messagesDialectPath(path) || strings.HasSuffix(path, "/v1/messages") || strings.Contains(path, "/v1/messages/") || strings.HasSuffix(path, "/messages") || request.Header.Get("Anthropic-Version") != ""))
 		if credential != "" && anthropic {
 			request.Header.Set("x-api-key", credential)
 		} else if credential != "" {
@@ -1990,6 +2012,13 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	// client received the events before the handoff and then nothing.
 	source := response.Body
 	go func() {
+		// The channel closes with the goroutine: a consumer parked in
+		// channelReader.Read when a cancellation lands gets the closed
+		// channel instead of a silence it would wait out forever. Without
+		// this, the goroutine's exit select could drop its terminal error
+		// half the time (both cases ready, Go picks at random) and leave
+		// the copy loop parked on a channel nobody feeds.
+		defer close(reads)
 		buffer := make([]byte, 64*1024)
 		for {
 			count, err := source.Read(buffer)
@@ -2022,6 +2051,15 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			response.Body.Close()
 			return "", nil, relayapp.TokenUsage{}, nil, ctx.Err()
 		case <-probation:
+			// A stream the tool repair owns never goes live: the repair
+			// rewrites events split across data lines and restores tool
+			// aliases, and the client must receive the rewritten bytes, not
+			// the raw ones. The announcement is in the prefix by now — these
+			// lifecycles open the stream — so the check is cheap and sure.
+			if streamAnnouncesRepairableEvents(buffered) {
+				probation = nil
+				continue
+			}
 			// The stream has been flowing for the whole window without
 			// ending: this is a real generation, not a connection about to
 			// break. Ownership of the reader goroutine, its channel and the
@@ -2034,7 +2072,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				// goroutine's chunks as they keep arriving: the client's
 				// stream is the whole answer, not the part that postdates
 				// the window.
-				source:    io.MultiReader(bytes.NewReader(buffered), channelReader{reads: reads}),
+				source:    &channelReader{prefix: buffered, reads: reads},
 				inspector: inspector,
 				collected: buffered,
 				limit:     limit,

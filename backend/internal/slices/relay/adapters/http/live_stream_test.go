@@ -1,9 +1,12 @@
 package relayhttp
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	guardrailrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/relay"
 	guardrailruleset "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/ruleset"
@@ -55,5 +58,100 @@ func TestCanStreamLiveDecidesByModeAndDialect(t *testing.T) {
 	}
 	if live.canStreamLive(request("/v1/chat/completions"), []byte(`{"model":"glm","messages":[]}`), &native) {
 		t.Fatal("a non-stream request took the live path")
+	}
+}
+
+// The reader contract: a chunk larger than the caller's buffer is served
+// across successive Reads. io.ReadAll grows its buffer from 512 bytes, and a
+// channel reader that consumed a whole 64KB chunk per call and discarded the
+// tail past the buffer silently corrupted every answer it carried.
+func TestChannelReaderServesLargeChunksAcrossSmallBuffers(t *testing.T) {
+	chunk := make([]byte, 200)
+	for index := range chunk {
+		chunk[index] = byte(index)
+	}
+	reads := make(chan bodyRead, 2)
+	reads <- bodyRead{chunk: chunk}
+	reads <- bodyRead{err: io.EOF}
+	close(reads)
+	reader := &channelReader{prefix: []byte("prefix-bytes"), reads: reads}
+
+	var assembled []byte
+	assembled = append(assembled, mustRead(t, reader, 7)...)  // the prefix first
+	assembled = append(assembled, mustRead(t, reader, 11)...) // the prefix's tail
+	assembled = append(assembled, mustRead(t, reader, 50)...) // chunk: 50 + 50 + 50
+	assembled = append(assembled, mustRead(t, reader, 50)...)
+	assembled = append(assembled, mustRead(t, reader, 50)...)
+	// The remaining 50 chunk bytes: the tail is served before the error it
+	// shares a chunk with.
+	tail := make([]byte, 200)
+	count, err := reader.Read(tail)
+	if count != 50 || err != nil {
+		t.Fatalf("the chunk's tail was lost: count=%d err=%v", count, err)
+	}
+	assembled = append(assembled, tail[:count]...)
+	if _, err := reader.Read(make([]byte, 8)); err != io.EOF {
+		t.Fatalf("the terminal error was lost: %v", err)
+	}
+	want := append([]byte("prefix-bytes"), chunk...)
+	if string(assembled) != string(want) {
+		t.Fatal("the assembled stream does not match what was sent")
+	}
+}
+
+func mustRead(t *testing.T, reader io.Reader, size int) []byte {
+	t.Helper()
+	buffer := make([]byte, size)
+	count, err := reader.Read(buffer)
+	if err != nil || count == 0 {
+		t.Fatalf("a read failed: count=%d err=%v", count, err)
+	}
+	return buffer[:count]
+}
+
+// A stream the tool repair owns stays buffered even after the probation
+// window: the repair rewrites announcements the provider sent in shapes the
+// client would drop (an item already "completed" while its deltas still
+// come), and the client must receive the rewritten bytes, not the raw ones.
+// The announcement rides the stream's opening events, so the probation sees
+// it before deciding.
+func TestARepairableStreamStaysBufferedPastTheProbation(t *testing.T) {
+	// The announcement split across data lines AND already marked completed —
+	// the exact shape the repair exists to fix, twice over.
+	stream := "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\n" +
+		"data: \"item\":{\"id\":\"i1\",\"type\":\"message\",\"status\":\"completed\",\"content\":null}}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte(stream))
+		writer.(http.Flusher).Flush()
+		// Longer than the probation: the stream is flowing when the window
+		// closes, and only the announcement can keep it buffered.
+		time.Sleep(400 * time.Millisecond)
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0,\"delta\":\"done\"}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null}}\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.LiveStreamProbation = 100 * time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(
+		`{"model":"gpt-test","stream":true,"tools":[{"type":"function","name":"sh_cmd"}],"input":"go"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if !strings.Contains(body, "response.completed") {
+		t.Fatalf("the buffered stream was not delivered whole: %s", body)
+	}
+	// The item the provider announced as already finished is now in_progress:
+	// a completed announcement makes the client drop every delta after it.
+	if !strings.Contains(body, `"in_progress"`) {
+		t.Fatalf("the raw completed announcement reached the client unrepaired: %s", body)
 	}
 }

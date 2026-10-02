@@ -10,14 +10,24 @@ import (
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
-// streamKeepAlive is the byte sequence that keeps a silent stream alive on
-// the client's side: an SSE comment for the chat-family dialects (a fake
+// streamKeepAlive is the byte sequence that keeps a silent stream alive for
+// byte-level idlers: an SSE comment for the chat-family dialects (a fake
 // data event would corrupt the stream), and the in_progress event the
-// Responses dialect defines for exactly this purpose. A client measuring
-// its own idle timeout does not care that the provider is thinking — a
-// long prefill or a reasoning gap killed requests that the buffered path
-// had kept alive with these all along (measured: "stream idle timeout
-// after 300000ms").
+// Responses dialect defines for exactly this purpose. Proxies, load
+// balancers and clients that reset their idle timer on any received byte
+// are held off by these.
+//
+// What they deliberately do NOT fix, read from the client's own source and
+// recorded here so nobody re-attempts it: pi-ai's chat-stream watchdog
+// (LLM_STREAM_IDLE_TIMEOUT, the "stream idle timeout after 300000ms"
+// failure) resets only when its parser yields a content-bearing event.
+// Its chat parser pushes events solely for non-empty delta.content and
+// non-empty reasoning fields, skips chunks without a choice outright, and
+// its Responses parser skips event types it does not handle — so SSE
+// comments, empty deltas, usage-only chunks and response.in_progress are
+// all invisible to that timer, and no byte the relay can send during a
+// silent prefill feeds it without corrupting the answer. The fix for that
+// client is its own profile knob (streamIdleTimeoutMs), not the relay.
 func streamKeepAlive(path string) []byte {
 	if responsesDialectPath(canonicalPath(path)) {
 		return []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{}}\n\n")

@@ -345,11 +345,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		committed = true
 		heartbeat = func() error {
-			payload := []byte(": switchboard keep-alive\n\n")
-			if responsesDialectPath(canonicalPath(request.URL.Path)) {
-				payload = []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{}}\n\n")
-			}
-			if _, err := writer.Write(payload); err != nil {
+			if _, err := writer.Write(streamKeepAlive(request.URL.Path)); err != nil {
 				return errClientDisconnected
 			}
 			if flusher != nil {
@@ -634,6 +630,17 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		if readErr != nil {
+			// A canceled context on a live stream is the client's own exit,
+			// not the provider's failure: it timed out, navigated away, or
+			// closed the connection, and the request context is what carried
+			// that to the provider's body. Filing it as a provider break
+			// pointed history at the wrong end of the wire.
+			if errors.Is(readErr, context.Canceled) {
+				cancelled = true
+				errorCode = "client_disconnected"
+				errorDetail = readErr.Error()
+				return
+			}
 			errorCode = "stream_incomplete"
 			errorDetail = readErr.Error()
 			if _, live := response.Body.(*liveStreamBody); live && committed {
@@ -2087,6 +2094,12 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				collected: make([]byte, 0, min(limit, 64*1024)),
 				limit:     limit,
 				idleFor:   config.StreamIdleTimeout,
+				// The heartbeat that fed the request phase ended with the
+				// handoff; a long prefill or reasoning gap after it would
+				// starve the client's own idle timer. The keep-alive rides
+				// the stream's silences instead.
+				keepAliveFor: config.HeartbeatInterval,
+				keepAliveMsg: streamKeepAlive(path),
 				// abort closes the provider's body — snapshotted, for the
 				// same reason the goroutine snapshots it: this closure
 				// outlives the reassignment of response.Body.
@@ -2095,6 +2108,9 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			}
 			if live.idleFor > 0 {
 				live.idle = time.AfterFunc(live.idleFor, live.abort)
+			}
+			if live.keepAliveFor > 0 {
+				live.keepAlive = time.NewTimer(live.keepAliveFor)
 			}
 			return "live", buffered, relayapp.TokenUsage{}, live, nil
 		case <-idle.C:

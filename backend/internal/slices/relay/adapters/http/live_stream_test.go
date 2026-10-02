@@ -137,6 +137,51 @@ func TestChannelReaderServesBytesAndErrorAndClosedChannels(t *testing.T) {
 	}
 }
 
+// The seamlessness case: a provider whose prefill is silent for far longer
+// than the client's own idle patience. The buffered path fed the client
+// keep-alives through the whole wait; the live path stopped at the handoff,
+// and the client died of silence ("stream idle timeout after 300000ms",
+// then "stream_incomplete / context canceled" on the relay's side). The
+// live body now emits the dialect's keep-alive while the provider is
+// silent, and a data chunk resets the cadence.
+func TestALiveStreamKeepsASilentPrefillFed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		// A silent prefill: longer than the keep-alive interval, shorter
+		// than the idle timeout.
+		time.Sleep(120 * time.Millisecond)
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 40 * time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if !strings.Contains(body, ": switchboard keep-alive\n\n") {
+		t.Fatalf("a silent prefill starved the client: no keep-alive in the stream: %q", body)
+	}
+	if !strings.Contains(body, "[DONE]") || !strings.Contains(body, "usage") {
+		t.Fatalf("the keep-alives corrupted the answer: %q", body)
+	}
+	// The cadence: keep-alives ride the silence BEFORE the first token, not
+	// after it — the stream ends with the answer, not trailing comments.
+	if index := strings.Index(body, "usage"); index >= 0 && strings.LastIndex(body, ": switchboard keep-alive") > index {
+		t.Fatalf("keep-alives continued after the stream had data: %q", body)
+	}
+}
+
 func mustRead(t *testing.T, reader io.Reader, size int) []byte {
 	t.Helper()
 	buffer := make([]byte, size)

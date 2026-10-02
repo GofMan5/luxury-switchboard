@@ -10,6 +10,21 @@ import (
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
+// streamKeepAlive is the byte sequence that keeps a silent stream alive on
+// the client's side: an SSE comment for the chat-family dialects (a fake
+// data event would corrupt the stream), and the in_progress event the
+// Responses dialect defines for exactly this purpose. A client measuring
+// its own idle timeout does not care that the provider is thinking — a
+// long prefill or a reasoning gap killed requests that the buffered path
+// had kept alive with these all along (measured: "stream idle timeout
+// after 300000ms").
+func streamKeepAlive(path string) []byte {
+	if responsesDialectPath(canonicalPath(path)) {
+		return []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{}}\n\n")
+	}
+	return []byte(": switchboard keep-alive\n\n")
+}
+
 // channelReader is the live body's source: the probation's buffered prefix
 // first, then the reader goroutine's chunks as they keep arriving. It honors
 // the io.Reader contract — a chunk larger than the caller's buffer is served
@@ -111,6 +126,14 @@ type liveStreamBody struct {
 	// lease through the whole answer, and live delivery is not a license to
 	// overbook the key.
 	release func()
+	// keepAlive emits the dialect's keep-alive while the provider is
+	// silent: the request phase heartbeat ended at the handoff, and a long
+	// prefill or a reasoning gap would otherwise starve the client's own
+	// idle timer until it gave up ("stream idle timeout after 300000ms")
+	// — the buffered path kept the client fed the whole wait.
+	keepAlive    *time.Timer
+	keepAliveFor time.Duration
+	keepAliveMsg []byte
 	// onEnd runs once, on the stream's natural end or its break, with the
 	// assembled copy, the usage read from it, the terminal the provider
 	// reached ("" when it reached none), and the generation time.
@@ -118,6 +141,28 @@ type liveStreamBody struct {
 }
 
 func (body *liveStreamBody) Read(into []byte) (int, error) {
+	if len(body.source.prefix) == 0 && len(body.source.pending) == 0 && body.source.pendingErr == nil {
+		select {
+		case value, open := <-body.source.reads:
+			if !open {
+				if !body.completed {
+					body.complete()
+				}
+				return 0, errLiveStreamAborted
+			}
+			body.source.pending = value.chunk
+			body.source.pendingErr = value.err
+		case <-body.keepAliveTimer():
+			// The provider is silent and the client is waiting: one
+			// keep-alive now, the timer re-armed for the next silence. A
+			// data chunk resets it, so these ride gaps only.
+			if body.keepAlive != nil {
+				body.keepAlive.Reset(body.keepAliveFor)
+			}
+			count := copy(into, body.keepAliveMsg)
+			return count, nil
+		}
+	}
 	// The probation already fed the prefix to this inspector and counted
 	// its usage: serving the prefix again would corrupt the parser mid-event
 	// and double the review's body. The collected copy still takes every
@@ -127,6 +172,9 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 	if count > 0 {
 		if body.idle != nil {
 			body.idle.Reset(body.idleFor)
+		}
+		if body.keepAlive != nil {
+			body.keepAlive.Reset(body.keepAliveFor)
 		}
 		if !prefixServing {
 			body.inspector.Feed(into[:count])
@@ -145,12 +193,26 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 	return count, err
 }
 
+// keepAliveTimer returns the keep-alive channel, or a nil channel when the
+// body carries no keep-alive (its interval never configured): a nil channel
+// parks that select case forever, leaving the provider's silence to the
+// idle watchdog alone.
+func (body *liveStreamBody) keepAliveTimer() <-chan time.Time {
+	if body.keepAlive == nil {
+		return nil
+	}
+	return body.keepAlive.C
+}
+
 func (body *liveStreamBody) Close() error {
 	// A client that walks away mid-stream ends the answer here too: the
 	// deferred close is the last thing that runs, and the usage the provider
 	// already reported belongs to the request either way.
 	if body.idle != nil {
 		body.idle.Stop()
+	}
+	if body.keepAlive != nil {
+		body.keepAlive.Stop()
 	}
 	if !body.completed {
 		body.complete()

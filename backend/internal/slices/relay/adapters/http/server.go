@@ -367,6 +367,50 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}, &chatActive, &upstreamDetail, publicModel, liveAllowed)
 	}
 	var response *http.Response
+	// serveLiveStream copies one live answer to the client and reports
+	// whether the stream broke — an error, or an end without the terminal
+	// event. It writes no failure event of its own: whether a break is final
+	// or invisible (nothing delivered but headers and keep-alives) is the
+	// caller's decision, and a failure event the next attempt would erase is
+	// not a byte the client should ever read.
+	serveLiveStream := func(live *liveStreamBody) bool {
+		buffer := make([]byte, 64*1024)
+		for {
+			count, readErr := response.Body.Read(buffer)
+			if count > 0 {
+				if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
+					cancelled = true
+					errorCode = "client_disconnected"
+					errorDetail = writeErr.Error()
+					return false
+				}
+				bytesOut += int64(count)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if errors.Is(readErr, io.EOF) {
+				return live.terminal() == ""
+			}
+			if readErr != nil {
+				// A canceled context on a live stream is the client's own exit,
+				// not the provider's failure: it timed out, navigated away, or
+				// closed the connection, and the request context is what carried
+				// that to the provider's body. Filing it as a provider break
+				// pointed history at the wrong end of the wire.
+				if errors.Is(readErr, context.Canceled) {
+					cancelled = true
+					errorCode = "client_disconnected"
+					errorDetail = readErr.Error()
+					return false
+				}
+				errorCode = "stream_incomplete"
+				errorDetail = readErr.Error()
+				return true
+			}
+		}
+	}
+	liveStreamRetries := 0
 	// A refused answer is a wasted attempt, not a dead request. The rules match shell
 	// and network idiom an honest assistant produces all day, so in Block mode one
 	// unlucky answer would otherwise end a run the caller cannot restart from here —
@@ -525,25 +569,81 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// chunks instead, and the review runs on the assembled copy when the
 		// provider finishes.
 		code := ""
-		if _, live := response.Body.(*liveStreamBody); !live {
-			restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
-			// The guardrails judge exactly what the client is about to read, after every
-			// translation and repair, so a payload cannot hide in a dialect the relay was
-			// still rewriting.
-			var blocked bool
-			code, blocked = server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
-				ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
-				ClientDeclaredTools: clientDeclaredTools,
-				// The markers of the credential in flight, so a provider that echoes
-				// the key it was sent does not get it recorded as evidence: the
-				// findings page shows excerpts of the answer, and an excerpt is the
-				// answer.
-				Secrets: secrets,
-			})
-			if !blocked {
-				break
+		if live, isLive := response.Body.(*liveStreamBody); isLive {
+			// A live answer is served here, inside the ladder: a stream that
+			// breaks before its first content byte delivered nothing the
+			// client could see — headers and keep-alives — so the break is a
+			// transport failure like any other and the ladder re-requests
+			// invisibly (measured in the field: "use of closed network
+			// connection" killed turns whose client had seen nothing but
+			// silence). A break after content cannot be retried — the client
+			// already read bytes no re-request can unsend — and ends in the
+			// dialect's failure event.
+			live.onEnd = func(collected []byte, streamUsage relayapp.TokenUsage, terminal string, streamGeneration time.Duration) {
+				// Fold, not overwrite: a retried sequence's earlier attempt
+				// may have already reported usage, and a discarded
+				// generation is still billed.
+				usage = usageWith(usage, streamUsage)
+				generation = streamGeneration
+				server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
+					ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+					ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
+				})
+				// Only when nothing more specific was already filed: a client
+				// that walked away mid-stream already carries the real cause,
+				// and overwriting it with "ended without a terminal" would
+				// misattribute the break.
+				if terminal == "" && errorCode == "" {
+					errorCode = "stream_incomplete"
+					errorDetail = "the provider's stream ended without a terminal event"
+				}
 			}
-		} else {
+			broke := serveLiveStream(live)
+			if !broke {
+				_ = live.Close()
+				return
+			}
+			// A break before any content, with budget left, is invisible:
+			// re-request. The failure event is deliberately NOT written —
+			// the next attempt is about to replace what would have ended the
+			// stream.
+			if live.delivered == 0 && liveStreamRetries < maxStreamFailuresBeforeFallback && errorCode != "client_disconnected" && !cancelled {
+				liveStreamRetries++
+				_ = live.Close()
+				delay := retryDelay(attempt, nil, server.config)
+				server.observeRetry(activityID, attempt, http.StatusOK, delay)
+				if waitErr := waitRetry(ctx, delay); waitErr != nil {
+					cancelled = true
+					errorCode = "cancelled"
+					errorDetail = waitErr.Error()
+					if committed {
+						writeStreamFailure(writer, request.URL.Path, model)
+					}
+					return
+				}
+				continue
+			}
+			if committed && errorCode != "client_disconnected" {
+				writeStreamFailure(writer, request.URL.Path, model)
+			}
+			_ = live.Close()
+			return
+		}
+		restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
+		// The guardrails judge exactly what the client is about to read, after every
+		// translation and repair, so a payload cannot hide in a dialect the relay was
+		// still rewriting.
+		var blocked bool
+		code, blocked = server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
+			ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+			ClientDeclaredTools: clientDeclaredTools,
+			// The markers of the credential in flight, so a provider that echoes
+			// the key it was sent does not get it recorded as evidence: the
+			// findings page shows excerpts of the answer, and an excerpt is the
+			// answer.
+			Secrets: secrets,
+		})
+		if !blocked {
 			break
 		}
 		// The refused body is dropped here rather than by the deferred close below: this
@@ -582,29 +682,8 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		copyResponseHeaders(writer.Header(), response.Header, secrets)
 		writer.WriteHeader(response.StatusCode)
 	}
-	// A live stream's accounting arrives with its end, not with its headers:
-	// the inspector has been riding the chunks all along, and the review runs
-	// on the assembled copy the moment the provider finishes — the findings
-	// land in the journal either way, and in monitor mode they were never
-	// going to hold a byte back.
-	if live, ok := response.Body.(*liveStreamBody); ok {
-		live.onEnd = func(collected []byte, streamUsage relayapp.TokenUsage, terminal string, streamGeneration time.Duration) {
-			usage = streamUsage
-			generation = streamGeneration
-			server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
-				ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
-				ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
-			})
-			// Only when nothing more specific was already filed: a client
-			// that walked away mid-stream already carries the real cause,
-			// and overwriting it with "ended without a terminal" would
-			// misattribute the break.
-			if terminal == "" && errorCode == "" {
-				errorCode = "stream_incomplete"
-				errorDetail = "the provider's stream ended without a terminal event"
-			}
-		}
-	}
+	// The copy loop below serves the buffered answers; a live body never
+	// reaches it — the ladder's live branch serves and settles it in place.
 	buffer := make([]byte, 64*1024)
 	for {
 		count, readErr := response.Body.Read(buffer)
@@ -621,31 +700,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
-			// A live stream that ended without its terminal event still has
-			// to end in the dialect the client opened — the failure event is
-			// the last byte it reads, not silence.
-			if live, ok := response.Body.(*liveStreamBody); ok && live.terminal() == "" && committed {
-				writeStreamFailure(writer, request.URL.Path, model)
-			}
 			return
 		}
 		if readErr != nil {
-			// A canceled context on a live stream is the client's own exit,
-			// not the provider's failure: it timed out, navigated away, or
-			// closed the connection, and the request context is what carried
-			// that to the provider's body. Filing it as a provider break
-			// pointed history at the wrong end of the wire.
-			if errors.Is(readErr, context.Canceled) {
-				cancelled = true
-				errorCode = "client_disconnected"
-				errorDetail = readErr.Error()
-				return
-			}
 			errorCode = "stream_incomplete"
 			errorDetail = readErr.Error()
-			if _, live := response.Body.(*liveStreamBody); live && committed {
-				writeStreamFailure(writer, request.URL.Path, model)
-			}
 			return
 		}
 	}
@@ -2056,6 +2115,47 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
 	inspector := &sseInspector{path: canonicalPath(path)}
+	// handoffLive transfers ownership of the reader goroutine, its channel
+	// and the provider's body to a live body built over the bytes read so
+	// far. Called from two places: the probation timer (a silent prefill —
+	// nothing has arrived, the keep-alives feed the client until the first
+	// token) and the first content chunk (TTFT: the client's first byte
+	// lands when the provider's first token does, not a fixed window later).
+	handoffLive := func() (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
+		handedLive = true
+		live := &liveStreamBody{
+			// The probation's bytes are delivered first, then the
+			// goroutine's chunks as they keep arriving: the client's
+			// stream is the whole answer, not the part that postdates
+			// the window. collected starts empty — Read appends every
+			// byte the client receives, prefix included — and the
+			// inspector skips the prefix, which the probation already
+			// fed it.
+			source:    &channelReader{prefix: buffered, reads: reads},
+			inspector: inspector,
+			collected: make([]byte, 0, min(limit, 64*1024)),
+			limit:     limit,
+			idleFor:   config.StreamIdleTimeout,
+			// The heartbeat that fed the request phase ended with the
+			// handoff; a long prefill or reasoning gap after it would
+			// starve the client's own idle timer. The keep-alive rides
+			// the stream's silences instead.
+			keepAliveFor: config.HeartbeatInterval,
+			keepAliveMsg: streamKeepAlive(path),
+			// abort closes the provider's body — snapshotted, for the
+			// same reason the goroutine snapshots it: this closure
+			// outlives the reassignment of response.Body.
+			abort:  func() { _ = source.Close() },
+			cancel: cancelRead,
+		}
+		if live.idleFor > 0 {
+			live.idle = time.AfterFunc(live.idleFor, live.abort)
+		}
+		if live.keepAliveFor > 0 {
+			live.keepAlive = time.NewTimer(live.keepAliveFor)
+		}
+		return "live", buffered, relayapp.TokenUsage{}, live, nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -2074,45 +2174,10 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				probation = nil
 				continue
 			}
-			// The stream has been flowing for the whole window without
-			// ending: this is a real generation, not a connection about to
-			// break. Ownership of the reader goroutine, its channel and the
-			// provider's body transfers to the live body; the deferred
-			// cleanups are disarmed so they do not kill what is now the
-			// client's stream.
-			handedLive = true
-			live := &liveStreamBody{
-				// The probation's bytes are delivered first, then the
-				// goroutine's chunks as they keep arriving: the client's
-				// stream is the whole answer, not the part that postdates
-				// the window. collected starts empty — Read appends every
-				// byte the client receives, prefix included — and the
-				// inspector skips the prefix, which the probation already
-				// fed it.
-				source:    &channelReader{prefix: buffered, reads: reads},
-				inspector: inspector,
-				collected: make([]byte, 0, min(limit, 64*1024)),
-				limit:     limit,
-				idleFor:   config.StreamIdleTimeout,
-				// The heartbeat that fed the request phase ended with the
-				// handoff; a long prefill or reasoning gap after it would
-				// starve the client's own idle timer. The keep-alive rides
-				// the stream's silences instead.
-				keepAliveFor: config.HeartbeatInterval,
-				keepAliveMsg: streamKeepAlive(path),
-				// abort closes the provider's body — snapshotted, for the
-				// same reason the goroutine snapshots it: this closure
-				// outlives the reassignment of response.Body.
-				abort:  func() { _ = source.Close() },
-				cancel: cancelRead,
-			}
-			if live.idleFor > 0 {
-				live.idle = time.AfterFunc(live.idleFor, live.abort)
-			}
-			if live.keepAliveFor > 0 {
-				live.keepAlive = time.NewTimer(live.keepAliveFor)
-			}
-			return "live", buffered, relayapp.TokenUsage{}, live, nil
+			// The stream has been silent for the whole window: a prefill.
+			// Go live with an empty prefix so the keep-alives start feeding
+			// the client while the provider thinks.
+			return handoffLive()
 		case <-idle.C:
 			response.Body.Close()
 			return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
@@ -2132,6 +2197,19 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 						return terminal, buffered, inspector.usage, nil, errRetryableSSEFailure
 					}
 					return inspector.reason(), buffered, inspector.usage, nil, nil
+				}
+				// The first real content is the honest handoff moment: the
+				// provider has started generating, the client's wait ends
+				// with this very chunk instead of a fixed window after it,
+				// and a stream that breaks before any content still never
+				// reached the client — the ladder retries it invisibly.
+				// The framing check keeps a whole-JSON-body answer (an
+				// aggregator ignoring the stream flag) on the buffered
+				// path: it is not an event stream, and delivering it raw
+				// into one is the lie the guards below exist to prevent.
+				// The gate itself refuses what the repair still owns.
+				if probation != nil && bodyLooksLikeEventStream(buffered) && livePrefixReady(canonicalPath(path), buffered) {
+					return handoffLive()
 				}
 				if !idle.Stop() {
 					select {

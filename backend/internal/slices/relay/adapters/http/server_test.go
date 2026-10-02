@@ -2597,6 +2597,12 @@ func TestStreamHeartbeatCoversCredentialQueue(t *testing.T) {
 }
 
 func TestChatStreamRetriesUntilDoneMarker(t *testing.T) {
+	// Block mode: the answer is held back for the verdict, so a truncated
+	// stream is repaired invisibly — the buffered path's contract. (Monitor
+	// mode goes live at the first content chunk for time-to-first-token, and
+	// there a mid-stream break is final: the bytes were delivered, and no
+	// re-request can unsend them — the client's own turn-level retry is the
+	// recovery, pinned by TestABreakAfterContentIsFinal.)
 	var attempts int
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		attempts++
@@ -2608,12 +2614,12 @@ func TestChatStreamRetriesUntilDoneMarker(t *testing.T) {
 		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
-	parsed, _ := url.Parse(upstream.URL)
-	server := NewServer("127.0.0.1:0", Dependencies{
-		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
-		Credentials: &credentialSource{values: []string{"key"}},
-		Config:      Config{RetryBase: time.Millisecond, RetryMax: 2 * time.Millisecond, StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024},
-	})
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeBlock, upstream.URL, sink)
+	server.config.RetryBase = time.Millisecond
+	server.config.RetryMax = 2 * time.Millisecond
+	server.config.StreamIdleTimeout = time.Second
+	server.config.MaxRequestBytes = 1024 * 1024
 	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","stream":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()

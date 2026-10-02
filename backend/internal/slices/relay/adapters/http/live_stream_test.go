@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +180,107 @@ func TestALiveStreamKeepsASilentPrefillFed(t *testing.T) {
 	// after it — the stream ends with the answer, not trailing comments.
 	if index := strings.Index(body, "usage"); index >= 0 && strings.LastIndex(body, ": switchboard keep-alive") > index {
 		t.Fatalf("keep-alives continued after the stream had data: %q", body)
+	}
+}
+
+// The seamless retry: a live stream that breaks BEFORE its first content
+// byte delivered nothing the client could see — headers and keep-alives — so
+// the break is a transport failure like any other and the ladder re-requests
+// invisibly (measured in the field: "use of closed network connection" was
+// killing turns whose client had seen nothing but silence). A break AFTER
+// content is final: no re-request can unsend bytes the client already read.
+func TestABreakBeforeContentIsRetriedInvisibly(t *testing.T) {
+	var attempts int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			// Headers, then a silence past the probation, then the
+			// connection dies without a byte of answer and without [DONE].
+			writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			writer.(http.Flusher).Flush()
+			time.Sleep(120 * time.Millisecond)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 40 * time.Millisecond
+	server.config.RetryBase = time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if atomic.LoadInt32(&attempts) < 2 {
+		t.Fatalf("the broken attempt was never retried: attempts=%d body=%q", atomic.LoadInt32(&attempts), response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "usage") || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("the retried answer did not reach the client whole: %q", body)
+	}
+	if strings.Contains(body, "upstream_unavailable") {
+		t.Fatalf("an invisible break surfaced as a failure event: %q", body)
+	}
+	if sink.finish.ErrorCode != "" || sink.finish.Status != http.StatusOK {
+		t.Fatalf("the seamless retry was filed as a failure: %+v", sink.finish)
+	}
+	// The wasted attempt is billed: a discarded generation is still a
+	// generation. The retry's usage rides the same record.
+	if sink.finish.Usage.TotalTokens != 15 {
+		t.Fatalf("usage was lost through the retry: %+v", sink.finish.Usage)
+	}
+	if len(sink.retries) == 0 || sink.retries[0].Attempt < 1 {
+		t.Fatalf("the retry was not visible in the activity record: %+v", sink.retries)
+	}
+}
+
+// The same break AFTER content is final: the client already read bytes no
+// re-request can unsend, and the stream ends in the dialect's failure event.
+func TestABreakAfterContentIsFinal(t *testing.T) {
+	var attempts int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			writer.(http.Flusher).Flush()
+			_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+			writer.(http.Flusher).Flush()
+			time.Sleep(120 * time.Millisecond)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 40 * time.Millisecond
+	server.config.RetryBase = time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if atomic.LoadInt32(&attempts) != 1 {
+		t.Fatalf("a break after content was retried — the client would have seen two answers: attempts=%d", atomic.LoadInt32(&attempts))
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "partial") || !strings.Contains(body, "upstream_unavailable") {
+		t.Fatalf("the delivered content or the failure event was lost: %q", body)
+	}
+	if sink.finish.ErrorCode != "stream_incomplete" {
+		t.Fatalf("the final break was not filed: %+v", sink.finish)
 	}
 }
 

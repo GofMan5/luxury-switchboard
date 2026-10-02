@@ -130,6 +130,12 @@ type liveStreamBody struct {
 	// the body.
 	abort  func()
 	cancel context.CancelFunc
+	// delivered counts the provider bytes the client has actually received:
+	// prefix and chunks, never keep-alives. It is what makes a mid-stream
+	// break retryable — a break before the first content byte is invisible
+	// (headers and keep-alives only), so the ladder can re-request and the
+	// client never learns the stream died.
+	delivered int64
 	// release finishes the credential lease: a live generation is still
 	// generating after the handoff, and the key's concurrency accounting
 	// must count it for as long as it runs — the buffered path held the
@@ -180,6 +186,7 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 	prefixServing := len(body.source.prefix) > 0
 	count, err := body.source.Read(into)
 	if count > 0 {
+		body.delivered += int64(count)
 		if body.idle != nil {
 			body.idle.Reset(body.idleFor)
 		}

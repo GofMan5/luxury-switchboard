@@ -33,7 +33,13 @@ var errInvalidChatCompatibility = errors.New("invalid chat completions compatibi
 // Completions request for providers that only speak the chat format
 // (route.Format == "chat" or the automatic fallback already proved it).
 // Chat providers stream by nature, so the translated request always asks for
-// a stream; the relay buffers it and re-emits it in the shape the client asked
+// a stream — and asks the stream to carry usage: an OpenAI-compatible chat
+// provider reports tokens in a stream ONLY when the request says
+// include_usage, so without it every streamed answer through the translation
+// came back 200-and-healthy with nothing to bill, count, or show. The relay
+// built this request, so it asks for what it needs; the client's own stream
+// flag and options are the client's.
+// The relay buffers it and re-emits it in the shape the client asked
 // for.
 func prepareChatCompletions(method, path string, body []byte, contentType, chatPath string, enabled bool) (string, []byte, bool, error) {
 	if !enabled || method != http.MethodPost || canonicalPath(path) != responsesPath || !strings.Contains(strings.ToLower(contentType), "json") {
@@ -72,7 +78,10 @@ func responsesToChat(body []byte) ([]byte, error) {
 			}
 		}
 	}
-	chat := map[string]any{"stream": true}
+	chat := map[string]any{
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+	}
 	for _, field := range []string{"model", "metadata", "temperature", "top_p", "user", "parallel_tool_calls"} {
 		if value, exists := payload[field]; exists && value != nil {
 			chat[field] = value

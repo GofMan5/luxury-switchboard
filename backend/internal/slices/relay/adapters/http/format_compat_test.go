@@ -75,6 +75,14 @@ func TestResponsesRequestTranslatesToChatCompletions(t *testing.T) {
 	if chat["stream"] != true {
 		t.Fatal("chat request must force streaming")
 	}
+	// The translation asks for streamed usage: an OpenAI-compatible chat
+	// provider reports tokens in a stream ONLY when the request says
+	// include_usage, and without it every streamed answer through the
+	// translation came back 200-and-healthy with nothing to count.
+	options, _ := chat["stream_options"].(map[string]any)
+	if options["include_usage"] != true {
+		t.Fatalf("the chat request did not ask for streamed usage: %v", chat["stream_options"])
+	}
 	if chat["max_tokens"] != json.Number("64") {
 		t.Fatalf("max_output_tokens was not mapped to max_tokens: %v", chat["max_tokens"])
 	}

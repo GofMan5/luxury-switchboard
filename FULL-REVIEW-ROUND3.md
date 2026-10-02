@@ -1,8 +1,8 @@
-# Ревью-цикл 3: закрытие остатков + повторное ревью (Luxury Switchboard 1.0.29)
+# Ревью-цикл 3: закрытие остатков + повторное ревью (Luxury Switchboard 1.0.30)
 
 Третий цикл: закрывает остатки из §4 [FULL-REVIEW-ROUND2.md](FULL-REVIEW-ROUND2.md), поднимает патч
-1.0.28 → 1.0.29, прогоняет полную матрицу и повторяет независимое ревью четырьмя зонами.
-Заодно найден и починен **настоящий живой баг подсчёта токенов** (см. §3).
+1.0.28 → 1.0.30, прогоняет полную матрицу и повторяет независимое ревью четырьмя зонами.
+Заодно найдены и починены **два настоящих живых бага** (подсчёт токенов и пробные 400, §3 и §1.2).
 
 ---
 
@@ -53,11 +53,25 @@
 anon-ключи получают только `.done`-события (полные значения). Тесты:
 `TestUnnamedDeltasStillJoinTheSharedAccumulator` (мутация убита), `TestUnnamedDoneEventsDoNotShareAnAccumulator`.
 
-## 3. Живой e2e: найден настоящий баг подсчёта токенов
+## 3. Живой e2e: два настоящих бага подсчёта токенов
 
 Пользователь сообщил: на alpha-relay (chat-диалект) нули на всех экранах. Разбор:
-- **Живое e2е** (`live_usage_test.go`): настоящий app через stdio — providers.add → keys.add → routes.upsert → relay.start → **реальный HTTP POST** → activity.list — считал токены корректно; придраться было не к чему, кроме…
-- **Настоящий баг**: chat-провайдер, игнорирующий `stream:true` и отвечающий JSON. Раньше: SSE-ветка буферизует JSON как «стрим без событий» → errIncompleteSSE → ретраи → 55 секунд → 502, ответ в руках всё время. Токены нулевые, запрос мёртв. **Починено** `chatCompletionBody` (§1, строка 6): JSON с choices = полный ответ с terminal и usage из тела. Это и был сценарий «перестало считать».
+- **Живое e2е** (`live_usage_test.go`): настоящий app через stdio — providers.add → keys.add → routes.upsert → relay.start → **реальный HTTP POST** → activity.list.
+- **Баг №1**: chat-провайдер, игнорирующий `stream:true` и отвечающий JSON → 55 секунд ретраев → 502. **Починено** `chatCompletionBody` (§1, строка 6).
+- **Баг №2 (главный)**: перевод `/v1/responses` → chat **не просил streamed usage**. OpenAI-совместимый провайдер кладёт usage в стрим **только** при `stream_options: {"include_usage": true}` — alpha-relay честно молчал, релею нечего было считать. Мой первый e2e-фейк слал usage всегда и **маскировал** это. Починено: трансляция просит usage ([format_compat.go](backend/internal/slices/relay/adapters/http/format_compat.go)), fallback убирает stream_options при stream:false. Живое e2е переведено на «честного» провайдера (usage только по запросу) — **мутация (убрать include_usage) роняет его ровно симптомом пользователя: нули**.
+
+## 3.1 Пробные 400 (лишнее время на каждом запросе)
+
+Codex на GLM платил **один пробный 400 на каждый запрос**: Codex просит `reasoning_effort:"medium"`,
+GLM принимает low/high/max и говорит об этом в тексте ошибки. Ремонт (map на ближайший уровень)
+срабатывал — 200 — но round trip уже потрачен, и в Live Activity строка мигает 400→200.
+Починено **запоминанием** (по образцу chat-discovery кэша): [repair_memo.go](backend/internal/slices/relay/adapters/http/repair_memo.go) —
+relay учитывает по провайдеру выученную форму запроса (роль developer→system, rename max_tokens,
+отказанные параметры, список принимаемых effort-уровней) и применяет её **до** отправки. Первый
+запрос платит за пробу (400 — единственный честный источник), все следующие идут сразу.
+Обучается **только успешный** запрос: лежащий провайдер ничего не «чинит» из следующего.
+Тесты: `TestTheSecondRequestSendsTheLearnedShape` (мутация убита: без превентивного применения
+второй запрос снова платит пробу), `TestAFailingRequestTeachesNothing`, `TestTheMemoRewritesExactlyWhatTheRepairsDo`.
 
 ## 4. Platform / slices / release / Rust / frontend
 

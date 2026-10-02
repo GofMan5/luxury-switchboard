@@ -69,11 +69,15 @@ type Server struct {
 	transport    *http.Transport
 	proxyClients map[string]*http.Client
 	chatOnly     sync.Map
-	mu           sync.Mutex
-	server       *http.Server
-	listener     net.Listener
-	routeCtx     context.Context
-	cancelRoute  context.CancelFunc
+	// repairs remembers, per provider, the request shapes a successful
+	// exchange needed, so the second request does not pay for the first
+	// one's probe 400s.
+	repairs     *repairMemo
+	mu          sync.Mutex
+	server      *http.Server
+	listener    net.Listener
+	routeCtx    context.Context
+	cancelRoute context.CancelFunc
 }
 
 type Dependencies struct {
@@ -153,6 +157,8 @@ func NewServer(address string, dependencies Dependencies) *Server {
 		client:       &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
 		transport:    transport,
 		proxyClients: make(map[string]*http.Client),
+		chatOnly:     sync.Map{},
+		repairs:      newRepairMemo(),
 		routeCtx:     ctx,
 		cancelRoute:  cancel,
 	}
@@ -792,6 +798,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	streamFailures := 0
 	fallbackActive := false
 	fallbackPath := canonicalPath(incoming.URL.Path)
+	// The shape this provider already accepted, learned from its own probe
+	// 400s on an earlier request: applied before the first attempt so the
+	// second request does not pay for the first one's discovery. learned is
+	// what the repairs on THIS request taught, merged into the memo only if
+	// the request eventually succeeds — a provider that is simply down must
+	// not have its parameters "repaired" out of the next request.
+	body = server.repairs.apply(route.ProviderID, body)
+	learned := providerAdjustments{}
 	// What the attempts before this one cost. A retried answer was still generated and
 	// still billed, so its tokens belong to the request even though nobody read it.
 	discarded := relayapp.TokenUsage{}
@@ -986,6 +1000,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.Header.Set("X-Switchboard-Terminal", terminal)
 				addDiscardedUsage(&discarded, streamUsage)
 				setUsageHeaders(response.Header, discarded, time.Since(attemptStarted))
+				server.repairs.merge(route.ProviderID, learned)
 				return response, nil
 			}
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") || expectsJSONResponse(incoming.URL.Path) {
@@ -1066,9 +1081,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				}
 				response.Header.Del("Content-Encoding")
 				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), time.Since(attemptStarted))
+				server.repairs.merge(route.ProviderID, learned)
 				return response, nil
 			}
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
+			server.repairs.merge(route.ProviderID, learned)
 			return response, nil
 		}
 
@@ -1212,18 +1229,35 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		refused := policyRefused(string(errorBody))
 		if status == http.StatusBadRequest && !refused && canRetry(attempt, attemptLimit) {
 			if repaired, changed := repairRejectedParameters(body, errorBody); changed {
+				// What the provider named is what the memo will drop next
+				// time: the complaint is the only honest source of the shape
+				// it accepts.
+				complaint := strings.ToLower(string(errorBody))
+				if strings.Contains(complaint, "max_completion_tokens") {
+					learned.maxTokens = true
+				}
+				for _, field := range []string{"temperature", "top_p"} {
+					if strings.Contains(complaint, field) && !containsString(learned.dropFields, field) {
+						learned.dropFields = append(learned.dropFields, field)
+					}
+				}
 				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 				body = repaired
 				server.observeRetry(activityID, attempt, status, 0)
 				continue
 			}
 			if repaired, changed := repairDeveloperRole(body, errorBody); changed {
+				learned.developerRole = true
 				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 				body = repaired
 				server.observeRetry(activityID, attempt, status, 0)
 				continue
 			}
 			if repaired, changed := repairReasoningEffort(body, errorBody); changed {
+				// The provider's accepted levels, verbatim from its own
+				// complaint: the memo maps each later request's ask onto
+				// this list exactly the way the repair just did.
+				learned.efforts = quotedValues(strings.ToLower(string(errorBody)))
 				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 				body = repaired
 				server.observeRetry(activityID, attempt, status, 0)
@@ -1749,6 +1783,11 @@ func nonStreamingResponsesRequest(body []byte, maxBytes int64) ([]byte, bool) {
 		return nil, false
 	}
 	payload["stream"] = false
+	// stream_options is only legal while the stream flag is on; a provider
+	// that reads the spec strictly answers 400 for the pair we would
+	// otherwise send. The translation asks for streamed usage precisely so
+	// this fallback can take it back out again.
+	delete(payload, "stream_options")
 	encoded, err := json.Marshal(payload)
 	if err != nil || (maxBytes > 0 && int64(len(encoded)) > maxBytes) {
 		return nil, false
@@ -2550,19 +2589,7 @@ func repairDeveloperRole(body, errorBody []byte) ([]byte, bool) {
 	if decoder.Decode(&payload) != nil {
 		return body, false
 	}
-	messages, _ := payload["messages"].([]any)
-	changed := false
-	for _, entry := range messages {
-		message, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		if role, _ := message["role"].(string); role == "developer" {
-			message["role"] = "system"
-			changed = true
-		}
-	}
-	if !changed {
+	if !rewriteDeveloperRoles(payload) {
 		return body, false
 	}
 	repaired, err := json.Marshal(payload)
@@ -2606,30 +2633,8 @@ func repairReasoningEffort(body, errorBody []byte) ([]byte, bool) {
 	if decoder.Decode(&payload) != nil {
 		return body, false
 	}
-	requested, _ := payload["reasoning_effort"].(string)
-	if requested == "" {
+	if !alignReasoningEffort(payload, quotedValues(text)) {
 		return body, false
-	}
-	accepted := rankableEfforts(quotedValues(text))
-	requestedRank, known := reasoningEffortRanks[requested]
-	if !known {
-		// A spelling this relay does not rank cannot be mapped: drop it
-		// rather than guess what the provider meant by accepting it.
-		delete(payload, "reasoning_effort")
-	} else if len(accepted) > 0 {
-		replacement, changed := nearestReasoningEffort(requestedRank, accepted)
-		if !changed {
-			// The requested effort is already on the provider's list:
-			// nothing to repair, and rewriting it would loop on a complaint
-			// about something else.
-			return body, false
-		}
-		payload["reasoning_effort"] = replacement
-	} else {
-		// No readable list — or a list nothing in this relay can rank: the
-		// provider's default is the only honest substitute for a level it
-		// refused to name.
-		delete(payload, "reasoning_effort")
 	}
 	repaired, err := json.Marshal(payload)
 	if err != nil {

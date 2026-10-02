@@ -22,7 +22,16 @@ import (
 func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 	const chatStream = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":40,\"total_tokens\":140,\"prompt_tokens_details\":{\"cached_tokens\":30},\"completion_tokens_details\":{\"reasoning_tokens\":10}}}\n\n" +
 		"data: [DONE]\n\n"
+	// An honest OpenAI-compatible chat provider: usage rides the stream only
+	// when the request asked for it (stream_options include_usage), which is
+	// exactly what the translation must do for the tokens to exist at all.
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"include_usage":true`) {
+			writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
 		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		_, _ = writer.Write([]byte(chatStream))
 	}))

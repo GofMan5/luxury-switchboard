@@ -3,6 +3,7 @@ package relayhttp
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"sync"
 )
 
@@ -116,6 +117,48 @@ func (memo *repairMemo) apply(providerID string, body []byte) []byte {
 		return body
 	}
 	return repaired
+}
+
+// ensureStreamUsage asks a chat stream to report its tokens: an
+// OpenAI-compatible provider includes usage in a stream ONLY when the request
+// says include_usage, so without this the relay's meter has nothing to read
+// — the request answers 200-and-healthy with zero tokens on every screen.
+// The ask rides the dialect it belongs to: only a chat-path streaming JSON
+// body gets it, a client that asked for itself keeps its own options, and a
+// Responses-shaped body (no such field in that API) is untouched byte for
+// byte.
+func ensureStreamUsage(body []byte, contentType, path string) []byte {
+	if len(body) == 0 || !strings.Contains(strings.ToLower(contentType), "json") {
+		return body
+	}
+	// Chat only: the legacy completions dialect predates stream_options
+	// entirely, and a Responses body has no such field — the ask rides the
+	// dialect that defines it.
+	if canonical := canonicalPath(path); !chatDialectPath(canonical) {
+		return body
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) != nil || payload == nil {
+		return body
+	}
+	if stream, _ := payload["stream"].(bool); !stream {
+		return body
+	}
+	if options, ok := payload["stream_options"].(map[string]any); ok {
+		if include, _ := options["include_usage"].(bool); include {
+			return body
+		}
+		options["include_usage"] = true
+	} else {
+		payload["stream_options"] = map[string]any{"include_usage": true}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
 }
 
 func containsString(values []string, want string) bool {

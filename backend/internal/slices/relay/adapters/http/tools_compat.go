@@ -58,7 +58,7 @@ type declaredTool struct {
 }
 
 func normalizeResponsesTools(method, path, contentType string, body []byte) ([]byte, toolCompat) {
-	if method != http.MethodPost || canonicalPath(path) != "/v1/responses" ||
+	if method != http.MethodPost || !responsesDialectPath(canonicalPath(path)) ||
 		!strings.Contains(strings.ToLower(contentType), "json") || len(body) == 0 {
 		return body, toolCompat{}
 	}
@@ -578,7 +578,7 @@ func providerSafeToolRune(character rune) bool {
 // and unrelated events stay untouched. Dialects without Responses items and
 // without renamed tools are returned as they arrived.
 func restoreClientToolCalls(body []byte, compat toolCompat, path string, eventStream bool) []byte {
-	responses := canonicalPath(path) == "/v1/responses"
+	responses := responsesDialectPath(canonicalPath(path))
 	if len(body) == 0 || (compat.empty() && !(responses && eventStream)) {
 		return body
 	}

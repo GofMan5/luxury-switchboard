@@ -42,7 +42,7 @@ var errInvalidChatCompatibility = errors.New("invalid chat completions compatibi
 // The relay buffers it and re-emits it in the shape the client asked
 // for.
 func prepareChatCompletions(method, path string, body []byte, contentType, chatPath string, enabled bool) (string, []byte, bool, error) {
-	if !enabled || method != http.MethodPost || canonicalPath(path) != responsesPath || !strings.Contains(strings.ToLower(contentType), "json") {
+	if !enabled || method != http.MethodPost || !responsesDialectPath(canonicalPath(path)) || !strings.Contains(strings.ToLower(contentType), "json") {
 		return path, body, false, nil
 	}
 	translated, err := responsesToChat(body)

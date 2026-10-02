@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -224,5 +226,203 @@ func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 	}
 	if row.Status != http.StatusOK {
 		t.Errorf("the recorded status was %d, not 200", row.Status)
+	}
+}
+
+// A streaming client pays for streaming: a provider that paces its events
+// 400 ms apart must not have its answer rewritten into "wait, then
+// everything at once". The measurable question — the gap between the
+// client's first and last data events — separates progressive delivery (the
+// provider's own pacing, ~400 ms) from buffered delivery (both events land
+// together after the provider finished, ~0). Measured against the real app:
+// the same command chain, the same real HTTP client, deadlines on every
+// read.
+func TestLiveRelayStreamDeliveryTiming(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"}}]}\n\n"))
+		writer.(http.Flusher).Flush()
+		time.Sleep(400 * time.Millisecond)
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		writer.(http.Flusher).Flush()
+		fmt.Fprint(os.Stderr, "DEBUG-UPSTREAM-DONE-WRITTEN\n")
+	}))
+	defer upstream.Close()
+
+	root := t.TempDir()
+	t.Setenv("SWITCHBOARD_PORT", "0")
+	for name, file := range map[string]string{
+		"SWITCHBOARD_SETTINGS_PATH":       "settings.dpapi",
+		"SWITCHBOARD_PROVIDERS_PATH":      "providers.dpapi",
+		"SWITCHBOARD_KEYS_PATH":           "keys.dpapi",
+		"SWITCHBOARD_ROUTES_PATH":         "routes.dpapi",
+		"SWITCHBOARD_TUNNEL_PATH":         "tunnel.dpapi",
+		"SWITCHBOARD_HISTORY_PATH":        "history.db",
+		"SWITCHBOARD_TUNNEL_HISTORY_PATH": "tunnel-history.db",
+	} {
+		t.Setenv(name, filepath.Join(root, file))
+	}
+	requests, toApp := io.Pipe()
+	fromApp, responses := io.Pipe()
+	app, err := New(requests, responses, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appContext, stopApp := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- app.Run(appContext) }()
+	type answer struct {
+		ID      string          `json:"id"`
+		Type    string          `json:"type"`
+		OK      bool            `json:"ok"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	answers := make(chan answer, 256)
+	go func() {
+		defer close(answers)
+		reader := bufio.NewReader(fromApp)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				var one answer
+				if json.Unmarshal(line, &one) == nil && one.Type == "result" {
+					answers <- one
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		stopApp()
+		_ = toApp.Close()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("the control plane did not stop")
+		}
+		_ = responses.Close()
+	}()
+	sequence := 0
+	command := func(method string, payload any) answer {
+		t.Helper()
+		sequence++
+		id := fmt.Sprintf("timing%d", sequence)
+		frame, err := json.Marshal(map[string]any{"v": 1, "id": id, "type": "command", "method": method, "payload": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := toApp.Write(append(frame, '\n')); err != nil {
+			t.Fatalf("%s could not be sent: %v", method, err)
+		}
+		deadline := time.After(20 * time.Second)
+		for {
+			select {
+			case one, open := <-answers:
+				if !open {
+					t.Fatalf("the control plane closed before answering %s", method)
+				}
+				if one.ID == id {
+					if !one.OK {
+						t.Fatalf("%s failed: %s", method, one.Payload)
+					}
+					return one
+				}
+			case <-deadline:
+				t.Fatalf("%s was never answered", method)
+			}
+		}
+	}
+
+	added := command("providers.add", map[string]any{
+		"name": "Alpha Relay", "baseUrl": upstream.URL, "authMode": "bearer",
+		"dialect": "openai", "format": "chat", "rpm": 600, "enabled": true,
+	})
+	var provider struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(added.Payload, &provider); err != nil || provider.ID == "" {
+		t.Fatalf("providers.add answered unreadably: %s", added.Payload)
+	}
+	command("keys.add", map[string]any{"providerId": provider.ID, "label": "primary", "secret": "sk-live"})
+	command("routes.upsert", map[string]any{
+		"target": "relay", "publicModel": "glm-5.3", "upstreamModel": "glm-5.3",
+		"providerId": provider.ID, "enabled": true, "priority": 0,
+	})
+	command("relay.start", nil)
+	status := command("relay.status", nil)
+	var snapshot struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(status.Payload, &snapshot); err != nil || snapshot.Address == "" {
+		t.Fatalf("the relay did not start: %s", status.Payload)
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	request, err := http.NewRequest(http.MethodPost, snapshot.Address+"/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	// Dump every goroutine's stack two seconds in: whatever is stuck, its
+	// stack says where.
+	go func() {
+		time.Sleep(2 * time.Second)
+		stacks := make([]byte, 256*1024)
+		count := runtime.Stack(stacks, true)
+		fmt.Fprint(os.Stderr, string(stacks[:count]))
+	}()
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("the request through the live relay failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("the live request did not succeed: status=%d body=%s", response.StatusCode, body)
+	}
+	if !strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("a stream request was not answered as an event stream: %s", response.Header.Get("Content-Type"))
+	}
+
+	reader := bufio.NewReader(response.Body)
+	var arrivals []time.Time
+	var received strings.Builder
+	started := time.Now()
+	for done := false; !done; {
+		line, err := reader.ReadString('\n')
+		received.WriteString(line)
+		if strings.HasPrefix(line, "data:") {
+			arrivals = append(arrivals, time.Now())
+			if strings.Contains(line, "[DONE]") {
+				done = true
+			}
+		}
+		if err != nil {
+			done = true
+		}
+	}
+	t.Logf("client received: %q", received.String())
+	if len(arrivals) < 2 {
+		t.Fatalf("the stream delivered %d data events, want at least 2", len(arrivals))
+	}
+	t.Logf("delivery gap between first and last data event: %v (provider paces 400ms)", arrivals[len(arrivals)-1].Sub(arrivals[0]))
+	// Time-to-first-token: the provider writes its first event immediately
+	// and its second one 400 ms later. A buffered relay delivers nothing
+	// until the whole answer exists — the first byte lands at ~400 ms, after
+	// the generation. A live relay lands it inside the probation window,
+	// well before the second event even exists. The margin is the provider's
+	// own pacing minus the window.
+	ttft := arrivals[0].Sub(started)
+	t.Logf("time to first data event: %v", ttft)
+	if ttft >= 350*time.Millisecond {
+		t.Fatalf("the answer was delivered buffered, not streamed: ttft=%v — the client waited for the whole generation before the first byte", ttft)
+	}
+	if !strings.Contains(received.String(), "usage") || !strings.Contains(received.String(), "[DONE]") {
+		t.Fatalf("the live stream lost its tail: %q", received.String())
 	}
 }

@@ -1,6 +1,7 @@
 package relayhttp
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -93,6 +94,44 @@ func TestChatCompatBufferedUsageReachesTheActivityRecord(t *testing.T) {
 	usage := sink.finish.Usage
 	if usage.InputTokens != 70 || usage.OutputTokens != 25 || usage.CachedTokens != 15 || usage.TotalTokens != 95 {
 		t.Fatalf("usage was lost on the buffered chat path: %+v", usage)
+	}
+}
+
+// The exact shape from the operator's request inspector: a NATIVE chat
+// caller (POST /chat/completions, no translation — the client speaks the
+// chat dialect itself), streaming, no stream_options of its own. The meter
+// still needs the provider to report usage, and an OpenAI-compatible chat
+// stream carries tokens ONLY on request — so the relay asks, on the client's
+// behalf, and the row fills in instead of reading zeros on every screen.
+func TestANativeChatStreamIsStillMetered(t *testing.T) {
+	const chatStream = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":40,\"total_tokens\":140,\"prompt_tokens_details\":{\"cached_tokens\":30},\"completion_tokens_details\":{\"reasoning_tokens\":10}}}\n\n" +
+		"data: [DONE]\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"include_usage":true`) {
+			// The honest provider: no ask, no usage.
+			writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte(chatStream))
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("the chat answer was not delivered: status=%d body=%s", response.Code, response.Body.String())
+	}
+	usage := sink.finish.Usage
+	if usage.InputTokens != 100 || usage.OutputTokens != 40 || usage.CachedTokens != 30 || usage.ReasoningTokens != 10 {
+		t.Fatalf("a native chat stream was not metered: %+v", usage)
 	}
 }
 

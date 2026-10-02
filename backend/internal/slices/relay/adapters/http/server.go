@@ -102,6 +102,10 @@ type Config struct {
 	RetryMax              time.Duration
 	PermanentAttempts     int
 	HeartbeatInterval     time.Duration
+	// LiveStreamProbation is how long a stream must survive before the relay
+	// delivers it as it arrives (monitor mode, native dialect). Zero or
+	// negative takes the default.
+	LiveStreamProbation time.Duration
 }
 
 func NewServer(address string, dependencies Dependencies) *Server {
@@ -275,6 +279,15 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		targetURL.RawPath = ""
 	case route.UpstreamModel != "" && route.UpstreamModel != model:
 		body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
+	}
+	// A native chat caller (no translation — the client spoke the chat
+	// dialect itself) still has to be metered, and the meter needs the
+	// provider to report usage: an OpenAI-compatible chat stream carries
+	// tokens ONLY on request. The translated branch asks in
+	// prepareChatCompletions; this is the same ask for the body the client
+	// wrote itself. A client that already asked keeps its own options.
+	if !chatCompat && !imageCompat {
+		body = ensureStreamUsage(body, request.Header.Get("Content-Type"), request.URL.Path)
 	}
 	if route.CacheTTL >= time.Hour {
 		extended, carriesHour := extendCacheTTL(body, request.Header.Get("Content-Type"))
@@ -505,20 +518,31 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 			response.Header.Del("Content-Encoding")
 		}
-		restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
-		// The guardrails judge exactly what the client is about to read, after every
-		// translation and repair, so a payload cannot hide in a dialect the relay was
-		// still rewriting.
-		code, blocked := server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
-			ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
-			ClientDeclaredTools: clientDeclaredTools,
-			// The markers of the credential in flight, so a provider that echoes
-			// the key it was sent does not get it recorded as evidence: the
-			// findings page shows excerpts of the answer, and an excerpt is the
-			// answer.
-			Secrets: secrets,
-		})
-		if !blocked {
+		// A live stream skips the buffered repairs and reviews: both read the
+		// whole body to judge it, and reading it here would put the wait the
+		// live path exists to remove right back. The inspector rides the
+		// chunks instead, and the review runs on the assembled copy when the
+		// provider finishes.
+		code := ""
+		if _, live := response.Body.(*liveStreamBody); !live {
+			restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
+			// The guardrails judge exactly what the client is about to read, after every
+			// translation and repair, so a payload cannot hide in a dialect the relay was
+			// still rewriting.
+			var blocked bool
+			code, blocked = server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
+				ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+				ClientDeclaredTools: clientDeclaredTools,
+				// The markers of the credential in flight, so a provider that echoes
+				// the key it was sent does not get it recorded as evidence: the
+				// findings page shows excerpts of the answer, and an excerpt is the
+				// answer.
+				Secrets: secrets,
+			})
+			if !blocked {
+				break
+			}
+		} else {
 			break
 		}
 		// The refused body is dropped here rather than by the deferred close below: this
@@ -557,6 +581,24 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		copyResponseHeaders(writer.Header(), response.Header, secrets)
 		writer.WriteHeader(response.StatusCode)
 	}
+	// A live stream's accounting arrives with its end, not with its headers:
+	// the inspector has been riding the chunks all along, and the review runs
+	// on the assembled copy the moment the provider finishes — the findings
+	// land in the journal either way, and in monitor mode they were never
+	// going to hold a byte back.
+	if live, ok := response.Body.(*liveStreamBody); ok {
+		live.onEnd = func(collected []byte, streamUsage relayapp.TokenUsage, terminal string) {
+			usage = streamUsage
+			server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
+				ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+				ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
+			})
+			if terminal == "" {
+				errorCode = "stream_incomplete"
+				errorDetail = "the provider's stream ended without a terminal event"
+			}
+		}
+	}
 	buffer := make([]byte, 64*1024)
 	for {
 		count, readErr := response.Body.Read(buffer)
@@ -573,11 +615,20 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
+			// A live stream that ended without its terminal event still has
+			// to end in the dialect the client opened — the failure event is
+			// the last byte it reads, not silence.
+			if live, ok := response.Body.(*liveStreamBody); ok && live.terminal() == "" && committed {
+				writeStreamFailure(writer, request.URL.Path, model)
+			}
 			return
 		}
 		if readErr != nil {
 			errorCode = "stream_incomplete"
 			errorDetail = readErr.Error()
+			if _, live := response.Body.(*liveStreamBody); live && committed {
+				writeStreamFailure(writer, request.URL.Path, model)
+			}
 			return
 		}
 	}
@@ -627,6 +678,9 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		targetURL.RawPath = ""
 	} else if !imageCompat {
 		body = rewriteRequestModel(request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel)
+		// Same ask as the local path: a native chat caller's stream has to
+		// report usage for the public client's own meter.
+		body = ensureStreamUsage(body, request.Headers.Get("Content-Type"), request.Path)
 	}
 	if route.CacheTTL >= time.Hour {
 		extended, carriesHour := extendCacheTTL(body, request.Headers.Get("Content-Type"))
@@ -920,7 +974,23 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if chatActive != nil && *chatActive {
 					ssePath = defaultChatCompletionsPath
 				}
-				terminal, buffered, streamUsage, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config, chatActive != nil && *chatActive)
+				// Monitor-mode native streams earn live delivery once they
+				// survive the probation window: the client sees the same
+				// bytes either way, and holding them back only converted the
+				// provider's own pacing into a wait followed by a burst.
+				// Streams that end inside the window — a flaky provider's
+				// truncation — never reach the client, and the repair ladder
+				// below keeps working exactly as it did.
+				liveAfter := time.Duration(0)
+				if server.canStreamLive(incoming, body, chatActive) {
+					liveAfter = server.liveStreamProbation()
+				}
+				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config, chatActive != nil && *chatActive, liveAfter)
+				if liveBody != nil {
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
+					response.Body = liveBody
+					return response, nil
+				}
 				if bufferErr != nil {
 					outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport}
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
@@ -1454,12 +1524,43 @@ func canonicalPath(path string) string {
 	return strings.ToLower(pathpkg.Clean("/" + path))
 }
 
+// The dialect path helpers answer one question — "which dialect does this
+// canonical path name" — for both spellings providers actually mount: with
+// and without the /v1 prefix. alpha-relay and its siblings answer /chat/completions
+// as readily as /v1/chat/completions, and a decision list that recognizes
+// only the prefixed spelling lets the client's choice of spelling decide
+// what gets metered, inspected and terminated instead of the bytes — the
+// exact inversion canonicalPath exists to prevent.
+func chatDialectPath(path string) bool {
+	return path == "/v1/chat/completions" || path == "/chat/completions"
+}
+
+func completionsDialectPath(path string) bool {
+	return path == "/v1/completions" || path == "/completions"
+}
+
+func responsesDialectPath(path string) bool {
+	return path == "/v1/responses" || path == "/responses"
+}
+
+func messagesDialectPath(path string) bool {
+	return path == "/v1/messages" || path == "/messages"
+}
+
+func imageDialectPath(path string) bool {
+	return path == "/v1/images/generations" || path == "/images/generations" || path == "/v1/images/edits" || path == "/images/edits"
+}
+
+func inferenceDialectPath(path string) bool {
+	return responsesDialectPath(path) || chatDialectPath(path) || completionsDialectPath(path) || messagesDialectPath(path)
+}
+
 func expectsJSONResponse(path string) bool {
 	switch canonicalPath(path) {
-	case "/v1/responses", "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/images/generations", "/v1/images/edits":
+	case "/v1/images/generations", "/v1/images/edits", "/images/generations", "/images/edits":
 		return true
 	default:
-		return false
+		return inferenceDialectPath(canonicalPath(path))
 	}
 }
 
@@ -1479,12 +1580,10 @@ func emptyUpstreamAnswer(body []byte, path string, status int) bool {
 	if status != http.StatusOK {
 		return false
 	}
-	switch canonicalPath(path) {
-	case "/v1/responses", "/v1/chat/completions", "/v1/completions", "/v1/messages":
+	if inferenceDialectPath(canonicalPath(path)) {
 		return len(bytes.TrimSpace(body)) == 0
-	default:
-		return false
 	}
+	return false
 }
 
 // sensitiveCredentialMarkers lists what must never reach a public reader. All of it
@@ -1534,18 +1633,29 @@ func (server *Server) retryCredentialFailure(ctx context.Context, lease relayapp
 
 func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error, operation func(context.Context) (*http.Response, error)) (*http.Response, error) {
 	requestCtx, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
+	// The ticker stops on its own channel rather than on the request context:
+	// a live stream's answer is still arriving when the operation returns,
+	// and the copy loop owns the writer from that moment — an interleaved
+	// keep-alive would race it. The request context itself stays alive for a
+	// live answer, because the transport closes the response body the moment
+	// its context is canceled: canceling here would end the stream before the
+	// first byte was delivered (measured: the client received only the
+	// failure event). The parent chain — the caller's request context, the
+	// route context — still cancels it when the request truly ends.
+	stopped := make(chan struct{})
+	exited := make(chan struct{})
+	heartFailure := make(chan error, 1)
 	go func() {
+		defer close(exited)
 		ticker := time.NewTicker(server.config.HeartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-requestCtx.Done():
-				done <- nil
+			case <-stopped:
 				return
 			case <-ticker.C:
 				if err := heartbeat(); err != nil {
-					done <- err
+					heartFailure <- err
 					cancel()
 					return
 				}
@@ -1553,13 +1663,30 @@ func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error,
 		}
 	}()
 	response, err := operation(requestCtx)
-	cancel()
-	heartbeatErr := <-done
-	if heartbeatErr != nil {
-		drainResponse(response)
-		return nil, heartbeatErr
+	close(stopped)
+	// The heartbeat goroutine writes to the same ResponseWriter the copy
+	// loop is about to write to, and that writer is not safe for concurrent
+	// use: its last keep-alive must be ordered before the first body byte by
+	// more than wall-clock luck. Waiting for the goroutine to actually exit
+	// provides the edge — the same discipline the buffered path always had.
+	<-exited
+	if err != nil {
+		cancel()
+		return response, err
 	}
-	return response, err
+	select {
+	case heartbeatErr := <-heartFailure:
+		drainResponse(response)
+		cancel()
+		return nil, heartbeatErr
+	default:
+	}
+	if _, live := response.Body.(*liveStreamBody); !live {
+		// A buffered answer carries its bytes in memory: the context that
+		// fetched them can end here.
+		cancel()
+	}
+	return response, nil
 }
 
 // guardrailAttempts is how many times a request may be sent again after its answer
@@ -1757,8 +1884,7 @@ func requiresStreamTerminal(request *http.Request, body []byte) bool {
 	if request.Method != http.MethodPost {
 		return false
 	}
-	path := canonicalPath(request.URL.Path)
-	if path != "/v1/responses" && path != "/v1/chat/completions" && path != "/v1/completions" && path != "/v1/messages" {
+	if !inferenceDialectPath(canonicalPath(request.URL.Path)) {
 		return false
 	}
 	var payload struct {
@@ -1834,15 +1960,39 @@ type bodyRead struct {
 	err   error
 }
 
-func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool) (string, []byte, relayapp.TokenUsage, error) {
-	defer response.Body.Close()
+// bufferTerminalSSE reads a provider's stream to its terminal event. When
+// liveAfter is positive and the stream is still flowing when the window
+// closes — no terminal, no end — it returns terminal "live" with the bytes
+// read so far, the usage already seen, and a live body whose source is the
+// reader goroutine this function started: the goroutine keeps reading the
+// provider, so the handoff races nothing. A stream that ends or breaks
+// inside the window never leaves as live, and the flaky-provider repair
+// ladder keeps working exactly as it did before the window existed.
+func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, liveAfter time.Duration) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
+	handedLive := false
+	defer func() {
+		if !handedLive {
+			response.Body.Close()
+		}
+	}()
 	readCtx, cancelRead := context.WithCancel(ctx)
-	defer cancelRead()
+	defer func() {
+		if !handedLive {
+			cancelRead()
+		}
+	}()
 	reads := make(chan bodyRead, 1)
+	// The goroutine must close over the body it was given, not over the
+	// response: the live handoff REPLACES response.Body with the live body
+	// on this very object, and a goroutine that reads response.Body by
+	// pointer would then read the live body — which is fed by the channel
+	// only this goroutine fills. That cycle is a deadlock, measured: the
+	// client received the events before the handoff and then nothing.
+	source := response.Body
 	go func() {
 		buffer := make([]byte, 64*1024)
 		for {
-			count, err := response.Body.Read(buffer)
+			count, err := source.Read(buffer)
 			value := bodyRead{err: err}
 			if count > 0 {
 				value.chunk = append([]byte(nil), buffer[:count]...)
@@ -1859,6 +2009,10 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	}()
 	idle := time.NewTimer(config.StreamIdleTimeout)
 	defer idle.Stop()
+	var probation <-chan time.Time
+	if liveAfter > 0 {
+		probation = time.After(liveAfter)
+	}
 	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
 	inspector := &sseInspector{path: canonicalPath(path)}
@@ -1866,26 +2020,54 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 		select {
 		case <-ctx.Done():
 			response.Body.Close()
-			return "", nil, relayapp.TokenUsage{}, ctx.Err()
+			return "", nil, relayapp.TokenUsage{}, nil, ctx.Err()
+		case <-probation:
+			// The stream has been flowing for the whole window without
+			// ending: this is a real generation, not a connection about to
+			// break. Ownership of the reader goroutine, its channel and the
+			// provider's body transfers to the live body; the deferred
+			// cleanups are disarmed so they do not kill what is now the
+			// client's stream.
+			handedLive = true
+			live := &liveStreamBody{
+				// The probation's bytes are delivered first, then the
+				// goroutine's chunks as they keep arriving: the client's
+				// stream is the whole answer, not the part that postdates
+				// the window.
+				source:    io.MultiReader(bytes.NewReader(buffered), channelReader{reads: reads}),
+				inspector: inspector,
+				collected: buffered,
+				limit:     limit,
+				idleFor:   config.StreamIdleTimeout,
+				// abort closes the provider's body — snapshotted, for the
+				// same reason the goroutine snapshots it: this closure
+				// outlives the reassignment of response.Body.
+				abort:  func() { _ = source.Close() },
+				cancel: cancelRead,
+			}
+			if live.idleFor > 0 {
+				live.idle = time.AfterFunc(live.idleFor, live.abort)
+			}
+			return "live", buffered, relayapp.TokenUsage{}, live, nil
 		case <-idle.C:
 			response.Body.Close()
-			return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+			return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
 		case result := <-reads:
 			if len(result.chunk) > 0 {
 				if int64(len(buffered))+int64(len(result.chunk)) > limit {
 					response.Body.Close()
-					return "", nil, relayapp.TokenUsage{}, errResponseTooLarge
+					return "", nil, relayapp.TokenUsage{}, nil, errResponseTooLarge
 				}
 				buffered = append(buffered, result.chunk...)
 				previousTerminal := inspector.terminal
 				if terminal := inspector.Feed(result.chunk); terminal != "" && previousTerminal == "" {
 					if terminal == "response.invalid" {
-						return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+						return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
 					}
 					if inspector.retryableFailure() {
-						return terminal, buffered, inspector.usage, errRetryableSSEFailure
+						return terminal, buffered, inspector.usage, nil, errRetryableSSEFailure
 					}
-					return inspector.reason(), buffered, inspector.usage, nil
+					return inspector.reason(), buffered, inspector.usage, nil, nil
 				}
 				if !idle.Stop() {
 					select {
@@ -1899,12 +2081,12 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				previousTerminal := inspector.terminal
 				if terminal := inspector.Finish(); terminal != "" && previousTerminal == "" {
 					if terminal == "response.invalid" {
-						return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+						return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
 					}
 					if inspector.retryableFailure() {
-						return terminal, buffered, inspector.usage, errRetryableSSEFailure
+						return terminal, buffered, inspector.usage, nil, errRetryableSSEFailure
 					}
-					return inspector.reason(), buffered, inspector.usage, nil
+					return inspector.reason(), buffered, inspector.usage, nil, nil
 				}
 				// An aggregator that ignores the stream flag answers the request
 				// as one JSON chat completion. That body is the answer, not a
@@ -1918,9 +2100,9 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				// guardrails would trust, and the answer is safer dead in the
 				// retry ladder than delivered uninspected.
 				if terminal, usage, complete := chatCompletionBody(buffered); complete && chatDialect {
-					return terminal, buffered, usage, nil
+					return terminal, buffered, usage, nil, nil
 				}
-				return "", nil, relayapp.TokenUsage{}, errIncompleteSSE
+				return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
 			}
 		}
 	}
@@ -2050,7 +2232,7 @@ func (inspector *sseInspector) Finish() string {
 		inspector.line = nil
 	}
 	inspector.finishEvent()
-	if inspector.terminal == "" && inspector.finished && (inspector.path == "/v1/chat/completions" || inspector.path == "/v1/completions") {
+	if inspector.terminal == "" && inspector.finished && (chatDialectPath(inspector.path) || completionsDialectPath(inspector.path)) {
 		inspector.terminal = "done"
 	}
 	return inspector.terminal
@@ -2086,7 +2268,7 @@ func (inspector *sseInspector) finishEvent() {
 	eventName := inspector.eventName
 	inspector.eventName = ""
 	if bytes.Equal(data, []byte("[DONE]")) {
-		if inspector.path == "/v1/chat/completions" || inspector.path == "/v1/completions" {
+		if chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) {
 			inspector.terminal = "done"
 		}
 		return
@@ -2100,7 +2282,7 @@ func (inspector *sseInspector) finishEvent() {
 	if eventType == "" {
 		eventType = typelessEventType(eventName, payload)
 	}
-	if inspector.path == "/v1/responses" && (strings.HasSuffix(eventType, ".delta") || strings.HasSuffix(eventType, ".partial_image")) {
+	if responsesDialectPath(inspector.path) && (strings.HasSuffix(eventType, ".delta") || strings.HasSuffix(eventType, ".partial_image")) {
 		inspector.output = true
 	}
 	if eventType == "response.completed" {
@@ -2120,10 +2302,10 @@ func (inspector *sseInspector) finishEvent() {
 	if eventType == "response.completed" || eventType == "response.failed" || eventType == "response.incomplete" {
 		inspector.terminal = eventType
 	}
-	if eventType == "message_stop" && inspector.path == "/v1/messages" {
+	if eventType == "message_stop" && messagesDialectPath(inspector.path) {
 		inspector.terminal = eventType
 	}
-	if inspector.path == "/v1/chat/completions" || inspector.path == "/v1/completions" {
+	if chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) {
 		if choices, ok := payload["choices"].([]any); ok {
 			for _, choice := range choices {
 				item, _ := choice.(map[string]any)
@@ -2137,7 +2319,7 @@ func (inspector *sseInspector) finishEvent() {
 }
 
 func (inspector *sseInspector) retryableFailure() bool {
-	return inspector.path == "/v1/responses" && inspector.terminal == "response.failed" && !inspector.output && !inspector.refused
+	return responsesDialectPath(inspector.path) && inspector.terminal == "response.failed" && !inspector.output && !inspector.refused
 }
 
 // typelessEventType names typeless stream data from its `event:` line, but only
@@ -2261,12 +2443,12 @@ func positiveInt(value any) int64 {
 
 func writeStreamFailure(writer http.ResponseWriter, path, model string) {
 	path = canonicalPath(path)
-	if path == "/v1/messages" {
+	if messagesDialectPath(path) {
 		body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": "The request could not be completed"}})
 		_, _ = writer.Write(append(append([]byte("event: error\ndata: "), body...), []byte("\n\n")...))
 		return
 	}
-	if path == "/v1/chat/completions" || path == "/v1/completions" {
+	if chatDialectPath(path) || completionsDialectPath(path) {
 		body, _ := json.Marshal(map[string]any{"error": map[string]string{"code": "upstream_unavailable", "message": "The request could not be completed"}})
 		_, _ = writer.Write(append(append([]byte("data: "), body...), []byte("\n\ndata: [DONE]\n\n")...))
 		return

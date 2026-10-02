@@ -2462,7 +2462,7 @@ func TestResponsesInspectorReadsPastInProgressChunk(t *testing.T) {
 	first := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
 	second := []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n")
 	response := &http.Response{Body: io.NopCloser(io.MultiReader(bytes.NewReader(first), &delayedReader{delay: 25 * time.Millisecond, body: second}))}
-	terminal, body, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024}, false)
+	terminal, body, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024}, false, 0)
 	if err != nil || terminal != "response.completed" || !bytes.Contains(body, []byte("response.in_progress")) || !bytes.Contains(body, []byte("response.completed")) {
 		t.Fatalf("inspector stopped on an in-progress chunk: terminal=%q body=%s err=%v", terminal, body, err)
 	}
@@ -2548,7 +2548,7 @@ func TestTerminalSSEAcceptsIncorrectProviderContentTypeOnlyAfterValidation(t *te
 		Header: http.Header{"Content-Type": []string{"text/plain"}},
 		Body:   io.NopCloser(strings.NewReader("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n")),
 	}
-	terminal, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024}, false)
+	terminal, _, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024}, false, 0)
 	if err != nil || terminal != "done" {
 		t.Fatalf("valid SSE with a wrong content type was rejected: terminal=%q err=%v", terminal, err)
 	}

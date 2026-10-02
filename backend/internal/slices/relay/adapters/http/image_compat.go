@@ -21,7 +21,7 @@ var (
 )
 
 func prepareImageRequest(method, path string, body []byte, contentType, upstreamModel string, enabled bool) (string, []byte, bool, error) {
-	if !enabled || method != http.MethodPost || canonicalPath(path) != "/v1/images/generations" || !strings.Contains(strings.ToLower(contentType), "json") {
+	if !enabled || method != http.MethodPost || !imageDialectPath(canonicalPath(path)) || !strings.Contains(strings.ToLower(contentType), "json") {
 		return path, body, false, nil
 	}
 	var payload map[string]any

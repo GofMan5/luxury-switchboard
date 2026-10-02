@@ -5,6 +5,7 @@ package relayguardrail
 
 import (
 	guardrailapp "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/application"
+	guardraildomain "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
@@ -36,4 +37,11 @@ func (guard *Guard) Review(body []byte, eventStream bool, subject relayapp.Guard
 
 func (guard *Guard) ClientDeclaredTools(requestBody []byte) bool {
 	return guardrailapp.RequestDeclaresTools(requestBody)
+}
+
+// CanBlock reports whether the wired inspector can refuse an answer. Monitor
+// mode records verdicts without enforcing them, so the relay may deliver a
+// stream as it arrives and review it when it ends.
+func (guard *Guard) CanBlock() bool {
+	return guard.inspector.Mode() == guardraildomain.ModeBlock
 }

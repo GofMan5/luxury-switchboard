@@ -82,12 +82,15 @@ export default function TestsPage() {
   // provider whose catalog errored would read as measured-and-fine.
   const catalogsReady = scopedProviders.every((provider) => Array.isArray(state.catalogs[provider.id]))
   const erroredCatalogs = scopedProviders.filter((provider) => state.catalogs[provider.id] === 'error')
+  // A scope of only image generators has nothing a text probe can measure.
+  const testableRows = rows.filter((row) => !IMAGE_MODEL.test(row.model)).length
 
   const runScope = () => {
     const targets: TestTarget[] = []
     for (const provider of scopedProviders) {
       const catalog = state.catalogs[provider.id]
-      if (Array.isArray(catalog)) targets.push({ providerId: provider.id, providerName: provider.name, models: catalog.filter((model) => !IMAGE_MODEL.test(model)) })
+      const testable = Array.isArray(catalog) ? catalog.filter((model) => !IMAGE_MODEL.test(model)) : []
+      if (testable.length > 0) targets.push({ providerId: provider.id, providerName: provider.name, models: testable })
     }
     void tests.run(targets)
   }
@@ -109,7 +112,7 @@ export default function TestsPage() {
         </div>
         {state.running
           ? <Button variant="secondary" onClick={() => tests.cancel()}><Square size={14} />Stop</Button>
-          : <Button variant="primary" disabled={rows.length === 0 || !catalogsReady} onClick={runScope}><Play size={14} />Run {scope === 'all' ? 'all' : 'shown'}</Button>}
+          : <Button variant="primary" disabled={testableRows === 0 || !catalogsReady} onClick={runScope}><Play size={14} />Run {scope === 'all' ? 'all' : 'shown'}</Button>}
       </header>
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
       {erroredCatalogs.length > 0 ? (
@@ -178,13 +181,15 @@ function TestRow({ row, running, onRun }: { row: { providerId: string; providerN
   const state = result?.state
   const imageModel = IMAGE_MODEL.test(row.model)
   if (imageModel) {
+    // The per-row Run stays: the name heuristic can be wrong, and a model the
+    // filter mislabels must remain testable by hand.
     return (
       <tr>
         <td><Pill>Image model</Pill></td>
         <td className={styles.modelCell} title={row.model}>{row.model}</td>
         <td>{row.providerName}</td>
         <td className={styles.num} colSpan={3}><span className={styles.imageNote}>text probe not applicable</span></td>
-        <td />
+        <td className={styles.rowActions}><button type="button" className={styles.rowButton} disabled={running} onClick={onRun}><Play size={12} aria-hidden="true" />Run</button></td>
       </tr>
     )
   }

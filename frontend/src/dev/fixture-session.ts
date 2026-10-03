@@ -194,6 +194,9 @@ const prices: ModelPrice[] = [
   { model: 'qwen3.8-max-0902', input: 1.2, cachedInput: 0.24, output: 6, reasoning: 0, updatedAt: iso(172_800_000) },
 ]
 
+// The catalog's unit of account follows setCurrency like the real store does.
+let catalogCurrency = 'USD'
+
 export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = '1.0.37-fixture'
   readonly #listeners = new Map<string, Set<EventListener>>()
@@ -266,12 +269,12 @@ export class FixtureSession implements ControlPlaneSession {
       case 'settings.update': return { settings: { ...settings, ...body }, restartRequired: false }
       case 'analytics.report': return reportFor(String(body.period ?? '24h'))
       case 'history.recent': return { requests: history, available: 486 }
-      case 'analytics.prices.get': return { prices, currency: 'USD' }
-      case 'analytics.prices.set': return { prices, currency: 'USD' }
-      case 'analytics.prices.remove': return { prices: prices.slice(1), currency: 'USD' }
+      case 'analytics.prices.get': return { prices, currency: catalogCurrency }
+      case 'analytics.prices.set': return { prices, currency: catalogCurrency }
+      case 'analytics.prices.remove': return { prices: prices.slice(1), currency: catalogCurrency }
       case 'routes.list': return { routes: body.target === 'tunnel' ? tunnelRoutes : relayRoutes }
       case 'models.discover': return { models: modelIds.concat(['glm-5.3-flash', 'glm-5.2', 'qwen3.7-max', 'qwen3.7-plus', 'kimi-k2.7-code', 'deepseek-v4.1-flash', 'qwen3.5-plus', 'deepseek-v3.2']) }
-      case 'analytics.prices.setCurrency': return { prices, currency: String(body.currency ?? 'USD') }
+      case 'analytics.prices.setCurrency': catalogCurrency = String(body.currency ?? 'USD'); return { prices, currency: catalogCurrency }
       case 'models.test': {
         // The probe's answers arrive as events over a beat, the way the real
         // sidecar reports them — a UI that only renders on command completion

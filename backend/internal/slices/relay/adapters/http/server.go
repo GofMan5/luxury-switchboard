@@ -1311,7 +1311,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// A 5xx that names congestion is a queue to wait in, not a verdict to
 		// hand the caller: "no channel available", "service overloaded",
 		// "upstream load is saturated" (new-api's wording, measured on
-		// the reseller) mean the provider has nothing free right now and usually
+		// some resellers) mean the provider has nothing free right now and usually
 		// does seconds later. The permanent-attempt budget that ends a
 		// deterministic 5xx after two tries was ending work the caller cannot
 		// restart from here — so the overloaded class waits the congestion out
@@ -3170,7 +3170,7 @@ func modelUnavailable(body []byte, model string, status int) bool {
 }
 
 // sharedPoolExhausted reports a billing verdict about the provider's shared
-// pool rather than the key's own balance: the reseller releases GPT/Claude
+// pool rather than the key's own balance: some resellers release GPT/Claude
 // capacity in daily batches, and "Budget pool quota has been exhausted" means
 // the batch is spent for everyone (measured, and stated in their own
 // announcements). Banning keys until midnight for it froze the whole pool
@@ -3336,7 +3336,7 @@ func rateLimitedText(text string) bool {
 // breakage. These answers resolve on their own once a channel frees up, so the
 // request retries instead of surfacing the status. Wording is taken from the
 // resellers this relay actually serves: new-api's Chinese saturation message
-// (measured on the reseller) and the English overload idioms.
+// (measured on a reseller) and the English overload idioms.
 func serviceOverloaded(text string) bool {
 	if text == "" {
 		return false
@@ -3346,7 +3346,7 @@ func serviceOverloaded(text string) bool {
 		"resource exhausted", "temporarily unavailable", "server is busy",
 		"capacity", "saturated", "backpressure",
 		// new-api answers congestion in its own words, in Chinese and English
-		// (measured on the reseller and GLM resellers). The previous entries
+		// (measured on reseller traffic). The previous entries
 		// here had been written as corrupted bytes: they matched nothing real,
 		// and their replacement-char runs could false-positive on ordinary
 		// text. Real wording, real bytes.
@@ -3600,7 +3600,7 @@ func jsonErrorDetailUnbounded(body []byte, secrets []string) string {
 		candidates = append(candidates, response["error"], response["incomplete_details"])
 	}
 	// Reseller envelopes also carry the reason beside the error object: a
-	// top-level message (the reseller) or a code/msg pair (its current API).
+	// top-level message (one shape) or a code/msg pair (another).
 	// The envelope itself is read before the bare strings, so a code/msg pair
 	// files as "401: Invalid API Key!" rather than losing its code — and a
 	// present error object still wins over all of it.

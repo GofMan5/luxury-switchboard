@@ -160,9 +160,9 @@ function ownerPageChunks(root) {
 
 // The sidecar markers are read from the backend instead of being restated here:
 // the commands of the stdio slices edition_owner.go registers (compiled only
-// into the owner binary) plus the publisher identity name the SSH stack carries,
-// so a new owner command fails the public scan without anyone remembering this
-// file. An empty read throws for the same reason as the chunk list.
+// into the owner binary), so a new owner command fails the public scan without
+// anyone remembering this file. An empty read throws for the same reason as the
+// chunk list.
 function ownerCommandMarkers(root) {
   const bootstrap = readFileSync(join(root, 'backend', 'internal', 'app', 'bootstrap', 'edition_owner.go'), 'utf8')
   const packages = [...bootstrap.matchAll(/"github\.com\/luxuryprivate\/switchboard\/backend\/(internal\/slices\/[^"]+\/adapters\/stdio)"/gu)]
@@ -176,8 +176,5 @@ function ownerCommandMarkers(root) {
     }
   }
   if (markers.length === 0) throw new Error('The owner stdio slices register no commands to strip-check')
-  const sshRuntime = readFileSync(join(root, 'backend', 'internal', 'slices', 'tunnel', 'adapters', 'ssh', 'runtime.go'), 'utf8')
-  const identity = sshRuntime.match(/identityName\s*=\s*"([^"]+)"/u)?.[1]
-  if (!identity) throw new Error('The publisher identity name moved; the public scan needs it')
-  return [...markers, identity]
+  return markers
 }

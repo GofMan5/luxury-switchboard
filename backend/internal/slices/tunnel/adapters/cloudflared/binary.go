@@ -26,11 +26,16 @@ const (
 )
 
 // connectorSHA256 pins the release artifacts, computed from the published
-// binaries themselves.
+// binaries themselves. Lowercase, because hex.EncodeToString speaks lowercase.
 var connectorSHA256 = map[string]string{
-	"windows/amd64": "F096265EC2FCBE9BB6E2D64268DB167CED3FCBB83D894BDB9E2FCDB26F2EA7E2",
-	"linux/amd64":   "77E26D8D900E0B8469F416239D14B5F296525FDF79FEE6F511EF55609E3FBAC2",
+	"windows/amd64": "f096265ec2fcbe9bb6e2d64268db167ced3fcbb83d894bdb9e2fcdb26f2ea7e2",
+	"linux/amd64":   "77e26d8d900e0b8469f416239d14b5f296525fdf79fee6f511ef55609e3fbac2",
 }
+
+// downloadCeiling bounds the whole download without punishing a slow line:
+// the connector is ~35 MB, so ten minutes forgives ~60 KB/s and still refuses
+// to hang forever on a connection that answers headers and then goes silent.
+const downloadCeiling = 10 * time.Minute
 
 // connectorHTTPClient bounds the handshake, not the download: a 35 MB binary
 // on a slow line needs minutes, and a total timeout would cancel exactly the
@@ -108,7 +113,9 @@ func (runtime *Runtime) ensureConnector(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	response, err := connectorHTTPClient.Do(request)
+	downloadCtx, cancel := context.WithTimeout(ctx, downloadCeiling)
+	defer cancel()
+	response, err := connectorHTTPClient.Do(request.WithContext(downloadCtx))
 	if err != nil {
 		return "", errors.New("the tunnel connector could not be downloaded")
 	}

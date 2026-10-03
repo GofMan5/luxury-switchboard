@@ -1042,7 +1042,7 @@ func TestAFortyThreeNamingTheModelBlocksTheModelWhateverTheWording(t *testing.T)
 }
 
 // Congestion answers on their own once a channel frees up, so a 503 that names
-// it (new-api's saturation wording, measured on the reseller) is waited out on
+// it (a reseller's saturation wording, measured live) is waited out on
 // the attempt ceiling instead of surfacing after the two-try budget a plain
 // 5xx spends. The verdict must not cool the keys: every key answers it
 // identically.

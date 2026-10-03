@@ -43,7 +43,11 @@ export function PriceEditor({ prices, currency, phase, knownModels, onSave, onRe
           the mount it belongs to: a conditional child of a persistent parent
           would run the hook's effect while the dialog does not exist. */}
       {open ? (
+        // The currency draft is captured at mount; keying on it reseeds the
+        // dialog if the catalog arrives while it is open, instead of letting a
+        // stale draft Apply over the freshly loaded one.
         <PriceDialog
+          key={currency}
           prices={prices}
           currency={currency}
           phase={phase}
@@ -72,6 +76,7 @@ interface PriceDialogProps {
 function PriceDialog({ prices, currency, phase, knownList, onClose, onSave, onRemove, onSetCurrency }: PriceDialogProps) {
   const [state, setState] = useState<EditorState>(emptyDraft)
   const [currencyDraft, setCurrencyDraft] = useState(currency)
+  const [currencyError, setCurrencyError] = useState('')
   const busy = phase === 'saving' || phase === 'loading'
   // Escape and the Tab trap behave like every other modal in the app: the
   // shared hook, not a per-modal reinvention.
@@ -80,6 +85,11 @@ function PriceDialog({ prices, currency, phase, knownList, onClose, onSave, onRe
   const currencyCode = currencyDraft.trim().toUpperCase()
   const currencyValid = /^[A-Z]{3}$/.test(currencyCode)
   const currencyDirty = currencyValid && currencyCode !== currency
+
+  async function applyCurrency() {
+    setCurrencyError('')
+    if (!(await onSetCurrency(currencyCode))) setCurrencyError('The currency was not saved — the catalog keeps its current one.')
+  }
 
   // The dialog closes only on a confirmed save: a failed one keeps the
   // operator's typed rates on screen next to the error.
@@ -121,11 +131,12 @@ function PriceDialog({ prices, currency, phase, knownList, onClose, onSave, onRe
             <button
               type="button"
               disabled={busy || !currencyDirty}
-              onClick={() => void onSetCurrency(currencyCode)}
+              onClick={() => void applyCurrency()}
             >
               Apply
             </button>
           </div>
+          {currencyError ? <p className="price-currency-error" role="alert">{currencyError}</p> : null}
           <p className="price-currency-note">The catalog converts nothing: rates stay the numbers you entered, only the unit they read in changes.</p>
         </header>
         <label className="price-field">

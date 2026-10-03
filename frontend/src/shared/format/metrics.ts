@@ -36,7 +36,7 @@ const currencySymbols: Record<string, string> = {
  * thousand, in the catalog's currency of account. */
 export function formatCost(cost: number | undefined, currency = 'USD'): string {
   const value = cost ?? 0
-  if (!Number.isFinite(value)) return '—'
+  if (!Number.isFinite(value) || value < 0) return '—'
   const symbol = currencySymbols[currency] ?? ''
   const suffix = symbol ? '' : ` ${currency}`
   if (value === 0) return `${symbol}0${suffix}`

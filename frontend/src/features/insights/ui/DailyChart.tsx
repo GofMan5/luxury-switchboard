@@ -29,7 +29,7 @@ export function DailyChart({ daily, currency = 'USD' }: { daily: readonly Insigh
   const hoveredPoint = hovered >= 0 && hovered < points.length ? points[hovered] : null
 
   return (
-    <figure className="daily-chart" role="img" aria-label={`Daily requests up to ${maxRequests.toLocaleString()} and estimated cost up to $${maxCost < 0.01 ? maxCost.toFixed(4) : maxCost.toFixed(2)}`}>
+    <figure className="daily-chart" role="img" aria-label={`Daily requests up to ${maxRequests.toLocaleString()} and estimated cost up to ${formatCost(maxCost, currency)}`}>
       <svg
         viewBox={`0 0 ${chartWidth} ${chartHeight}`}
         preserveAspectRatio="none"
@@ -106,7 +106,7 @@ export function DailyChart({ daily, currency = 'USD' }: { daily: readonly Insigh
                 <td>{point.date}</td>
                 <td>{point.volume.requests.toLocaleString()}</td>
                 <td>{point.volume.failed.toLocaleString()}</td>
-                <td>{point.volume.cost > 0 ? `$${point.volume.cost.toFixed(2)}` : '—'}</td>
+                <td>{point.volume.cost > 0 ? formatCost(point.volume.cost, currency) : '—'}</td>
               </tr>
             ))}
           </tbody>

@@ -47,3 +47,5 @@ src-tauri/binaries/switchboard-sidecar-*
 backend/bin/
 .coverage
 htmlcov/
+
+browser-screenshots/

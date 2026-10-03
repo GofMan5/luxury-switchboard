@@ -5,7 +5,9 @@ import { useInsights } from './useInsights'
 import { PriceEditor } from './PriceEditor'
 import { DailyChart } from './DailyChart'
 import { formatClock, formatCost, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
+import { Metric, MetricStrip, Panel, Segmented } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import chrome from '../../../shared/ui/chrome.module.css'
 import styles from './InsightsPage.module.css'
 
 const periods: readonly InsightsPeriod[] = ['24h', '48h', '72h', 'all']
@@ -24,12 +26,21 @@ const stateLabels: Record<HistoryRequest['state'], string> = {
 // runes, and the full text lives behind the row's tooltip.
 const errorPreviewLimit = 180
 
+/** The quiet re-read cadence: numbers stay honest without a visible reload. */
+const AUTO_REFRESH_MS = 60_000
+
 type ProviderSortKey = 'name' | 'requests' | 'success' | 'latency' | 'retries' | 'tokens' | 'cost'
 type ModelSortKey = 'model' | 'requests' | 'success' | 'tokens' | 'tps' | 'cost'
 
 export default function InsightsPage() {
   const { model, state } = useInsights()
   useEffect(() => { if (state.phase === 'idle') void model.load('24h') }, [model, state.phase])
+  // refresh() swaps the report in place; the phase never leaves ready, so the
+  // period switch and the refresh button stay usable through every cycle.
+  useEffect(() => {
+    const timer = window.setInterval(() => void model.refresh(), AUTO_REFRESH_MS)
+    return () => window.clearInterval(timer)
+  }, [model])
   const report = state.report
   const loading = state.phase === 'loading' || state.phase === 'idle'
   const showSkeleton = !report
@@ -56,20 +67,13 @@ export default function InsightsPage() {
       <header className="page-header">
         <div><h1>Insights</h1><p>Where the tokens, the money and the failures actually go</p></div>
         <div className={styles.actions}>
-          <div className={styles.periods} role="group" aria-label="Insights period">
-            {periods.map((period) => (
-              <button
-                key={period}
-                type="button"
-                data-active={state.period === period}
-                aria-pressed={state.period === period}
-                disabled={loading}
-                onClick={() => void model.load(period)}
-              >
-                {period === 'all' ? 'All' : period}
-              </button>
-            ))}
-          </div>
+          <Segmented<InsightsPeriod>
+            label="Insights period"
+            value={state.period}
+            disabled={loading}
+            options={periods.map((period) => ({ id: period, label: period === 'all' ? 'All' : period }))}
+            onChange={(period) => void model.load(period)}
+          />
           <PriceEditor
             prices={state.prices}
             phase={state.pricesPhase}
@@ -84,150 +88,145 @@ export default function InsightsPage() {
       </header>
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
       {showSkeleton && loading ? <p className={styles.loading} role="status">Loading insights…</p> : null}
-      <div className={styles.metrics} aria-busy={loading}>
-        {showSkeleton
-          ? skeletonMetrics.map((label) => (
-            <div key={label} className={styles.metric} aria-hidden="true"><span>{label}</span><strong className={styles.skeleton} /></div>
-          ))
-          : (
-            <>
-              <Metric label="Requests" value={formatInteger(overview?.volume.requests)} detail={`${formatInteger(overview?.volume.completed)} completed · ${formatInteger(overview?.volume.failed)} failed`} />
-              <Metric label="Success rate" value={overview ? `${Math.round(overview.successRate * 100)}%` : '—'} detail={`${formatInteger(overview?.volume.retries)} retries${overview?.topErrorCode ? ` · ${overview.topErrorCode}` : ''}`} />
-              <Metric
-                label="Estimated cost"
-                value={overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost) : formatPartialCost(overview.volume.cost)) : '—'}
-                detail={overview?.volume.isPriced ? 'priced estimate' : `${pricedShare}% of requests priced`}
-              />
-              <Metric label="p95 latency" value={formatDuration(overview?.p95Ms ?? 0)} detail={`p50 ${formatDuration(overview?.p50Ms ?? 0)}`} />
-              <Metric label="Tokens" value={formatInteger(overview?.volume.totalTokens)} detail={`${formatInteger(overview?.volume.cachedTokens)} cached · ${formatInteger(overview?.volume.reasoningTokens)} reasoning`} />
-            </>
-          )}
-      </div>
-      {report && report.daily.length > 1 ? (
-        <section className={styles.panel} aria-label="Daily usage">
-          <header><div><h2>Daily usage</h2><span>Requests and estimated cost per day</span></div></header>
-          <DailyChart daily={report.daily} />
-        </section>
-      ) : null}
-      {report && report.providers.length > 0 ? (
-        <section className={styles.panel} aria-label="Provider breakdown">
-          <header><div><h2>Providers</h2><span>Reliability and speed per provider — click a column to sort</span></div></header>
-          <div className={styles.tableWrap}><table aria-label="Provider breakdown"><thead><tr>
-            <SortHeader<ProviderSortKey> label="Provider" sortKey="name" active={providerSort} onSort={setProviderSort} />
-            <SortHeader<ProviderSortKey> label="Requests" sortKey="requests" active={providerSort} onSort={setProviderSort} />
-            <SortHeader<ProviderSortKey> label="Success" sortKey="success" active={providerSort} onSort={setProviderSort} />
-            <SortHeader<ProviderSortKey> label="p50 / p95" sortKey="latency" active={providerSort} onSort={setProviderSort} />
-            <SortHeader<ProviderSortKey> label="Retries" sortKey="retries" active={providerSort} onSort={setProviderSort} />
-            <SortHeader<ProviderSortKey> label="Tokens" sortKey="tokens" active={providerSort} onSort={setProviderSort} />
-            <SortHeader<ProviderSortKey> label="Est. cost" sortKey="cost" active={providerSort} onSort={setProviderSort} />
-          </tr></thead><tbody>
-            {providers.map((provider) => (
-              <tr key={provider.id}>
-                <td title={provider.id}>{provider.name || provider.id}</td>
-                <td>{formatInteger(provider.volume.requests)}</td>
-                <td>{formatRate(provider.volume.completed, provider.volume.requests)}</td>
-                <td>{formatDuration(provider.p50Ms)} / {formatDuration(provider.p95Ms)}</td>
-                <td>{formatInteger(provider.volume.retries)}</td>
-                <td>{formatInteger(provider.volume.totalTokens)}</td>
-                <td>{provider.volume.isPriced ? formatCost(provider.volume.cost) : formatPartialCost(provider.volume.cost)}</td>
-              </tr>
-            ))}
-          </tbody></table></div>
-        </section>
-      ) : null}
-      {report && report.models.length > 0 ? (
-        <section className={styles.panel} aria-label="Model breakdown">
-          <header><div><h2>Models</h2><span>What the tokens were spent on — click a column to sort</span></div></header>
-          <div className={styles.tableWrap}><table aria-label="Model breakdown"><thead><tr>
-            <SortHeader<ModelSortKey> label="Model" sortKey="model" active={modelSort} onSort={setModelSort} />
-            <SortHeader<ModelSortKey> label="Requests" sortKey="requests" active={modelSort} onSort={setModelSort} />
-            <SortHeader<ModelSortKey> label="Success" sortKey="success" active={modelSort} onSort={setModelSort} />
-            <SortHeader<ModelSortKey> label="Tokens" sortKey="tokens" active={modelSort} onSort={setModelSort} />
-            <SortHeader<ModelSortKey> label="Tok/s" sortKey="tps" active={modelSort} onSort={setModelSort} />
-            <SortHeader<ModelSortKey> label="Est. cost" sortKey="cost" active={modelSort} onSort={setModelSort} />
-          </tr></thead><tbody>
-            {models.map((entry) => (
-              <tr key={entry.model}>
-                <td title={entry.model}>{entry.model}</td>
-                <td>{formatInteger(entry.volume.requests)}</td>
-                <td>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
-                <td>{formatInteger(entry.volume.totalTokens)}</td>
-                <td>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond, 0) : '—'}</td>
-                <td>{entry.volume.isPriced ? formatCost(entry.volume.cost) : formatPartialCost(entry.volume.cost)}</td>
-              </tr>
-            ))}
-          </tbody></table></div>
-        </section>
-      ) : null}
-      {report && report.errors.length > 0 ? (
-        <section className={styles.panel} aria-label="Error breakdown">
-          <header><div><h2>Failures</h2><span>The relay's own error codes, ranked</span></div></header>
-          <div className={styles.errorBars}>
-            {report.errors.map((error) => {
-              const share = report.overview.volume.requests > 0 ? 100 * error.requests / report.overview.volume.requests : 0
-              return (
-                <div key={error.errorCode} className={styles.errorBar}>
-                  <span className={styles.errorCode}>{error.errorCode}</span>
-                  <span className={styles.errorTrack} aria-hidden="true"><span className={styles.errorFill} style={{ width: `${Math.max(share, share > 0 ? 2 : 0)}%` }} /></span>
-                  <span className={styles.errorCount}>{formatInteger(error.requests)}</span>
-                </div>
-              )
-            })}
-          </div>
-        </section>
-      ) : null}
-      {report && report.unpricedModels.length > 0 ? (
-        <section className={styles.panel} aria-label="Pricing gaps" data-testid="pricing-gaps">
-          <header><div><h2><Coins size={14} aria-hidden="true" /> No price set</h2><span>The estimate does not cover these models</span></div></header>
-          <p className={styles.unpriced}>{report.unpricedModels.join(' · ')}</p>
-        </section>
-      ) : null}
-      {state.phase !== 'idle' && state.phase !== 'error' ? (
-        <section className={styles.panel} aria-label="Recent persisted requests">
-          <header><div><h2>Recent requests</h2><span>{state.recent.length > 0 ? `${state.recentAvailable > state.recent.length ? `Newest ${state.recent.length} of ${state.recentAvailable} rows` : `${state.recent.length} rows`} in ${state.period === 'all' ? 'history' : `the last ${state.period}`}` : 'No persisted requests in this period'}</span></div></header>
-          <div className={styles.tableWrap}><table aria-label="Recent persisted requests"><thead><tr>
-            <th scope="col">State</th><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">HTTP</th><th scope="col">Latency</th><th scope="col">Processed</th><th scope="col">Cached</th><th scope="col">Time</th>
-          </tr></thead><tbody>
-            {loading && state.recent.length === 0
-              ? [0, 1, 2].map((row) => <tr key={row} className={styles.skeletonRow} aria-hidden="true"><td colSpan={8}><span className={styles.skeleton} /></td></tr>)
-              : state.recent.map((request) => (
-                <tr key={request.id} data-failed={request.state === 'failed' || undefined}>
-                  <td><span className={styles.state}><StatusDot state={request.state} />{stateLabels[request.state]}</span></td>
-                  <td title={request.model}>{request.model || '—'}</td>
-                  <td>{request.providerId || '—'}</td>
-                  <td>{request.status || '—'}</td>
-                  <td>{formatDuration(request.latencyMs)}</td>
-                  <td>{formatInteger(request.totalTokens)}</td>
-                  <td>{formatInteger(request.cachedTokens)}</td>
-                  <td>{formatClock(request.updatedAt)}</td>
+      <div className="page-body">
+        <div aria-busy={loading}>
+          {showSkeleton
+            ? (
+              <div className={chrome.metricStrip} aria-hidden="true">
+                {skeletonMetrics.map((label) => (
+                  <div key={label} className={chrome.metric}><span className={chrome.metricLabel}>{label}</span><strong className={`${chrome.metricValue} ${styles.skeleton}`} /></div>
+                ))}
+              </div>
+            )
+            : (
+              <MetricStrip>
+                <Metric label="Requests" value={formatInteger(overview?.volume.requests)} detail={`${formatInteger(overview?.volume.completed)} completed · ${formatInteger(overview?.volume.failed)} failed`} />
+                <Metric label="Success rate" value={overview ? `${Math.round(overview.successRate * 100)}%` : '—'} detail={`${formatInteger(overview?.volume.retries)} retries${overview?.topErrorCode ? ` · ${overview.topErrorCode}` : ''}`} tone={overview && overview.successRate < 0.9 ? 'warning' : undefined} />
+                <Metric
+                  label="Estimated cost"
+                  value={overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost) : formatPartialCost(overview.volume.cost)) : '—'}
+                  detail={overview?.volume.isPriced ? 'priced estimate' : `${pricedShare}% of requests priced`}
+                />
+                <Metric label="p95 latency" value={formatDuration(overview?.p95Ms ?? 0)} detail={`p50 ${formatDuration(overview?.p50Ms ?? 0)}`} />
+                <Metric label="Tokens" value={formatInteger(overview?.volume.totalTokens)} detail={`${formatInteger(overview?.volume.cachedTokens)} cached · ${formatInteger(overview?.volume.reasoningTokens)} reasoning`} />
+              </MetricStrip>
+            )}
+        </div>
+        {report && report.daily.length > 1 ? (
+          <Panel title="Daily usage" subtitle={report.generatedAt ? `Updated ${formatClock(report.generatedAt)} · auto-refresh every minute` : 'Requests and estimated cost per day'}>
+            <DailyChart daily={report.daily} />
+          </Panel>
+        ) : null}
+        {report && report.providers.length > 0 ? (
+          <Panel title="Providers" subtitle="Reliability and speed per provider — click a column to sort">
+            <div className={chrome.tableWrap}><table className={`${chrome.dataTable} ${styles.wideProviders}`} aria-label="Provider breakdown"><thead><tr>
+              <SortHeader<ProviderSortKey> label="Provider" sortKey="name" active={providerSort} onSort={setProviderSort} />
+              <SortHeader<ProviderSortKey> label="Requests" sortKey="requests" active={providerSort} onSort={setProviderSort} numeric />
+              <SortHeader<ProviderSortKey> label="Success" sortKey="success" active={providerSort} onSort={setProviderSort} numeric />
+              <SortHeader<ProviderSortKey> label="p50 / p95" sortKey="latency" active={providerSort} onSort={setProviderSort} numeric />
+              <SortHeader<ProviderSortKey> label="Retries" sortKey="retries" active={providerSort} onSort={setProviderSort} numeric />
+              <SortHeader<ProviderSortKey> label="Tokens" sortKey="tokens" active={providerSort} onSort={setProviderSort} numeric />
+              <SortHeader<ProviderSortKey> label="Est. cost" sortKey="cost" active={providerSort} onSort={setProviderSort} numeric />
+            </tr></thead><tbody>
+              {providers.map((provider) => (
+                <tr key={provider.id}>
+                  <td title={provider.id}>{provider.name || provider.id}</td>
+                  <td className={styles.num}>{formatInteger(provider.volume.requests)}</td>
+                  <td className={styles.num}>{formatRate(provider.volume.completed, provider.volume.requests)}</td>
+                  <td className={styles.num}>{formatDuration(provider.p50Ms)} / {formatDuration(provider.p95Ms)}</td>
+                  <td className={styles.num}>{formatInteger(provider.volume.retries)}</td>
+                  <td className={styles.num}>{formatInteger(provider.volume.totalTokens)}</td>
+                  <td className={styles.num}>{provider.volume.isPriced ? formatCost(provider.volume.cost) : formatPartialCost(provider.volume.cost)}</td>
                 </tr>
               ))}
-            {!loading && state.recent.length === 0 ? <tr><td colSpan={8} className={styles.empty}>No persisted requests in this period.</td></tr> : null}
-          </tbody></table></div>
-        </section>
-      ) : null}
-      {failedRequests.length > 0 ? (
-        <section className={styles.panel} aria-label="Request errors">
-          <header><div><h2>Request errors</h2><span>Full diagnostics from the persisted rows</span></div></header>
-          <div className={styles.errorList}>
-            {failedRequests.map((request) => {
-              const full = request.errorDetail || request.errorCode || ''
-              return (
-                <article key={request.id} className={styles.errorItem}>
-                  <strong title={full} tabIndex={0} aria-label={full}>{previewError(full)}</strong>
-                  <small>{request.model || 'Unknown model'} — {formatClock(request.updatedAt)}</small>
-                </article>
-              )
-            })}
-          </div>
-        </section>
-      ) : null}
+            </tbody></table></div>
+          </Panel>
+        ) : null}
+        {report && report.models.length > 0 ? (
+          <Panel title="Models" subtitle="What the tokens were spent on — click a column to sort">
+            <div className={chrome.tableWrap}><table className={`${chrome.dataTable} ${styles.wideModels}`} aria-label="Model breakdown"><thead><tr>
+              <SortHeader<ModelSortKey> label="Model" sortKey="model" active={modelSort} onSort={setModelSort} />
+              <SortHeader<ModelSortKey> label="Requests" sortKey="requests" active={modelSort} onSort={setModelSort} numeric />
+              <SortHeader<ModelSortKey> label="Success" sortKey="success" active={modelSort} onSort={setModelSort} numeric />
+              <SortHeader<ModelSortKey> label="Tokens" sortKey="tokens" active={modelSort} onSort={setModelSort} numeric />
+              <SortHeader<ModelSortKey> label="Tok/s" sortKey="tps" active={modelSort} onSort={setModelSort} numeric />
+              <SortHeader<ModelSortKey> label="Est. cost" sortKey="cost" active={modelSort} onSort={setModelSort} numeric />
+            </tr></thead><tbody>
+              {models.map((entry) => (
+                <tr key={entry.model}>
+                  <td title={entry.model}>{entry.model}</td>
+                  <td className={styles.num}>{formatInteger(entry.volume.requests)}</td>
+                  <td className={styles.num}>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
+                  <td className={styles.num}>{formatInteger(entry.volume.totalTokens)}</td>
+                  <td className={styles.num}>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond, 0) : '—'}</td>
+                  <td className={styles.num}>{entry.volume.isPriced ? formatCost(entry.volume.cost) : formatPartialCost(entry.volume.cost)}</td>
+                </tr>
+              ))}
+            </tbody></table></div>
+          </Panel>
+        ) : null}
+        {report && report.errors.length > 0 ? (
+          <Panel title="Failures" subtitle="The relay's own error codes, ranked">
+            <div className={styles.errorBars}>
+              {report.errors.map((error) => {
+                const share = report.overview.volume.requests > 0 ? 100 * error.requests / report.overview.volume.requests : 0
+                return (
+                  <div key={error.errorCode} className={styles.errorBar}>
+                    <span className={styles.errorCode} title={error.errorCode}>{error.errorCode}</span>
+                    <span className={styles.errorTrack} aria-hidden="true"><span className={styles.errorFill} style={{ width: `${Math.max(share, share > 0 ? 2 : 0)}%` }} /></span>
+                    <span className={styles.errorCount}>{formatInteger(error.requests)}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </Panel>
+        ) : null}
+        {report && report.unpricedModels.length > 0 ? (
+          <Panel title={<><Coins size={14} aria-hidden="true" /> No price set</>} subtitle="The estimate does not cover these models">
+            <p className={styles.unpriced}>{report.unpricedModels.join(' · ')}</p>
+          </Panel>
+        ) : null}
+        {state.phase !== 'idle' && state.phase !== 'error' ? (
+          <Panel title="Recent requests" subtitle={state.recent.length > 0 ? `${state.recentAvailable > state.recent.length ? `Newest ${state.recent.length} of ${state.recentAvailable} rows` : `${state.recent.length} rows`} in ${state.period === 'all' ? 'history' : `the last ${state.period}`}` : 'No persisted requests in this period'}>
+            <div className={chrome.tableWrap}><table className={`${chrome.dataTable} ${styles.wideRecent}`} aria-label="Recent persisted requests"><thead><tr>
+              <th scope="col">State</th><th scope="col">Model</th><th scope="col">Provider</th><th scope="col" className={styles.num}>HTTP</th><th scope="col" className={styles.num}>Latency</th><th scope="col" className={styles.num}>Processed</th><th scope="col" className={styles.num}>Cached</th><th scope="col" className={styles.num}>Time</th>
+            </tr></thead><tbody>
+              {loading && state.recent.length === 0
+                ? [0, 1, 2].map((row) => <tr key={row} className={styles.skeletonRow} aria-hidden="true"><td colSpan={8}><span className={styles.skeleton} /></td></tr>)
+                : state.recent.map((request) => (
+                  <tr key={request.id} data-failed={request.state === 'failed' || undefined}>
+                    <td><span className={styles.state}><StatusDot state={request.state} />{stateLabels[request.state]}</span></td>
+                    <td title={request.model}>{request.model || '—'}</td>
+                    <td>{request.providerId || '—'}</td>
+                    <td className={styles.num}>{request.status || '—'}</td>
+                    <td className={styles.num}>{formatDuration(request.latencyMs)}</td>
+                    <td className={styles.num}>{formatInteger(request.totalTokens)}</td>
+                    <td className={styles.num}>{formatInteger(request.cachedTokens)}</td>
+                    <td className={styles.num}>{formatClock(request.updatedAt)}</td>
+                  </tr>
+                ))}
+              {!loading && state.recent.length === 0 ? <tr><td colSpan={8} className={styles.empty}>No persisted requests in this period.</td></tr> : null}
+            </tbody></table></div>
+          </Panel>
+        ) : null}
+        {failedRequests.length > 0 ? (
+          <Panel title="Request errors" subtitle="Full diagnostics from the persisted rows">
+            <div className={styles.errorList}>
+              {failedRequests.map((request) => {
+                const full = request.errorDetail || request.errorCode || ''
+                return (
+                  <article key={request.id} className={styles.errorItem}>
+                    <strong title={full} tabIndex={0} aria-label={full}>{previewError(full)}</strong>
+                    <small>{request.model || 'Unknown model'} — {formatClock(request.updatedAt)}</small>
+                  </article>
+                )
+              })}
+            </div>
+          </Panel>
+        ) : null}
+      </div>
     </section>
   )
-}
-
-function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
-  return <div className={styles.metric}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
 }
 
 function useSort<Key extends string>(initial: Key): [{ key: Key; descending: boolean }, (key: Key) => void] {
@@ -242,21 +241,24 @@ function useSort<Key extends string>(initial: Key): [{ key: Key; descending: boo
   return [sort, choose]
 }
 
-function SortHeader<Key extends string>({ label, sortKey, active, onSort }: {
+function SortHeader<Key extends string>({ label, sortKey, active, onSort, numeric = false }: {
   label: string
   sortKey: Key
   active: { key: Key; descending: boolean }
   onSort: (key: Key) => void
+  numeric?: boolean
 }) {
   const isActive = active.key === sortKey
   return (
     <th
       scope="col"
       aria-sort={isActive ? (active.descending ? 'descending' : 'ascending') : 'none'}
+      className={numeric ? styles.num : undefined}
     >
       <button type="button" className={styles.sortButton} data-active={isActive || undefined} onClick={() => onSort(sortKey)}>
+        {numeric ? <span aria-hidden="true" className={styles.sortArrow} data-visible={isActive || undefined}>{isActive && !active.descending ? '↑' : '↓'}</span> : null}
         {label}
-        <span aria-hidden="true" className={styles.sortArrow} data-visible={isActive || undefined}>{isActive && !active.descending ? '↑' : '↓'}</span>
+        {numeric ? null : <span aria-hidden="true" className={styles.sortArrow} data-visible={isActive || undefined}>{isActive && !active.descending ? '↑' : '↓'}</span>}
       </button>
     </th>
   )
@@ -334,7 +336,6 @@ function successRate(volume: { requests: number; completed: number }): number {
 function formatPartialCost(cost: number): string {
   return cost > 0 ? `≥ ${formatCost(cost)}` : '—'
 }
-
 
 function previewError(value: string): string {
   return value.length > errorPreviewLimit ? `${value.slice(0, errorPreviewLimit)}…` : value

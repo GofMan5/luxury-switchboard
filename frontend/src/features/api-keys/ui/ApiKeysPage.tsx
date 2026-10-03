@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 
 import { Activity, ArrowDown, ArrowUp, ClipboardPaste, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
 import { useProviders } from '../../providers/ui/useProviders'
 import { Button } from '../../../shared/ui/Button'
+import { Pill } from '../../../shared/ui/chrome'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
 import { useApiKeys } from './useApiKeys'
@@ -89,12 +90,13 @@ export default function ApiKeysPage() {
         <table className={styles.table}>
           <thead>
             <tr>
-              <th>Priority</th><th>Label</th><th>Limit</th><th>Actual</th><th>Proxy</th><th>Cooldown</th><th>429</th><th>Actions</th>
+              <th>Priority</th><th>Label</th><th>Limit</th><th>Actual</th><th>Proxy</th><th>State</th><th>429</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {ordered.map((key, index) => {
               const movablePosition = movablePositions.get(key.id) ?? -1
+              const keyState = stateOfKey(key)
               return (
                 <tr key={key.id} data-dead={key.authStreak >= 3 || undefined}>
                   <td className={styles.priority}>{index + 1}</td>
@@ -112,11 +114,11 @@ export default function ApiKeysPage() {
                       {key.lastOutcome ? <span className={styles.outcome} data-outcome={key.lastOutcome}>{key.lastOutcome}</span> : null}
                     </span>
                   </td>
-                  <td>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
-                  <td>{key.startsInWindow} / {perSecond ? 's' : 'min'}</td>
+                  <td className={styles.num}>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
+                  <td className={styles.num}>{key.startsInWindow} / {perSecond ? 's' : 'min'}</td>
                   <td>{key.pinned ? 'Direct' : key.proxyConfigured ? 'Configured' : 'Direct'}</td>
-                  <td>{formatCooldown(key.cooldownMs, key.blockedModels)}</td>
-                  <td>{key.retries429}</td>
+                  <td><Pill tone={keyState.tone}>{keyState.label}</Pill></td>
+                  <td className={styles.num}>{key.retries429}</td>
                   <td>
                     <div className={styles.rowActions}>
                       <IconAction label={`Move ${key.label} up`} disabled={key.pinned || movablePosition === 0 || state.pendingId === key.id} onClick={() => void model.move(key.id, -1)}><ArrowUp /></IconAction>
@@ -361,8 +363,9 @@ function ConfirmRemove({ keyValue, pending, error, onCancel, onConfirm }: { keyV
   return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Remove API key"><header><div><h2>Remove “{keyValue.label}”?</h2><p>Queued requests will use the next eligible key.</p></div></header>{error ? <p className={styles.confirmError} role="alert">{error}</p> : null}<footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Removing…' : 'Remove key'}</Button></footer></section></div>
 }
 
-function formatCooldown(milliseconds: number, blockedModels: number): string {
-  if (milliseconds > 0) return milliseconds < 60_000 ? `${Math.ceil(milliseconds / 1_000)} s` : `${Math.ceil(milliseconds / 60_000)} min`
-  if (blockedModels > 0) return `${blockedModels} model${blockedModels === 1 ? '' : 's'}`
-  return 'Ready'
+function stateOfKey(key: ApiKey): { label: string; tone: 'neutral' | 'success' | 'warning' | 'danger' } {
+  if (key.authStreak >= 3) return { label: 'Dead', tone: 'danger' }
+  if (key.cooldownMs > 0) return { label: key.cooldownMs < 60_000 ? `Cooldown ${Math.ceil(key.cooldownMs / 1_000)} s` : `Cooldown ${Math.ceil(key.cooldownMs / 60_000)} min`, tone: 'warning' }
+  if (key.blockedModels > 0) return { label: `${key.blockedModels} model${key.blockedModels === 1 ? '' : 's'} blocked`, tone: 'warning' }
+  return { label: 'Ready', tone: 'success' }
 }

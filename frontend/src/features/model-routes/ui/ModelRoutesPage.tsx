@@ -5,6 +5,7 @@ import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import { OWNER_EDITION } from '../../../app/edition'
+import { Segmented } from '../../../shared/ui/chrome'
 import { useModels } from '../../models/ui/useModels'
 import { useProviders } from '../../providers/ui/useProviders'
 import { publishedModels, selectionChanges, type ModelRoute, type RouteTarget } from '../domain/route'
@@ -144,10 +145,12 @@ export default function ModelRoutesPage() {
 
       {OWNER_EDITION ? (
         <div className={styles.toolbar}>
-          <div className={styles.targets}>
-            <button type="button" data-active={state.target === 'relay'} onClick={() => void model.load('relay')}>Local Relay</button>
-            <button type="button" data-active={state.target === 'tunnel'} onClick={() => void model.load('tunnel')}>Public Tunnel</button>
-          </div>
+          <Segmented
+            label="Route target"
+            value={state.target}
+            options={[{ id: 'relay' as const, label: 'Local Relay' }, { id: 'tunnel' as const, label: 'Public Tunnel' }]}
+            onChange={(target) => void model.load(target)}
+          />
           <span>{state.target === 'relay' ? 'Unassigned models use the active provider.' : 'Only enabled aliases in this list appear in /v1/models.'}</span>
         </div>
       ) : null}
@@ -167,9 +170,12 @@ export default function ModelRoutesPage() {
         </header>
         <div className={styles.catalogToolbar}>
           <label className={styles.search}><Search size={15} /><input type="search" value={search} placeholder="Filter models" onChange={(event) => setSearch(event.currentTarget.value)} /></label>
-          <div className={styles.filters} role="group" aria-label="Catalog filter">
-            {FILTERS.map((entry) => <button key={entry.id} type="button" data-active={filter === entry.id} onClick={() => setFilter(entry.id)}>{entry.label}</button>)}
-          </div>
+          <Segmented
+            label="Catalog filter"
+            value={filter}
+            options={FILTERS.map((entry) => ({ id: entry.id, label: entry.label }))}
+            onChange={setFilter}
+          />
           <Button disabled={visibleModels.length === 0 || models.testing} onClick={() => visibleSelected === visibleModels.length ? clearShown() : selectShown()}>
             <CheckCheck size={15} />{visibleSelected === visibleModels.length && visibleModels.length > 0 ? 'Clear shown' : 'Select shown'}
           </Button>
@@ -300,7 +306,7 @@ function RouteEditor({ target, route, providers, pending, operationError, onClos
     setError('')
     void onSave({ target, publicModel: publicModel.trim(), upstreamModel: upstreamModel.trim(), providerId, contextLimitKiB: Math.round(context * 1024), priority: target === 'relay' ? chainPriority : undefined, aliases: aliasList, enabled })
   }
-  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Also match</span><input value={aliases} maxLength={1024} placeholder="claude-opus-5[1m], alias-2" onChange={event => setAliases(event.currentTarget.value)} /><small>Extra requested names that route to this same upstream model, comma or space separated.{target === 'tunnel' ? ' Accepted by the tunnel, but /v1/models lists only the public alias above, which is also the name every answer carries.' : ''}</small></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>{target === 'relay' ? <label><span>Failover order</span><span className={styles.suffixed}><input type="number" min="0" max="1000" step="1" required value={priority} onChange={event => setPriority(event.currentTarget.value)} /><small>lower first</small></span><small>Add the same requested model on another provider with a higher number and a request that gets a final refusal here moves there on its own.</small></label> : null}<label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
+  return <div className="ui-scrim"><form ref={dialogRef} className={`ui-modal ${styles.routeModal}`} role="dialog" aria-modal="true" aria-label={route ? 'Edit model route' : 'Add model route'} onSubmit={submit}><header><div><h2>{route ? 'Edit route' : 'Add route'}</h2><p>{target === 'tunnel' ? 'Public alias never exposes the upstream model or provider.' : 'Requested model is routed to the selected provider.'}</p></div><button type="button" aria-label="Close" onClick={onClose}><X /></button></header><div className={styles.form}><label><span>{target === 'tunnel' ? 'Public alias' : 'Requested model'}</span><input className={styles.monoInput} value={publicModel} maxLength={128} required disabled={Boolean(route)} data-autofocus onChange={event => setPublicModel(event.currentTarget.value)} /></label><label><span>Upstream model</span><input className={styles.monoInput} value={upstreamModel} maxLength={128} required onChange={event => setUpstreamModel(event.currentTarget.value)} /></label><label><span>Also match</span><input className={styles.monoInput} value={aliases} maxLength={1024} placeholder="claude-opus-5[1m], alias-2" onChange={event => setAliases(event.currentTarget.value)} /><small>Extra requested names that route to this same upstream model, comma or space separated.{target === 'tunnel' ? ' Accepted by the tunnel, but /v1/models lists only the public alias above, which is also the name every answer carries.' : ''}</small></label><label><span>Provider</span><select value={providerId} required onChange={event => setProviderId(event.currentTarget.value)}>{providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>{target === 'relay' ? <label><span>Failover order</span><span className={styles.suffixed}><input type="number" min="0" max="1000" step="1" required value={priority} onChange={event => setPriority(event.currentTarget.value)} /><small>lower first</small></span><small>Add the same requested model on another provider with a higher number and a request that gets a final refusal here moves there on its own.</small></label> : null}<label><span>Context limit</span><span className={styles.suffixed}><input type="number" min="0" max="2048" step="0.001" required value={contextMiB} onChange={event => setContextMiB(event.currentTarget.value)} /><small>MiB</small></span></label><label className={styles.check}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.currentTarget.checked)} />Route enabled</label>{error || operationError ? <p className={styles.formError} role="alert">{error || operationError}</p> : null}</div><footer><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? 'Saving…' : 'Save route'}</Button></footer></form></div>
 }
 
 /** Builds a failover chain in one pass: one public model, several providers in
@@ -397,7 +403,7 @@ export function ChainWizard({ providers, initialPublicModel, pending, operationE
         <div className={styles.form}>
           <label>
             <span>Public model</span>
-            <input value={publicModel} maxLength={128} required data-autofocus placeholder="glm" onChange={(event) => setPublicModel(event.currentTarget.value)} />
+            <input className={styles.monoInput} value={publicModel} maxLength={128} required data-autofocus placeholder="glm" onChange={(event) => setPublicModel(event.currentTarget.value)} />
             <small>The name your clients ask for. Every provider below serves it under its own upstream name.</small>
           </label>
           <div className={styles.chainRows} role="list" aria-label="Chain providers in order">

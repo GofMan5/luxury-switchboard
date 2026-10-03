@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Ban, NotebookPen, RefreshCw, ShieldCheck, UsersRound, X } from 'lucide-react'
 import { formatBytes, formatClock, formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
+import { Metric, MetricStrip } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import { MAX_CLIENT_NOTE, type TunnelClient, type TunnelClientEvent, type TunnelClientProfile } from '../domain/client'
@@ -30,15 +31,16 @@ export default function ClientsPage() {
 
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
 
-      <div className={styles.metrics}>
-        <Metric label="Connected clients" value={state.clients.length} />
-        <Metric label="Active now" value={metrics.active} tone="active" />
-        <Metric label="Queued" value={metrics.queued} tone={metrics.queued > 0 ? 'queued' : undefined} />
-        <Metric label="Banned" value={metrics.banned} tone={metrics.banned > 0 ? 'banned' : undefined} />
-        <Metric label="Current RPM" value={metrics.rpm} />
-      </div>
+      <div className="page-body">
+        <MetricStrip>
+          <Metric label="Connected clients" value={state.clients.length.toLocaleString()} />
+          <Metric label="Active now" value={metrics.active.toLocaleString()} tone={metrics.active > 0 ? 'success' : undefined} />
+          <Metric label="Queued" value={metrics.queued.toLocaleString()} tone={metrics.queued > 0 ? 'warning' : undefined} />
+          <Metric label="Banned" value={metrics.banned.toLocaleString()} tone={metrics.banned > 0 ? 'danger' : undefined} />
+          <Metric label="Current RPM" value={metrics.rpm.toLocaleString()} />
+        </MetricStrip>
 
-      <section className={styles.clients}>
+        <section className={styles.clients}>
         <header>
           <div><UsersRound size={17} aria-hidden="true" /><h2>Clients</h2></div>
           <span>Bans apply to new requests. Notes stay on this machine.</span>
@@ -60,7 +62,8 @@ export default function ClientsPage() {
             </tbody>
           </table>
         </div>
-      </section>
+        </section>
+      </div>
 
       {state.selectedIp ? (
         <ClientDialog
@@ -74,10 +77,6 @@ export default function ClientsPage() {
       ) : null}
     </section>
   )
-}
-
-function Metric({ label, value, tone }: { label: string; value: number; tone?: 'active' | 'queued' | 'banned' }) {
-  return <div className={styles.metric} data-tone={tone}><span>{label}</span><strong>{value.toLocaleString()}</strong></div>
 }
 
 function clientState(client: Pick<TunnelClient, 'active' | 'queued' | 'banned'>) {

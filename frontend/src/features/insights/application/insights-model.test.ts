@@ -101,4 +101,53 @@ describe('InsightsModel', () => {
     expect(model.snapshot().period).toBe('48h')
     expect(model.snapshot().report?.period).toBe('48h')
   })
+
+  it('refreshes quietly: the phase never leaves ready while the numbers swap', async () => {
+    await model.load('24h')
+    let release: ((report: InsightsReport) => void) | undefined
+    port.report.mockImplementationOnce((period: InsightsPeriod) => new Promise<InsightsReport>((resolve) => { release = () => resolve({ ...emptyReport(period), generatedAt: '2026-09-29T13:00:00Z' }) }))
+    const refreshing = model.refresh()
+    // In flight: the phase stays ready, the old report stays on screen.
+    expect(model.snapshot().phase).toBe('ready')
+    expect(model.snapshot().report?.generatedAt).toBe('2026-09-29T12:00:00Z')
+    release?.({ ...emptyReport('24h'), generatedAt: '2026-09-29T13:00:00Z' })
+    await refreshing
+    expect(model.snapshot().report?.generatedAt).toBe('2026-09-29T13:00:00Z')
+    expect(model.snapshot().phase).toBe('ready')
+  })
+
+  it('runs one refresh at a time: a second tick while in flight is a no-op', async () => {
+    await model.load('24h')
+    let release: ((report: InsightsReport) => void) | undefined
+    port.report.mockImplementationOnce((period: InsightsPeriod) => new Promise<InsightsReport>((resolve) => { release = () => resolve(emptyReport(period)) }))
+    const first = model.refresh()
+    const second = model.refresh()
+    // The second call must settle without touching the port at all: the count
+    // stays at the initial load plus the one refresh actually in flight.
+    await second
+    expect(port.report).toHaveBeenCalledTimes(2)
+    release?.(emptyReport('24h'))
+    await first
+    expect(port.report).toHaveBeenCalledTimes(2)
+  })
+
+  it('escalates out of the error phase with a real load on the next tick', async () => {
+    port.report.mockRejectedValueOnce(new Error('down'))
+    await model.load('24h')
+    expect(model.snapshot().phase).toBe('error')
+    await model.refresh()
+    expect(model.snapshot().phase).toBe('ready')
+    expect(model.snapshot().report?.period).toBe('24h')
+  })
+
+  it('discards a refresh that resolves after a load took over', async () => {
+    await model.load('24h')
+    let releaseRefresh: ((report: InsightsReport) => void) | undefined
+    port.report.mockImplementationOnce((period: InsightsPeriod) => new Promise<InsightsReport>((resolve) => { releaseRefresh = () => resolve(emptyReport(period)) }))
+    const refreshing = model.refresh()
+    await model.load('48h')
+    releaseRefresh?.(emptyReport('24h'))
+    await refreshing
+    expect(model.snapshot().period).toBe('48h')
+  })
 })

@@ -20,6 +20,7 @@ export class InsightsModel {
   #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], recentAvailable: 0, prices: [], pricesPhase: 'idle', error: '' }
   #listeners = new Set<() => void>()
   #generation = 0
+  #refreshing = false
   constructor(port: InsightsPort) { this.#port = port }
   snapshot = (): InsightsState => this.#state
   subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
@@ -36,6 +37,33 @@ export class InsightsModel {
       if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent: recent.rows, recentAvailable: recent.available, prices, pricesPhase: 'ready', error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Insights are unavailable' })
+    }
+  }
+
+  /**
+   * The scheduled re-read behind the auto-refresh: the report on screen stays
+   * put while the next one loads — the phase never flips to loading, so no
+   * skeleton, no disabled period buttons, no flicker. A failed cycle keeps the
+   * current numbers and is retried by the next tick. An errored page escalates
+   * to a real load instead of no-oping forever.
+   */
+  async refresh(): Promise<void> {
+    if (this.#state.phase === 'error') {
+      await this.load(this.#state.period)
+      return
+    }
+    if (this.#state.phase !== 'ready' || this.#refreshing) return
+    const generation = this.#generation
+    const period = this.#state.period
+    this.#refreshing = true
+    try {
+      const [report, recent] = await Promise.all([this.#port.report(period), this.#port.recent(period)])
+      // A load() that started while this read was in flight owns the screen.
+      if (generation === this.#generation) this.#set({ ...this.#state, report, recent: recent.rows, recentAvailable: recent.available, error: '' })
+    } catch {
+      // Quiet by contract: the visible report stays the latest known truth.
+    } finally {
+      this.#refreshing = false
     }
   }
 

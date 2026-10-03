@@ -1,7 +1,9 @@
-import { useState, type FormEvent } from 'react'
-import { KeyRound, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Database, KeyRound, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
+import { EmptyState, Pill } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import { useMediaQuery } from '../../../shared/ui/useMediaQuery'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { Provider, ProviderInput, RateUnit } from '../domain/provider'
 import { useProviders } from './useProviders'
@@ -13,8 +15,15 @@ export default function ProvidersPage() {
   const [selectedID, setSelectedID] = useState('')
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; provider?: Provider } | null>(null)
   const [removeProvider, setRemoveProvider] = useState<Provider | null>(null)
+  // Below the two-pane comfort width the inspector becomes a sheet over the
+  // list, so it opens only on an explicit pick; on wide layouts the active
+  // provider is the default read.
+  const narrow = useMediaQuery('(max-width: 1120px)')
+  const [opened, setOpened] = useState(false)
   const selected = state.catalog.providers.find((provider) => provider.id === selectedID) ?? state.catalog.providers.find((provider) => provider.id === state.catalog.activeId)
   const effectiveID = selected?.id ?? ''
+  const inspectorVisible = Boolean(selected) && (!narrow || opened)
+  const openProvider = (id: string) => { setSelectedID(id); setOpened(true) }
 
   return (
     <section className={styles.page}>
@@ -30,21 +39,27 @@ export default function ProvidersPage() {
       <div className={styles.layout}>
         <section className={styles.listPane} aria-label="Configured providers">
           <div className={styles.listHeader}><span>Name</span><span>State</span><span>Rate</span><span>Route</span></div>
-          {state.catalog.providers.map((provider) => {
-            const active = provider.id === state.catalog.activeId
-            return (
-              <button key={provider.id} type="button" className={styles.providerRow} data-selected={provider.id === effectiveID} onClick={() => setSelectedID(provider.id)}>
-                <span className={styles.providerName}><strong>{provider.name}</strong><small>{provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
-                <span className={styles.health}><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Enabled' : 'Disabled'}</span>
-                <span className={styles.rpm}>{rateShort(provider)}</span>
-                <span className={active ? styles.active : styles.standby}>{active ? 'Active' : 'Standby'}</span>
-              </button>
-            )
-          })}
-          {state.catalog.providers.length === 0 ? <div className={styles.empty}>No providers configured.</div> : null}
+          <div className={styles.listScroll}>
+            {state.catalog.providers.map((provider) => {
+              const active = provider.id === state.catalog.activeId
+              const health = state.health.get(provider.id)
+              return (
+                <button key={provider.id} type="button" className={styles.providerRow} data-selected={provider.id === effectiveID} onClick={() => openProvider(provider.id)}>
+                  <span className={styles.providerName}><strong>{provider.name}</strong><small>{provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
+                  <span className={styles.health} title={health && !health.up ? health.reason : undefined}>
+                    <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : provider.enabled ? 'healthy' : 'stopped'} />
+                    {provider.enabled ? (health && !health.up ? 'Unreachable' : 'Enabled') : 'Disabled'}
+                  </span>
+                  <span className={styles.rpm}>{rateShort(provider)}</span>
+                  {active ? <Pill tone="info">Active</Pill> : <Pill>Standby</Pill>}
+                </button>
+              )
+            })}
+            {state.catalog.providers.length === 0 ? <EmptyState icon={Database} title="No providers configured" hint="Add a provider to route requests through the relay." /> : null}
+          </div>
         </section>
 
-        {selected ? (
+        {inspectorVisible && selected ? (
           <ProviderInspector
             provider={selected}
             active={selected.id === state.catalog.activeId}
@@ -52,8 +67,13 @@ export default function ProvidersPage() {
             onActivate={() => void model.activate(selected.id)}
             onEdit={() => { model.clearError(); setEditor({ mode: 'edit', provider: selected }) }}
             onDelete={() => { model.clearError(); setRemoveProvider(selected) }}
+            onClose={() => { setOpened(false); setSelectedID('') }}
           />
-        ) : <div className={styles.noSelection}>Select a provider to inspect its policy.</div>}
+        ) : narrow ? null : (
+          <div className={styles.noSelection}>
+            <EmptyState icon={Database} title="No provider selected" hint="Select a provider to inspect its policy." />
+          </div>
+        )}
       </div>
 
       {editor ? (
@@ -90,23 +110,45 @@ export default function ProvidersPage() {
   )
 }
 
-function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDelete }: {
+function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDelete, onClose }: {
   provider: Provider; active: boolean; pending: boolean
-  onActivate: () => void; onEdit: () => void; onDelete: () => void
+  onActivate: () => void; onEdit: () => void; onDelete: () => void; onClose: () => void
 }) {
+  // Not a modal: no focus trap, no autofocus — Escape and the X simply close it.
+  const panelRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+      }
+    }
+    panel.addEventListener('keydown', keydown)
+    return () => panel.removeEventListener('keydown', keydown)
+  }, [onClose])
   return (
-    <aside className={styles.inspector} aria-label={`${provider.name} provider details`}>
+    <aside ref={panelRef} className={styles.inspector} aria-label={`${provider.name} provider details`}>
       <header className={styles.inspectorHeader}>
-        <div><h2>{provider.name}</h2><span><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Configured' : 'Disabled'}</span></div>
-        <div className={styles.inspectorActions}>
-          <Button variant="secondary" onClick={onEdit}><Pencil size={14} />Edit</Button>
-          {!provider.builtin ? <Button variant="danger" disabled={active || provider.keyCount > 0} onClick={onDelete}><Trash2 size={14} />Delete</Button> : null}
+        <div>
+          <h2>{provider.name}</h2>
+          <span><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Configured' : 'Disabled'}</span>
+        </div>
+        <div className={styles.inspectorHeaderActions}>
           <Button variant={active ? 'secondary' : 'primary'} disabled={active || pending || !provider.enabled} onClick={onActivate}>{pending ? 'Switching…' : active ? 'Active route' : 'Activate'}</Button>
+          <button type="button" className={styles.closeInspector} aria-label="Close provider details" onClick={onClose}><X size={16} aria-hidden="true" /></button>
         </div>
       </header>
-      <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
-      <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Request limit</dt><dd>{rateLabel(provider)}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
-      <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>{provider.authMode === 'passthrough' ? 'Keys added in API Keys are used only for model discovery and tests.' : 'Secret material is never returned to the UI.'}</span></div></div></section>
+      <div className={styles.inspectorActions}>
+        <Button variant="secondary" onClick={onEdit}><Pencil size={14} />Edit</Button>
+        {!provider.builtin ? <Button variant="danger" disabled={active || provider.keyCount > 0} onClick={onDelete}><Trash2 size={14} />Delete</Button> : null}
+      </div>
+      <div className={styles.inspectorScroll}>
+        <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
+        <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Request limit</dt><dd>{rateLabel(provider)}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
+        <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>{provider.authMode === 'passthrough' ? 'Keys added in API Keys are used only for model discovery and tests.' : 'Secret material is never returned to the UI.'}</span></div></div></section>
+      </div>
     </aside>
   )
 }
@@ -172,11 +214,11 @@ function ProviderEditor({ mode, provider, pending, operationError, active, onClo
         <header><div><h2>{mode === 'add' ? 'Add provider' : `Edit ${provider?.name}`}</h2><p>Remote endpoints require HTTPS; loopback HTTP is allowed.</p></div><button type="button" aria-label="Close" disabled={pending} onClick={onClose}><X size={18} /></button></header>
         <div className={styles.formBody}>
           <label><span>Display name</span><input value={name} maxLength={80} data-autofocus onChange={(event) => setName(event.currentTarget.value)} /></label>
-          <label><span>Base URL</span><input type="url" value={baseUrl} maxLength={2048} required placeholder="https://provider.example/v1" onChange={(event) => setBaseURL(event.currentTarget.value)} /></label>
+          <label><span>Base URL</span><input type="url" className={styles.monoInput} value={baseUrl} maxLength={2048} required placeholder="https://provider.example/v1" onChange={(event) => setBaseURL(event.currentTarget.value)} /></label>
           <label><span>API dialect</span><select value={dialect} onChange={(event) => setDialect(event.currentTarget.value as Provider['dialect'])}><option value="auto">Auto-detect from request</option><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic compatible</option></select></label>
-          <label><span>Models discovery path</span><input value={modelsPath} maxLength={160} required placeholder="/v1/models" onChange={(event) => setModelsPath(event.currentTarget.value)} /></label>
+          <label><span>Models discovery path</span><input className={styles.monoInput} value={modelsPath} maxLength={160} required placeholder="/v1/models" onChange={(event) => setModelsPath(event.currentTarget.value)} /></label>
           <label><span>Request format</span><select value={format} onChange={(event) => setFormat(event.currentTarget.value as Provider['format'])}><option value="auto">Auto-detect (Responses first)</option><option value="responses">Responses API only</option><option value="chat">Chat completions only (translated)</option></select><small>Chat completions providers receive Responses API calls automatically.</small></label>
-          {format === 'chat' ? <label><span>Chat completions path</span><input value={chatPath} maxLength={160} required placeholder="/v1/chat/completions" onChange={(event) => setChatPath(event.currentTarget.value)} /><small>Where the provider actually serves chat completions.</small></label> : null}
+          {format === 'chat' ? <label><span>Chat completions path</span><input className={styles.monoInput} value={chatPath} maxLength={160} required placeholder="/v1/chat/completions" onChange={(event) => setChatPath(event.currentTarget.value)} /><small>Where the provider actually serves chat completions.</small></label> : null}
           <label className={styles.check}><input type="checkbox" checked={imageCompat} onChange={(event) => setImageCompat(event.currentTarget.checked)} />Bridge image generation through the Responses image tool</label>
           <label><span>Authentication</span><select value={authMode} onChange={(event) => setAuthMode(event.currentTarget.value as Provider['authMode'])}><option value="auto">Auto by API dialect</option><option value="bearer">Bearer token</option><option value="x-api-key">x-api-key</option><option value="custom">Custom header</option><option value="passthrough">Pass through client auth</option></select></label>
           {authMode === 'custom' ? <label><span>Custom auth header</span><input value={authHeader} maxLength={64} required placeholder="Authorization or api-key" onChange={(event) => setAuthHeader(event.currentTarget.value)} /><small>The encrypted key value is sent exactly as stored, including an optional Token or Basic prefix.</small></label> : null}

@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { RefreshCw, ScanEye, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-react'
+import { RefreshCw, ScanEye, ShieldAlert, ShieldCheck, ShieldOff, Trash2, X } from 'lucide-react'
 import { formatClock } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
+import { Metric, MetricStrip } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import {
@@ -55,86 +56,85 @@ export default function GuardrailsPage() {
 
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
 
-      <div className={styles.metrics}>
-        {/* The recorded total, not the length of the list below: the list is bounded
-            by what one page shows and what fits one protocol frame, and reading the
-            metric off it would report a cap as if it were the whole journal. */}
-        <Metric label="Findings" value={status?.findingCount ?? state.findings.length} />
-        <Metric label="High severity" value={counts.high} tone={counts.high > 0 ? 'high' : undefined} />
-        <Metric label="Refused answers" value={counts.blocked} tone={counts.blocked > 0 ? 'blocked' : undefined} />
-        <Metric label="Providers involved" value={counts.providers.size} />
-        <Metric label="Rules loaded" value={status?.ruleCount ?? 0} />
+      <div className="page-body">
+        <MetricStrip>
+          {/* The recorded total, not the length of the list below: the list is bounded
+              by what one page shows and what fits one protocol frame, and reading the
+              metric off it would report a cap as if it were the whole journal. */}
+          <Metric label="Findings" value={(status?.findingCount ?? state.findings.length).toLocaleString()} />
+          <Metric label="High severity" value={counts.high.toLocaleString()} tone={counts.high > 0 ? 'warning' : undefined} />
+          <Metric label="Refused answers" value={counts.blocked.toLocaleString()} tone={counts.blocked > 0 ? 'danger' : undefined} />
+          <Metric label="Providers involved" value={counts.providers.size.toLocaleString()} />
+          <Metric label="Rules loaded" value={(status?.ruleCount ?? 0).toLocaleString()} />
+        </MetricStrip>
+
+        <section className={styles.mode}>
+          <header>
+            <div><ScanEye size={17} aria-hidden="true" /><h2>Inspection mode</h2></div>
+            <span>Takes effect on the next request. No restart needed.</span>
+          </header>
+          <div className={styles.modeChoices} role="radiogroup" aria-label="Inspection mode">
+            {GUARDRAIL_MODES.map((choice) => (
+              <button
+                key={choice}
+                type="button"
+                role="radio"
+                aria-checked={mode === choice}
+                data-active={mode === choice || undefined}
+                disabled={state.pending}
+                onClick={() => void model.setMode(choice)}
+              >
+                <span className={styles.modeIcon} aria-hidden="true">{choice === 'off' ? <ShieldOff size={16} /> : choice === 'block' ? <ShieldAlert size={16} /> : <ScanEye size={16} />}</span>
+                <strong>{modeLabel(choice)}</strong>
+                <small>{modeDescription(choice)}</small>
+              </button>
+            ))}
+          </div>
+          <p className={styles.modeNote}>
+            {status
+              ? `${status.ruleCount.toLocaleString()} detection rules and ${status.indicatorCount.toLocaleString()} known indicators, rule set version ${status.ruleSetVersion}. The rules themselves stay inside the application.`
+              : 'Loading the detection rule set…'}
+          </p>
+        </section>
+
+        <section className={styles.findings}>
+          <header>
+            <div><ShieldAlert size={17} aria-hidden="true" /><h2>Findings</h2></div>
+            {/* A shorter list than the metric is not a bug, but it must not read as the
+                whole journal either: the oldest are held back so one answer's evidence
+                cannot outgrow what the app can hand to this window. */}
+            <span>
+              {withheld > 0
+                ? `Newest ${state.findings.length.toLocaleString()} of ${(status?.findingCount ?? 0).toLocaleString()}. Kept in memory only, and never sent anywhere.`
+                : 'Newest first. Kept in memory only, and never sent anywhere.'}
+            </span>
+          </header>
+          <div className={styles.tableWrap}>
+            <table>
+              <thead>
+                <tr><th>Verdict</th><th>Severity</th><th>Provider</th><th>Model</th><th>Detected</th><th>Evidence</th><th>Time</th></tr>
+              </thead>
+              <tbody>
+                {state.findings.map((record) => (
+                  <FindingRow key={record.id} record={record} onOpen={() => setOpenId(record.id)} />
+                ))}
+                {state.phase !== 'loading' && state.findings.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className={styles.empty}>
+                      <ShieldCheck size={20} aria-hidden="true" />
+                      {mode === 'off' ? 'Inspection is off. Nothing is being checked.' : 'No provider has sent anything suspicious.'}
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
-
-      <section className={styles.mode}>
-        <header>
-          <div><ScanEye size={17} aria-hidden="true" /><h2>Inspection mode</h2></div>
-          <span>Takes effect on the next request. No restart needed.</span>
-        </header>
-        <div className={styles.modeChoices} role="radiogroup" aria-label="Inspection mode">
-          {GUARDRAIL_MODES.map((choice) => (
-            <button
-              key={choice}
-              type="button"
-              role="radio"
-              aria-checked={mode === choice}
-              data-active={mode === choice || undefined}
-              disabled={state.pending}
-              onClick={() => void model.setMode(choice)}
-            >
-              <strong>{modeLabel(choice)}</strong>
-              <small>{modeDescription(choice)}</small>
-            </button>
-          ))}
-        </div>
-        <p className={styles.modeNote}>
-          {status
-            ? `${status.ruleCount.toLocaleString()} detection rules and ${status.indicatorCount.toLocaleString()} known indicators, rule set version ${status.ruleSetVersion}. The rules themselves stay inside the application.`
-            : 'Loading the detection rule set…'}
-        </p>
-      </section>
-
-      <section className={styles.findings}>
-        <header>
-          <div><ShieldAlert size={17} aria-hidden="true" /><h2>Findings</h2></div>
-          {/* A shorter list than the metric is not a bug, but it must not read as the
-              whole journal either: the oldest are held back so one answer's evidence
-              cannot outgrow what the app can hand to this window. */}
-          <span>
-            {withheld > 0
-              ? `Newest ${state.findings.length.toLocaleString()} of ${(status?.findingCount ?? 0).toLocaleString()}. Kept in memory only, and never sent anywhere.`
-              : 'Newest first. Kept in memory only, and never sent anywhere.'}
-          </span>
-        </header>
-        <div className={styles.tableWrap}>
-          <table>
-            <thead>
-              <tr><th>Verdict</th><th>Severity</th><th>Provider</th><th>Model</th><th>Detected</th><th>Evidence</th><th>Time</th></tr>
-            </thead>
-            <tbody>
-              {state.findings.map((record) => (
-                <FindingRow key={record.id} record={record} onOpen={() => setOpenId(record.id)} />
-              ))}
-              {state.phase !== 'loading' && state.findings.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className={styles.empty}>
-                    <ShieldCheck size={20} aria-hidden="true" />
-                    {mode === 'off' ? 'Inspection is off. Nothing is being checked.' : 'No provider has sent anything suspicious.'}
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </section>
 
       {selected ? <FindingDialog record={selected} onClose={() => setOpenId('')} /> : null}
     </section>
   )
-}
-
-function Metric({ label, value, tone }: { label: string; value: number; tone?: 'high' | 'blocked' }) {
-  return <div className={styles.metric} data-tone={tone}><span>{label}</span><strong>{value.toLocaleString()}</strong></div>
 }
 
 function verdictView(record: Pick<GuardrailRecord, 'verdict'>) {

@@ -51,9 +51,11 @@ function sampleReport(): InsightsReport {
   }
 }
 
+const mockRefresh = vi.fn()
+
 function show(state: InsightsState) {
   mockUseInsights.mockReturnValue({
-    model: { load: mockLoad, savePrice: mockSavePrice, removePrice: mockRemovePrice },
+    model: { load: mockLoad, savePrice: mockSavePrice, removePrice: mockRemovePrice, refresh: mockRefresh },
     state,
   } as never)
   render(<InsightsPage />)

@@ -33,7 +33,6 @@ id_rsa*
 *.dpapi
 runtime/
 logs/
-deploy/tunnels.json
 artifacts/
 tui-*.png
 tui-*.svg

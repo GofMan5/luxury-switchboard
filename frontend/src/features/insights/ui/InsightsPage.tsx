@@ -76,10 +76,12 @@ export default function InsightsPage() {
           />
           <PriceEditor
             prices={state.prices}
+            currency={state.pricesCurrency}
             phase={state.pricesPhase}
             knownModels={(report?.models ?? []).map((entry) => entry.model)}
             onSave={(draft) => model.savePrice(draft)}
             onRemove={(entry) => model.removePrice(entry)}
+            onSetCurrency={(currency) => model.setCurrency(currency)}
           />
           <button type="button" className={styles.refresh} disabled={loading} onClick={() => void model.load(state.period)}>
             <RefreshCw size={15} aria-hidden="true" />{loading ? 'Refreshing…' : 'Refresh'}
@@ -104,7 +106,7 @@ export default function InsightsPage() {
                 <Metric label="Success rate" value={overview ? `${Math.round(overview.successRate * 100)}%` : '—'} detail={`${formatInteger(overview?.volume.retries)} retries${overview?.topErrorCode ? ` · ${overview.topErrorCode}` : ''}`} tone={overview && overview.successRate < 0.9 ? 'warning' : undefined} />
                 <Metric
                   label="Estimated cost"
-                  value={overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost) : formatPartialCost(overview.volume.cost)) : '—'}
+                  value={overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost, state.pricesCurrency) : formatPartialCost(overview.volume.cost, state.pricesCurrency)) : '—'}
                   detail={overview?.volume.isPriced ? 'priced estimate' : `${pricedShare}% of requests priced`}
                 />
                 <Metric label="p95 latency" value={formatDuration(overview?.p95Ms ?? 0)} detail={`p50 ${formatDuration(overview?.p50Ms ?? 0)}`} />
@@ -114,7 +116,7 @@ export default function InsightsPage() {
         </div>
         {report && report.daily.length > 1 ? (
           <Panel title="Daily usage" subtitle={report.generatedAt ? `Updated ${formatClock(report.generatedAt)} · auto-refresh every minute` : 'Requests and estimated cost per day'}>
-            <DailyChart daily={report.daily} />
+            <DailyChart daily={report.daily} currency={state.pricesCurrency} />
           </Panel>
         ) : null}
         {report && report.providers.length > 0 ? (
@@ -136,7 +138,7 @@ export default function InsightsPage() {
                   <td className={styles.num}>{formatDuration(provider.p50Ms)} / {formatDuration(provider.p95Ms)}</td>
                   <td className={styles.num}>{formatInteger(provider.volume.retries)}</td>
                   <td className={styles.num}>{formatInteger(provider.volume.totalTokens)}</td>
-                  <td className={styles.num}>{provider.volume.isPriced ? formatCost(provider.volume.cost) : formatPartialCost(provider.volume.cost)}</td>
+                  <td className={styles.num}>{provider.volume.isPriced ? formatCost(provider.volume.cost, state.pricesCurrency) : formatPartialCost(provider.volume.cost, state.pricesCurrency)}</td>
                 </tr>
               ))}
             </tbody></table></div>
@@ -159,7 +161,7 @@ export default function InsightsPage() {
                   <td className={styles.num}>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
                   <td className={styles.num}>{formatInteger(entry.volume.totalTokens)}</td>
                   <td className={styles.num}>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond, 0) : '—'}</td>
-                  <td className={styles.num}>{entry.volume.isPriced ? formatCost(entry.volume.cost) : formatPartialCost(entry.volume.cost)}</td>
+                  <td className={styles.num}>{entry.volume.isPriced ? formatCost(entry.volume.cost, state.pricesCurrency) : formatPartialCost(entry.volume.cost, state.pricesCurrency)}</td>
                 </tr>
               ))}
             </tbody></table></div>
@@ -333,8 +335,8 @@ function successRate(volume: { requests: number; completed: number }): number {
   return volume.completed / volume.requests
 }
 
-function formatPartialCost(cost: number): string {
-  return cost > 0 ? `≥ ${formatCost(cost)}` : '—'
+function formatPartialCost(cost: number, currency: string): string {
+  return cost > 0 ? `≥ ${formatCost(cost, currency)}` : '—'
 }
 
 function previewError(value: string): string {

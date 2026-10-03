@@ -11,7 +11,7 @@ const chartHeight = 180
 const chartWidth = 1000
 const costAxisMax = 4 // $ ticks: 0, 25, 50, 75, 100% of the max
 
-export function DailyChart({ daily }: { daily: readonly InsightsDailyPoint[] }) {
+export function DailyChart({ daily, currency = 'USD' }: { daily: readonly InsightsDailyPoint[]; currency?: string }) {
   const points = daily.slice(-90)
   const [hovered, setHovered] = useState(-1)
   const maxRequests = Math.max(1, ...points.map((point) => point.volume.requests))
@@ -89,7 +89,7 @@ export function DailyChart({ daily }: { daily: readonly InsightsDailyPoint[] }) 
           over a bar it reports. Screen readers get the numbers table instead. */}
       <div className="daily-readout" data-empty={!hoveredPoint || undefined}>
         {hoveredPoint
-          ? `${hoveredPoint.date} · ${formatInteger(hoveredPoint.volume.requests)} requests · ${formatInteger(hoveredPoint.volume.failed)} failed · ${hoveredPoint.volume.cost > 0 ? formatCost(hoveredPoint.volume.cost) : 'no cost data'}`
+          ? `${hoveredPoint.date} · ${formatInteger(hoveredPoint.volume.requests)} requests · ${formatInteger(hoveredPoint.volume.failed)} failed · ${hoveredPoint.volume.cost > 0 ? formatCost(hoveredPoint.volume.cost, currency) : 'no cost data'}`
           : 'Hover a day for exact numbers'}
       </div>
       <figcaption className="daily-caption">

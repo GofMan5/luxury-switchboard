@@ -12,7 +12,6 @@ import type { ClientsModel } from '../features/clients/application/clients-model
 import type { ModelsModel } from '../features/models/application/models-model'
 import type { TestsModel } from '../features/tests/application/tests-model'
 import type { UpdatesModel } from '../features/updates/application/updates-model'
-import type { SharedModel } from '../features/shared-control/application/shared-model'
 import type { NotificationsModel } from '../features/notifications/application/notifications-model'
 import type { BackupModel } from '../features/backup/application/backup-model'
 
@@ -33,7 +32,6 @@ export interface AppServices {
   /** Publishing workspaces exist only in the owner edition. */
   readonly tunnel?: TunnelModel
   readonly clients?: ClientsModel
-  readonly shared?: SharedModel
   /** Version the control plane reported during the handshake. */
   readonly appVersion: string
 }

@@ -14,11 +14,10 @@ func Register(server *platform.Server, service *application.Service) {
 	server.Handle("tunnel.configure", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		current := service.Config()
 		var command struct {
-			Port             int    `json:"port"`
-			RPMPerIP         int    `json:"rpmPerIp"`
-			ContextLimitKiB  int    `json:"contextLimitKiB"`
-			BrandResponse    string `json:"brandResponse"`
-			PublisherProfile string `json:"publisherProfile"`
+			Port            int    `json:"port"`
+			RPMPerIP        int    `json:"rpmPerIp"`
+			ContextLimitKiB int    `json:"contextLimitKiB"`
+			BrandResponse   string `json:"brandResponse"`
 		}
 		if platform.DecodePayload(payload, &command) != nil {
 			return nil, invalid()
@@ -27,7 +26,6 @@ func Register(server *platform.Server, service *application.Service) {
 		current.RPMPerIP = command.RPMPerIP
 		current.ContextLimitKiB = command.ContextLimitKiB
 		current.BrandResponse = command.BrandResponse
-		current.PublisherProfile = command.PublisherProfile
 		if err := service.Configure(ctx, current); err != nil {
 			return nil, failed()
 		}

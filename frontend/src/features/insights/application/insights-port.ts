@@ -1,4 +1,4 @@
-import type { HistoryRequest, InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
+import type { HistoryRequest, InsightsPeriod, InsightsReport, PriceCatalog } from '../domain/insights'
 
 export interface PriceDraft {
   readonly model: string
@@ -20,7 +20,8 @@ export interface RecentRequests {
 export interface InsightsPort {
   report(period: InsightsPeriod, signal?: AbortSignal): Promise<InsightsReport>
   recent(period: InsightsPeriod, signal?: AbortSignal): Promise<RecentRequests>
-  prices(signal?: AbortSignal): Promise<readonly ModelPrice[]>
-  setPrice(draft: PriceDraft, signal?: AbortSignal): Promise<readonly ModelPrice[]>
-  removePrice(model: string, signal?: AbortSignal): Promise<readonly ModelPrice[]>
+  prices(signal?: AbortSignal): Promise<PriceCatalog>
+  setPrice(draft: PriceDraft, signal?: AbortSignal): Promise<PriceCatalog>
+  removePrice(model: string, signal?: AbortSignal): Promise<PriceCatalog>
+  setCurrency(currency: string, signal?: AbortSignal): Promise<PriceCatalog>
 }

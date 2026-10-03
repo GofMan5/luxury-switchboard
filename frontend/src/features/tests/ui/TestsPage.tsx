@@ -12,6 +12,10 @@ import styles from './TestsPage.module.css'
 
 type SortKey = 'model' | 'ttft' | 'total' | 'rate'
 
+/** Text probes cannot measure an image generator — it answers 400 on the
+ * chat endpoints, which is not a failure worth a red row. */
+const IMAGE_MODEL = /image|dall-e|flux|seedream|imagen/i
+
 function tokensPerSecond(result: ModelTestResult): number {
   if (!result.outputTokens || !result.latencyMs) return 0
   // Decode rate: the generation proper starts at the first token.
@@ -83,7 +87,7 @@ export default function TestsPage() {
     const targets: TestTarget[] = []
     for (const provider of scopedProviders) {
       const catalog = state.catalogs[provider.id]
-      if (Array.isArray(catalog)) targets.push({ providerId: provider.id, providerName: provider.name, models: catalog })
+      if (Array.isArray(catalog)) targets.push({ providerId: provider.id, providerName: provider.name, models: catalog.filter((model) => !IMAGE_MODEL.test(model)) })
     }
     void tests.run(targets)
   }
@@ -101,7 +105,7 @@ export default function TestsPage() {
       <header className="page-header">
         <div>
           <h1>Tests</h1>
-          <p>Real streaming probes: first token, total time, decode rate</p>
+          <p>Real streaming probes — each is one request against the provider's rate limit; a busy pool answers «Pool busy» instead of queueing ahead of your traffic</p>
         </div>
         {state.running
           ? <Button variant="secondary" onClick={() => tests.cancel()}><Square size={14} />Stop</Button>
@@ -172,13 +176,25 @@ export default function TestsPage() {
 function TestRow({ row, running, onRun }: { row: { providerId: string; providerName: string; model: string; result: ModelTestResult | null }; running: boolean; onRun: () => void }) {
   const result = row.result
   const state = result?.state
+  const imageModel = IMAGE_MODEL.test(row.model)
+  if (imageModel) {
+    return (
+      <tr>
+        <td><Pill>Image model</Pill></td>
+        <td className={styles.modelCell} title={row.model}>{row.model}</td>
+        <td>{row.providerName}</td>
+        <td className={styles.num} colSpan={3}><span className={styles.imageNote}>text probe not applicable</span></td>
+        <td />
+      </tr>
+    )
+  }
   return (
     <tr data-testing={state === 'testing' || undefined}>
       <td>
         {state === 'testing' ? <span className={styles.state}><StatusDot state="active" />Testing</span>
           : state === 'available' ? <span className={styles.state}><StatusDot state="healthy" />OK</span>
           : state === 'timeout' ? <Pill tone="warning">Timeout</Pill>
-          : state === 'unavailable' && result ? <Pill tone="danger">{result.errorCode === 'result_missing' ? 'No answer' : result.errorCode === 'interrupted' ? 'Stopped' : result.errorCode === 'provider_failed' ? 'Unreachable' : `HTTP ${result.status || '—'}`}</Pill>
+          : state === 'unavailable' && result ? <Pill tone={result.errorCode === 'pool_busy' ? 'warning' : 'danger'}>{result.errorCode === 'result_missing' ? 'No answer' : result.errorCode === 'interrupted' ? 'Stopped' : result.errorCode === 'provider_failed' ? 'Unreachable' : result.errorCode === 'pool_busy' ? 'Pool busy' : `HTTP ${result.status || '—'}`}</Pill>
           : <Pill>Untested</Pill>}
       </td>
       <td className={styles.modelCell} title={row.model}>{row.model}</td>

@@ -10,6 +10,7 @@ export interface InsightsState {
   /** How many rows the period actually holds; the list is bounded to one frame. */
   readonly recentAvailable: number
   readonly prices: readonly ModelPrice[]
+  readonly pricesCurrency: string
   readonly pricesPhase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly error: string
 }
@@ -17,7 +18,7 @@ export interface InsightsState {
 /** Reload the report after a price edit: the cost columns are the point. */
 export class InsightsModel {
   readonly #port: InsightsPort
-  #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], recentAvailable: 0, prices: [], pricesPhase: 'idle', error: '' }
+  #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], recentAvailable: 0, prices: [], pricesCurrency: 'USD', pricesPhase: 'idle', error: '' }
   #listeners = new Set<() => void>()
   #generation = 0
   #refreshing = false
@@ -29,12 +30,12 @@ export class InsightsModel {
     const generation = ++this.#generation
     this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, recent: period === this.#state.period ? this.#state.recent : [], recentAvailable: period === this.#state.period ? this.#state.recentAvailable : 0, error: '' })
     try {
-      const [report, recent, prices] = await Promise.all([
+      const [report, recent, catalog] = await Promise.all([
         this.#port.report(period),
         this.#port.recent(period),
-        this.#state.pricesPhase === 'idle' ? this.#port.prices() : Promise.resolve(this.#state.prices),
+        this.#state.pricesPhase === 'idle' ? this.#port.prices() : Promise.resolve({ prices: this.#state.prices, currency: this.#state.pricesCurrency }),
       ])
-      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent: recent.rows, recentAvailable: recent.available, prices, pricesPhase: 'ready', error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent: recent.rows, recentAvailable: recent.available, prices: catalog.prices, pricesCurrency: catalog.currency, pricesPhase: 'ready', error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Insights are unavailable' })
     }
@@ -72,8 +73,8 @@ export class InsightsModel {
     const generation = this.#generation
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
-      const prices = await this.#port.setPrice(draft)
-      if (generation === this.#generation) this.#set({ ...this.#state, prices, pricesPhase: 'ready' })
+      const catalog = await this.#port.setPrice(draft)
+      if (generation === this.#generation) this.#set({ ...this.#state, prices: catalog.prices, pricesCurrency: catalog.currency, pricesPhase: 'ready' })
       // The estimate only changes once the backend re-reads the catalog, so
       // the report is refreshed, not patched client-side.
       await this.load(this.#state.period)
@@ -89,12 +90,26 @@ export class InsightsModel {
     const generation = this.#generation
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
-      const prices = await this.#port.removePrice(model)
-      if (generation === this.#generation) this.#set({ ...this.#state, prices, pricesPhase: 'ready' })
+      const catalog = await this.#port.removePrice(model)
+      if (generation === this.#generation) this.#set({ ...this.#state, prices: catalog.prices, pricesCurrency: catalog.currency, pricesPhase: 'ready' })
       await this.load(this.#state.period)
       return true
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, pricesPhase: 'error', error: 'The price was not removed' })
+      return false
+    }
+  }
+
+  /** The unit of account the rates are written in; relabels every cost figure. */
+  async setCurrency(currency: string): Promise<boolean> {
+    const generation = this.#generation
+    this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
+    try {
+      const catalog = await this.#port.setCurrency(currency)
+      if (generation === this.#generation) this.#set({ ...this.#state, prices: catalog.prices, pricesCurrency: catalog.currency, pricesPhase: 'ready' })
+      return true
+    } catch {
+      if (generation === this.#generation) this.#set({ ...this.#state, pricesPhase: 'error', error: 'The currency was not saved' })
       return false
     }
   }

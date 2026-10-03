@@ -24,14 +24,25 @@ export function formatInteger(value: number | undefined): string {
   return value.toLocaleString()
 }
 
-/** Money as the operator reads it: cents under a dollar, whole dollars above a thousand. */
-export function formatCost(cost: number | undefined): string {
+// Symbols for the currencies people actually bill in; an unlisted ISO code
+// renders as a suffix instead of a wrong glyph.
+const currencySymbols: Record<string, string> = {
+  USD: '$', EUR: '€', GBP: '£', JPY: '¥', CNY: '¥', KRW: '₩', RUB: '₽', INR: '₹',
+  TRY: '₺', BRL: 'R$', PLN: 'zł', UAH: '₴', KZT: '₸', ILS: '₪', THB: '฿', VND: '₫',
+  HKD: 'HK$', SGD: 'S$', TWD: 'NT$', AUD: 'A$', CAD: 'C$',
+}
+
+/** Money as the operator reads it: cents under one unit, round numbers above a
+ * thousand, in the catalog's currency of account. */
+export function formatCost(cost: number | undefined, currency = 'USD'): string {
   const value = cost ?? 0
   if (!Number.isFinite(value)) return '—'
-  if (value === 0) return '$0'
-  if (value < 0.01) return `$${value.toFixed(4)}`
-  if (value < 1_000) return `$${value.toFixed(2)}`
-  return `$${Math.round(value).toLocaleString()}`
+  const symbol = currencySymbols[currency] ?? ''
+  const suffix = symbol ? '' : ` ${currency}`
+  if (value === 0) return `${symbol}0${suffix}`
+  if (value < 0.01) return `${symbol}${value.toFixed(4)}${suffix}`
+  if (value < 1_000) return `${symbol}${value.toFixed(2)}${suffix}`
+  return `${symbol}${Math.round(value).toLocaleString()}${suffix}`
 }
 
 export function formatClock(value: string): string {

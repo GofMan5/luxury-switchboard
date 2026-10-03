@@ -18,12 +18,11 @@ type document struct {
 	Config  storedConfig `json:"config"`
 }
 type storedConfig struct {
-	Port             int    `json:"port"`
-	Token            string `json:"token"`
-	RPMPerIP         int    `json:"rpmPerIp"`
-	ContextLimitKiB  int    `json:"contextLimitKiB"`
-	BrandResponse    string `json:"brandResponse"`
-	PublisherProfile string `json:"publisherProfile,omitempty"`
+	Port            int    `json:"port"`
+	Token           string `json:"token"`
+	RPMPerIP        int    `json:"rpmPerIp"`
+	ContextLimitKiB int    `json:"contextLimitKiB"`
+	BrandResponse   string `json:"brandResponse"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -49,7 +48,7 @@ func (repository *Repository) Load(ctx context.Context) (domain.Config, bool, er
 	if value.Version != 1 && value.Version != 2 {
 		return domain.Config{}, false, errors.New("tunnel settings invalid")
 	}
-	config := domain.Config{Port: value.Config.Port, Token: value.Config.Token, RPMPerIP: value.Config.RPMPerIP, ContextLimitKiB: value.Config.ContextLimitKiB, BrandResponse: value.Config.BrandResponse, PublisherProfile: value.Config.PublisherProfile}
+	config := domain.Config{Port: value.Config.Port, Token: value.Config.Token, RPMPerIP: value.Config.RPMPerIP, ContextLimitKiB: value.Config.ContextLimitKiB, BrandResponse: value.Config.BrandResponse}
 	if config.Validate() != nil {
 		return domain.Config{}, false, errors.New("tunnel settings invalid")
 	}
@@ -59,6 +58,6 @@ func (repository *Repository) Save(ctx context.Context, config domain.Config) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	stored := storedConfig{Port: config.Port, Token: config.Token, RPMPerIP: config.RPMPerIP, ContextLimitKiB: config.ContextLimitKiB, BrandResponse: config.BrandResponse, PublisherProfile: config.PublisherProfile}
+	stored := storedConfig{Port: config.Port, Token: config.Token, RPMPerIP: config.RPMPerIP, ContextLimitKiB: config.ContextLimitKiB, BrandResponse: config.BrandResponse}
 	return encryptedfile.Save(repository.path, magic, encryptedfile.DefaultMaxPlaintext, document{Version: 2, Config: stored})
 }

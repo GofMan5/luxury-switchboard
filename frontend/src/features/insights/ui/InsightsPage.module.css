@@ -82,6 +82,13 @@
 :global(.price-field span) { color: var(--text-muted); font-size: 11px; }
 :global(.price-field input) { height: 34px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 10px; background: var(--bg-field); color: var(--text-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
 :global(.price-field input:focus-visible) { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+:global(.price-currency) { display: flex; align-items: flex-end; gap: 8px; margin-top: 12px; max-width: 240px; }
+:global(.price-currency .price-field) { flex: 1; }
+:global(.price-currency input) { text-transform: uppercase; }
+:global(.price-currency button) { height: 34px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 14px; color: var(--text-secondary); background: var(--bg-elevated); cursor: pointer; font-size: 12.5px; transition: color var(--motion-fast), background var(--motion-fast); }
+:global(.price-currency button:hover:not(:disabled)) { color: var(--text-primary); background: var(--bg-hover); }
+:global(.price-currency button:disabled) { color: var(--text-disabled); cursor: not-allowed; }
+:global(.price-currency-note) { margin: 6px 0 0; color: var(--text-muted); font-size: 11px; }
 :global(.price-grid) { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
 :global(.price-error) { margin: 0; color: color-mix(in srgb, var(--status-danger) 72%, var(--text-primary)); font-size: 12px; }
 :global(.price-actions) { display: flex; gap: 8px; align-items: center; }

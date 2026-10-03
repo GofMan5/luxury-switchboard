@@ -23,7 +23,6 @@ beforeAll(async () => {
     import('./features/model-routes/ui/ModelRoutesPage'),
     import('./features/tunnel/ui/TunnelPage'),
     import('./features/clients/ui/ClientsPage'),
-    import('./features/shared-control/ui/SharedControlPage'),
     import('./features/settings/ui/SettingsPage'),
     import('./features/guardrails/ui/GuardrailsPage'),
     import('./features/insights/ui/InsightsPage'),
@@ -48,9 +47,8 @@ function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://
         'activity.list': { requests: [] },
         'activity.summary': { requests: 0, active: 0, queued: 0, successRate: 0, p95Ms: 0, rpm: 0 },
         'settings.get': settingsSnapshot,
-        'tunnel.get': { state: 'stopped', port: 8797, address: '', rpmPerIp: 0, contextLimitKiB: 0, brandResponse: 'Luxury Private', publisherProfile: '', tokenConfigured: true },
+        'tunnel.get': { state: 'stopped', port: 8797, address: '', rpmPerIp: 0, contextLimitKiB: 0, brandResponse: '', tokenConfigured: true },
         'clients.list': { clients: [] },
-        'shared.list': { available: false, revision: 0, tunnels: [], error: 'Unavailable' },
         'keys.list': { keys: [] },
         'routes.list': { routes: [] },
         'models.discover': { models: [] },
@@ -105,7 +103,7 @@ describe('App navigation', () => {
     await renderPages([
       ['Tunnel', 'Tunnel'],
       ['Clients', 'Tunnel Clients'],
-            ['Shared Control', 'Shared Control'],
+      ['Tests', 'Tests'],
       ['Guardrails', 'Guardrails'],
       ['Settings', 'Settings'],
     ])

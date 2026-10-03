@@ -114,6 +114,8 @@ type Overview struct {
 type Report struct {
 	Period      string          `json:"period"`
 	GeneratedAt time.Time       `json:"generatedAt"`
+	// Currency is the catalog's unit of account; cost figures read in it.
+	Currency    string `json:"currency"`
 	Overview    Overview        `json:"overview"`
 	Providers   []ProviderStats `json:"providers"`
 	Models      []ModelStats    `json:"models"`

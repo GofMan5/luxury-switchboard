@@ -1,4 +1,4 @@
-export type TunnelState = 'stopped' | 'starting' | 'online' | 'paused' | 'error'
+export type TunnelState = 'stopped' | 'installing' | 'starting' | 'online' | 'error'
 
 export interface TunnelSnapshot {
   readonly state: TunnelState
@@ -7,7 +7,6 @@ export interface TunnelSnapshot {
   readonly rpmPerIp: number
   readonly contextLimitKiB: number
   readonly brandResponse: string
-  readonly publisherProfile: string
   readonly tokenConfigured: boolean
   readonly error?: string
 }
@@ -17,5 +16,4 @@ export interface TunnelConfig {
   readonly rpmPerIp: number
   readonly contextLimitKiB: number
   readonly brandResponse: string
-  readonly publisherProfile: string
 }

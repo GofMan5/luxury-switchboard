@@ -124,7 +124,7 @@ export default function OverviewPage() {
                 <div className={styles.dailyMetric}><span>Requests</span><strong>{overview ? formatInteger(overview.volume.requests) : '—'}</strong></div>
                 <div className={styles.dailyMetric}><span>Completed</span><strong>{overview ? formatInteger(overview.volume.completed) : '—'}</strong></div>
                 <div className={styles.dailyMetric}><span>Success</span><strong>{overview ? `${Math.round(overview.successRate * 100)}%` : '—'}</strong></div>
-                <div className={styles.dailyMetric}><span>Est. cost</span><strong>{overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost) : overview.volume.cost > 0 ? `≥ ${formatCost(overview.volume.cost)}` : '—') : '—'}</strong></div>
+                <div className={styles.dailyMetric}><span>Est. cost</span><strong>{overview ? (overview.volume.isPriced ? formatCost(overview.volume.cost, insightsState.pricesCurrency) : overview.volume.cost > 0 ? `≥ ${formatCost(overview.volume.cost, insightsState.pricesCurrency)}` : '—') : '—'}</strong></div>
                 <div className={styles.dailyMetric}><span>Tokens</span><strong>{overview ? formatInteger(overview.volume.totalTokens) : '—'}</strong></div>
                 <div className={styles.dailyMetric}><span>Cached</span><strong>{overview ? formatInteger(overview.volume.cachedTokens) : '—'}</strong></div>
               </div>

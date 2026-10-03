@@ -4,7 +4,7 @@ import type { PrivacyReport } from '../domain/privacy'
 import type { TunnelPort } from './tunnel-port'
 import { TunnelModel } from './tunnel-model'
 
-const stopped: TunnelSnapshot = { state: 'stopped', port: 8797, address: '', rpmPerIp: 0, contextLimitKiB: 0, brandResponse: '', publisherProfile: '', tokenConfigured: true }
+const stopped: TunnelSnapshot = { state: 'stopped', port: 8797, address: '', rpmPerIp: 0, contextLimitKiB: 0, brandResponse: '', tokenConfigured: true }
 const online: TunnelSnapshot = { ...stopped, state: 'online', address: 'http://127.0.0.1:8797/v1' }
 const privacyReport: PrivacyReport = { checkedAt: '', requestUrl: '', status: 200, statusText: '200 OK', protocol: 'HTTP/1.1', remoteAddress: '', durationMs: 1, bodyBytes: 0, headers: [], topLevelFields: [], models: [], rawBody: '', credentialReflected: false }
 

@@ -251,6 +251,7 @@ fn allowed_method(method: &str) -> bool {
             | "routes.delete"
             | "models.discover"
             | "models.test"
+            | "analytics.prices.setCurrency"
             | "tunnel.get"
             | "tunnel.configure"
             | "tunnel.start"
@@ -263,6 +264,9 @@ fn allowed_method(method: &str) -> bool {
             | "clients.profile"
             | "shared.list"
             | "shared.control"
+            // Removed commands stay listed until every shipped sidecar is
+            // newer than every shipped shell: an old shell's call gets a clean
+            // method_not_found, not a frame error.
     )
 }
 

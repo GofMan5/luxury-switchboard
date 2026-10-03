@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -53,13 +54,48 @@ func (price Price) Validate() error {
 	return nil
 }
 
-// Catalog is every price the operator set. It starts empty and stays honest:
-// an empty catalog means "no cost estimate", never a guess.
+// Catalog is every price the operator set, plus the currency of account those
+// rates are written in. It starts empty and stays honest: an empty catalog
+// means "no cost estimate", never a guess.
 type Catalog struct {
 	Prices map[string]Price `json:"prices"`
+	// Currency is an ISO 4217 code ("USD", "CNY", "RUB"). The catalog does no
+	// conversion — rates are entered in it and estimates are read in it.
+	Currency string `json:"currency"`
 }
 
-func NewCatalog() Catalog { return Catalog{Prices: map[string]Price{}} }
+// DefaultCurrency keeps catalogs written before the field existed reading
+// exactly what they always read.
+const DefaultCurrency = "USD"
+
+func NewCatalog() Catalog { return Catalog{Prices: map[string]Price{}, Currency: DefaultCurrency} }
+
+// Normalized fills the currency an older file never wrote.
+func (catalog Catalog) Normalized() Catalog {
+	if catalog.Currency == "" {
+		catalog.Currency = DefaultCurrency
+	}
+	return catalog
+}
+
+// SetCurrency switches the unit of account. Codes are ISO 4217 letters.
+func (catalog Catalog) SetCurrency(currency string) (Catalog, error) {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if len(currency) != 3 {
+		return catalog, errors.New("currency must be a three-letter code")
+	}
+	for _, r := range currency {
+		if r < 'A' || r > 'Z' {
+			return catalog, errors.New("currency must be a three-letter code")
+		}
+	}
+	next := NewCatalog()
+	for model, price := range catalog.Prices {
+		next.Prices[model] = price
+	}
+	next.Currency = currency
+	return next, nil
+}
 
 func (catalog Catalog) Get(model string) (Price, bool) {
 	price, ok := catalog.Prices[model]
@@ -72,6 +108,7 @@ func (catalog Catalog) Set(price Price) Catalog {
 		next.Prices[model] = existing
 	}
 	next.Prices[price.Model] = price
+	next.Currency = catalog.Normalized().Currency
 	return next
 }
 
@@ -82,6 +119,7 @@ func (catalog Catalog) Remove(model string) Catalog {
 			next.Prices[existing] = value
 		}
 	}
+	next.Currency = catalog.Normalized().Currency
 	return next
 }
 

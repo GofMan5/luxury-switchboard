@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InsightsModel } from './insights-model'
 import type { InsightsPort } from './insights-port'
-import type { InsightsReport, HistoryRequest, InsightsPeriod, ModelPrice } from '../domain/insights'
+import type { InsightsReport, HistoryRequest, InsightsPeriod, PriceCatalog } from '../domain/insights'
 
 function emptyReport(period: InsightsPeriod): InsightsReport {
   return {
@@ -21,9 +21,10 @@ function request(id: string): HistoryRequest {
 class FakePort implements InsightsPort {
   report = vi.fn(async (period: InsightsPeriod): Promise<InsightsReport> => emptyReport(period))
   recent = vi.fn(async (period: InsightsPeriod): Promise<{ rows: readonly HistoryRequest[]; available: number }> => ({ rows: [request(`r-${period}`)], available: 1 }))
-  prices = vi.fn(async (): Promise<readonly ModelPrice[]> => [])
-  setPrice = vi.fn(async (): Promise<readonly ModelPrice[]> => [])
-  removePrice = vi.fn(async (): Promise<readonly ModelPrice[]> => [])
+  prices = vi.fn(async (): Promise<PriceCatalog> => ({ prices: [], currency: 'USD' }))
+  setPrice = vi.fn(async (): Promise<PriceCatalog> => ({ prices: [], currency: 'USD' }))
+  removePrice = vi.fn(async (): Promise<PriceCatalog> => ({ prices: [], currency: 'USD' }))
+  setCurrency = vi.fn(async (): Promise<PriceCatalog> => ({ prices: [], currency: 'USD' }))
 }
 
 describe('InsightsModel', () => {
@@ -77,7 +78,7 @@ describe('InsightsModel', () => {
   })
 
   it('closes the editor only on a confirmed save, and reloads the report after it', async () => {
-    port.setPrice.mockResolvedValue([{ model: 'm', input: 1, cachedInput: 0.1, output: 2, reasoning: 0, updatedAt: '2026-09-29T12:00:00Z' }])
+    port.setPrice.mockResolvedValue({ prices: [{ model: 'm', input: 1, cachedInput: 0.1, output: 2, reasoning: 0, updatedAt: '2026-09-29T12:00:00Z' }], currency: 'USD' })
     await model.load('24h')
     const saved = await model.savePrice({ model: 'm', input: 1, cachedInput: 0.1, output: 2, reasoning: 0 })
     expect(saved).toBe(true)

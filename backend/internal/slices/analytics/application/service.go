@@ -140,6 +140,7 @@ func (service *Service) Report(ctx context.Context, period Period) (domain.Repor
 	return domain.Report{
 		Period:         string(period),
 		GeneratedAt:    service.now(),
+		Currency:       catalog.Normalized().Currency,
 		Overview:       buildOverview(grouped, latencies, errorRows, catalog),
 		Providers:      buildProviders(grouped, latencies, errorRows, catalog, liveNames),
 		Models:         buildModels(grouped, latencies, errorRows, catalog),
@@ -153,7 +154,34 @@ func (service *Service) Prices(ctx context.Context) (domain.Catalog, error) {
 	if service.prices == nil {
 		return domain.Catalog{}, ErrUnavailable
 	}
-	return service.prices.Load(ctx)
+	catalog, err := service.prices.Load(ctx)
+	if err != nil {
+		return domain.Catalog{}, err
+	}
+	return catalog.Normalized(), nil
+}
+
+// SetCurrency switches the unit of account the rates are written in. The
+// catalog converts nothing: the operator's numbers keep meaning what they
+// meant, the label follows.
+func (service *Service) SetCurrency(ctx context.Context, currency string) (domain.Catalog, error) {
+	if service.prices == nil {
+		return domain.Catalog{}, ErrUnavailable
+	}
+	service.writeMu.Lock()
+	defer service.writeMu.Unlock()
+	current, err := service.prices.Load(ctx)
+	if err != nil {
+		return domain.Catalog{}, err
+	}
+	updated, err := current.SetCurrency(currency)
+	if err != nil {
+		return domain.Catalog{}, err
+	}
+	if err := service.prices.Save(ctx, updated); err != nil {
+		return domain.Catalog{}, err
+	}
+	return updated, nil
 }
 
 func (service *Service) SetPrice(ctx context.Context, price domain.Price) (domain.Catalog, error) {

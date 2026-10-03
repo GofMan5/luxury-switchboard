@@ -78,7 +78,7 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 	}
 
 	owner := systemstdio.Edition == "owner"
-	for _, method := range []string{"tunnel.get", "clients.list", "shared.list"} {
+	for _, method := range []string{"tunnel.get", "clients.list"} {
 		answer := call(t, toApp, answers, method)
 		if owner && !answer.OK {
 			t.Fatalf("the owner edition refused %s: %s", method, answer.Error.Code)

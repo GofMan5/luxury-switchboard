@@ -122,12 +122,16 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		Method: http.MethodPost, Path: path, BytesIn: int64(len(body)),
 	})
 	model := requestModel(body, "application/json")
-	lease, credential, _, err := server.acquireCredential(ctx, route, model, nil)
-	if err != nil {
+	// A probe never parks in the production queue: measurement must not
+	// displace service. A pool without a free key answers "busy" and the page
+	// says so — a test that queues ahead of real traffic is a test that makes
+	// the outage it measures.
+	lease, credential, ok := server.tryAcquireCredential(route, model)
+	if !ok {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
-			Status: http.StatusBadGateway, ErrorCode: "credential_unavailable",
+			Status: http.StatusServiceUnavailable, ErrorCode: "pool_busy",
 		})
-		return relayapp.ProbeReport{ErrorCode: "credential_unavailable"}, err
+		return relayapp.ProbeReport{ErrorCode: "pool_busy"}, nil
 	}
 	markers := sensitiveCredentialMarkers(credential)
 	targetURL := url.URL{Path: path}
@@ -352,8 +356,13 @@ func probeFrameDelta(frame []byte, dialect string) (string, int, probeTerminal) 
 			switch eventType {
 			case "content_block_delta":
 				if delta, ok := payload["delta"].(map[string]any); ok {
+					// Text and thinking both count: the first token the model
+					// spent on either is the latency the operator feels.
 					if text, _ := delta["text"].(string); text != "" {
 						return text, 0, probeTerminalMissing
+					}
+					if thinking, _ := delta["thinking"].(string); thinking != "" {
+						return thinking, 0, probeTerminalMissing
 					}
 				}
 			case "message_delta":
@@ -378,11 +387,16 @@ func probeFrameDelta(frame []byte, dialect string) (string, int, probeTerminal) 
 					if text, _ := delta["content"].(string); text != "" {
 						return text, 0, probeTerminalMissing
 					}
+					// Reasoning models think out loud before they answer; that
+					// thinking is the first token the user waits for.
+					if reasoning, _ := delta["reasoning_content"].(string); reasoning != "" {
+						return reasoning, 0, probeTerminalMissing
+					}
 				}
 			}
 		default:
 			switch eventType {
-			case "response.output_text.delta":
+			case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 				if text, _ := payload["delta"].(string); text != "" {
 					return text, 0, probeTerminalMissing
 				}

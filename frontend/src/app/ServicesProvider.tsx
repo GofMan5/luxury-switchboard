@@ -24,8 +24,6 @@ import { ModelsModel } from '../features/models/application/models-model'
 import { TestsModel } from '../features/tests/application/tests-model'
 import { StdioUpdatesPort } from '../features/updates/adapters/stdio-updates-port'
 import { UpdatesModel } from '../features/updates/application/updates-model'
-import { StdioSharedPort } from '../features/shared-control/adapters/stdio-shared-port'
-import { SharedModel } from '../features/shared-control/application/shared-model'
 import { StdioNotificationsPort } from '../features/notifications/adapters/stdio-notifications-port'
 import { NotificationsModel } from '../features/notifications/application/notifications-model'
 import { StdioBackupPort } from '../features/backup/adapters/stdio-backup-port'
@@ -71,7 +69,6 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         current.notifications.connect(),
         current.tunnel?.connect() ?? Promise.resolve(),
         current.clients?.connect() ?? Promise.resolve(),
-        current.shared?.connect() ?? Promise.resolve(),
         keys.providerId ? current.apiKeys.load(keys.providerId) : Promise.resolve(),
         routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
         models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
@@ -96,7 +93,6 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.models.dispose()
       services?.tests.dispose()
       services?.updates.dispose()
-      services?.shared?.dispose()
       if (session && !sessionStopped) {
         sessionStopped = true
         void session.stop().catch(() => undefined)
@@ -127,7 +123,6 @@ export function ServicesProvider({ children }: PropsWithChildren) {
             ? {
                 tunnel: new TunnelModel(new StdioTunnelPort(session)),
                 clients: new ClientsModel(new StdioClientsPort(session)),
-                shared: new SharedModel(new StdioSharedPort(session)),
               }
             : {}),
         }

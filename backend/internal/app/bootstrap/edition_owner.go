@@ -13,15 +13,11 @@ import (
 	publicmarkers "github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/adapters/providers"
 	publicroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/publictunnel/adapters/routes"
 	settingsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
-	sharedssh "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/adapters/ssh"
-	sharedstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/adapters/stdio"
-	sharedapp "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/application"
-	shareddomain "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/domain"
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/cloudflared"
 	tunneldpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/dpapi"
 	tunnelhttp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/http"
 	tunnelprivacy "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/privacyaudit"
 	tunnelroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/routes"
-	tunnelssh "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/ssh"
 	tunnelstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/stdio"
 	tunnelapp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/application"
 	clientsqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/adapters/sqlite"
@@ -29,16 +25,14 @@ import (
 	clientapp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/application"
 )
 
-// registerEdition wires the owner-only publishing stack: the public gateway, its
-// per-client governance and shared control.
+// registerEdition wires the owner-only publishing stack: the public gateway and
+// its per-client governance. The tunnel publishes through a Cloudflare quick
+// tunnel the app runs itself — no host of ours, no SSH keys, no dashboard: one
+// click and the public address is on screen.
 func registerEdition(protocol *platform.Server, dependencies editionDependencies) (editionRuntime, error) {
 	logger := dependencies.logger
 	markers := publicmarkers.NewMarkers(dependencies.catalog, dependencies.keys)
 	routes := publicroutes.NewSource(dependencies.routes, markers)
-	sharedControl, err := sharedapp.NewService(sharedssh.NewClient())
-	if err != nil {
-		return editionRuntime{}, err
-	}
 	history, historyErr := defaultTunnelHistory(dependencies.settings.TunnelRetentionHours)
 	if historyErr != nil {
 		// Bans live in the same store, so this is not only a telemetry gap: every
@@ -63,10 +57,7 @@ func registerEdition(protocol *platform.Server, dependencies editionDependencies
 		logger.Printf("tunnel client bans could not all be restored: %v; readable bans are in force", err)
 	}
 	gateway := tunnelhttp.NewRuntime(routes, markers, dependencies.relay, publicactivity.NewRecorder(clients), clients)
-	publisher := tunnelssh.NewRuntime(gateway, routes, func(ctx context.Context) error {
-		_, err := sharedControl.EnsureSelfRunning(ctx)
-		return err
-	})
+	publisher := cloudflared.NewRuntime(gateway)
 	service, loadErr, err := defaultTunnelService(publisher, tunnelroutes.NewSource(routes))
 	if err != nil {
 		return editionRuntime{}, err
@@ -74,15 +65,6 @@ func registerEdition(protocol *platform.Server, dependencies editionDependencies
 	if loadErr != nil {
 		logger.Printf("encrypted tunnel settings could not be loaded; tunnel remains stopped")
 	}
-	sharedControl.OnChanged(func(snapshot shareddomain.Snapshot) {
-		for _, tunnel := range snapshot.Tunnels {
-			if tunnel.Name == sharedapp.SelfName {
-				service.SetPublicationState(tunnel.State)
-				return
-			}
-		}
-	})
-	sharedstdio.Register(protocol, sharedControl)
 	tunnelstdio.Register(protocol, service)
 	clientstdio.Register(protocol, clients)
 	runtime := editionRuntime{stop: service.Stop}

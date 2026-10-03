@@ -258,8 +258,8 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 		}
 		tunnelPort, _ := strconv.Atoi(strings.TrimPrefix(reservation.Addr().String(), "127.0.0.1:"))
 		_ = reservation.Close()
-		brand := "Luxury Private лучший приватный софт для абузов - @Luxuryprivate_bot"
-		configured := call("tunnel_configure", "tunnel.configure", map[string]any{"port": tunnelPort, "rpmPerIp": 0, "contextLimitKiB": 0, "brandResponse": brand, "publisherProfile": ""})
+		brand := "served by Luxury Switchboard"
+		configured := call("tunnel_configure", "tunnel.configure", map[string]any{"port": tunnelPort, "rpmPerIp": 0, "contextLimitKiB": 0, "brandResponse": brand})
 		if configured["ok"] != true {
 			t.Fatalf("local tunnel configuration failed: %+v", configured)
 		}

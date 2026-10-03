@@ -118,8 +118,7 @@ func LoadDefault() (State, bool, error) {
 		}
 		state.Tunnel = tunneldomain.Config{
 			Port: 8797, Token: saved.Tunnel.AccessToken, RPMPerIP: saved.Tunnel.RPMPerIP,
-			ContextLimitKiB: saved.Tunnel.ContextLimitKiB, PublisherProfile: saved.Tunnel.PublisherProfile,
-			BrandResponse: "Luxury Private лучший приватный софт для абузов - @Luxuryprivate_bot",
+			ContextLimitKiB: saved.Tunnel.ContextLimitKiB,
 		}
 		state.HasTunnel = state.Tunnel.Validate() == nil
 	}

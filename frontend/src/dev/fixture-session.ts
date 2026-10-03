@@ -266,11 +266,12 @@ export class FixtureSession implements ControlPlaneSession {
       case 'settings.update': return { settings: { ...settings, ...body }, restartRequired: false }
       case 'analytics.report': return reportFor(String(body.period ?? '24h'))
       case 'history.recent': return { requests: history, available: 486 }
-      case 'analytics.prices.get': return { prices }
-      case 'analytics.prices.set': return { prices }
-      case 'analytics.prices.remove': return { prices: prices.slice(1) }
+      case 'analytics.prices.get': return { prices, currency: 'USD' }
+      case 'analytics.prices.set': return { prices, currency: 'USD' }
+      case 'analytics.prices.remove': return { prices: prices.slice(1), currency: 'USD' }
       case 'routes.list': return { routes: body.target === 'tunnel' ? tunnelRoutes : relayRoutes }
       case 'models.discover': return { models: modelIds.concat(['glm-5.3-flash', 'glm-5.2', 'qwen3.7-max', 'qwen3.7-plus', 'kimi-k2.7-code', 'deepseek-v4.1-flash', 'qwen3.5-plus', 'deepseek-v3.2']) }
+      case 'analytics.prices.setCurrency': return { prices, currency: String(body.currency ?? 'USD') }
       case 'models.test': {
         // The probe's answers arrive as events over a beat, the way the real
         // sidecar reports them — a UI that only renders on command completion
@@ -313,8 +314,8 @@ export class FixtureSession implements ControlPlaneSession {
       case 'keys.check': return { checked: 4, rejected: 1, reachable: true }
       case 'guardrails.status': return { mode: 'monitor', ruleCount: 106, indicatorCount: 1_900, ruleSetVersion: 7, findingCount: 12 }
       case 'guardrails.findings': return { findings }
-      case 'tunnel.get': case 'tunnel.configure': case 'tunnel.start': return { state: 'online', port: 8788, address: 'https://switchboard-v1.21433.examplehost.dev', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', publisherProfile: 'v1.21433.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', tokenConfigured: true }
-      case 'tunnel.stop': return { state: 'stopped', port: 8788, address: '', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', publisherProfile: '', tokenConfigured: true }
+      case 'tunnel.get': case 'tunnel.configure': case 'tunnel.start': return { state: 'online', port: 8797, address: 'https://fresh-words-mild-orbit.trycloudflare.com/v1', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', tokenConfigured: true }
+      case 'tunnel.stop': return { state: 'stopped', port: 8797, address: '', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', tokenConfigured: true }
       case 'tunnel.rotate': case 'tunnel.reveal': return { token: 'swt_fixture_access_key_0123456789abcdef' }
       case 'tunnel.privacy_test': return { checkedAt: iso(0), requestUrl: 'https://switchboard-v1.21433.examplehost.dev/v1/models', status: 200, statusText: 'OK', protocol: 'HTTP/2', remoteAddress: '104.21.5.19:443', durationMs: 214, bodyBytes: 841, headers: [
         { name: 'content-type', values: ['application/json'] },
@@ -330,11 +331,6 @@ export class FixtureSession implements ControlPlaneSession {
         { ip: '192.0.2.150', actualRpm: 12, count: 512, active: 1, queued: 0, refused: 0, lastSeen: iso(12_000), state: 'active', banned: false, note: 'Phone' },
       ] }
       case 'clients.events': return { events: activity.slice(0, 14).map((request) => ({ id: request.id, ip: String(body.ip ?? ''), time: request.updatedAt, state: request.state === 'failed' ? 'error' : 'complete', method: request.method, path: request.path, model: request.model, status: request.status ?? 200, latencyMs: request.latencyMs, bytesIn: request.bytesIn, bytesOut: request.bytesOut, errorCode: request.errorCode })) }
-      case 'shared.list': return { available: true, revision: 14, stale: false, error: '', tunnels: [
-        { position: 0, name: 'Ваш коннект', state: 'running' },
-        { position: 1, name: 'friend-laptop', state: 'paused' },
-        { position: 2, name: 'old-phone', state: 'stopped' },
-      ] }
       case 'notifications.list': return { notifications: [
         { id: 'n1', kind: 'keys', severity: 'warning', title: 'Key "old-reseller" was rejected', body: 'North Relay answered 401 three times in a row. The key is skipped until reset.', at: iso(3_600_000) },
         { id: 'n2', kind: 'relay', severity: 'info', title: 'Relay is live', body: 'Listening on http://127.0.0.1:8787.', at: iso(7_200_000) },

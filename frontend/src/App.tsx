@@ -17,9 +17,6 @@ const GuardrailsPage = lazy(() => import('./features/guardrails/ui/GuardrailsPag
 // publishing workspaces instead of shipping unreachable code.
 const TunnelPage: ComponentType | null = __OWNER_EDITION__ ? lazy(() => import('./features/tunnel/ui/TunnelPage')) : null
 const ClientsPage: ComponentType | null = __OWNER_EDITION__ ? lazy(() => import('./features/clients/ui/ClientsPage')) : null
-const SharedControlPage: ComponentType | null = __OWNER_EDITION__
-  ? lazy(() => import('./features/shared-control/ui/SharedControlPage'))
-  : null
 
 export default function App() {
   return (
@@ -57,7 +54,6 @@ function Switchboard() {
         {route === 'guardrails' ? <GuardrailsPage /> : null}
         {route === 'tunnel' && TunnelPage ? <TunnelPage /> : null}
         {route === 'clients' && ClientsPage ? <ClientsPage /> : null}
-        {route === 'shared' && SharedControlPage ? <SharedControlPage /> : null}
       </Suspense>
     </AppShell>
   )

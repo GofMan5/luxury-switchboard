@@ -6,7 +6,6 @@ import {
   Database,
   FlaskConical,
   KeyRound,
-  Network,
   RadioTower,
   Route,
   Settings,
@@ -25,7 +24,6 @@ export type AppRoute =
   | 'tunnel'
   | 'clients'
   | 'insights'
-  | 'shared'
   | 'settings'
 
 export interface NavigationItem {
@@ -78,7 +76,6 @@ export const navigation: readonly NavigationSection[] = [
           items: [
             { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
             { id: 'clients', label: 'Clients', icon: UsersRound },
-            { id: 'shared', label: 'Shared Control', icon: Network },
           ],
         },
       ] as const satisfies readonly NavigationSection[])

@@ -6,10 +6,12 @@ import { useModalFocus } from '../../../shared/ui/useModalFocus'
 
 interface PriceEditorProps {
   readonly prices: readonly ModelPrice[]
+  readonly currency: string
   readonly phase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly knownModels: readonly string[]
   readonly onSave: (draft: PriceDraft) => Promise<boolean>
   readonly onRemove: (model: string) => Promise<boolean>
+  readonly onSetCurrency: (currency: string) => Promise<boolean>
 }
 
 type EditorState = {
@@ -22,7 +24,10 @@ type EditorState = {
 
 const emptyDraft: EditorState = { model: '', input: '', cachedInput: '', output: '', reasoning: '' }
 
-export function PriceEditor({ prices, phase, knownModels, onSave, onRemove }: PriceEditorProps) {
+/** The currencies most operators bill in; the field also takes any ISO code. */
+const POPULAR_CURRENCIES = ['USD', 'EUR', 'CNY', 'RUB', 'GBP', 'JPY', 'KRW', 'INR', 'TRY', 'BRL', 'PLN', 'UAH', 'KZT', 'ILS', 'THB', 'VND', 'HKD', 'SGD', 'TWD', 'AED'] as const
+
+export function PriceEditor({ prices, currency, phase, knownModels, onSave, onRemove, onSetCurrency }: PriceEditorProps) {
   const [open, setOpen] = useState(false)
   const busy = phase === 'saving' || phase === 'loading'
   const knownList = useMemo(
@@ -40,11 +45,13 @@ export function PriceEditor({ prices, phase, knownModels, onSave, onRemove }: Pr
       {open ? (
         <PriceDialog
           prices={prices}
+          currency={currency}
           phase={phase}
           knownList={knownList}
           onClose={() => setOpen(false)}
           onSave={onSave}
           onRemove={onRemove}
+          onSetCurrency={onSetCurrency}
         />
       ) : null}
     </>
@@ -53,20 +60,26 @@ export function PriceEditor({ prices, phase, knownModels, onSave, onRemove }: Pr
 
 interface PriceDialogProps {
   readonly prices: readonly ModelPrice[]
+  readonly currency: string
   readonly phase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly knownList: readonly string[]
   readonly onClose: () => void
   readonly onSave: (draft: PriceDraft) => Promise<boolean>
   readonly onRemove: (model: string) => Promise<boolean>
+  readonly onSetCurrency: (currency: string) => Promise<boolean>
 }
 
-function PriceDialog({ prices, phase, knownList, onClose, onSave, onRemove }: PriceDialogProps) {
+function PriceDialog({ prices, currency, phase, knownList, onClose, onSave, onRemove, onSetCurrency }: PriceDialogProps) {
   const [state, setState] = useState<EditorState>(emptyDraft)
+  const [currencyDraft, setCurrencyDraft] = useState(currency)
   const busy = phase === 'saving' || phase === 'loading'
   // Escape and the Tab trap behave like every other modal in the app: the
   // shared hook, not a per-modal reinvention.
   const dialogRef = useModalFocus<HTMLDivElement>(onClose, busy)
   const existing = prices.find((price) => price.model === state.model)
+  const currencyCode = currencyDraft.trim().toUpperCase()
+  const currencyValid = /^[A-Z]{3}$/.test(currencyCode)
+  const currencyDirty = currencyValid && currencyCode !== currency
 
   // The dialog closes only on a confirmed save: a failed one keeps the
   // operator's typed rates on screen next to the error.
@@ -88,7 +101,32 @@ function PriceDialog({ prices, phase, knownList, onClose, onSave, onRemove }: Pr
       >
         <header>
           <h2 id="price-title">Price catalog</h2>
-          <p>Rates per one million tokens, in dollars. A zero field means that token kind is not priced, and models without a price are excluded from the estimate instead of guessed.</p>
+          <p>Rates per one million tokens, in {currency}. A zero field means that token kind is not priced, and models without a price are excluded from the estimate instead of guessed.</p>
+          <div className="price-currency">
+            <label className="price-field">
+              <span>Currency</span>
+              <input
+                list="price-currencies"
+                value={currencyDraft}
+                maxLength={6}
+                aria-label="Currency"
+                placeholder="USD"
+                disabled={busy}
+                onChange={(event) => setCurrencyDraft(event.target.value.toUpperCase())}
+              />
+              <datalist id="price-currencies">
+                {POPULAR_CURRENCIES.map((code) => <option key={code} value={code} />)}
+              </datalist>
+            </label>
+            <button
+              type="button"
+              disabled={busy || !currencyDirty}
+              onClick={() => void onSetCurrency(currencyCode)}
+            >
+              Apply
+            </button>
+          </div>
+          <p className="price-currency-note">The catalog converts nothing: rates stay the numbers you entered, only the unit they read in changes.</p>
         </header>
         <label className="price-field">
           <span>Model</span>

@@ -188,6 +188,63 @@ func TestTheProbeReportsAMissingTerminal(t *testing.T) {
 	}
 }
 
+// A reasoning model thinks out loud before it answers; that thinking IS the
+// first token the operator waits for, and a probe blind to it reports no TTFT
+// at all.
+func TestTheProbeCountsReasoningAsTheFirstToken(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := writer.(http.Flusher)
+		time.Sleep(60 * time.Millisecond)
+		fmt.Fprint(writer, `data: {"choices":[{"delta":{"reasoning_content":"thinking…"}}]}`+"\n\n")
+		flusher.Flush()
+		time.Sleep(60 * time.Millisecond)
+		fmt.Fprint(writer, `data: {"choices":[{"delta":{"content":"OK"}}]}`+"\n\n")
+		fmt.Fprint(writer, `data: {"choices":[],"usage":{"completion_tokens":41}}`+"\n\n")
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer", Format: "chat", ChatPath: "/v1/chat/completions"}},
+		Credentials: &credentialSource{values: []string{"test-key"}},
+		Config:      Config{StreamIdleTimeout: 5 * time.Second},
+	})
+	report, err := server.Probe(context.Background(), "echo", "kimi-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.TTFTMs < 50 || report.TTFTMs >= report.TotalMs {
+		t.Fatalf("reasoning was not counted as the first token: %+v", report)
+	}
+	if report.OutputTokens != 41 {
+		t.Fatalf("usage lost: %+v", report)
+	}
+}
+
+// A probe never parks in the production queue: measurement must not displace
+// service. A busy pool answers "busy" instead of queueing the test ahead of
+// the operator's real traffic.
+func TestTheProbeNeverQueuesAheadOfRealTraffic(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		t.Error("a probe reached the provider with no free key")
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: delayedCredentialSource{delay: time.Minute, value: "test-key"}, // TryAcquire misses by design
+		Config:      Config{StreamIdleTimeout: 5 * time.Second},
+	})
+	report, err := server.Probe(context.Background(), "echo", "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ErrorCode != "pool_busy" {
+		t.Fatalf("a busy pool did not read as busy: %+v", report)
+	}
+}
+
 func TestTheProbeReportsARefusalAsARefusal(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusUnauthorized)

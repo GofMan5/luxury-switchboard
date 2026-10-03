@@ -64,12 +64,21 @@ export interface InsightsOverview {
 export interface InsightsReport {
   readonly period: InsightsPeriod
   readonly generatedAt: string
+  /** The price catalog's unit of account; cost figures read in it. An older
+   * sidecar omits it and the formatters fall back to USD. */
+  readonly currency?: string
   readonly overview: InsightsOverview
   readonly providers: readonly InsightsProvider[]
   readonly models: readonly InsightsModel[]
   readonly daily: readonly InsightsDailyPoint[]
   readonly errors: readonly InsightsErrorCount[]
   readonly unpricedModels: readonly string[]
+}
+
+/** The price catalog answer: the rates plus the currency they are written in. */
+export interface PriceCatalog {
+  readonly prices: readonly ModelPrice[]
+  readonly currency: string
 }
 
 export interface ModelPrice {

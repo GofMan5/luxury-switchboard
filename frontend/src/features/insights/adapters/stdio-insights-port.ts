@@ -1,5 +1,5 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
-import type { HistoryRequest, InsightsPeriod, InsightsReport, ModelPrice } from '../domain/insights'
+import type { HistoryRequest, InsightsPeriod, InsightsReport, PriceCatalog } from '../domain/insights'
 import type { InsightsPort, PriceDraft, RecentRequests } from '../application/insights-port'
 
 export class StdioInsightsPort implements InsightsPort {
@@ -16,18 +16,23 @@ export class StdioInsightsPort implements InsightsPort {
     return { rows, available: answer.available ?? rows.length }
   }
 
-  async prices(signal?: AbortSignal): Promise<readonly ModelPrice[]> {
-    const answer = await this.#session.call<{ prices: readonly ModelPrice[] }>('analytics.prices.get', {}, signal)
-    return answer.prices ?? []
+  async prices(signal?: AbortSignal): Promise<PriceCatalog> {
+    const answer = await this.#session.call<{ prices?: PriceCatalog['prices']; currency?: string }>('analytics.prices.get', {}, signal)
+    return { prices: answer.prices ?? [], currency: answer.currency ?? 'USD' }
   }
 
-  async setPrice(draft: PriceDraft, signal?: AbortSignal): Promise<readonly ModelPrice[]> {
-    const answer = await this.#session.call<{ prices: readonly ModelPrice[] }>('analytics.prices.set', draft, signal)
-    return answer.prices ?? []
+  async setPrice(draft: PriceDraft, signal?: AbortSignal): Promise<PriceCatalog> {
+    const answer = await this.#session.call<{ prices?: PriceCatalog['prices']; currency?: string }>('analytics.prices.set', draft, signal)
+    return { prices: answer.prices ?? [], currency: answer.currency ?? 'USD' }
   }
 
-  async removePrice(model: string, signal?: AbortSignal): Promise<readonly ModelPrice[]> {
-    const answer = await this.#session.call<{ prices: readonly ModelPrice[] }>('analytics.prices.remove', { model }, signal)
-    return answer.prices ?? []
+  async removePrice(model: string, signal?: AbortSignal): Promise<PriceCatalog> {
+    const answer = await this.#session.call<{ prices?: PriceCatalog['prices']; currency?: string }>('analytics.prices.remove', { model }, signal)
+    return { prices: answer.prices ?? [], currency: answer.currency ?? 'USD' }
+  }
+
+  async setCurrency(currency: string, signal?: AbortSignal): Promise<PriceCatalog> {
+    const answer = await this.#session.call<{ prices?: PriceCatalog['prices']; currency?: string }>('analytics.prices.setCurrency', { currency }, signal)
+    return { prices: answer.prices ?? [], currency: answer.currency ?? 'USD' }
   }
 }

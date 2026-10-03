@@ -58,6 +58,19 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		return catalogResponse(catalog), nil
 	})
+	server.Handle("analytics.prices.setCurrency", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var query struct {
+			Currency string `json:"currency"`
+		}
+		if platform.DecodePayload(payload, &query) != nil {
+			return nil, platform.MethodError{Code: "invalid_payload", Message: "Invalid currency"}
+		}
+		catalog, err := service.SetCurrency(ctx, query.Currency)
+		if err != nil {
+			return nil, priceError(err)
+		}
+		return catalogResponse(catalog), nil
+	})
 	server.Handle("analytics.prices.remove", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var query struct {
 			Model string `json:"model"`
@@ -81,7 +94,7 @@ func catalogResponse(catalog domain.Catalog) map[string]any {
 	for _, model := range catalog.Models() {
 		entries = append(entries, catalog.Prices[model])
 	}
-	return map[string]any{"prices": entries}
+	return map[string]any{"prices": entries, "currency": catalog.Normalized().Currency}
 }
 
 func reportError(err error) platform.MethodError {

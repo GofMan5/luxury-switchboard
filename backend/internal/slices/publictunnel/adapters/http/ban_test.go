@@ -33,7 +33,7 @@ func TestBannedClientIsRefusedBeforeReachingTheProvider(t *testing.T) {
 	activity := &fakeClientActivity{}
 	gateway := bannedGateway(t, dispatcher, activity, fakeBans{"203.0.113.7": true})
 	request := authorizedRequest(http.MethodPost, "/v1/responses", `{"model":"public-gpt"}`)
-	request.Header.Set("X-Tunnel-Client-IP", "203.0.113.7")
+	request.Header.Set("Cf-Connecting-Ip", "203.0.113.7")
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
@@ -53,7 +53,7 @@ func TestBannedClientIsRefusedBeforeReachingTheProvider(t *testing.T) {
 func TestBannedClientCannotEvenListTheModels(t *testing.T) {
 	gateway := bannedGateway(t, &fakeDispatcher{}, nil, fakeBans{"203.0.113.7": true})
 	request := authorizedRequest(http.MethodGet, "/v1/models", "")
-	request.Header.Set("X-Tunnel-Client-IP", "203.0.113.7")
+	request.Header.Set("Cf-Connecting-Ip", "203.0.113.7")
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || response.Body.String() != `{"error":"Request rejected"}` {
@@ -65,11 +65,28 @@ func TestUnbannedClientsKeepWorkingWhileABanIsActive(t *testing.T) {
 	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"output":"ok"}`)}}
 	gateway := bannedGateway(t, dispatcher, nil, fakeBans{"203.0.113.7": true})
 	request := authorizedRequest(http.MethodPost, "/v1/responses", `{"model":"public-gpt"}`)
-	request.Header.Set("X-Tunnel-Client-IP", "198.51.100.4")
+	request.Header.Set("Cf-Connecting-Ip", "198.51.100.4")
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || dispatcher.calls != 1 {
 		t.Fatalf("a ban blocked an unrelated client: status=%d calls=%d", response.Code, dispatcher.calls)
+	}
+}
+
+// The client address comes from the Cloudflare edge, never from the client:
+// a self-declared address header would otherwise hand the caller someone
+// else's RPM budget, ban record and history.
+func TestAClientCannotNameItsOwnAddress(t *testing.T) {
+	dispatcher := &fakeDispatcher{response: relayapp.DispatchResponse{Status: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"output":"ok"}`)}}
+	gateway := bannedGateway(t, dispatcher, nil, fakeBans{"203.0.113.7": true})
+	request := authorizedRequest(http.MethodPost, "/v1/responses", `{"model":"public-gpt"}`)
+	request.RemoteAddr = "203.0.113.7:9000"
+	request.Header.Set("X-Tunnel-Client-IP", "198.51.100.4") // forged: must be ignored
+	request.Header.Set("Cf-Connecting-Ip", "203.0.113.7")    // the edge's word: must rule
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("a forged address header beat the edge's: status=%d", response.Code)
 	}
 }
 
@@ -88,7 +105,7 @@ func TestOwnerNoteNeverReachesAPublicResponse(t *testing.T) {
 		{http.MethodGet, "/v1/models", "", "203.0.113.7"},
 	} {
 		request := authorizedRequest(probe.method, probe.path, probe.body)
-		request.Header.Set("X-Tunnel-Client-IP", probe.ip)
+		request.Header.Set("Cf-Connecting-Ip", probe.ip)
 		response := httptest.NewRecorder()
 		gateway.ServeHTTP(response, request)
 		if strings.Contains(response.Body.String(), note) {
@@ -117,7 +134,7 @@ func TestBanCheckStaysAfterAuthorization(t *testing.T) {
 	activity := &fakeClientActivity{}
 	gateway := bannedGateway(t, &fakeDispatcher{}, activity, fakeBans{"203.0.113.7": true})
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	request.Header.Set("X-Tunnel-Client-IP", "203.0.113.7")
+	request.Header.Set("Cf-Connecting-Ip", "203.0.113.7")
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {

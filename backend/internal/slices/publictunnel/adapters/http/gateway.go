@@ -275,12 +275,13 @@ func (gateway *Gateway) authorized(request *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(gateway.config.Token)) == 1
 }
 func clientIP(request *http.Request) string {
-	// This header is trusted only because the publisher edge overwrites it
-	// (deploy/Caddyfile.tunnel-hub.example sets header_up X-Tunnel-Client-IP to
-	// the real remote host) before the request reaches the forwarded port. Any
-	// off-Caddy path to that port would let a caller forge the address, and with
-	// it every per-client decision this function feeds: RPM, bans and history.
-	if values := request.Header.Values("X-Tunnel-Client-IP"); len(values) == 1 {
+	// The edge that fronts this gateway is a Cloudflare quick tunnel, and its
+	// edge sets Cf-Connecting-Ip to the real remote address — a client passing
+	// through Cloudflare cannot forge it, because the edge overwrites whatever
+	// it was sent. A client-supplied address header is never trusted: forging
+	// it would take over the RPM budget, the bans and the history of whoever
+	// it names.
+	if values := request.Header.Values("Cf-Connecting-Ip"); len(values) == 1 {
 		if ip := net.ParseIP(strings.TrimSpace(values[0])); ip != nil && !ip.IsUnspecified() {
 			return ip.String()
 		}

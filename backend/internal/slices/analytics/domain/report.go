@@ -112,15 +112,15 @@ type Overview struct {
 // price catalog. Lists are bounded and sorted: providers and models by
 // total tokens, errors by count.
 type Report struct {
-	Period      string          `json:"period"`
-	GeneratedAt time.Time       `json:"generatedAt"`
+	Period      string    `json:"period"`
+	GeneratedAt time.Time `json:"generatedAt"`
 	// Currency is the catalog's unit of account; cost figures read in it.
-	Currency    string `json:"currency"`
-	Overview    Overview        `json:"overview"`
-	Providers   []ProviderStats `json:"providers"`
-	Models      []ModelStats    `json:"models"`
-	Daily       []DailyPoint    `json:"daily"`
-	Errors      []ErrorCount    `json:"errors"`
+	Currency  string          `json:"currency"`
+	Overview  Overview        `json:"overview"`
+	Providers []ProviderStats `json:"providers"`
+	Models    []ModelStats    `json:"models"`
+	Daily     []DailyPoint    `json:"daily"`
+	Errors    []ErrorCount    `json:"errors"`
 	// UnpricedModels names the models the cost estimate does not cover, so
 	// "what am I missing" is a list, not a guess.
 	UnpricedModels []string `json:"unpricedModels"`

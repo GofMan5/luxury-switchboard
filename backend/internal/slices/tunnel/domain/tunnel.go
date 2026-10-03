@@ -9,7 +9,7 @@ import (
 type State string
 
 const (
-	StateStopped  State = "stopped"
+	StateStopped State = "stopped"
 	// StateInstalling is the one-time connector download: a first start on a
 	// fresh machine spends it there instead of failing opaquely.
 	StateInstalling State = "installing"

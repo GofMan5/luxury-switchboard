@@ -17,7 +17,7 @@ import (
 const (
 	// The project's public home. Update checks read only the latest-release
 	// endpoint; nothing about the operator's setup is ever sent.
-	releasesURL = "https://api.github.com/repos/GofMan5/swap-provider-url/releases/latest"
+	releasesURL = "https://api.github.com/repos/GofMan5/luxury-switchboard/releases/latest"
 	httpTimeout = 6 * time.Second
 )
 

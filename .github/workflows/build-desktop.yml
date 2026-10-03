@@ -78,6 +78,9 @@ jobs:
           go -C backend test ./...
           go -C backend vet ./...
           go -C backend mod verify
+          # The tauri build script validates the sidecar's externalBin path even
+          # for a test build, so the sidecar must exist before cargo runs.
+          pnpm sidecar:build
           cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Race the concurrent slices
         # The plain runs above catch logic; only -race catches the data races

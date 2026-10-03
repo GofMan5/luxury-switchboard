@@ -21,6 +21,7 @@ import (
 )
 
 func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
+	requireSecureStorage(t)
 	root := t.TempDir()
 	liveStream := os.Getenv("SWITCHBOARD_TEST_LIVE_STREAM") == "1"
 	t.Setenv("SWITCHBOARD_PORT", "0")

@@ -22,6 +22,7 @@ import (
 // Written while hunting a report that token counts (input, output, cached)
 // stopped appearing on every screen.
 func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
+	requireSecureStorage(t)
 	const chatStream = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":40,\"total_tokens\":140,\"prompt_tokens_details\":{\"cached_tokens\":30},\"completion_tokens_details\":{\"reasoning_tokens\":10}}}\n\n" +
 		"data: [DONE]\n\n"
 	// An honest OpenAI-compatible chat provider: usage rides the stream only
@@ -238,6 +239,7 @@ func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 // the same command chain, the same real HTTP client, deadlines on every
 // read.
 func TestLiveRelayStreamDeliveryTiming(t *testing.T) {
+	requireSecureStorage(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		writer.(http.Flusher).Flush()

@@ -2,8 +2,8 @@
 name = "switchboard-desktop"
 version = "1.0.41"
 description = "Luxury Switchboard desktop shell"
-authors = ["Luxury Private"]
-license = "LicenseRef-Proprietary"
+authors = ["Luxury Switchboard contributors"]
+license = "MIT"
 edition = "2024"
 rust-version = "1.85"
 

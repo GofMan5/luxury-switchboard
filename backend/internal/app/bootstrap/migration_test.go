@@ -19,6 +19,7 @@ func newLogger(into *strings.Builder) *log.Logger {
 // refused to run again, so the ones the same crash never wrote were never
 // coming.
 func TestTheLegacyImportCompletesAcrossRestarts(t *testing.T) {
+	requireSecureStorage(t)
 	root := t.TempDir()
 	providers := filepath.Join(root, "providers.dpapi")
 	keys := filepath.Join(root, "keys.dpapi")

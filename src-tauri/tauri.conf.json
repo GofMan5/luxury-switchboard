@@ -31,7 +31,9 @@
     "active": true,
     "externalBin": ["binaries/switchboard-sidecar"],
     "resources": {
-      "../backend/internal/slices/guardrails/adapters/ruleset/LICENSE-holone.txt": "LICENSE-holone.txt"
+      "../backend/internal/slices/guardrails/adapters/ruleset/LICENSE-holone.txt": "LICENSE-holone.txt",
+      "../LICENSE": "LICENSE.txt",
+      "../NOTICE": "NOTICE.txt"
     },
     "icon": [
       "icons/32x32.png",

@@ -1,0 +1,66 @@
+Luxury Switchboard
+Copyright (c) 2026 Luxury Switchboard contributors
+
+This product is distributed under the MIT License (see LICENSE).
+
+Third-party components shipped in the application
+-------------------------------------------------
+
+Tauri framework and plugins (tauri, tauri-plugin-shell, tauri-build)
+  Copyright (c) Tauri Programme within The Commons Conservancy
+  Licensed under Apache-2.0 OR MIT
+  https://github.com/tauri-apps/tauri
+
+serde and serde_json
+  Copyright (c) Erick Tryzelaar, David Tolnay and contributors
+  Licensed under MIT OR Apache-2.0
+  https://github.com/serde-rs/serde
+
+React and React DOM
+  Copyright (c) Meta Platforms, Inc. and affiliates
+  Licensed under MIT
+  https://github.com/facebook/react
+
+@tauri-apps/api
+  Copyright (c) Tauri Programme within The Commons Conservancy
+  Licensed under Apache-2.0 OR MIT
+  https://github.com/tauri-apps/tauri
+
+lucide-react (icons)
+  Copyright (c) Lucide Contributors
+  Licensed under ISC
+  https://github.com/lucide-icons/lucide
+
+go-keyring
+  Copyright (c) Zalando SE and contributors
+  Licensed under MIT
+  https://github.com/zalando/go-keyring
+
+golang.org/x/sys
+  Copyright (c) The Go Authors
+  Licensed under BSD-3-Clause
+  https://cs.opensource.google/go/x/sys
+
+modernc.org/sqlite (embeds SQLite)
+  Licensed under BSD-3-Clause; SQLite itself is in the public domain
+  https://gitlab.com/cznic/sqlite · https://sqlite.org
+
+Guardrail rule and indicator data vendored from holone
+  Licensed under MIT; the full license text ships next to the installed
+  application as LICENSE-holone.txt
+  https://github.com/vanndh/holone
+
+Components the application downloads at runtime
+-------------------------------------------------
+
+cloudflared (Cloudflare)
+  Licensed under Apache-2.0. Not distributed with this product: on first
+  tunnel start the app downloads it from the project's own pinned release,
+  verifies the SHA-256 checksum recorded in this repository
+  (backend/internal/slices/tunnel/adapters/cloudflared/binary.go),
+  and runs it locally.
+  https://github.com/cloudflare/cloudflared
+
+Build-time tooling (never shipped): Vite (MIT), Vitest (MIT), TypeScript
+(Apache-2.0), oxlint (MIT), Testing Library (MIT), jsdom (MIT),
+@tauri-apps/cli (Apache-2.0 OR MIT).

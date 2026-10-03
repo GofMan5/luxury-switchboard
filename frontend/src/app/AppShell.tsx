@@ -1,6 +1,7 @@
 import type { PropsWithChildren } from 'react'
-import { useEffect } from 'react'
-import { PanelLeftClose, Square } from 'lucide-react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import { ArrowUpCircle, PanelLeftClose, PanelLeftOpen, Square } from 'lucide-react'
+import { openExternal } from '../platform/lifecycle/open-external'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
 import { useSettings } from '../features/settings/ui/useSettings'
@@ -36,7 +37,8 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   }, [animationsEnabled])
   // The toast master switch follows the settings record: the feed stays, the
   // interruptions stop.
-  const { notifications } = useAppServices()
+  const { notifications, updates } = useAppServices()
+  const update = useSyncExternalStore(updates.subscribe, updates.snapshot).check
   const notificationsEnabled = settingsState.settings?.notificationsEnabled ?? true
   useEffect(() => {
     notifications.setEnabled(notificationsEnabled)
@@ -49,9 +51,20 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   const live = relayState.snapshot.state === 'live'
   const needsStop = live || (relayState.snapshot.state === 'error' && Boolean(relayState.snapshot.address))
   const configuredPort = settingsState.settings?.listenerPort || relayState.snapshot.port
+  // The rail state survives the session: an operator who works collapsed
+  // should not re-collapse on every launch.
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return window.localStorage.getItem('switchboard.sidebar') === 'collapsed' } catch { return false }
+  })
+  const toggleSidebar = () => {
+    setCollapsed((value) => {
+      try { window.localStorage.setItem('switchboard.sidebar', value ? 'expanded' : 'collapsed') } catch { /* storage is a courtesy */ }
+      return !value
+    })
+  }
 
   return (
-    <div className={styles.shell}>
+    <div className={styles.shell} data-sidebar={collapsed ? 'collapsed' : undefined}>
       <aside className={styles.sidebar} aria-label="Sidebar">
         <div className={styles.brand}>
           <span className={styles.brandMark} aria-hidden="true">L</span>
@@ -83,8 +96,28 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
           ))}
         </nav>
         <div className={styles.sidebarFooter}>
-          <PanelLeftClose size={17} aria-hidden="true" />
-          <span>{appVersion ? `v${appVersion}` : 'Luxury Switchboard'}</span>
+          <button
+            type="button"
+            className={styles.collapse}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-pressed={collapsed}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            onClick={toggleSidebar}
+          >
+            {collapsed ? <PanelLeftOpen size={16} aria-hidden="true" /> : <PanelLeftClose size={16} aria-hidden="true" />}
+          </button>
+          {update?.newer && update.reachable ? (
+            <button
+              type="button"
+              className={styles.updatePill}
+              title={`Version ${update.latest} is out — open the release page`}
+              onClick={() => void openExternal(update.url)}
+            >
+              <ArrowUpCircle size={12} aria-hidden="true" />
+              v{update.latest}
+            </button>
+          ) : null}
+          <span title={appVersion ? `Luxury Switchboard ${appVersion}` : 'Luxury Switchboard'}>{appVersion ? `v${appVersion}` : 'Luxury Switchboard'}</span>
         </div>
       </aside>
 

@@ -57,6 +57,18 @@ func NewService(capacity int) *Service {
 	}
 }
 
+// SetCapacity moves the ring bound without a restart: a smaller bound trims
+// the oldest rows immediately, a larger one just lets the buffer grow.
+func (service *Service) SetCapacity(capacity int) {
+	if capacity < 1 {
+		capacity = defaultCapacity
+	}
+	service.mu.Lock()
+	service.capacity = capacity
+	service.trimLocked()
+	service.mu.Unlock()
+}
+
 func (service *Service) Start(value domain.Start) string {
 	now := service.now().UTC()
 	id := fmt.Sprintf("%s_%016x", service.namespace, service.sequence.Add(1))

@@ -77,26 +77,4 @@ func TestGuardrailSettingsAreValidated(t *testing.T) {
 	}
 }
 
-// The running process re-reads the mode on its own, so changing only the mode must
-// not ask the operator to restart. Anything else still must.
-func TestOnlyTheGuardrailModeAppliesWithoutARestart(t *testing.T) {
-	current := Defaults()
-	live := current
-	live.GuardrailMode = "block"
-	if current.RequiresRestart(live) {
-		t.Fatal("changing the guardrail mode demanded a restart")
-	}
-	if current.RequiresRestart(current) {
-		t.Fatal("changing nothing demanded a restart")
-	}
-	for _, next := range []Settings{
-		func() Settings { s := current; s.ListenerPort = 9000; return s }(),
-		func() Settings { s := current; s.GuardrailFindings = 1_000; return s }(),
-		// A restart-worthy change alongside a live one must still be reported.
-		func() Settings { s := live; s.MaxQueued = 200; return s }(),
-	} {
-		if !current.RequiresRestart(next) {
-			t.Fatalf("a restart-worthy change was missed: %+v", next)
-		}
-	}
-}
+

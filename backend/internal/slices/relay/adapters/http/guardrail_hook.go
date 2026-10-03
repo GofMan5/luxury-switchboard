@@ -41,7 +41,7 @@ func (server *Server) reviewResponse(response *http.Response, path string, subje
 	if !labelledStream && !strings.Contains(contentType, "json") && !expectsJSONResponse(path) {
 		return "", false
 	}
-	limit := responseBufferLimit(server.config)
+	limit := responseBufferLimit(server.configSnapshot())
 	buffered, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	// A body larger than the ceiling is left to the buffering layers that own that
 	// error. The prefix already read is spliced back in front of the rest instead of

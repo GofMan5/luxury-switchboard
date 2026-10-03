@@ -21,7 +21,10 @@ type editionDependencies struct {
 	routes   *routeapp.Service
 	relay    *relayhttp.Server
 	settings settingsdomain.Settings
-	logger   *log.Logger
+	// applySettings lets the edition's own stores follow live settings changes;
+	// nil in a wiring that has none to follow.
+	applySettings func(listener func(settingsdomain.Settings))
+	logger        *log.Logger
 }
 
 // editionRuntime owns whatever lifecycle the edition added. Both hooks are nil when

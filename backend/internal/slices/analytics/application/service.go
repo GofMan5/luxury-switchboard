@@ -59,10 +59,18 @@ type PriceStore interface {
 	Save(ctx context.Context, catalog domain.Catalog) error
 }
 
+// ProviderNames resolves the current display name for each provider id.
+// History rows carry the name the provider had when the request ran; a rename
+// must not leave reports reading the old name forever.
+type ProviderNames interface {
+	Names(ctx context.Context) (map[string]string, error)
+}
+
 // Service answers "what happened and what did it cost".
 type Service struct {
 	facts  Facts
 	prices PriceStore
+	names  ProviderNames
 	now    func() time.Time
 	// The catalog is read-modify-write: without the lock, two concurrent
 	// price edits race on Load-then-Save and one silently loses. The shell
@@ -70,8 +78,8 @@ type Service struct {
 	writeMu sync.Mutex
 }
 
-func NewService(facts Facts, prices PriceStore) *Service {
-	return &Service{facts: facts, prices: prices, now: time.Now}
+func NewService(facts Facts, prices PriceStore, names ProviderNames) *Service {
+	return &Service{facts: facts, prices: prices, names: names, now: time.Now}
 }
 
 // maxDimensionRows bounds each breakdown list. The report travels in one
@@ -118,6 +126,14 @@ func (service *Service) Report(ctx context.Context, period Period) (domain.Repor
 	if err != nil {
 		return domain.Report{}, err
 	}
+	// Current names are a courtesy layer over the recorded ones: a resolver
+	// outage degrades to what history wrote, never to a failed report.
+	liveNames := map[string]string{}
+	if service.names != nil {
+		if resolved, nameErr := service.names.Names(ctx); nameErr == nil {
+			liveNames = resolved
+		}
+	}
 	if len(latencies) > latencySampleCap {
 		latencies = latencies[:latencySampleCap]
 	}
@@ -125,7 +141,7 @@ func (service *Service) Report(ctx context.Context, period Period) (domain.Repor
 		Period:         string(period),
 		GeneratedAt:    service.now(),
 		Overview:       buildOverview(grouped, latencies, errorRows, catalog),
-		Providers:      buildProviders(grouped, latencies, errorRows, catalog),
+		Providers:      buildProviders(grouped, latencies, errorRows, catalog, liveNames),
 		Models:         buildModels(grouped, latencies, errorRows, catalog),
 		Daily:          buildDaily(daily, catalog),
 		Errors:         buildErrors(errorRows),
@@ -314,7 +330,7 @@ func addVolumes(left, right domain.TokenVolume) domain.TokenVolume {
 	return left
 }
 
-func buildProviders(grouped []domain.GroupedRow, latencies []domain.LatencySample, errorRows []domain.ErrorRow, catalog domain.Catalog) []domain.ProviderStats {
+func buildProviders(grouped []domain.GroupedRow, latencies []domain.LatencySample, errorRows []domain.ErrorRow, catalog domain.Catalog, liveNames map[string]string) []domain.ProviderStats {
 	states := map[string]*accumulator{}
 	names := map[string]string{}
 	for _, row := range grouped {
@@ -326,6 +342,13 @@ func buildProviders(grouped []domain.GroupedRow, latencies []domain.LatencySampl
 		state.add(row.TokenVolume)
 		if row.ProviderName != "" {
 			names[row.ProviderID] = row.ProviderName
+		}
+	}
+	// The current name wins over every recorded one; the recorded name is the
+	// fallback for providers that no longer exist.
+	for id, live := range liveNames {
+		if live != "" {
+			names[id] = live
 		}
 	}
 	for _, sample := range latencies {

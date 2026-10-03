@@ -29,7 +29,7 @@ type Store struct {
 	closed        atomic.Bool
 	closeMu       sync.Mutex
 	dbClosed      bool
-	retentionDays int
+	retentionDays atomic.Int32
 	dropMu        sync.Mutex
 	onDrop        func(cause string)
 }
@@ -84,7 +84,8 @@ func Open(path string, retentionDays int) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	store := &Store{db: db, retentionDays: retentionDays}
+	store := &Store{db: db}
+	store.retentionDays.Store(int32(retentionDays))
 	if err := store.prune(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -255,8 +256,19 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	return tx.Commit()
 }
 
+// SetRetentionDays moves the retention window live; the next prune — and one
+// right now — applies it, so shrinking the window reclaims history immediately.
+func (store *Store) SetRetentionDays(days int) {
+	if days < 1 {
+		return
+	}
+	store.retentionDays.Store(int32(days))
+	// Best effort: the prune loop runs on its own cadence either way.
+	_ = store.prune(context.Background())
+}
+
 func (store *Store) prune(ctx context.Context) error {
-	cutoff := time.Now().UTC().AddDate(0, 0, -store.retentionDays).UnixMilli()
+	cutoff := time.Now().UTC().AddDate(0, 0, -int(store.retentionDays.Load())).UnixMilli()
 	_, err := store.db.ExecContext(ctx, `DELETE FROM requests WHERE started_at_ms < ?`, cutoff)
 	if err != nil {
 		return errors.New("history retention failed")

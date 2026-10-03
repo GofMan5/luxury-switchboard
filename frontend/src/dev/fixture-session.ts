@@ -17,10 +17,12 @@ import type { InsightsReport, HistoryRequest, ModelPrice } from '../features/ins
 const now = Date.now()
 const iso = (offsetMs: number): string => new Date(now - offsetMs).toISOString()
 
+// Fixture providers are fictional on purpose: the file is committed, and a
+// development fixture is not where real vendor names belong.
 const providers: Provider[] = [
-  { id: 'alpha-relay', name: 'Alpha Relay', baseUrl: 'https://api.alpha-relay.ai/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'openai', modelsPath: '/v1/models', format: 'chat', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 40, rateUnit: 'minute', cacheTtl: '0s', enabled: true, keyConfigured: true, keyCount: 3, builtin: false },
-  { id: 'vendor-hub', name: 'Agent Router', baseUrl: 'https://router.agentc.dev/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'auto', modelsPath: '/v1/models', format: 'responses', chatPath: '/v1/chat/completions', imageCompat: true, rpm: 120, rateUnit: 'minute', cacheTtl: '1h0m0s', enabled: true, keyConfigured: true, keyCount: 2, builtin: false },
-  { id: 'sigma-llm', name: 'Sigma LLM', baseUrl: 'https://sigma-llm.ai/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'openai', modelsPath: '/v1/models', format: 'chat', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 8, rateUnit: 'second', cacheTtl: '0s', enabled: true, keyConfigured: true, keyCount: 1, builtin: false },
+  { id: 'north-relay', name: 'North Relay', baseUrl: 'https://api.north-relay.example/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'openai', modelsPath: '/v1/models', format: 'chat', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 40, rateUnit: 'minute', cacheTtl: '0s', enabled: true, keyConfigured: true, keyCount: 3, builtin: false },
+  { id: 'vendor-hub', name: 'Vendor Hub', baseUrl: 'https://router.vendor-hub.example/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'auto', modelsPath: '/v1/models', format: 'responses', chatPath: '/v1/chat/completions', imageCompat: true, rpm: 120, rateUnit: 'minute', cacheTtl: '1h0m0s', enabled: true, keyConfigured: true, keyCount: 2, builtin: false },
+  { id: 'sigma-llm', name: 'Sigma LLM', baseUrl: 'https://sigma-llm.example/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'openai', modelsPath: '/v1/models', format: 'chat', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 8, rateUnit: 'second', cacheTtl: '0s', enabled: true, keyConfigured: true, keyCount: 1, builtin: false },
   { id: 'spare', name: 'Spare quota', baseUrl: 'https://backup.llm.example/v1', authMode: 'passthrough', authHeader: 'Authorization', dialect: 'auto', modelsPath: '/v1/models', format: 'auto', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 0, rateUnit: 'minute', cacheTtl: '0s', enabled: false, keyConfigured: false, keyCount: 0, builtin: false },
 ]
 
@@ -66,15 +68,15 @@ function fixtureRequest(index: number, offsetMs: number): ActivityRequest {
 const activity: ActivityRequest[] = Array.from({ length: 42 }, (_, index) => fixtureRequest(index, index * 96_000 + 4_000))
 
 const relayRoutes: ModelRoute[] = [
-  { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-5.3', providerId: 'alpha-relay', contextLimitKiB: 0, aliases: [], enabled: true, priority: 0 },
+  { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-5.3', providerId: 'north-relay', contextLimitKiB: 0, aliases: [], enabled: true, priority: 0 },
   { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-5.3', providerId: 'vendor-hub', contextLimitKiB: 0, aliases: [], enabled: true, priority: 1 },
   { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-5.3-flash', providerId: 'sigma-llm', contextLimitKiB: 0, aliases: ['glm-fast'], enabled: true, priority: 2 },
   { target: 'relay', publicModel: 'kimi', upstreamModel: 'kimi-k3', providerId: 'vendor-hub', contextLimitKiB: 0, aliases: [], enabled: true, priority: 0 },
-  { target: 'relay', publicModel: 'qwen3.8-max', upstreamModel: 'qwen3.8-max-0902', providerId: 'alpha-relay', contextLimitKiB: 0, aliases: [], enabled: false, priority: 0 },
+  { target: 'relay', publicModel: 'qwen3.8-max', upstreamModel: 'qwen3.8-max-0902', providerId: 'north-relay', contextLimitKiB: 0, aliases: [], enabled: false, priority: 0 },
 ]
 const tunnelRoutes: ModelRoute[] = [
   { target: 'tunnel', publicModel: 'fast', upstreamModel: 'glm-5.3-flash', providerId: 'sigma-llm', contextLimitKiB: 65_536, aliases: [], enabled: true },
-  { target: 'tunnel', publicModel: 'smart', upstreamModel: 'glm-5.3', providerId: 'alpha-relay', contextLimitKiB: 131_072, aliases: [], enabled: true },
+  { target: 'tunnel', publicModel: 'smart', upstreamModel: 'glm-5.3', providerId: 'north-relay', contextLimitKiB: 131_072, aliases: [], enabled: true },
 ]
 
 const settings: Settings = {
@@ -152,15 +154,15 @@ function reportFor(period: string): InsightsReport {
     generatedAt: iso(0),
     overview: { volume: volume(3, 486), successRate: 0.962, p50Ms: 2_140, p95Ms: 18_600, tokensPerSecond: 44, pricedRequests: 470, topErrorCode: 'rate_limited' },
     providers: [
-      { id: 'alpha-relay', name: 'Alpha Relay', volume: volume(1, 240), p50Ms: 1_900, p95Ms: 12_400, avgMs: 2_700, tokensPerSecond: 48, errors: [{ errorCode: 'rate_limited', requests: 9 }] },
-      { id: 'vendor-hub', name: 'Agent Router', volume: volume(2, 170), p50Ms: 2_600, p95Ms: 22_100, avgMs: 3_900, tokensPerSecond: 39, errors: [{ errorCode: 'stream_idle_timeout', requests: 4 }] },
+      { id: 'north-relay', name: 'North Relay', volume: volume(1, 240), p50Ms: 1_900, p95Ms: 12_400, avgMs: 2_700, tokensPerSecond: 48, errors: [{ errorCode: 'rate_limited', requests: 9 }] },
+      { id: 'vendor-hub', name: 'Vendor Hub', volume: volume(2, 170), p50Ms: 2_600, p95Ms: 22_100, avgMs: 3_900, tokensPerSecond: 39, errors: [{ errorCode: 'stream_idle_timeout', requests: 4 }] },
       { id: 'sigma-llm', name: 'Sigma LLM', volume: volume(4, 76), p50Ms: 1_400, p95Ms: 9_800, avgMs: 2_100, tokensPerSecond: 52, errors: [] },
     ],
     models: [
-      { model: 'glm-5.3', providerName: 'Alpha Relay', volume: volume(1, 210), p50Ms: 1_800, p95Ms: 11_900, avgMs: 2_500, tokensPerSecond: 49, errors: [] },
-      { model: 'qwen3.8-max-0902', providerName: 'Alpha Relay', volume: volume(2, 96), p50Ms: 2_200, p95Ms: 14_700, avgMs: 3_100, tokensPerSecond: 44, errors: [] },
-      { model: 'kimi-k3', providerName: 'Agent Router', volume: volume(3, 88), p50Ms: 2_900, p95Ms: 24_200, avgMs: 4_400, tokensPerSecond: 37, errors: [{ errorCode: 'stream_idle_timeout', requests: 3 }] },
-      { model: 'deepseek-v4-pro-0813', providerName: 'Agent Router', volume: volume(5, 62), p50Ms: 3_100, p95Ms: 26_400, avgMs: 4_900, tokensPerSecond: 34, errors: [] },
+      { model: 'glm-5.3', providerName: 'North Relay', volume: volume(1, 210), p50Ms: 1_800, p95Ms: 11_900, avgMs: 2_500, tokensPerSecond: 49, errors: [] },
+      { model: 'qwen3.8-max-0902', providerName: 'North Relay', volume: volume(2, 96), p50Ms: 2_200, p95Ms: 14_700, avgMs: 3_100, tokensPerSecond: 44, errors: [] },
+      { model: 'kimi-k3', providerName: 'Vendor Hub', volume: volume(3, 88), p50Ms: 2_900, p95Ms: 24_200, avgMs: 4_400, tokensPerSecond: 37, errors: [{ errorCode: 'stream_idle_timeout', requests: 3 }] },
+      { model: 'deepseek-v4-pro-0813', providerName: 'Vendor Hub', volume: volume(5, 62), p50Ms: 3_100, p95Ms: 26_400, avgMs: 4_900, tokensPerSecond: 34, errors: [] },
       { model: 'qwen-plus', providerName: 'Sigma LLM', volume: { ...volume(6, 30), isPriced: false, cost: 0 }, p50Ms: 1_200, p95Ms: 8_200, avgMs: 1_900, tokensPerSecond: 55, errors: [] },
     ],
     daily,
@@ -240,8 +242,9 @@ export class FixtureSession implements ControlPlaneSession {
     const body = (payload ?? {}) as Record<string, never>
     switch (method) {
       case 'relay.status': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
+      case 'updates.check': return { current: this.appVersion, latest: this.appVersion, url: '', newer: false, reachable: true, checkedAt: iso(0) }
       case 'relay.start': case 'relay.stop': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
-      case 'providers.list': return { activeId: 'alpha-relay', providers }
+      case 'providers.list': return { activeId: 'north-relay', providers }
       case 'providers.health': return { states: providers.map((provider) => ({ providerId: provider.id, up: provider.enabled, reason: provider.enabled ? '' : 'Disabled' })) }
       case 'activity.list': return { requests: activity, available: activity.length }
       case 'activity.summary': return { requests: 486, active: 2, queued: 1, successRate: 96.2, p95Ms: 18_600, rpm: 12.4 }
@@ -254,7 +257,37 @@ export class FixtureSession implements ControlPlaneSession {
       case 'analytics.prices.remove': return { prices: prices.slice(1) }
       case 'routes.list': return { routes: body.target === 'tunnel' ? tunnelRoutes : relayRoutes }
       case 'models.discover': return { models: modelIds.concat(['glm-5.3-flash', 'glm-5.2', 'qwen3.7-max', 'qwen3.7-plus', 'kimi-k2.7-code', 'deepseek-v4.1-flash', 'qwen3.5-plus', 'deepseek-v3.2']) }
-      case 'models.test': return { tested: Array.isArray(body.models) ? (body.models as readonly unknown[]).length : 0 }
+      case 'models.test': {
+        // The probe's answers arrive as events over a beat, the way the real
+        // sidecar reports them — a UI that only renders on command completion
+        // shows nothing in the fixture either.
+        const runId = String(body.runId ?? '')
+        const providerId = String(body.providerId ?? '')
+        const models = Array.isArray(body.models) ? (body.models as readonly string[]) : []
+        // Per-provider seed: identical rows across providers would read as
+        // copied data, and the page exists to compare them.
+        const seed = providerId.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0)
+        models.forEach((model, index) => {
+          window.setTimeout(() => {
+            const failed = model.includes('flash') && providerId === 'sigma-llm'
+            const ttft = 380 + ((index * 211 + seed * 7) % 2_600)
+            const total = ttft + 700 + ((index * 503 + seed * 31) % 4_000)
+            this.#emit('models.tested', {
+              runId, providerId, model,
+              state: failed ? 'unavailable' : 'available',
+              status: failed ? 429 : 200,
+              latencyMs: total,
+              ttftMs: failed ? 0 : ttft,
+              outputTokens: failed ? 0 : 32,
+              ...(failed ? { errorCode: 'rate_limited' } : {}),
+            })
+          }, 320 * (index + 1))
+        })
+        const pending = new Promise<{ tested: number }>((resolve) => {
+          window.setTimeout(() => resolve({ tested: models.length }), 320 * (models.length + 1))
+        })
+        return pending
+      }
       case 'keys.list': return { keys: [
         { id: 'k1', providerId: body.providerId, label: 'primary', priority: 0, rpm: 40, pinned: false, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 3, startsInWindow: 11, authStreak: 0, lastOutcome: 'success' },
         { id: 'k2', providerId: body.providerId, label: 'backup-2', priority: 1, rpm: 40, pinned: false, proxyConfigured: true, cooldownMs: 42_000, blockedModels: 0, retries429: 14, startsInWindow: 4, authStreak: 1, lastOutcome: 'rate-limited' },
@@ -287,7 +320,7 @@ export class FixtureSession implements ControlPlaneSession {
         { position: 2, name: 'old-phone', state: 'stopped' },
       ] }
       case 'notifications.list': return { notifications: [
-        { id: 'n1', kind: 'keys', severity: 'warning', title: 'Key "old-reseller" was rejected', body: 'Alpha Relay answered 401 three times in a row. The key is skipped until reset.', at: iso(3_600_000) },
+        { id: 'n1', kind: 'keys', severity: 'warning', title: 'Key "old-reseller" was rejected', body: 'North Relay answered 401 three times in a row. The key is skipped until reset.', at: iso(3_600_000) },
         { id: 'n2', kind: 'relay', severity: 'info', title: 'Relay is live', body: 'Listening on http://127.0.0.1:8787.', at: iso(7_200_000) },
         { id: 'n3', kind: 'backup', severity: 'success', title: 'Backup exported', body: 'Providers, keys and routes written to disk.', at: iso(86_400_000) },
       ] }

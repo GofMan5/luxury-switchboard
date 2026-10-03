@@ -10,6 +10,7 @@ const ApiKeysPage = lazy(() => import('./features/api-keys/ui/ApiKeysPage'))
 const SettingsPage = lazy(() => import('./features/settings/ui/SettingsPage'))
 const InsightsPage = lazy(() => import('./features/insights/ui/InsightsPage'))
 const ModelRoutesPage = lazy(() => import('./features/model-routes/ui/ModelRoutesPage'))
+const TestsPage = lazy(() => import('./features/tests/ui/TestsPage'))
 const GuardrailsPage = lazy(() => import('./features/guardrails/ui/GuardrailsPage'))
 
 // The public build never references these modules, so the bundler drops the
@@ -52,6 +53,7 @@ function Switchboard() {
         {route === 'settings' ? <SettingsPage /> : null}
         {route === 'insights' ? <InsightsPage /> : null}
         {route === 'routes' ? <ModelRoutesPage /> : null}
+        {route === 'tests' ? <TestsPage /> : null}
         {route === 'guardrails' ? <GuardrailsPage /> : null}
         {route === 'tunnel' && TunnelPage ? <TunnelPage /> : null}
         {route === 'clients' && ClientsPage ? <ClientsPage /> : null}

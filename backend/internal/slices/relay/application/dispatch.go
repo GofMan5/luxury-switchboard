@@ -35,3 +35,23 @@ type DispatchResponse struct {
 type Dispatcher interface {
 	Dispatch(context.Context, DispatchRequest) (DispatchResponse, error)
 }
+
+// ProbeReport is one measured streaming request: when the first content token
+// arrived, when the answer finished, and how many tokens the provider reported
+// (or the probe counted). ErrorCode carries the failure class like a history
+// row does.
+type ProbeReport struct {
+	Status       int     `json:"status"`
+	TTFTMs       float64 `json:"ttftMs"`
+	TotalMs      float64 `json:"totalMs"`
+	OutputTokens int     `json:"outputTokens"`
+	ErrorCode    string  `json:"errorCode"`
+	ErrorDetail  string  `json:"errorDetail"`
+}
+
+// StreamProber measures a provider+model with a real streaming request. The
+// buffered Dispatch cannot answer "when did the first token arrive" because it
+// sees the answer whole; the probe reads the stream as it arrives.
+type StreamProber interface {
+	Probe(ctx context.Context, providerID, model string) (ProbeReport, error)
+}

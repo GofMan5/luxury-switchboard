@@ -21,6 +21,9 @@ import { StdioClientsPort } from '../features/clients/adapters/stdio-clients-por
 import { ClientsModel } from '../features/clients/application/clients-model'
 import { StdioModelsPort } from '../features/models/adapters/stdio-models-port'
 import { ModelsModel } from '../features/models/application/models-model'
+import { TestsModel } from '../features/tests/application/tests-model'
+import { StdioUpdatesPort } from '../features/updates/adapters/stdio-updates-port'
+import { UpdatesModel } from '../features/updates/application/updates-model'
 import { StdioSharedPort } from '../features/shared-control/adapters/stdio-shared-port'
 import { SharedModel } from '../features/shared-control/application/shared-model'
 import { StdioNotificationsPort } from '../features/notifications/adapters/stdio-notifications-port'
@@ -57,6 +60,8 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       const models = current.models.snapshot()
       const insights = current.insights.snapshot()
       current.models.connect()
+      current.tests.connect()
+      current.updates.connect()
       reconnecting = Promise.all([
         current.relay.connect(),
         current.providers.connect(),
@@ -89,6 +94,8 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.tunnel?.dispose()
       services?.clients?.dispose()
       services?.models.dispose()
+      services?.tests.dispose()
+      services?.updates.dispose()
       services?.shared?.dispose()
       if (session && !sessionStopped) {
         sessionStopped = true
@@ -109,6 +116,8 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           insights: new InsightsModel(new StdioInsightsPort(session)),
           routes: new RoutesModel(new StdioRoutesPort(session), { tracksBothTargets: __OWNER_EDITION__ }),
           models: new ModelsModel(new StdioModelsPort(session)),
+          tests: new TestsModel(new StdioModelsPort(session)),
+          updates: new UpdatesModel(new StdioUpdatesPort(session)),
           guardrails: new GuardrailsModel(new StdioGuardrailsPort(session)),
           notifications: new NotificationsModel(new StdioNotificationsPort(session)),
           backup: new BackupModel(new StdioBackupPort(session)),

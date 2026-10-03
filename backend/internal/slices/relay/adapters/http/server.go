@@ -64,6 +64,10 @@ type Server struct {
 	guardrail    relayapp.Guardrail
 	failovers    relayapp.FailoverSource
 	routeEvents  relayapp.RouteEventSink
+	// config is written only by Reconfigure, under configMu; every read goes
+	// through configSnapshot(). Tests may still mutate the field directly
+	// because they do so before the server serves.
+	configMu     sync.RWMutex
 	config       Config
 	client       *http.Client
 	transport    *http.Transport
@@ -117,42 +121,8 @@ type Config struct {
 }
 
 func NewServer(address string, dependencies Dependencies) *Server {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.ForceAttemptHTTP2 = true
-	transport.MaxIdleConns = 128
-	transport.MaxIdleConnsPerHost = 32
-	// Ten minutes, not ninety seconds: agent traffic is bursty — a turn
-	// finishes, the user reads, the next turn comes minutes later — and a
-	// closed idle connection pays a fresh TLS handshake on the next request.
-	// The provider closes its side when it wants to; this side just keeps
-	// what is still alive available.
-	transport.IdleConnTimeout = 10 * time.Minute
-	config := dependencies.Config
-	if config.MaxRequestBytes <= 0 || config.MaxRequestBytes > absoluteMaxRequestBytes {
-		config.MaxRequestBytes = 64 * 1024 * 1024
-	}
-	if config.ResponseHeaderTimeout <= 0 {
-		config.ResponseHeaderTimeout = 45 * time.Second
-	}
-	if config.StreamIdleTimeout <= 0 {
-		config.StreamIdleTimeout = 60 * time.Second
-	}
-	if config.RetryBase <= 0 {
-		config.RetryBase = 500 * time.Millisecond
-	}
-	if config.RetryMax <= 0 {
-		config.RetryMax = 30 * time.Second
-	}
-	if config.PermanentAttempts < 1 {
-		config.PermanentAttempts = 2
-	} else if config.PermanentAttempts > 3 {
-		config.PermanentAttempts = 3
-	}
-	if config.HeartbeatInterval <= 0 {
-		config.HeartbeatInterval = 15 * time.Second
-	}
-	transport.ResponseHeaderTimeout = config.ResponseHeaderTimeout
+	config := normalizeConfig(dependencies.Config)
+	transport := newTransport(config)
 	ctx, cancel := context.WithCancel(context.Background())
 	var activity relayapp.ActivitySink = relayapp.NoopActivity{}
 	if dependencies.Activity != nil {
@@ -245,7 +215,7 @@ func (server *Server) CancelActive() {
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ctx, cancel := server.requestContext(request.Context())
 	defer cancel()
-	body, err := readRequestBody(request, server.config.MaxRequestBytes)
+	body, err := readRequestBody(request, server.configSnapshot().MaxRequestBytes)
 	if err != nil {
 		writeError(writer, http.StatusRequestEntityTooLarge, "Request body is too large")
 		return
@@ -531,7 +501,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// A rejected request already carries a neutral error body; translating it
 		// would replace the reason with an empty "completed" response.
 		if chatActive && status < 400 {
-			limit := responseBufferLimit(server.config)
+			limit := responseBufferLimit(server.configSnapshot())
 			raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
 			response.Body.Close()
 			if readErr != nil || int64(len(raw)) > limit {
@@ -644,7 +614,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			_ = live.Close()
 			return
 		}
-		restoreResponseToolCalls(response, clientTools, request.URL.Path, server.config)
+		restoreResponseToolCalls(response, clientTools, request.URL.Path, server.configSnapshot())
 		// The guardrails judge exactly what the client is about to read, after every
 		// translation and repair, so a payload cannot hide in a dialect the relay was
 		// still rewriting.
@@ -665,7 +635,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// path returns before the loop ever falls through to it.
 		response.Body.Close()
 		if attempt+1 < server.guardrailAttempts() {
-			delay := retryDelay(attempt, nil, server.config)
+			delay := retryDelay(attempt, nil, server.configSnapshot())
 			server.observeRetry(activityID, attempt, status, delay)
 			if waitErr := waitRetry(ctx, delay); waitErr != nil {
 				cancelled = true
@@ -814,7 +784,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	defer response.Body.Close()
 	usage = usageFromHeaders(response.Header)
 	generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
-	limit := responseBufferLimit(server.config)
+	limit := responseBufferLimit(server.configSnapshot())
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil || int64(len(responseBody)) > limit {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
@@ -1059,7 +1029,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if !canRetry(attempt, attemptLimit) {
 				return nil, err
 			}
-			delay := retryDelay(attempt, nil, server.config)
+			delay := retryDelay(attempt, nil, server.configSnapshot())
 			server.observeRetry(activityID, attempt, 0, delay)
 			if err := waitRetry(ctx, delay); err != nil {
 				return nil, err
@@ -1093,7 +1063,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if liveAllowed && server.canStreamLive(incoming, body, chatActive) {
 					liveAfter = server.liveStreamProbation()
 				}
-				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.config, chatActive != nil && *chatActive, liveAfter)
+				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, liveAfter)
 				if liveBody != nil {
 					// A live generation is still generating: the lease rides
 					// the stream's end, not the handoff, so the key's
@@ -1124,7 +1094,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if errors.Is(bufferErr, errIncompleteSSE) && responsesDialectPath(fallbackPath) && (chatActive == nil || !*chatActive) {
 						streamFailures++
 						if streamFailures >= maxStreamFailuresBeforeFallback && canRetry(attempt, attemptLimit) {
-							if fallback, ok := nonStreamingResponsesRequest(body, server.config.MaxRequestBytes); ok {
+							if fallback, ok := nonStreamingResponsesRequest(body, server.configSnapshot().MaxRequestBytes); ok {
 								body = fallback
 								fallbackActive = true
 								*terminalStream = false
@@ -1135,7 +1105,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					}
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
 						requestFailures++
-						if requestFailures >= server.config.PermanentAttempts || !canRetry(attempt, attemptLimit) {
+						if requestFailures >= server.configSnapshot().PermanentAttempts || !canRetry(attempt, attemptLimit) {
 							response.Body = io.NopCloser(bytes.NewReader(buffered))
 							response.ContentLength = -1
 							response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -1148,7 +1118,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 						}
 						// The half-stream is thrown away, but the provider generated it.
 						addDiscardedUsage(&discarded, streamUsage)
-						delay := retryDelay(attempt, nil, server.config)
+						delay := retryDelay(attempt, nil, server.configSnapshot())
 						server.observeRetry(activityID, attempt, http.StatusOK, delay)
 						if err := waitRetry(ctx, delay); err != nil {
 							return nil, err
@@ -1158,7 +1128,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if !canRetry(attempt, attemptLimit) {
 						return nil, bufferErr
 					}
-					delay := retryDelay(attempt, nil, server.config)
+					delay := retryDelay(attempt, nil, server.configSnapshot())
 					server.observeRetry(activityID, attempt, 0, delay)
 					if err := waitRetry(ctx, delay); err != nil {
 						return nil, err
@@ -1192,7 +1162,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				return response, nil
 			}
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") || expectsJSONResponse(incoming.URL.Path) {
-				buffered, bufferErr := bufferJSONResponse(ctx, response, server.config)
+				buffered, bufferErr := bufferJSONResponse(ctx, response, server.configSnapshot())
 				if bufferErr != nil {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 					if errors.Is(bufferErr, errResponseTooLarge) {
@@ -1201,7 +1171,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if !canRetry(attempt, attemptLimit) {
 						return nil, bufferErr
 					}
-					delay := retryDelay(attempt, nil, server.config)
+					delay := retryDelay(attempt, nil, server.configSnapshot())
 					server.observeRetry(activityID, attempt, 0, delay)
 					if err := waitRetry(ctx, delay); err != nil {
 						return nil, err
@@ -1218,7 +1188,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 						if !canRetry(attempt, attemptLimit) {
 							return nil, bufferErr
 						}
-						delay := retryDelay(attempt, nil, server.config)
+						delay := retryDelay(attempt, nil, server.configSnapshot())
 						server.observeRetry(activityID, attempt, 0, delay)
 						if err := waitRetry(ctx, delay); err != nil {
 							return nil, err
@@ -1234,10 +1204,10 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if terminal == "response.failed" || empty {
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 					requestFailures++
-					if requestFailures < server.config.PermanentAttempts && canRetry(attempt, attemptLimit) {
+					if requestFailures < server.configSnapshot().PermanentAttempts && canRetry(attempt, attemptLimit) {
 						// The answer is discarded, but the provider generated and billed it.
 						addDiscardedUsage(&discarded, usageFromJSON(buffered))
-						delay := retryDelay(attempt, nil, server.config)
+						delay := retryDelay(attempt, nil, server.configSnapshot())
 						server.observeRetry(activityID, attempt, http.StatusOK, delay)
 						if err := waitRetry(ctx, delay); err != nil {
 							return nil, err
@@ -1281,7 +1251,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// the key rotates without paying for a body read and scan. Draining (not
 		// reading) keeps the connection reusable without retaining the body.
 		if status == http.StatusTooManyRequests || status == 529 {
-			delay := retryDelay(attempt, response, server.config)
+			delay := retryDelay(attempt, response, server.configSnapshot())
 			finishLease(lease, relayapp.AttemptOutcome{
 				Kind: relayapp.AttemptRateLimited, RetryAfter: delay,
 			})
@@ -1308,7 +1278,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		failureText := normalizeErrorText(errorBody)
 		rateLimited := rateLimitedText(failureText)
 		if status != http.StatusPaymentRequired && rateLimited {
-			delay := retryDelay(attempt, response, server.config)
+			delay := retryDelay(attempt, response, server.configSnapshot())
 			finishLease(lease, relayapp.AttemptOutcome{
 				Kind: relayapp.AttemptRateLimited, RetryAfter: delay,
 			})
@@ -1326,7 +1296,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// ceiling like a transport failure instead of spending the
 		// permanent-attempt budget a 5xx that answers out loud spends.
 		if status == http.StatusRequestTimeout {
-			delay := retryDelay(attempt, response, server.config)
+			delay := retryDelay(attempt, response, server.configSnapshot())
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
@@ -1352,7 +1322,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// 502 and 504 join that class by status alone: nginx answers a
 		// bare HTML page with no wording to read, and "my upstream did not
 		// answer me" is the same news as "no channel available" — the edge
-		// could not reach what serves the model (measured on alpha-relay: twelve
+		// could not reach what serves the model (measured on a production reseller: twelve
 		// consecutive bare 502s, two attempts, dead request). 503 and 500
 		// stay on the plain budget unless their wording says congestion: the
 		// application answered, so the failure can be its own deterministic
@@ -1368,7 +1338,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if congestionAnswers >= 3 {
 				// Three congestion answers in one request is a provider
 				// saying "not now" faster than the backoff can wait it out —
-				// measured on alpha-relay: requests alternating between
+				// measured on a production reseller: requests alternating between
 				// five-retry recoveries and clients cancelling mid-wait. A
 				// chain exists precisely so the caller never learns a
 				// provider is flapping; without one this falls through to the
@@ -1377,7 +1347,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					continue
 				}
 			}
-			delay := retryDelay(attempt, response, server.config)
+			delay := retryDelay(attempt, response, server.configSnapshot())
 			if !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
@@ -1389,7 +1359,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 
 		if status >= 500 {
-			delay := retryDelay(attempt, response, server.config)
+			delay := retryDelay(attempt, response, server.configSnapshot())
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError})
 			serverFailures++
 			// A 5xx without a rate-limit or congestion verdict is a
@@ -1400,7 +1370,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// 408s and congestion keep that ceiling — a dropped socket, a
 			// timed-out wait and a busy channel all say nothing about the next
 			// attempt.
-			if serverFailures >= server.config.PermanentAttempts || !canRetry(attempt, attemptLimit) {
+			if serverFailures >= server.configSnapshot().PermanentAttempts || !canRetry(attempt, attemptLimit) {
 				return genericErrorResponse(status), nil
 			}
 			server.observeRetry(activityID, attempt, status, delay)
@@ -1483,7 +1453,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				}
 				return genericErrorResponse(status), nil
 			}
-			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.configSnapshot())); err != nil {
 				return nil, err
 			}
 			continue
@@ -1523,7 +1493,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// parking on the model blocks other requests left behind.
 			rotateImmediate = true
 			rotationStatus = status
-			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.configSnapshot())); err != nil {
 				return nil, err
 			}
 			continue
@@ -1562,7 +1532,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// turned one refused answer into tens of minutes of queueing.
 			rotateImmediate = true
 			rotationStatus = status
-			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.config)); err != nil {
+			if err := server.retryCredentialFailure(ctx, lease, activityID, attempt, status, retryDelay(attempt, nil, server.configSnapshot())); err != nil {
 				return nil, err
 			}
 			continue
@@ -1618,7 +1588,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		}
 		if status == 400 || status == 404 || status == 409 || status == 422 {
 			requestFailures++
-			if requestFailures < server.config.PermanentAttempts && canRetry(attempt, attemptLimit) {
+			if requestFailures < server.configSnapshot().PermanentAttempts && canRetry(attempt, attemptLimit) {
 				server.observeRetry(activityID, attempt, status, 0)
 				continue
 			}
@@ -1644,7 +1614,7 @@ func canonicalPath(path string) string {
 
 // The dialect path helpers answer one question — "which dialect does this
 // canonical path name" — for both spellings providers actually mount: with
-// and without the /v1 prefix. alpha-relay and its siblings answer /chat/completions
+// and without the /v1 prefix. a production reseller and its siblings answer /chat/completions
 // as readily as /v1/chat/completions, and a decision list that recognizes
 // only the prefixed spelling lets the client's choice of spelling decide
 // what gets metered, inspected and terminated instead of the bytes — the
@@ -1765,7 +1735,7 @@ func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error,
 	heartFailure := make(chan error, 1)
 	go func() {
 		defer close(exited)
-		ticker := time.NewTicker(server.config.HeartbeatInterval)
+		ticker := time.NewTicker(server.configSnapshot().HeartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -1812,7 +1782,7 @@ func (server *Server) withHeartbeat(ctx context.Context, heartbeat func() error,
 // provider that failed out loud rather than a budget of its own — bounded, because
 // every extra attempt is another roll of the dice for a provider that is trying.
 func (server *Server) guardrailAttempts() int {
-	return max(server.config.PermanentAttempts, 1)
+	return max(server.configSnapshot().PermanentAttempts, 1)
 }
 
 // canRetry reports whether another attempt is allowed.
@@ -1843,7 +1813,7 @@ func (server *Server) canRotateCredential(attempt, limit int, lease relayapp.Cre
 		return false
 	}
 	if lease == nil {
-		return attempt+1 < server.config.PermanentAttempts
+		return attempt+1 < server.configSnapshot().PermanentAttempts
 	}
 	return failures < server.credentialCount(providerID)
 }
@@ -1853,7 +1823,7 @@ func (server *Server) canRotateCredential(attempt, limit int, lease relayapp.Cre
 func (server *Server) credentialCount(providerID string) int {
 	counter, ok := server.credentials.(relayapp.CredentialCounter)
 	if !ok {
-		return max(server.config.PermanentAttempts, 1)
+		return max(server.configSnapshot().PermanentAttempts, 1)
 	}
 	return max(counter.Count(providerID), 1)
 }
@@ -1890,6 +1860,10 @@ func (server *Server) tryAcquireCredential(route relayapp.Route, model string) (
 }
 
 func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
+	// Reconfigure swaps the base client and the transport template, so both
+	// reads sit under the same lock the swap takes.
+	server.mu.Lock()
+	defer server.mu.Unlock()
 	if rawURL == "" {
 		return server.client, nil
 	}
@@ -1901,8 +1875,6 @@ func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
 	if err != nil || proxyURL.Host == "" || !keypooldomain.ProxySchemeAllowed(proxyURL.Scheme) {
 		return nil, errors.New("invalid credential proxy")
 	}
-	server.mu.Lock()
-	defer server.mu.Unlock()
 	if client := server.proxyClients[rawURL]; client != nil {
 		return client, nil
 	}
@@ -1922,6 +1894,95 @@ func (server *Server) clientForProxy(rawURL string) (*http.Client, error) {
 }
 
 func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// normalizeConfig fills the defaults the zero values would otherwise take.
+// NewServer and Reconfigure share it so a live save and a fresh boot resolve
+// the same settings identically.
+func normalizeConfig(config Config) Config {
+	if config.MaxRequestBytes <= 0 || config.MaxRequestBytes > absoluteMaxRequestBytes {
+		config.MaxRequestBytes = 64 * 1024 * 1024
+	}
+	if config.ResponseHeaderTimeout <= 0 {
+		config.ResponseHeaderTimeout = 45 * time.Second
+	}
+	if config.StreamIdleTimeout <= 0 {
+		config.StreamIdleTimeout = 60 * time.Second
+	}
+	if config.RetryBase <= 0 {
+		config.RetryBase = 500 * time.Millisecond
+	}
+	if config.RetryMax <= 0 {
+		config.RetryMax = 30 * time.Second
+	}
+	if config.PermanentAttempts < 1 {
+		config.PermanentAttempts = 2
+	} else if config.PermanentAttempts > 3 {
+		config.PermanentAttempts = 3
+	}
+	if config.HeartbeatInterval <= 0 {
+		config.HeartbeatInterval = 15 * time.Second
+	}
+	return config
+}
+
+func newTransport(config Config) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 128
+	transport.MaxIdleConnsPerHost = 32
+	// Ten minutes, not ninety seconds: agent traffic is bursty — a turn
+	// finishes, the user reads, the next turn comes minutes later — and a
+	// closed idle connection pays a fresh TLS handshake on the next request.
+	// The provider closes its side when it wants to; this side just keeps
+	// what is still alive available.
+	transport.IdleConnTimeout = 10 * time.Minute
+	transport.ResponseHeaderTimeout = config.ResponseHeaderTimeout
+	return transport
+}
+
+// configSnapshot reads the live config; Reconfigure is the only writer, and a
+// request that races a save gets either side whole, never a torn mix.
+func (server *Server) configSnapshot() Config {
+	server.configMu.RLock()
+	defer server.configMu.RUnlock()
+	return server.config
+}
+
+// Reconfigure applies saved settings without a restart. In-flight requests
+// finish on the client they started with — the transport is rebuilt rather
+// than mutated, because http.Transport fields are read by RoundTrip without a
+// lock. Proxy-specific clients are dropped so they rebuild from the new one.
+func (server *Server) Reconfigure(config Config) {
+	config = normalizeConfig(config)
+	server.mu.Lock()
+	transport := newTransport(config)
+	server.client = &http.Client{Transport: transport, CheckRedirect: rejectRedirect}
+	server.transport = transport
+	for key, client := range server.proxyClients {
+		client.CloseIdleConnections()
+		delete(server.proxyClients, key)
+	}
+	server.mu.Unlock()
+	server.configMu.Lock()
+	server.config = config
+	server.configMu.Unlock()
+}
+
+// SetAddress moves the listener target; it binds on the next Start. A running
+// relay is stopped and started around the move by the caller.
+func (server *Server) SetAddress(address string) {
+	server.mu.Lock()
+	server.address = address
+	server.mu.Unlock()
+}
+
+// Address is the listener target the next Start binds.
+func (server *Server) Address() string {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.address
+}
 
 func (server *Server) observeRetry(activityID string, attempt, status int, delay time.Duration) {
 	server.activity.Retry(activityID, relayapp.ActivityRetry{
@@ -3301,7 +3362,7 @@ func serviceOverloaded(text string) bool {
 // gatewayCongestion reports whether the status itself says the provider's
 // edge could not reach its upstream: 502 and 504 are the proxy's own "no
 // channel available" (nginx answers a bare HTML page with no wording at
-// all - measured on alpha-relay: twelve consecutive 502s while the wording-based
+// all - measured on a production reseller: twelve consecutive 502s while the wording-based
 // classifier read nothing and the plain-5xx budget gave up after two
 // attempts). A 503 stays on the plain budget unless its wording says
 // congestion: "service unavailable" can be maintenance the caller cannot

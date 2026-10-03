@@ -40,13 +40,11 @@ describe('SettingsForm', () => {
       <SettingsForm
         initial={{ ...initial, guardrailMode: 'block' }}
         pending={false}
-        restartRequired={false}
         error=""
         onSave={onSave}
-        onRestart={vi.fn(async () => undefined)}
       />,
     )
-    fireEvent.change(screen.getByLabelText(/Listener port/u), { target: { value: '8898' } })
+    fireEvent.change(screen.getByLabelText(/^Listener port$/u), { target: { value: '8898' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ listenerPort: 8898, guardrailMode: 'block' }))
   })
@@ -56,33 +54,48 @@ describe('SettingsForm', () => {
       <SettingsForm
         initial={initial}
         pending={false}
-        restartRequired={false}
         error=""
         onSave={vi.fn(async () => true)}
-        onRestart={vi.fn(async () => undefined)}
       />,
     )
-    fireEvent.change(screen.getByLabelText(/Listener port/u), { target: { value: '8898' } })
-    fireEvent.change(screen.getByLabelText(/Maximum queued/u), { target: { value: '12000' } })
-    expect((screen.getByLabelText(/Listener port/u) as HTMLInputElement).valueAsNumber).toBe(8898)
-    expect((screen.getByLabelText(/Maximum queued/u) as HTMLInputElement).valueAsNumber).toBe(12000)
+    fireEvent.change(screen.getByLabelText(/^Listener port$/u), { target: { value: '8898' } })
+    fireEvent.change(screen.getByLabelText(/^Maximum queued$/u), { target: { value: '12000' } })
+    expect((screen.getByLabelText(/^Listener port$/u) as HTMLInputElement).valueAsNumber).toBe(8898)
+    expect((screen.getByLabelText(/^Maximum queued$/u) as HTMLInputElement).valueAsNumber).toBe(12000)
     expect((screen.getByRole('button', { name: 'Save settings' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('restarts from the saved-settings notice', () => {
-    const onRestart = vi.fn(async () => undefined)
+  it('applies on save and never asks for a restart', () => {
+    render(<SettingsForm initial={initial} pending={false} error="" onSave={vi.fn(async () => true)} />)
+    expect(screen.queryByRole('button', { name: /restart/i })).toBeNull()
+    expect(screen.getByText(/applies the moment you save/i)).toBeTruthy()
+  })
+
+  it('resets one field to the saved value, and the whole tab to the shipped defaults', () => {
     render(
       <SettingsForm
-        initial={initial}
+        initial={{ ...initial, listenerPort: 8898, maxQueued: 12_000 }}
         pending={false}
-        restartRequired
         error=""
         onSave={vi.fn(async () => true)}
-        onRestart={onRestart}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Restart now' }))
-    expect(onRestart).toHaveBeenCalledOnce()
+    // The saved value differs from the shipped default: a preset click makes the
+    // field dirty, its reset button must return the saved value, not the default.
+    fireEvent.click(screen.getByRole('button', { name: '8,787' }))
+    expect((screen.getByLabelText(/^Listener port$/u) as HTMLInputElement).valueAsNumber).toBe(8787)
+    fireEvent.click(screen.getByRole('button', { name: /Reset Listener port/i }))
+    expect((screen.getByLabelText(/^Listener port$/u) as HTMLInputElement).valueAsNumber).toBe(8898)
+    // A field of another tab must keep its edit through this tab's reset.
+    fireEvent.click(screen.getByRole('tab', { name: 'Reliability' }))
+    fireEvent.change(screen.getByLabelText(/^Stream idle$/u), { target: { value: '300' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Relay' }))
+    // The tab reset aims at the defaults — every field of the tab at once.
+    fireEvent.click(screen.getByRole('button', { name: /^defaults$/i }))
+    expect((screen.getByLabelText(/^Listener port$/u) as HTMLInputElement).valueAsNumber).toBe(8798)
+    expect((screen.getByLabelText(/^Maximum queued$/u) as HTMLInputElement).valueAsNumber).toBe(10_000)
+    fireEvent.click(screen.getByRole('tab', { name: 'Reliability' }))
+    expect((screen.getByLabelText(/^Stream idle$/u) as HTMLInputElement).valueAsNumber).toBe(300)
   })
 })
 

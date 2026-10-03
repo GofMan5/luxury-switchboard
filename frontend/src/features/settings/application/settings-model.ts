@@ -5,13 +5,12 @@ export interface SettingsState {
   readonly phase: 'loading' | 'ready' | 'error'
   readonly settings: Settings | null
   readonly pending: boolean
-  readonly restartRequired: boolean
   readonly error: string
 }
 
 export class SettingsModel {
   readonly #port: SettingsPort
-  #state: SettingsState = { phase: 'loading', settings: null, pending: false, restartRequired: false, error: '' }
+  #state: SettingsState = { phase: 'loading', settings: null, pending: false, error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #generation = 0
@@ -24,11 +23,11 @@ export class SettingsModel {
     const generation = ++this.#generation
     this.#unsubscribe ??= this.#port.subscribe((result) => {
       this.#generation++
-      this.#set({ phase: 'ready', settings: result.settings, pending: this.#state.pending, restartRequired: result.restartRequired, error: '' })
+      this.#set({ phase: 'ready', settings: result.settings, pending: this.#state.pending, error: '' })
     })
     try {
       const settings = await this.#port.get()
-      if (generation === this.#generation) this.#set({ phase: 'ready', settings, pending: false, restartRequired: false, error: '' })
+      if (generation === this.#generation) this.#set({ phase: 'ready', settings, pending: false, error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Settings are unavailable' })
     }
@@ -40,7 +39,7 @@ export class SettingsModel {
     this.#set({ ...this.#state, pending: true, error: '' })
     try {
       const result = await this.#port.update(settings)
-      this.#set({ phase: 'ready', settings: result.settings, pending: false, restartRequired: result.restartRequired, error: '' })
+      this.#set({ phase: 'ready', settings: result.settings, pending: false, error: '' })
       return true
     } catch {
       this.#set({ ...this.#state, pending: false, error: 'Settings could not be saved. Check every value.' })

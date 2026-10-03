@@ -1256,7 +1256,7 @@ func TestATerminalVerdictFailoversToTheSiblingProvider(t *testing.T) {
 // degradations.
 // A flapping provider answers congestion three times in one request: that is
 // a flap, not a backlog, and the chain exists precisely so the caller never
-// learns a provider is flapping (measured on alpha-relay: requests alternating
+// learns a provider is flapping (measured on a production reseller: requests alternating
 // between five-retry recoveries and clients cancelling mid-wait). One or two
 // congestion answers are still waited out where they stand — a blip drains
 // in seconds and moving the request for it would park a healthy provider.

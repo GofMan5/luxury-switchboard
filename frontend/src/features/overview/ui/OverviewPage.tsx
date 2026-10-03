@@ -13,6 +13,15 @@ import styles from './OverviewPage.module.css'
 /** The report re-reads itself on this cadence while the workspace is open. */
 const INSIGHTS_REFRESH_MS = 60_000
 
+/** Lower sorts first: the provider serving traffic, then the ones that could
+ * serve right now, then the configured-but-idle shells. */
+function relevance(provider: { id: string; enabled: boolean; keyCount: number; authMode: string }, activeId: string): number {
+  if (provider.id === activeId) return 0
+  if (provider.enabled && (provider.keyCount > 0 || provider.authMode === 'passthrough')) return 1
+  if (provider.enabled) return 2
+  return 3
+}
+
 export default function OverviewPage() {
   const activity = useActivity()
   const { state: providers } = useProviders()
@@ -123,24 +132,38 @@ export default function OverviewPage() {
 
             <Panel
               title="Provider routes"
-              subtitle={`${providers.catalog.providers.length} configured`}
+              subtitle={`${providers.catalog.providers.length} configured · ${providers.catalog.providers.filter((provider) => provider.enabled && (provider.keyCount > 0 || provider.authMode === 'passthrough')).length} routable`}
+              actions={<button type="button" className={styles.linkButton} onClick={() => { window.location.hash = 'providers' }}>Providers <ArrowRight size={13} aria-hidden="true" /></button>}
             >
               <div className={styles.providerList}>
-                {providers.catalog.providers.map((provider) => {
-                  const active = provider.id === providers.catalog.activeId
-                  const health = providers.health.get(provider.id)
-                  return (
-                    <div className={styles.providerRow} key={provider.id}>
-                      <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : provider.enabled ? 'healthy' : 'stopped'} />
-                      <div>
-                        <strong>{provider.name}</strong>
-                        <span>{provider.rpm === 0 ? 'Unlimited' : `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`} · {provider.authMode === 'passthrough' ? 'Passthrough' : provider.keyCount > 0 ? `${provider.keyCount} key${provider.keyCount === 1 ? '' : 's'}` : 'No key'}</span>
+                {/* The card answers "who serves traffic": the active provider
+                    first, then the routable ones. Disabled shells and keyless
+                    entries would only be scrolled past, so they fold away. */}
+                {providers.catalog.providers
+                  .slice()
+                  .sort((left, right) => relevance(left, providers.catalog.activeId) - relevance(right, providers.catalog.activeId))
+                  .slice(0, 5)
+                  .map((provider) => {
+                    const active = provider.id === providers.catalog.activeId
+                    const health = providers.health.get(provider.id)
+                    return (
+                      <div className={styles.providerRow} key={provider.id}>
+                        <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : provider.enabled ? 'healthy' : 'stopped'} />
+                        <div>
+                          <strong>{provider.name}</strong>
+                          <span>{provider.rpm === 0 ? 'Unlimited' : `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`} · {provider.authMode === 'passthrough' ? 'Passthrough' : provider.keyCount > 0 ? `${provider.keyCount} key${provider.keyCount === 1 ? '' : 's'}` : 'No key'}</span>
+                        </div>
+                        {active ? <Pill tone="info">Active</Pill> : <Pill>Standby</Pill>}
                       </div>
-                      {active ? <Pill tone="info">Active</Pill> : <Pill>Standby</Pill>}
-                    </div>
-                  )
-                })}
+                    )
+                  })}
               </div>
+              {providers.catalog.providers.length > 5 ? (
+                <div className={styles.providerMore}>
+                  <span>{providers.catalog.providers.length - 5} more</span>
+                  <button type="button" onClick={() => { window.location.hash = 'providers' }}>Open Providers</button>
+                </div>
+              ) : null}
               <div className={styles.relayFoot}>
                 <span>Listener</span>
                 <span className={styles.listenerValue}>

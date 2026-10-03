@@ -132,7 +132,7 @@ func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 		}
 	}
 
-	// The alpha-relay shape: a chat-only provider the client reaches through the
+	// The chat-only shape: a chat-only provider the client reaches through the
 	// Responses endpoint.
 	added := command("providers.add", map[string]any{
 		"name": "Alpha Relay", "baseUrl": upstream.URL, "authMode": "bearer",

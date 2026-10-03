@@ -40,5 +40,34 @@ export interface Settings {
 
 export interface SettingsUpdateResult {
   readonly settings: Settings
+  /** Wire compat: the control plane applies every setting live and answers
+   * false. The field stays on the shape so an older sidecar still parses. */
   readonly restartRequired: boolean
+}
+
+/**
+ * The defaults the control plane ships, mirrored from the backend's
+ * domain.Defaults(). The page shows them next to each field and offers a
+ * reset, so they must read the same values — one place here, one place there,
+ * and the field notes name the numbers.
+ */
+export const SETTINGS_DEFAULTS: Settings = {
+  listenerPort: 8798,
+  maxRequestMiB: 64,
+  headerTimeoutSeconds: 45,
+  streamIdleSeconds: 60,
+  retryBaseMilliseconds: 500,
+  retryMaxSeconds: 30,
+  permanentAttempts: 2,
+  maxQueued: 10_000,
+  activityCapacity: 2_000,
+  historyRetentionDays: 30,
+  tunnelRetentionHours: 72,
+  guardrailMode: 'monitor',
+  guardrailFindings: 500,
+  notificationsEnabled: true,
+  providerHealthEnabled: true,
+  animationsEnabled: true,
+  failoverEnabled: true,
+  chainMode: 'balance',
 }

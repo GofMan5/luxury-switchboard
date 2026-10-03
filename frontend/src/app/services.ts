@@ -10,6 +10,8 @@ import type { GuardrailsModel } from '../features/guardrails/application/guardra
 import type { TunnelModel } from '../features/tunnel/application/tunnel-model'
 import type { ClientsModel } from '../features/clients/application/clients-model'
 import type { ModelsModel } from '../features/models/application/models-model'
+import type { TestsModel } from '../features/tests/application/tests-model'
+import type { UpdatesModel } from '../features/updates/application/updates-model'
 import type { SharedModel } from '../features/shared-control/application/shared-model'
 import type { NotificationsModel } from '../features/notifications/application/notifications-model'
 import type { BackupModel } from '../features/backup/application/backup-model'
@@ -23,6 +25,8 @@ export interface AppServices {
   readonly insights: InsightsModel
   readonly routes: RoutesModel
   readonly models: ModelsModel
+  readonly tests: TestsModel
+  readonly updates: UpdatesModel
   readonly guardrails: GuardrailsModel
   readonly notifications: NotificationsModel
   readonly backup: BackupModel

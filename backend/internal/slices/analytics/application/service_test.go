@@ -53,8 +53,16 @@ func (prices *fakePrices) Save(_ context.Context, catalog domain.Catalog) error 
 	return prices.failWith
 }
 
+type fakeNames struct {
+	names map[string]string
+}
+
+func (source fakeNames) Names(context.Context) (map[string]string, error) {
+	return source.names, nil
+}
+
 func newService(facts *fakeFacts, prices *fakePrices) *application.Service {
-	service := application.NewService(facts, prices)
+	service := application.NewService(facts, prices, fakeNames{})
 	return service
 }
 
@@ -101,6 +109,32 @@ func TestTheReportMergesFactsIntoDimensions(t *testing.T) {
 	}
 	if len(report.Errors) != 1 || report.Errors[0].Requests != 2 {
 		t.Fatalf("errors did not group: %+v", report.Errors)
+	}
+}
+
+// History records the name a provider had when the request ran; a rename must
+// not leave every future report reading the old name. The current name wins,
+// and a provider missing from the resolver keeps its recorded one.
+func TestARenamedProviderReadsUnderItsCurrentName(t *testing.T) {
+	service := application.NewService(&fakeFacts{
+		grouped: []domain.GroupedRow{
+			{ProviderID: "p1", ProviderName: "Old Name", Model: "m1", TokenVolume: volume(4, 4, 0, 1_000, 500, 0, 0, 500)},
+			{ProviderID: "gone", ProviderName: "Deleted Provider", Model: "m1", TokenVolume: volume(2, 2, 0, 500, 200, 0, 0, 200)},
+		},
+	}, &fakePrices{}, fakeNames{names: map[string]string{"p1": "New Name"}})
+	report, err := service.Report(context.Background(), application.Period24H)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]string{}
+	for _, provider := range report.Providers {
+		byID[provider.ID] = provider.Name
+	}
+	if byID["p1"] != "New Name" {
+		t.Fatalf("the renamed provider kept its recorded name: %+v", report.Providers)
+	}
+	if byID["gone"] != "Deleted Provider" {
+		t.Fatalf("a provider missing from the resolver lost its recorded name: %+v", report.Providers)
 	}
 }
 

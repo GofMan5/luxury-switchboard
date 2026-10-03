@@ -1,23 +1,31 @@
 import { useContext, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type KeyboardEvent as UIKeyboardEvent, type ReactNode } from 'react'
-import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RotateCw, Save, ShieldCheck } from 'lucide-react'
-import { restartApp } from '../../../platform/lifecycle/restart-app'
+import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RotateCcw, Save, ShieldCheck } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
 import { useMediaQuery } from '../../../shared/ui/useMediaQuery'
 import { ServicesContext } from '../../../app/services'
-import type { Settings } from '../domain/settings'
+import { SETTINGS_DEFAULTS, type Settings } from '../domain/settings'
 import { useSettings } from './useSettings'
 import styles from './SettingsPage.module.css'
 
 type SettingsTab = 'relay' | 'reliability' | 'data' | 'routing' | 'interface' | 'backup'
 
 const tabs: readonly { id: SettingsTab; label: string; icon: ReactNode; description: string }[] = [
-  { id: 'relay', label: 'Relay', icon: <Gauge size={16} />, description: 'Listener and bounded request admission.' },
-  { id: 'reliability', label: 'Reliability', icon: <ShieldCheck size={16} />, description: 'Timeout and retry behavior shared by all provider profiles.' },
-  { id: 'data', label: 'Data', icon: <Database size={16} />, description: 'Bounded in-memory activity and persistent history policy.' },
+  { id: 'relay', label: 'Relay', icon: <Gauge size={16} />, description: 'The address your clients call and how much traffic may pile up waiting.' },
+  { id: 'reliability', label: 'Reliability', icon: <ShieldCheck size={16} />, description: 'Timeouts and retries shared by every provider profile.' },
+  { id: 'data', label: 'Data', icon: <Database size={16} />, description: 'How much the app remembers, in memory and on disk.' },
   { id: 'routing', label: 'Routing', icon: <GitBranch size={16} />, description: 'What happens when a provider answers with a verdict no retry could change.' },
   { id: 'interface', label: 'Interface', icon: <Bell size={16} />, description: 'What the shell tells you as it happens, and how it moves.' },
   { id: 'backup', label: 'Backup', icon: <ArchiveRestore size={16} />, description: 'Carry providers, keys, routes and model prices to another machine or another install.' },
 ]
+
+/** Which draft fields a tab edits, so its reset touches its own and nothing else. */
+const tabFields: Record<Exclude<SettingsTab, 'backup'>, readonly (keyof Settings)[]> = {
+  relay: ['listenerPort', 'maxRequestMiB', 'maxQueued'],
+  reliability: ['headerTimeoutSeconds', 'streamIdleSeconds', 'retryBaseMilliseconds', 'retryMaxSeconds', 'permanentAttempts'],
+  data: ['activityCapacity', 'historyRetentionDays', 'tunnelRetentionHours', 'guardrailFindings'],
+  routing: ['failoverEnabled', 'chainMode'],
+  interface: ['notificationsEnabled', 'providerHealthEnabled', 'animationsEnabled'],
+}
 
 export default function SettingsPage() {
   const { model, state } = useSettings()
@@ -28,40 +36,34 @@ export default function SettingsPage() {
   if (!state.settings) {
     return <section className={styles.page}><header className="page-header"><div><h1>Settings</h1><p>Loading validated runtime configuration…</p></div></header></section>
   }
-  return <SettingsForm key={JSON.stringify(state.settings)} initial={state.settings} pending={state.pending} restartRequired={state.restartRequired} error={state.error} tab={tab} onTab={setTab} onSave={(value) => model.save(value)} onRestart={restartApp} />
+  return <SettingsForm key={JSON.stringify(state.settings)} initial={state.settings} pending={state.pending} error={state.error} tab={tab} onTab={setTab} onSave={(value) => model.save(value)} />
 }
 
-export function SettingsForm({ initial, pending, restartRequired, error, tab: controlledTab, onTab, onSave, onRestart }: { initial: Settings; pending: boolean; restartRequired: boolean; error: string; tab?: SettingsTab; onTab?: (tab: SettingsTab) => void; onSave: (value: Settings) => Promise<boolean>; onRestart: () => Promise<void> }) {
+export function SettingsForm({ initial, pending, error, tab: controlledTab, onTab, onSave }: { initial: Settings; pending: boolean; error: string; tab?: SettingsTab; onTab?: (tab: SettingsTab) => void; onSave: (value: Settings) => Promise<boolean> }) {
   const [settings, setSettings] = useState(initial)
   // The page hoists the tab so a post-save remount keeps it; the form rendered
   // standalone (its tests) just keeps its own.
   const [internalTab, setInternalTab] = useState<SettingsTab>('relay')
   const tab = controlledTab ?? internalTab
   const setTab = onTab ?? setInternalTab
-  const [restarting, setRestarting] = useState(false)
-  const [restartError, setRestartError] = useState('')
   const dirty = JSON.stringify(settings) !== JSON.stringify(initial)
-  const number = (field: keyof Settings) => (event: ChangeEvent<HTMLInputElement>) => {
-    const value = Number(event.currentTarget.value)
+  const set = <K extends keyof Settings>(field: K, value: Settings[K]) => {
     setSettings((current) => ({ ...current, [field]: value }))
   }
-  const toggle = (field: 'notificationsEnabled' | 'providerHealthEnabled' | 'animationsEnabled' | 'failoverEnabled') => () => {
-    setSettings((current) => ({ ...current, [field]: !current[field] }))
+  // The tab reset writes the shipped defaults back into the draft; saving is
+  // still the operator's call, so an accidental click is one Cancel away.
+  const resetTab = () => {
+    if (tab === 'backup') return
+    setSettings((current) => {
+      const next = { ...current }
+      for (const field of tabFields[tab]) {
+        ;(next as Record<keyof Settings, unknown>)[field] = SETTINGS_DEFAULTS[field]
+      }
+      return next
+    })
   }
-  const chainMode = (event: ChangeEvent<HTMLSelectElement>) => {
-    setSettings((current) => ({ ...current, chainMode: event.currentTarget.value as Settings['chainMode'] }))
-  }
+  const tabAtDefaults = tab !== 'backup' && tabFields[tab].every((field) => settings[field] === SETTINGS_DEFAULTS[field])
   const submit = (event: FormEvent) => { event.preventDefault(); void onSave(settings) }
-  const restart = async () => {
-    setRestarting(true)
-    setRestartError('')
-    try {
-      await onRestart()
-    } catch {
-      setRestarting(false)
-      setRestartError('Luxury Switchboard could not restart. Close and reopen it to apply the saved settings.')
-    }
-  }
   const activeTab = tabs.find((entry) => entry.id === tab) ?? tabs[0]
   // The rail is vertical on wide windows and a horizontal strip under 959px —
   // the orientation is announced, and the arrows follow both axes either way.
@@ -80,14 +82,20 @@ export function SettingsForm({ initial, pending, restartRequired, error, tab: co
     railRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
   }
 
+  const field = <K extends keyof Settings>(key: K) => ({
+    value: settings[key],
+    saved: initial[key],
+    fallback: SETTINGS_DEFAULTS[key],
+    onChange: (value: Settings[K]) => set(key, value),
+  })
+
   return (
     <form className={styles.page} onSubmit={submit}>
       <header className="page-header">
-        <div><h1>Settings</h1><p>Safe defaults for relay, reliability and storage</p></div>
+        <div><h1>Settings</h1><p>Every value applies the moment you save — no restart</p></div>
         <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={15} />{pending ? 'Saving…' : 'Save settings'}</Button>
       </header>
-      {restartRequired ? <div className={styles.restart} aria-live="polite" aria-busy={restarting}><RotateCw size={17} /><div><strong>Restart Luxury Switchboard to apply runtime changes</strong><span>Saved values are already encrypted; active requests are cancelled cleanly during restart.</span></div><Button type="button" disabled={restarting} onClick={() => void restart()}>{restarting ? 'Restarting…' : 'Restart now'}</Button></div> : null}
-      {error || restartError ? <div className={styles.error} role="alert">{error || restartError}</div> : null}
+      {error ? <div className={styles.error} role="alert">{error}</div> : null}
 
       <div className={styles.layout}>
         <nav ref={railRef} className={styles.tabRail} role="tablist" aria-label="Settings sections" aria-orientation={horizontal ? 'horizontal' : 'vertical'} onKeyDown={tabKeys}>
@@ -115,65 +123,129 @@ export function SettingsForm({ initial, pending, restartRequired, error, tab: co
 
         <div className={styles.tabContent} role="tabpanel" id={`settings-panel-${activeTab.id}`} aria-labelledby={`settings-tab-${activeTab.id}`}>
           <header className={styles.tabHeader}>
-            <h2>{activeTab.label}</h2>
-            <p>{activeTab.description}</p>
+            <div>
+              <h2>{activeTab.label}</h2>
+              <p>{activeTab.description}</p>
+            </div>
+            {tab !== 'backup' ? (
+              <Button type="button" variant="ghost" disabled={tabAtDefaults} onClick={resetTab}>
+                <RotateCcw size={14} aria-hidden="true" />
+                Defaults
+              </Button>
+            ) : null}
           </header>
 
           {tab === 'relay' ? (
             <div className={styles.fields}>
-              <NumberField label="Listener port" value={settings.listenerPort} min={1} max={65535} onChange={number('listenerPort')} note="Loopback-only; remote binding is never allowed." />
-              <NumberField label="Maximum request" value={settings.maxRequestMiB} min={1} max={256} suffix="MiB" onChange={number('maxRequestMiB')} />
-              <NumberField label="Maximum queued" value={settings.maxQueued} min={100} max={100000} onChange={number('maxQueued')} note="Wait time is unlimited; memory is not." />
+              <NumberField
+                label="Listener port" min={1} max={65535} presets={[8798, 8787]} {...field('listenerPort')}
+                note="The loopback address your clients call: http://127.0.0.1:port. Remote binding is never allowed — only this machine can talk to the relay. Changing the port rebinds the listener in place; requests in flight are cancelled."
+              />
+              <NumberField
+                label="Maximum request" min={1} max={256} suffix="MiB" presets={[32, 64, 128]} {...field('maxRequestMiB')}
+                note="The largest single request the relay accepts, headers included. 64 MiB fits a context window far past every current model; lower it only to defend memory on a small machine."
+              />
+              <NumberField
+                label="Maximum queued" min={100} max={100000} presets={[1_000, 10_000, 50_000]} {...field('maxQueued')}
+                note="A request may wait for a free key as long as it needs — but the queue itself is bounded: past this many waiting requests, new ones are refused immediately instead of piling into memory."
+              />
+              <p className={styles.tabNote}>A port change rebinds the listener the moment you save; everything else on this page just starts applying.</p>
             </div>
           ) : null}
 
           {tab === 'reliability' ? (
             <div className={styles.fields}>
-              <NumberField label="Response headers" value={settings.headerTimeoutSeconds} min={5} max={300} suffix="sec" onChange={number('headerTimeoutSeconds')} note="How long a provider may think before its first byte." />
-              <NumberField label="Stream idle" value={settings.streamIdleSeconds} min={15} max={900} suffix="sec" onChange={number('streamIdleSeconds')} note="Silence budget between streamed events." />
-              <NumberField label="Retry base" value={settings.retryBaseMilliseconds} min={50} max={10000} suffix="ms" onChange={number('retryBaseMilliseconds')} />
-              <NumberField label="Retry maximum" value={settings.retryMaxSeconds} min={1} max={120} suffix="sec" onChange={number('retryMaxSeconds')} />
-              <NumberField label="Permanent attempts" value={settings.permanentAttempts} min={1} max={3} onChange={number('permanentAttempts')} note="429, transport and 5xx remain cancellable seamless retries." />
+              <NumberField
+                label="Response headers" min={5} max={300} suffix="sec" presets={[30, 45, 60, 120]} {...field('headerTimeoutSeconds')}
+                note="How long a provider may think before its first byte. Cold requests on big contexts prefill for a while — under ~30 seconds those get cut before they start."
+              />
+              <NumberField
+                label="Stream idle" min={15} max={900} suffix="sec" presets={[60, 300, 900]} {...field('streamIdleSeconds')}
+                note="The silence budget inside a live stream: no bytes for this long and the attempt is abandoned and retried on another key. Providers that prefill silently for minutes need this raised."
+              />
+              <NumberField
+                label="Retry base" min={50} max={10000} suffix="ms" presets={[250, 500, 1_000]} {...field('retryBaseMilliseconds')}
+                note="The wait before the first retry; every next wait doubles from here. Lower retries faster and leans harder on rate limits."
+              />
+              <NumberField
+                label="Retry maximum" min={1} max={120} suffix="sec" presets={[15, 30, 60]} {...field('retryMaxSeconds')}
+                note="The cap the backoff ladder climbs to, so a busy provider does not make a request wait minutes between attempts."
+              />
+              <NumberField
+                label="Permanent attempts" min={1} max={3} presets={[1, 2, 3]} {...field('permanentAttempts')}
+                note="How many times a request that failed for good — dead keys, spent quota, a refusal — is rebuilt before you see the error. 429s and broken connections retry separately and never spend this budget."
+              />
             </div>
           ) : null}
 
           {tab === 'data' ? (
             <div className={styles.fields}>
-              <NumberField label="Live activity rows" value={settings.activityCapacity} min={100} max={20000} onChange={number('activityCapacity')} note="The rolling buffer behind Live Activity." />
-              <NumberField label="History retention" value={settings.historyRetentionDays} min={1} max={365} suffix="days" onChange={number('historyRetentionDays')} />
+              <NumberField
+                label="Live activity rows" min={100} max={20000} presets={[1_000, 2_000, 5_000]} {...field('activityCapacity')}
+                note="How many recent requests Live Activity keeps in memory. More rows mean a longer scrollback and a bit more RAM."
+              />
+              <NumberField
+                label="History retention" min={1} max={365} suffix="days" presets={[7, 30, 90]} {...field('historyRetentionDays')}
+                note="How long the persisted journal — Insights, token counting, cost — is kept. Shrinking the window prunes the old records right away."
+              />
               {/* The public sidecar has no tunnel, so it keeps no tunnel log to retain.
                   The literal is tested here rather than a runtime flag so the field
                   leaves the public bundle entirely. */}
-              {__OWNER_EDITION__ ? <NumberField label="Tunnel log retention" value={settings.tunnelRetentionHours} min={24} max={720} suffix="hours" onChange={number('tunnelRetentionHours')} /> : null}
-              <NumberField label="Guardrail findings" value={settings.guardrailFindings} min={50} max={5000} onChange={number('guardrailFindings')} note="Inspection mode is chosen on the Guardrails page." />
+              {__OWNER_EDITION__ ? (
+                <NumberField
+                  label="Tunnel log retention" min={24} max={720} suffix="hours" presets={[72, 168, 720]} {...field('tunnelRetentionHours')}
+                  note="How long the per-client tunnel log is kept. Shrinking it prunes right away."
+                />
+              ) : null}
+              <NumberField
+                label="Guardrail findings" min={50} max={5000} presets={[250, 500, 1_000]} {...field('guardrailFindings')}
+                note="How many inspection findings are kept. They live in memory only and are never sent anywhere. The inspection mode itself is chosen on the Guardrails page."
+              />
             </div>
           ) : null}
 
           {tab === 'routing' ? (
             <div className={styles.fields}>
-              <ToggleField label="Failover chain" checked={settings.failoverEnabled} onChange={toggle('failoverEnabled')} note="On: a dead provider, an exhausted shared quota, a client-level rejection or a missing model moves the request to the next provider of that model's chain. Off: the refusal reaches your client exactly where it happened." />
-              <div className={styles.field}>
-                <span>Chain mode</span>
-                <span className={styles.inputWrap}>
-                  <select value={settings.chainMode} onChange={chainMode} aria-label="Chain mode">
-                    <option value="balance">Balance (round-robin)</option>
-                    <option value="failover">Failover (strict order)</option>
-                  </select>
+              <ToggleField
+                label="Failover chain" {...field('failoverEnabled')}
+                note="On: a dead provider, an exhausted shared quota, a client-level rejection or a missing model moves the request to the next provider of that model's chain. Off: the refusal reaches your client exactly where it happened."
+              />
+              <div className={styles.field} data-dirty={settings.chainMode !== initial.chainMode || undefined}>
+                <span className={styles.fieldHead}>
+                  <span>Chain mode</span>
+                  <span className={styles.fieldControl}>
+                    <FieldReset show={settings.chainMode !== initial.chainMode} label="Chain mode" onReset={() => set('chainMode', initial.chainMode)} />
+                    <span className={styles.inputWrap}>
+                      <select value={settings.chainMode} onChange={(event) => set('chainMode', event.currentTarget.value as Settings['chainMode'])} aria-label="Chain mode">
+                        <option value="balance">Balance (round-robin)</option>
+                        <option value="failover">Failover (strict order)</option>
+                      </select>
+                    </span>
+                  </span>
                 </span>
-                <em>Balance spreads requests across every healthy provider of a chain: two providers means twice the daily quota, because the batch quotas resellers run out of are per provider, not per you. Failover sends everything to the head of the chain and only moves on refusal.</em>
+                <em>Balance spreads requests across every healthy provider of a chain: two providers means twice the daily quota, because the quotas resellers run out of are per provider, not per you. Failover sends everything to the head of the chain and only moves on refusal. Default: Balance.</em>
               </div>
               <div className={styles.explainer}>
                 <strong>How a chain works</strong>
-                <p>Publish one model on several providers in Model Routes — for example glm → alpha-relay first, vendor-hub second. A request for glm lands on alpha-relay; when alpha-relay answers with a final verdict (dead keys, a spent quota, a client ban, a model it does not host), the relay degrades alpha-relay for five minutes, rewrites the request to the upstream name of the sibling and sends it there. Your client never sees the failure. After five minutes the chain tries alpha-relay again — in Balance mode it shares the load right away. Configure chains on the Model Routes page; models without a chain keep using the active provider.</p>
+                <p>Publish one model on several providers in Model Routes — for example glm → North Relay first, Vendor Hub second. A request for glm lands on North Relay; when North Relay answers with a final verdict (dead keys, a spent quota, a client ban, a model it does not host), the relay degrades North Relay for five minutes, rewrites the request to the upstream name of the sibling and sends it there. Your client never sees the failure. After five minutes the chain tries North Relay again — in Balance mode it shares the load right away. Configure chains on the Model Routes page; models without a chain keep using the active provider.</p>
               </div>
             </div>
           ) : null}
 
           {tab === 'interface' ? (
             <div className={styles.fields}>
-              <ToggleField label="Notifications" checked={settings.notificationsEnabled} onChange={toggle('notificationsEnabled')} note="Toasts and the unread badge. The feed itself stays recorded either way." />
-              <ToggleField label="Provider health probe" checked={settings.providerHealthEnabled} onChange={toggle('providerHealthEnabled')} note="One anonymous reachability check per enabled provider every two minutes." />
-              <ToggleField label="Animations" checked={settings.animationsEnabled} onChange={toggle('animationsEnabled')} note="The system's reduced-motion setting always wins over this switch." />
+              <ToggleField
+                label="Notifications" {...field('notificationsEnabled')}
+                note="Toasts and the unread badge. The feed itself stays recorded either way — this switch only governs the interruptions."
+              />
+              <ToggleField
+                label="Provider health probe" {...field('providerHealthEnabled')}
+                note="One anonymous reachability check per enabled provider every two minutes. It carries no keys and asks for nothing but a status code."
+              />
+              <ToggleField
+                label="Animations" {...field('animationsEnabled')}
+                note="Motion in the interface. The operating system's reduced-motion setting always wins over this switch."
+              />
             </div>
           ) : null}
 
@@ -278,24 +350,85 @@ export function BackupPanel() {
   )
 }
 
-function NumberField({ label, value, min, max, suffix, note, onChange }: { label: string; value: number; min: number; max: number; suffix?: string; note?: string; onChange: (event: ChangeEvent<HTMLInputElement>) => void }) {
-  return <label className={styles.field}><span>{label}</span><span className={styles.inputWrap}><input type="number" value={value} min={min} max={max} step="1" onChange={onChange} />{suffix ? <small>{suffix}</small> : null}</span>{note ? <em>{note}</em> : null}</label>
+function FieldReset({ show, label, onReset }: { show: boolean; label: string; onReset: () => void }) {
+  if (!show) return null
+  return (
+    <button type="button" className={styles.fieldReset} aria-label={`Reset ${label} to the saved value`} title="Back to the saved value" onClick={onReset}>
+      <RotateCcw size={12} aria-hidden="true" />
+    </button>
+  )
 }
 
-function ToggleField({ label, checked, note, onChange }: { label: string; checked: boolean; note?: string; onChange: () => void }) {
+/** A numeric setting with its explanation, the values that cover most cases,
+ * and a way back: to the saved value per field, to the shipped defaults per
+ * tab. The input is the precise tool; the presets are the fast one. */
+function NumberField({ label, value, saved, fallback, min, max, suffix, note, presets, onChange }: {
+  label: string
+  value: number
+  saved: number
+  fallback: number
+  min: number
+  max: number
+  suffix?: string
+  note?: string
+  presets?: readonly number[]
+  onChange: (value: number) => void
+}) {
+  const dirty = value !== saved
   return (
-    <div className={styles.field}>
-      <span>{label}</span>
-      <button
-        type="button"
-        className={styles.switch}
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        onClick={onChange}
-      >
-        <span className={styles.knob} aria-hidden="true" />
-      </button>
+    <div className={styles.field} data-dirty={dirty || undefined}>
+      <span className={styles.fieldHead}>
+        <span className={styles.fieldLabel}>{label}</span>
+        <span className={styles.fieldControl}>
+          <FieldReset show={dirty} label={label} onReset={() => onChange(saved)} />
+          <span className={styles.inputWrap}>
+            <input type="number" value={value} min={min} max={max} step="1" aria-label={label} onChange={(event) => onChange(Number(event.currentTarget.value))} />
+            {suffix ? <small>{suffix}</small> : null}
+          </span>
+        </span>
+      </span>
+      {note ? <em>{note}</em> : null}
+      {presets && presets.length > 0 ? (
+        <span className={styles.presets}>
+          {presets.map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              className={styles.preset}
+              data-active={value === preset || undefined}
+              aria-pressed={value === preset}
+              onClick={() => onChange(preset)}
+            >
+              {preset.toLocaleString('en-US')}
+            </button>
+          ))}
+          <span className={styles.presetDefault}>Default: {fallback.toLocaleString('en-US')}{suffix ? ` ${suffix}` : ''}</span>
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+function ToggleField({ label, value, saved, note, onChange }: { label: string; value: boolean; saved: boolean; note?: string; onChange: (value: boolean) => void }) {
+  const dirty = value !== saved
+  return (
+    <div className={styles.field} data-dirty={dirty || undefined}>
+      <span className={styles.fieldHead}>
+        <span className={styles.fieldLabel}>{label}</span>
+        <span className={styles.fieldControl}>
+          <FieldReset show={dirty} label={label} onReset={() => onChange(saved)} />
+          <button
+            type="button"
+            className={styles.switch}
+            role="switch"
+            aria-checked={value}
+            aria-label={label}
+            onClick={() => onChange(!value)}
+          >
+            <span className={styles.knob} aria-hidden="true" />
+          </button>
+        </span>
+      </span>
       {note ? <em>{note}</em> : null}
     </div>
   )

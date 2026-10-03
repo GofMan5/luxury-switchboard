@@ -1,0 +1,75 @@
+.page { display: flex; height: 100%; overflow: hidden; flex-direction: column; }
+
+.scopeRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.tableWrap { overflow: auto; }
+
+.table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 12px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  font-size: 11px;
+  font-weight: 560;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table td {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 7px 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.table tbody tr:hover { background: var(--bg-hover); }
+.table tbody tr[data-testing] { background: color-mix(in srgb, var(--accent-blue) 3%, transparent); }
+
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.sort:hover { color: var(--text-primary); }
+.sort:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 3px; }
+.sort span { width: 10px; }
+
+.state { display: inline-flex; align-items: center; gap: 7px; }
+
+.modelCell {
+  max-width: 320px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.rowRun {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast);
+}
+.rowRun:hover:not(:disabled) { color: var(--text-primary); border-color: var(--border-field); background: var(--bg-hover); }
+.rowRun:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.rowRun:disabled { opacity: .4; cursor: default; }

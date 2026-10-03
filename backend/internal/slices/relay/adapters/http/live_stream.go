@@ -309,8 +309,8 @@ func livePrefixReady(path string, buffered []byte) bool {
 // becomes the window plus the provider's own first token instead of the
 // whole generation.
 func (server *Server) liveStreamProbation() time.Duration {
-	if server.config.LiveStreamProbation <= 0 {
+	if server.configSnapshot().LiveStreamProbation <= 0 {
 		return defaultLiveStreamProbation
 	}
-	return server.config.LiveStreamProbation
+	return server.configSnapshot().LiveStreamProbation
 }

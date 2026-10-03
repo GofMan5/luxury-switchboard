@@ -172,6 +172,27 @@
   white-space: nowrap;
 }
 
+.providerMore {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--border-subtle);
+  padding: 8px 16px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.providerMore button {
+  border: 0;
+  padding: 2px 0;
+  color: var(--accent-blue);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.providerMore button:hover { text-decoration: underline; }
+.providerMore button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-radius: 3px; }
+
 .relayFoot {
   display: flex;
   min-height: 46px;

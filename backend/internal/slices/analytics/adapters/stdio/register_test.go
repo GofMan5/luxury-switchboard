@@ -102,7 +102,7 @@ func TestTheReportTravelsInOneProtocolFrame(t *testing.T) {
 			TokenVolume: domain.TokenVolume{Requests: 3, Completed: 2, TotalTokens: 100},
 		})
 	}
-	service := application.NewService(&fakeFacts{grouped: grouped}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")))
+	service := application.NewService(&fakeFacts{grouped: grouped}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")), nil)
 	frames := exchange(t, service, `"method":"analytics.report","payload":{"period":"24h"}`)
 	if len(frames) != 1 {
 		t.Fatalf("the report did not answer: %+v", frames)
@@ -119,7 +119,7 @@ func TestTheReportTravelsInOneProtocolFrame(t *testing.T) {
 
 func TestPricesRoundTripThroughTheProtocol(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "prices.json")
-	service := application.NewService(&fakeFacts{}, jsonfile.New(path))
+	service := application.NewService(&fakeFacts{}, jsonfile.New(path), nil)
 	frames := exchange(t, service,
 		`"method":"analytics.prices.set","payload":{"model":"gpt-6-astra","input":1.25,"cachedInput":0.125,"output":10,"reasoning":10}`,
 		`"method":"analytics.prices.get"`,
@@ -133,7 +133,7 @@ func TestPricesRoundTripThroughTheProtocol(t *testing.T) {
 	}
 	// The set answer and the get answer agree, and both agree with what the
 	// next process will load from disk.
-	fresh := application.NewService(&fakeFacts{}, jsonfile.New(path))
+	fresh := application.NewService(&fakeFacts{}, jsonfile.New(path), nil)
 	again := exchange(t, fresh, `"method":"analytics.prices.get"`)
 	pricesAgain, _ := payloadOf(t, again[0])["prices"].([]any)
 	if len(pricesAgain) != 1 || entryModel(t, pricesAgain[0]) != "gpt-6-astra" {
@@ -142,7 +142,7 @@ func TestPricesRoundTripThroughTheProtocol(t *testing.T) {
 }
 
 func TestAnImpossiblePriceIsRefusedByCode(t *testing.T) {
-	service := application.NewService(&fakeFacts{}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")))
+	service := application.NewService(&fakeFacts{}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")), nil)
 	frames := exchange(t, service, `"method":"analytics.prices.set","payload":{"model":"m","input":99999999}`)
 	if len(frames) != 1 || frames[0]["ok"] != false {
 		t.Fatalf("an impossible rate was accepted: %+v", frames)
@@ -154,7 +154,7 @@ func TestAnImpossiblePriceIsRefusedByCode(t *testing.T) {
 }
 
 func TestAFailedReportAnswersAnalyticsQueryFailed(t *testing.T) {
-	service := application.NewService(&fakeFacts{failing: true}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")))
+	service := application.NewService(&fakeFacts{failing: true}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")), nil)
 	frames := exchange(t, service, `"method":"analytics.report","payload":{"period":"24h"}`)
 	if len(frames) != 1 || frames[0]["ok"] != false || frameError(t, frames[0])["code"] != "analytics_query_failed" {
 		t.Fatalf("a failed query did not refuse by code: %+v", frames)
@@ -162,7 +162,7 @@ func TestAFailedReportAnswersAnalyticsQueryFailed(t *testing.T) {
 }
 
 func TestAnUnknownPeriodIsInvalidPayload(t *testing.T) {
-	service := application.NewService(&fakeFacts{}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")))
+	service := application.NewService(&fakeFacts{}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")), nil)
 	frames := exchange(t, service, `"method":"analytics.report","payload":{"period":"forever"}`)
 	if len(frames) != 1 || frames[0]["ok"] != false || frameError(t, frames[0])["code"] != "invalid_payload" {
 		t.Fatalf("an unknown period was accepted: %+v", frames)
@@ -176,7 +176,7 @@ func TestABrokenCatalogRefusesByItsOwnCode(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	service := application.NewService(&fakeFacts{}, jsonfile.New(path))
+	service := application.NewService(&fakeFacts{}, jsonfile.New(path), nil)
 	frames := exchange(t, service,
 		`"method":"analytics.prices.set","payload":{"model":"m","input":1}`,
 		`"method":"analytics.prices.get"`,
@@ -196,7 +196,7 @@ func TestAPricedReportCarriesTheEstimate(t *testing.T) {
 		ProviderID: "p1", ProviderName: "Alpha", Model: "gpt-6-astra",
 		TokenVolume: domain.TokenVolume{Requests: 1, Completed: 1, InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000},
 	}}
-	service := application.NewService(&fakeFacts{grouped: grouped}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")))
+	service := application.NewService(&fakeFacts{grouped: grouped}, jsonfile.New(filepath.Join(t.TempDir(), "prices.json")), nil)
 	frames := exchange(t, service,
 		`"method":"analytics.prices.set","payload":{"model":"gpt-6-astra","input":1,"cachedInput":0.1,"output":2}`,
 		`"method":"analytics.report","payload":{"period":"24h"}`,

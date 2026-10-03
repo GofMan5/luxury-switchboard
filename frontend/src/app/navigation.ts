@@ -4,6 +4,7 @@ import {
   CircleGauge,
   Coins,
   Database,
+  FlaskConical,
   KeyRound,
   Network,
   RadioTower,
@@ -19,6 +20,7 @@ export type AppRoute =
   | 'providers'
   | 'keys'
   | 'routes'
+  | 'tests'
   | 'guardrails'
   | 'tunnel'
   | 'clients'
@@ -56,6 +58,7 @@ export const navigation: readonly NavigationSection[] = [
       { id: 'providers', label: 'Providers', icon: Database },
       { id: 'keys', label: 'API Keys', icon: KeyRound },
       { id: 'routes', label: 'Model Routes', icon: Route },
+      { id: 'tests', label: 'Tests', icon: FlaskConical },
     ],
   },
   {

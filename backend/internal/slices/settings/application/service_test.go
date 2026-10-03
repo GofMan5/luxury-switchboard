@@ -51,18 +51,16 @@ func (repository *lockedSettingsRepository) Save(context.Context, domain.Setting
 	return repository.err
 }
 
+// Every setting applies live: the result never asks for a restart, and a
+// failed save leaves the running values untouched.
 func TestServicePersistsBeforePublishing(t *testing.T) {
 	repository := &memoryRepository{}
 	service, _ := NewService(repository)
 	next := domain.Defaults()
 	next.ListenerPort = 9000
 	result, err := service.Update(context.Background(), next)
-	if err != nil || !result.RestartRequired || service.Snapshot().ListenerPort != 9000 {
+	if err != nil || result.RestartRequired || service.Snapshot().ListenerPort != 9000 {
 		t.Fatalf("unexpected update: %+v %v", result, err)
-	}
-	result, err = service.Update(context.Background(), next)
-	if err != nil || !result.RestartRequired {
-		t.Fatalf("restart requirement was cleared before restart: %+v %v", result, err)
 	}
 	repository.fail = true
 	failed := next
@@ -131,12 +129,12 @@ func TestGuardrailModeIsPublishedWithoutRequiringARestart(t *testing.T) {
 		t.Fatalf("the mode change was not published: %v", applied)
 	}
 
-	// A listener also has to see changes that do need a restart, so a live setting
-	// updated alongside them is not lost until the process comes back.
+	// Nothing needs a restart anymore — the port change reaches the listener
+	// too, because the relay rebinds in place.
 	next.ListenerPort = 9000
 	result, err = service.Update(context.Background(), next)
-	if err != nil || !result.RestartRequired {
-		t.Fatalf("a port change did not require a restart: %+v %v", result, err)
+	if err != nil || result.RestartRequired {
+		t.Fatalf("a port change asked for a restart: %+v %v", result, err)
 	}
 	if len(applied) != 2 {
 		t.Fatalf("the second update was not published: %v", applied)

@@ -87,20 +87,6 @@ func (settings Settings) Normalized() Settings {
 	return settings
 }
 
-// RequiresRestart reports whether moving to next needs the process restarted.
-// Settings that the running application re-reads on its own — currently the
-// guardrail mode, the notification, health-probe and animation switches —
-// must not ask the user to restart for nothing.
-func (settings Settings) RequiresRestart(next Settings) bool {
-	settings.GuardrailMode, next.GuardrailMode = "", ""
-	settings.NotificationsEnabled, next.NotificationsEnabled = true, true
-	settings.ProviderHealthEnabled, next.ProviderHealthEnabled = true, true
-	settings.AnimationsEnabled, next.AnimationsEnabled = true, true
-	settings.FailoverEnabled, next.FailoverEnabled = true, true
-	settings.ChainMode, next.ChainMode = "", ""
-	return settings != next
-}
-
 func (settings Settings) Validate() error {
 	switch {
 	case settings.ListenerPort < 1 || settings.ListenerPort > 65535:

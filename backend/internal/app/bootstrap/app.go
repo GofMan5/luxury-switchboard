@@ -51,6 +51,7 @@ import (
 	relayroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/routes"
 	relaystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/stdio"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
+	relaydomain "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/domain"
 	routedpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/dpapi"
 	routeproviders "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/providers"
 	routestdio "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/stdio"
@@ -61,6 +62,9 @@ import (
 	settingsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/application"
 	settingsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
 	systemstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/system/adapters/stdio"
+	updategithub "github.com/luxuryprivate/switchboard/backend/internal/slices/updates/adapters/github"
+	updatesstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/updates/adapters/stdio"
+	updatesapp "github.com/luxuryprivate/switchboard/backend/internal/slices/updates/application"
 )
 
 type App struct {
@@ -166,9 +170,10 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 			PermanentAttempts:     settings.PermanentAttempts,
 		},
 	})
+	modelGateway := modelrelay.NewGateway(httpRuntime, max(time.Duration(settings.HeaderTimeoutSeconds)*time.Second, 90*time.Second))
 	modelService, err := modelapp.NewService(
 		modelproviders.NewCatalog(catalog),
-		modelrelay.NewGateway(httpRuntime, max(time.Duration(settings.HeaderTimeoutSeconds)*time.Second, 90*time.Second)),
+		modelGateway,
 	)
 	if err != nil {
 		return nil, err
@@ -196,6 +201,9 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	}
 	healthMonitor.SetEnabled(settings.ProviderHealthEnabled)
 	providerstdio.Register(protocol, catalog, providerManager, keyScheduler, healthMonitor)
+	// The update check asks the project's own release feed, nothing else; a
+	// quiet answer on a machine without network is the correct one.
+	updatesstdio.Register(protocol, updatesapp.NewService(systemstdio.AppVersion, updategithub.NewClient()))
 	keystdio.Register(protocol, keyManager, keyprobe.NewProber(catalog))
 	relaystdio.Register(protocol, relay)
 	activitystdio.Register(protocol, activity, history)
@@ -222,7 +230,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		return nil, err
 	}
 	priceStore := analyticsjsonfile.New(analyticsPricePath)
-	analyticsService := analyticsapp.NewService(factsPort, priceStore)
+	analyticsService := analyticsapp.NewService(factsPort, priceStore, providerNames{catalog: catalog})
 	analyticsstdio.Register(protocol, analyticsService)
 	// The backup reads the same encrypted stores the managers own and restores
 	// through them; the analytics price catalog travels with it, so a restore
@@ -271,12 +279,46 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	// The mode is a setting, so changing it must take effect on the next request
 	// rather than at the next launch.
 	settingsService.OnApplied(func(applied settingsdomain.Settings) {
-		if mode, err := guardraildomain.ParseMode(applied.Normalized().GuardrailMode); err == nil {
+		normalized := applied.Normalized()
+		if mode, err := guardraildomain.ParseMode(normalized.GuardrailMode); err == nil {
 			_ = guardrails.SetMode(mode)
 		}
 		healthMonitor.SetEnabled(applied.ProviderHealthEnabled)
-		routeService.SetChainMode(applied.Normalized().ChainMode)
+		routeService.SetChainMode(normalized.ChainMode)
 		routes.SetFailoverEnabled(applied.FailoverEnabled)
+		// Everything below used to wait for a restart; it applies in place now.
+		// The port move rebinds the listener around a stop/start of the relay;
+		// the rest just reconfigure their own piece.
+		httpRuntime.Reconfigure(relayhttp.Config{
+			MaxRequestBytes:       int64(applied.MaxRequestMiB) * 1024 * 1024,
+			ResponseHeaderTimeout: time.Duration(applied.HeaderTimeoutSeconds) * time.Second,
+			StreamIdleTimeout:     time.Duration(applied.StreamIdleSeconds) * time.Second,
+			RetryBase:             time.Duration(applied.RetryBaseMilliseconds) * time.Millisecond,
+			RetryMax:              time.Duration(applied.RetryMaxSeconds) * time.Second,
+			PermanentAttempts:     applied.PermanentAttempts,
+		})
+		keyScheduler.SetMaxQueued(applied.MaxQueued)
+		activity.SetCapacity(applied.ActivityCapacity)
+		if store, ok := history.(interface{ SetRetentionDays(int) }); ok {
+			store.SetRetentionDays(applied.HistoryRetentionDays)
+		}
+		guardrails.SetCapacity(normalized.GuardrailFindings)
+		modelGateway.SetTimeout(max(time.Duration(applied.HeaderTimeoutSeconds)*time.Second, 90*time.Second))
+		next := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(applied.ListenerPort)))
+		if next != httpRuntime.Address() {
+			live := relay.Snapshot().State == relaydomain.StateLive
+			if live {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = relay.Stop(ctx)
+				cancel()
+			}
+			httpRuntime.SetAddress(next)
+			if live {
+				if _, err := relay.Start(); err != nil {
+					logger.Printf("relay could not bind the new port; it is stopped")
+				}
+			}
+		}
 	})
 	// The initial values come from the same record, so a restart and a live
 	// change leave the relay in the same state.
@@ -286,7 +328,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	modelstdio.Register(protocol, modelService)
 	edition, err := registerEdition(protocol, editionDependencies{
 		catalog: catalog, keys: keyManager, routes: routeService,
-		relay: httpRuntime, settings: settings, logger: logger,
+		relay: httpRuntime, settings: settings, applySettings: settingsService.OnApplied, logger: logger,
 	})
 	if err != nil {
 		return nil, err
@@ -467,6 +509,21 @@ func defaultHistory(retentionDays int, onDrop func(cause string)) (activityapp.H
 
 // repairMemoPath places the relay's learned-shape file beside the history
 // database: same volume, same backup story, no secret in it either way.
+// providerNames adapts the provider catalog to the analytics name port:
+// reports read the current display name of each id, so a renamed provider does
+// not keep wearing the old name in every future report.
+type providerNames struct {
+	catalog *providerapp.Catalog
+}
+
+func (source providerNames) Names(context.Context) (map[string]string, error) {
+	names := make(map[string]string)
+	for _, provider := range source.catalog.List() {
+		names[provider.ID] = provider.Name
+	}
+	return names, nil
+}
+
 func repairMemoPath(historyPath string) string {
 	if historyPath == "" {
 		return ""

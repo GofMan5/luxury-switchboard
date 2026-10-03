@@ -210,6 +210,7 @@ fn allowed_method(method: &str) -> bool {
         "system.handshake"
             | "system.cancel"
             | "system.shutdown"
+            | "updates.check"
             | "relay.status"
             | "relay.start"
             | "relay.stop"

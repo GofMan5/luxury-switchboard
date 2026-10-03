@@ -16,6 +16,7 @@ import (
 	sharedstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/adapters/stdio"
 	sharedapp "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/application"
 	shareddomain "github.com/luxuryprivate/switchboard/backend/internal/slices/sharedcontrol/domain"
+	settingsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
 	tunneldpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/dpapi"
 	tunnelhttp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/http"
 	tunnelprivacy "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnel/adapters/privacyaudit"
@@ -44,6 +45,15 @@ func registerEdition(protocol *platform.Server, dependencies editionDependencies
 		// decision from an earlier session is unreachable and a new one cannot be
 		// saved. The message says so, because the two are not the same loss.
 		logger.Printf("tunnel client storage is unavailable; earlier bans are not in force and new ones cannot be saved")
+	}
+	// The retention window is a setting; it applies to the store in place, like
+	// every other setting, rather than at the next launch.
+	if history != nil && dependencies.applySettings != nil {
+		dependencies.applySettings(func(applied settingsdomain.Settings) {
+			if store, ok := history.(interface{ SetRetentionHours(int) }); ok {
+				store.SetRetentionHours(applied.TunnelRetentionHours)
+			}
+		})
 	}
 	clients := clientapp.NewService(history)
 	if err := clients.LoadProfiles(context.Background()); err != nil && historyErr == nil {

@@ -85,6 +85,20 @@ func NewInspector(engine *domain.Engine, mode domain.Mode, capacity int) (*Inspe
 	return &Inspector{engine: engine, mode: mode, capacity: capacity, now: time.Now}, nil
 }
 
+// SetCapacity moves the findings bound live; a smaller bound drops the oldest
+// records right away instead of waiting for the next finding to trim them.
+func (inspector *Inspector) SetCapacity(capacity int) {
+	if capacity < 1 {
+		capacity = defaultCapacity
+	}
+	inspector.mu.Lock()
+	inspector.capacity = capacity
+	if len(inspector.records) > inspector.capacity {
+		inspector.records = inspector.records[:inspector.capacity]
+	}
+	inspector.mu.Unlock()
+}
+
 // Mode reports the active mode.
 func (inspector *Inspector) Mode() domain.Mode {
 	inspector.mu.RLock()

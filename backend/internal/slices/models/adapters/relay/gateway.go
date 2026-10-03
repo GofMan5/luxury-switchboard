@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/models/application"
@@ -24,20 +25,34 @@ const (
 )
 
 type Gateway struct {
-	dispatcher   relayapp.Dispatcher
-	timeout      time.Duration
-	probeTimeout time.Duration
+	dispatcher relayapp.Dispatcher
+	timeout    atomic.Int64
 }
 
 func NewGateway(dispatcher relayapp.Dispatcher, timeout time.Duration) *Gateway {
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	return &Gateway{dispatcher: dispatcher, timeout: timeout, probeTimeout: min(timeout, maxProbeTimeout)}
+	gateway := &Gateway{dispatcher: dispatcher}
+	gateway.timeout.Store(int64(timeout))
+	return gateway
+}
+
+// SetTimeout moves the discovery/probe budget live: the probe cap follows the
+// new budget on the next call.
+func (gateway *Gateway) SetTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	gateway.timeout.Store(int64(timeout))
+}
+
+func (gateway *Gateway) probeBudget() time.Duration {
+	return min(time.Duration(gateway.timeout.Load()), maxProbeTimeout)
 }
 
 func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gateway.timeout)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(gateway.timeout.Load()))
 	defer cancel()
 	response, err := gateway.dispatcher.Dispatch(ctx, relayapp.DispatchRequest{
 		Method: http.MethodGet, Path: provider.ModelsPath, ProviderID: provider.ID,
@@ -61,8 +76,40 @@ func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) 
 
 func (gateway *Gateway) Test(ctx context.Context, provider domain.Provider, model string) domain.TestResult {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, gateway.probeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, gateway.probeBudget())
 	defer cancel()
+	// The streaming probe answers everything the plain request does and more:
+	// the first-token time and the token count. A dispatcher without it (a
+	// test double) takes the buffered path.
+	if prober, ok := gateway.dispatcher.(relayapp.StreamProber); ok {
+		report, err := prober.Probe(ctx, provider.ID, model)
+		result := domain.TestResult{
+			ProviderID: provider.ID, Model: model,
+			Status: report.Status, LatencyMS: report.TotalMs,
+			TTFTMS: report.TTFTMs, OutputTokens: report.OutputTokens,
+		}
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				result.State = "timeout"
+				result.ErrorCode = "timeout"
+			} else {
+				result.State = "unavailable"
+				result.ErrorCode = "transport"
+			}
+			return result
+		}
+		if report.Status >= 200 && report.Status < 300 && report.ErrorCode == "" {
+			result.State = "available"
+			return result
+		}
+		result.State = "unavailable"
+		if report.ErrorCode != "" {
+			result.ErrorCode = report.ErrorCode
+		} else {
+			result.ErrorCode = statusCode(report.Status)
+		}
+		return result
+	}
 	response, err := gateway.testRequest(ctx, provider, model)
 	result := domain.TestResult{ProviderID: provider.ID, Model: model, LatencyMS: float64(time.Since(started).Microseconds()) / 1000}
 	if err != nil {

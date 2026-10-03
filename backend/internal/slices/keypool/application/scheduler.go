@@ -106,6 +106,17 @@ func NewScheduler(maxQueued int) *Scheduler {
 	}
 }
 
+// SetMaxQueued moves the queue bound live: a smaller bound stops admitting
+// earlier while the waiters already parked drain on their own.
+func (scheduler *Scheduler) SetMaxQueued(maxQueued int) {
+	if maxQueued < 1 {
+		maxQueued = defaultMaxQueued
+	}
+	scheduler.mu.Lock()
+	scheduler.maxQueued = maxQueued
+	scheduler.mu.Unlock()
+}
+
 // Configure replaces a provider's rate settings and key set. window is the
 // period the limit is counted over; a zero value keeps the per-minute default.
 func (scheduler *Scheduler) Configure(providerID string, rpm int, window time.Duration, keys []domain.Key) error {

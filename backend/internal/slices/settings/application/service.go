@@ -25,7 +25,6 @@ type Service struct {
 	mu         sync.RWMutex
 	repository Repository
 	settings   domain.Settings
-	applied    domain.Settings
 	loadMu     sync.RWMutex
 	loadErr    error
 
@@ -43,7 +42,7 @@ func NewService(repository Repository) (*Service, error) {
 		return nil, errors.New("settings repository is required")
 	}
 	defaults := domain.Defaults()
-	return &Service{repository: repository, settings: defaults, applied: defaults}, nil
+	return &Service{repository: repository, settings: defaults}, nil
 }
 
 func (service *Service) Load(ctx context.Context) error {
@@ -68,7 +67,6 @@ func (service *Service) Load(ctx context.Context) error {
 	}
 	service.mu.Lock()
 	service.settings = settings
-	service.applied = settings
 	service.mu.Unlock()
 	return nil
 }
@@ -102,10 +100,11 @@ func (service *Service) Update(ctx context.Context, settings domain.Settings) (U
 	}
 	service.mu.Lock()
 	service.settings = settings
-	restartRequired := service.applied.RequiresRestart(settings)
 	service.mu.Unlock()
+	// Every setting applies live — the listeners reconfigure the relay, the
+	// queues, the stores and the probe in place. Nothing asks for a restart.
 	service.notifyApplied(settings)
-	return UpdateResult{Settings: settings, RestartRequired: restartRequired}, nil
+	return UpdateResult{Settings: settings, RestartRequired: false}, nil
 }
 
 // OnApplied registers a listener for settings that take effect without a restart.

@@ -27,7 +27,7 @@ type Store struct {
 	closed    atomic.Bool
 	closeMu   sync.Mutex
 	dbClosed  bool
-	retention time.Duration
+	retention atomic.Int64
 }
 
 func DefaultPath() (string, error) {
@@ -36,6 +36,16 @@ func DefaultPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, "tunnel_history.v1.db"), nil
+}
+
+// SetRetentionHours moves the retention window live; the prune running right
+// after applies it instead of waiting for the next launch.
+func (store *Store) SetRetentionHours(hours int) {
+	if hours < 1 {
+		return
+	}
+	store.retention.Store(int64(time.Duration(hours) * time.Hour))
+	_ = store.prune(context.Background())
 }
 
 func Open(path string, retentionHours int) (*Store, error) {
@@ -59,7 +69,8 @@ func Open(path string, retentionHours int) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	store := &Store{db: db, retention: time.Duration(retentionHours) * time.Hour}
+	store := &Store{db: db}
+	store.retention.Store(int64(time.Duration(retentionHours) * time.Hour))
 	if err := store.prune(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -181,7 +192,7 @@ func (store *Store) writeBatch(batch []domain.Event) error {
 }
 
 func (store *Store) prune(ctx context.Context) error {
-	_, err := store.db.ExecContext(ctx, `DELETE FROM tunnel_events WHERE time_ms < ?`, time.Now().UTC().Add(-store.retention).UnixMilli())
+	_, err := store.db.ExecContext(ctx, `DELETE FROM tunnel_events WHERE time_ms < ?`, time.Now().UTC().Add(-time.Duration(store.retention.Load())).UnixMilli())
 	if err != nil {
 		return errors.New("tunnel history retention failed")
 	}

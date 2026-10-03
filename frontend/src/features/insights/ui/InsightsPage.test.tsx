@@ -6,6 +6,32 @@ import type { InsightsState } from '../application/insights-model'
 import type { InsightsReport, InsightsPeriod } from '../domain/insights'
 
 vi.mock('./useInsights', () => ({ useInsights: vi.fn() }))
+// The page reads relay route counts from the shared routes model; the stub
+// answers with two routes on p1 and stays quiet otherwise.
+// The snapshot is one cached object: useSyncExternalStore loops on a fresh
+// identity per call, and the mock must not invent the bug it stands in for.
+const stubRoutesState = {
+  phase: 'ready', target: 'relay', routes: [],
+  published: {
+    relay: [
+      { publicModel: 'fast', upstreamModel: 'gpt-6-astra', providerId: 'p1', target: 'relay', enabled: true },
+      { publicModel: 'slow', upstreamModel: 'gpt-6-astra-0901', providerId: 'p1', target: 'relay', enabled: true },
+      { publicModel: 'draft', upstreamModel: 'claude-opus-5', providerId: 'p2', target: 'relay', enabled: false },
+    ],
+    tunnel: [],
+  },
+  pending: '', error: '',
+}
+
+vi.mock('../../../app/services', () => ({
+  useAppServices: () => ({
+    routes: {
+      subscribe: (_listener: () => void) => () => undefined,
+      snapshot: () => stubRoutesState,
+      load: vi.fn(),
+    },
+  }),
+}))
 
 import InsightsPage from './InsightsPage'
 import { useInsights } from './useInsights'
@@ -17,6 +43,7 @@ const mockUseInsights = vi.mocked(useInsights)
 const mockLoad = vi.fn()
 const mockSavePrice = vi.fn()
 const mockRemovePrice = vi.fn()
+const mockSetCurrency = vi.fn()
 
 function emptyVolume() {
   return {
@@ -55,7 +82,7 @@ const mockRefresh = vi.fn()
 
 function show(state: InsightsState) {
   mockUseInsights.mockReturnValue({
-    model: { load: mockLoad, savePrice: mockSavePrice, removePrice: mockRemovePrice, refresh: mockRefresh },
+    model: { load: mockLoad, savePrice: mockSavePrice, removePrice: mockRemovePrice, refresh: mockRefresh, setCurrency: mockSetCurrency },
     state,
   } as never)
   render(<InsightsPage />)
@@ -109,6 +136,22 @@ describe('InsightsPage', () => {
     await waitFor(() => expect(mockSavePrice).toHaveBeenCalled())
     expect(mockSavePrice.mock.calls[0][0].model).toBe('gpt-6-astra')
     expect(mockSavePrice.mock.calls[0][0].input).toBe(1.25)
+  })
+
+  it('names each provider its relay route count', () => {
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesCurrency: 'USD', pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
+    const row = screen.getByText('Alpha').closest('tr')
+    // Two enabled relay routes on p1; the disabled one on p2 does not count.
+    expect(row?.textContent).toContain('2')
+    expect(screen.getByText('Beta').closest('tr')?.textContent).toContain('0')
+  })
+
+  it('opens the price editor at a model straight from its row', async () => {
+    show({ phase: 'ready', period: '24h', report: sampleReport(), prices: [], pricesCurrency: 'USD', pricesPhase: 'ready', error: '', recent: [], recentAvailable: 0 })
+    const row = screen.getByText('gpt-6-astra').closest('tr')
+    fireEvent.click(row?.querySelector('button') as HTMLElement)
+    const dialog = await screen.findByRole('dialog')
+    expect((dialog.querySelector('[list="price-models"]') as HTMLInputElement).value).toBe('gpt-6-astra')
   })
 
   it('dismisses the price editor with Escape like every other modal', async () => {

@@ -11,24 +11,22 @@ import (
 	settingsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
 )
 
-// The public edition ships without the publishing stack. Its wiring lives behind
-// the "public" build tag, so the tunnel, its clients and shared control are absent
-// from the binary instead of merely hidden in the interface: a public build cannot
-// publish a gateway even when its sidecar is driven directly over stdio.
+// publishingDependencies is what the publishing stack (tunnel gateway, client
+// governance) needs from the rest of the composition.
 type editionDependencies struct {
 	catalog  *providerapp.Catalog
 	keys     *keyapp.Manager
 	routes   *routeapp.Service
 	relay    *relayhttp.Server
 	settings settingsdomain.Settings
-	// applySettings lets the edition's own stores follow live settings changes;
+	// applySettings lets the publishing stores follow live settings changes;
 	// nil in a wiring that has none to follow.
 	applySettings func(listener func(settingsdomain.Settings))
 	logger        *log.Logger
 }
 
-// editionRuntime owns whatever lifecycle the edition added. Both hooks are nil when
-// the edition contributes nothing.
+// editionRuntime owns whatever lifecycle the publishing stack added. Both hooks
+// are nil when it contributes nothing.
 type editionRuntime struct {
 	stop  func(context.Context) error
 	close func(context.Context) error

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { assertVersionsAgree, readVersion } from './version.mjs'
@@ -17,17 +17,10 @@ const architecture = {
   arm64: { windows: 'arm64', appImage: 'aarch64', deb: 'arm64' },
 }[process.arch]
 
-// The owner edition publishes gateways; the public one is compiled without that
-// stack. Both ship from one command so they can never drift apart.
-//
-// Only the public edition carries a label in its file name. Both installers share
-// one bundle identifier and one install path, so the public build silently replaces
-// an owner installation - naming them alike would leave nothing but the folder to
-// tell apart the two files once they are downloaded. The owner name stays bare
-// because the root SHA256SUMS.txt and package-friend.ps1 name it.
+// One build, one installer: the full product is the only product. The release
+// folder keeps the name scripts and docs already name.
 const editions = [
   { id: 'owner', label: '', directory: join(workspace, 'artifacts', 'release') },
-  { id: 'public', label: 'public-', directory: join(workspace, 'artifacts', 'release-public') },
 ]
 
 for (const edition of editions) {
@@ -61,9 +54,8 @@ function buildEdition(edition) {
   execFileSync(process.execPath, [pnpm, 'exec', 'tauri', 'build', '--ci'], {
     cwd: workspace,
     stdio: 'inherit',
-    env: { ...process.env, SWITCHBOARD_EDITION: edition.id },
+    env: { ...process.env },
   })
-  if (edition.id === 'public') assertPublicBuildIsStripped(workspace)
   mkdirSync(edition.directory, { recursive: true })
 
   for (const artifact of artifacts) {
@@ -120,61 +112,4 @@ function writeChecksums(edition) {
   console.log(`Release folder (${edition.id}): ${edition.directory}`)
 }
 
-// A public build that still carries the publishing stack would hand the tunnel to
-// anyone who runs the sidecar by hand, so the shipped bytes are checked, not the
-// intent of the build flags.
-function assertPublicBuildIsStripped(root) {
-  const pages = ownerPageChunks(root)
-  const ownerChunks = new RegExp(`^(?:${pages.join('|')})-`, 'u')
-  const bundle = join(root, 'frontend', 'dist', 'assets')
-  const owned = readdirSync(bundle).filter((name) => ownerChunks.test(name))
-  if (owned.length > 0) {
-    throw new Error(`Public interface still bundles owner workspaces: ${owned.join(', ')}`)
-  }
-  const binaries = join(root, 'src-tauri', 'binaries')
-  const sidecars = readdirSync(binaries).filter((name) => name.startsWith('switchboard-sidecar-'))
-  if (sidecars.length === 0) throw new Error('Public sidecar is missing')
-  const markers = ownerCommandMarkers(root)
-  for (const name of sidecars) {
-    const bytes = readFileSync(join(binaries, name))
-    for (const marker of markers) {
-      if (bytes.includes(marker)) {
-        throw new Error(`Public sidecar ${name} still contains the owner command ${marker}`)
-      }
-    }
-  }
-}
 
-// The owner chunk names are read from App.tsx instead of being restated here:
-// the lazy pages behind __OWNER_EDITION__ are exactly the modules the public
-// bundle must not carry, so a new owner workspace fails the scan the day it is
-// added. An empty read throws, because a scan with no names would pass on
-// anything.
-function ownerPageChunks(root) {
-  const source = readFileSync(join(root, 'frontend', 'src', 'App.tsx'), 'utf8')
-  const pages = [...source.matchAll(/__OWNER_EDITION__[^;]*?import\('([^']+)'\)/gu)]
-    .map((match) => basename(match[1]))
-  if (pages.length === 0) throw new Error('App.tsx lists no __OWNER_EDITION__ pages to strip')
-  return pages
-}
-
-// The sidecar markers are read from the backend instead of being restated here:
-// the commands of the stdio slices edition_owner.go registers (compiled only
-// into the owner binary), so a new owner command fails the public scan without
-// anyone remembering this file. An empty read throws for the same reason as the
-// chunk list.
-function ownerCommandMarkers(root) {
-  const bootstrap = readFileSync(join(root, 'backend', 'internal', 'app', 'bootstrap', 'edition_owner.go'), 'utf8')
-  const packages = [...bootstrap.matchAll(/"github\.com\/luxuryprivate\/switchboard\/backend\/(internal\/slices\/[^"]+\/adapters\/stdio)"/gu)]
-    .map((match) => join(root, 'backend', ...match[1].split('/')))
-  if (packages.length === 0) throw new Error('edition_owner.go registers no stdio slices to strip-check')
-  const markers = []
-  for (const directory of packages) {
-    for (const file of readdirSync(directory).filter((name) => name.endsWith('.go') && !name.endsWith('_test.go'))) {
-      const source = readFileSync(join(directory, file), 'utf8')
-      markers.push(...[...source.matchAll(/\.Handle\("([^"]+)"/gu)].map((match) => match[1]))
-    }
-  }
-  if (markers.length === 0) throw new Error('The owner stdio slices register no commands to strip-check')
-  return markers
-}

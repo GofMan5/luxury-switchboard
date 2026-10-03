@@ -4,7 +4,6 @@ import { formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
-import { OWNER_EDITION } from '../../../app/edition'
 import { Segmented } from '../../../shared/ui/chrome'
 import { useModels } from '../../models/ui/useModels'
 import { useProviders } from '../../providers/ui/useProviders'
@@ -143,17 +142,15 @@ export default function ModelRoutesPage() {
         </div>
       </header>
 
-      {OWNER_EDITION ? (
-        <div className={styles.toolbar}>
-          <Segmented
-            label="Route target"
-            value={state.target}
-            options={[{ id: 'relay' as const, label: 'Local Relay' }, { id: 'tunnel' as const, label: 'Public Tunnel' }]}
-            onChange={(target) => void model.load(target)}
-          />
-          <span>{state.target === 'relay' ? 'Unassigned models use the active provider.' : 'Only enabled aliases in this list appear in /v1/models.'}</span>
-        </div>
-      ) : null}
+      <div className={styles.toolbar}>
+        <Segmented
+          label="Route target"
+          value={state.target}
+          options={[{ id: 'relay' as const, label: 'Local Relay' }, { id: 'tunnel' as const, label: 'Public Tunnel' }]}
+          onChange={(target) => void model.load(target)}
+        />
+        <span>{state.target === 'relay' ? 'Unassigned models use the active provider.' : 'Only enabled aliases in this list appear in /v1/models.'}</span>
+      </div>
 
       {(state.error || models.error) ? <div className={styles.error} role="alert">{state.error || models.error}</div> : null}
 
@@ -272,7 +269,7 @@ const ModelCatalogRow = memo(function ModelCatalogRow({ item, selected, routed, 
       <span title={item}>{item}</span>
       <span className={styles.rowMeta}>
         {routed?.relay ? <em className={styles.badge} data-target="relay" title={`Relay: ${routed.relay}`}>Relay</em> : null}
-        {OWNER_EDITION && routed?.tunnel ? <em className={styles.badge} data-target="tunnel" title={`Tunnel alias: ${routed.tunnel}`}>{routed.tunnel === item ? 'Tunnel' : `Tunnel · ${routed.tunnel}`}</em> : null}
+        {routed?.tunnel ? <em className={styles.badge} data-target="tunnel" title={`Tunnel alias: ${routed.tunnel}`}>{routed.tunnel === item ? 'Tunnel' : `Tunnel · ${routed.tunnel}`}</em> : null}
         <ModelResult result={result} />
       </span>
     </label>

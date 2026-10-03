@@ -72,7 +72,7 @@ type App struct {
 	relay         *relayapp.Service
 	history       activityapp.History
 	analytics     *analyticssqlite.Facts
-	edition       editionRuntime
+	publishing    editionRuntime
 	logger        *log.Logger
 	healthMonitor *providerapp.HealthMonitor
 	healthCancel  context.CancelFunc
@@ -193,7 +193,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	protocol.Diagnostics(stderr)
 	systemstdio.Register(protocol)
 	// The health monitor probes enabled providers on an interval the settings
-	// gate. It runs in both editions: a public user's providers die the same
+	// gate. A user's providers die the same
 	// way an owner's do.
 	healthMonitor, err := providerapp.NewHealthMonitor(catalog, providerhealth.NewHTTPProber())
 	if err != nil {
@@ -333,7 +333,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	routes.SetFailoverEnabled(settings.FailoverEnabled)
 	routestdio.Register(protocol, routeService)
 	modelstdio.Register(protocol, modelService)
-	edition, err := registerEdition(protocol, editionDependencies{
+	publishing, err := registerPublishing(protocol, editionDependencies{
 		catalog: catalog, keys: keyManager, routes: routeService,
 		relay: httpRuntime, settings: settings, applySettings: settingsService.OnApplied, logger: logger,
 	})
@@ -345,7 +345,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		relay:         relay,
 		history:       history,
 		analytics:     analyticsFacts,
-		edition:       edition,
+		publishing:    publishing,
 		logger:        logger,
 		healthMonitor: healthMonitor,
 	}, nil
@@ -361,11 +361,11 @@ func (app *App) Run(ctx context.Context) error {
 		app.logger.Printf("relay start failed")
 	}
 	err := app.protocol.Serve(ctx)
-	editionCtx, cancelEdition := context.WithTimeout(context.Background(), 5*time.Second)
-	if stopErr := app.edition.Stop(editionCtx); stopErr != nil {
-		app.logger.Printf("edition runtime did not stop cleanly")
+	publishingCtx, cancelPublishing := context.WithTimeout(context.Background(), 5*time.Second)
+	if stopErr := app.publishing.Stop(publishingCtx); stopErr != nil {
+		app.logger.Printf("the publishing runtime did not stop cleanly")
 	}
-	cancelEdition()
+	cancelPublishing()
 	if app.healthCancel != nil {
 		app.healthCancel()
 	}
@@ -386,11 +386,11 @@ func (app *App) Run(ctx context.Context) error {
 			app.logger.Printf("analytics did not close cleanly")
 		}
 	}
-	editionHistoryCtx, cancelEditionHistory := context.WithTimeout(context.Background(), 5*time.Second)
-	if historyErr := app.edition.Close(editionHistoryCtx); historyErr != nil {
-		app.logger.Printf("edition history did not close cleanly")
+	publishingHistoryCtx, cancelPublishingHistory := context.WithTimeout(context.Background(), 5*time.Second)
+	if historyErr := app.publishing.Close(publishingHistoryCtx); historyErr != nil {
+		app.logger.Printf("the publishing history did not close cleanly")
 	}
-	cancelEditionHistory()
+	cancelPublishingHistory()
 	return err
 }
 

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { Coins, RefreshCw } from 'lucide-react'
 import type { InsightsPeriod, InsightsProvider, InsightsModel, HistoryRequest } from '../domain/insights'
 import { useInsights } from './useInsights'
+import { useAppServices } from '../../../app/services'
 import { PriceEditor } from './PriceEditor'
 import { DailyChart } from './DailyChart'
 import { formatClock, formatCost, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
@@ -34,6 +35,20 @@ type ModelSortKey = 'model' | 'requests' | 'success' | 'tokens' | 'tps' | 'cost'
 
 export default function InsightsPage() {
   const { model, state } = useInsights()
+  // The providers table also answers "how much of it is published": the relay
+  // route count comes from the routes model, loaded once and only read.
+  const { routes } = useAppServices()
+  const routesState = useSyncExternalStore(routes.subscribe, routes.snapshot)
+  useEffect(() => { if (routesState.phase === 'idle') void routes.load('relay') }, [routes, routesState.phase])
+  const routeCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const route of routesState.published.relay) {
+      if (route.enabled) counts.set(route.providerId, (counts.get(route.providerId) ?? 0) + 1)
+    }
+    return counts
+  }, [routesState.published.relay])
+  // A model row's price shortcut opens the editor with that model prefilled.
+  const [presetModel, setPresetModel] = useState<string | null>(null)
   useEffect(() => { if (state.phase === 'idle') void model.load('24h') }, [model, state.phase])
   // refresh() swaps the report in place; the phase never leaves ready, so the
   // period switch and the refresh button stay usable through every cycle.
@@ -79,6 +94,8 @@ export default function InsightsPage() {
             currency={state.pricesCurrency}
             phase={state.pricesPhase}
             knownModels={(report?.models ?? []).map((entry) => entry.model)}
+            presetModel={presetModel}
+            onPresetHandled={() => setPresetModel(null)}
             onSave={(draft) => model.savePrice(draft)}
             onRemove={(entry) => model.removePrice(entry)}
             onSetCurrency={(currency) => model.setCurrency(currency)}
@@ -123,6 +140,7 @@ export default function InsightsPage() {
           <Panel title="Providers" subtitle="Reliability and speed per provider — click a column to sort">
             <div className={chrome.tableWrap}><table className={`${chrome.dataTable} ${styles.wideProviders}`} aria-label="Provider breakdown"><thead><tr>
               <SortHeader<ProviderSortKey> label="Provider" sortKey="name" active={providerSort} onSort={setProviderSort} />
+              <th className={styles.num} scope="col">Relay routes</th>
               <SortHeader<ProviderSortKey> label="Requests" sortKey="requests" active={providerSort} onSort={setProviderSort} numeric />
               <SortHeader<ProviderSortKey> label="Success" sortKey="success" active={providerSort} onSort={setProviderSort} numeric />
               <SortHeader<ProviderSortKey> label="p50 / p95" sortKey="latency" active={providerSort} onSort={setProviderSort} numeric />
@@ -133,6 +151,7 @@ export default function InsightsPage() {
               {providers.map((provider) => (
                 <tr key={provider.id}>
                   <td title={provider.id}>{provider.name || provider.id}</td>
+                  <td className={styles.num}>{routeCounts.get(provider.id) ?? 0}</td>
                   <td className={styles.num}>{formatInteger(provider.volume.requests)}</td>
                   <td className={styles.num}>{formatRate(provider.volume.completed, provider.volume.requests)}</td>
                   <td className={styles.num}>{formatDuration(provider.p50Ms)} / {formatDuration(provider.p95Ms)}</td>
@@ -153,17 +172,26 @@ export default function InsightsPage() {
               <SortHeader<ModelSortKey> label="Tokens" sortKey="tokens" active={modelSort} onSort={setModelSort} numeric />
               <SortHeader<ModelSortKey> label="Tok/s" sortKey="tps" active={modelSort} onSort={setModelSort} numeric />
               <SortHeader<ModelSortKey> label="Est. cost" sortKey="cost" active={modelSort} onSort={setModelSort} numeric />
+              <th scope="col"><span className={styles.srOnly}>Price</span></th>
             </tr></thead><tbody>
-              {models.map((entry) => (
-                <tr key={entry.model}>
-                  <td title={entry.model}>{entry.model}</td>
-                  <td className={styles.num}>{formatInteger(entry.volume.requests)}</td>
-                  <td className={styles.num}>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
-                  <td className={styles.num}>{formatInteger(entry.volume.totalTokens)}</td>
-                  <td className={styles.num}>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond, 0) : '—'}</td>
-                  <td className={styles.num}>{entry.volume.isPriced ? formatCost(entry.volume.cost, state.pricesCurrency) : formatPartialCost(entry.volume.cost, state.pricesCurrency)}</td>
-                </tr>
-              ))}
+              {models.map((entry) => {
+                const priced = state.prices.some((price) => price.model === entry.model)
+                return (
+                  <tr key={entry.model}>
+                    <td title={entry.model}>{entry.model}</td>
+                    <td className={styles.num}>{formatInteger(entry.volume.requests)}</td>
+                    <td className={styles.num}>{formatRate(entry.volume.completed, entry.volume.requests)}</td>
+                    <td className={styles.num}>{formatInteger(entry.volume.totalTokens)}</td>
+                    <td className={styles.num}>{entry.tokensPerSecond > 0 ? formatDecimal(entry.tokensPerSecond, 0) : '—'}</td>
+                    <td className={styles.num}>{entry.volume.isPriced ? formatCost(entry.volume.cost, state.pricesCurrency) : formatPartialCost(entry.volume.cost, state.pricesCurrency)}</td>
+                    <td className={styles.priceCell}>
+                      <button type="button" className={styles.priceAction} data-priced={priced || undefined} onClick={() => setPresetModel(entry.model)}>
+                        <Coins size={12} aria-hidden="true" />{priced ? 'Edit price' : 'Set price'}
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody></table></div>
           </Panel>
         ) : null}

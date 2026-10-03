@@ -110,7 +110,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           apiKeys: new ApiKeysModel(new StdioApiKeysPort(session)),
           settings: new SettingsModel(new StdioSettingsPort(session)),
           insights: new InsightsModel(new StdioInsightsPort(session)),
-          routes: new RoutesModel(new StdioRoutesPort(session), { tracksBothTargets: __OWNER_EDITION__ }),
+          routes: new RoutesModel(new StdioRoutesPort(session)),
           models: new ModelsModel(new StdioModelsPort(session)),
           tests: new TestsModel(new StdioModelsPort(session)),
           updates: new UpdatesModel(new StdioUpdatesPort(session)),
@@ -118,13 +118,9 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           notifications: new NotificationsModel(new StdioNotificationsPort(session)),
           backup: new BackupModel(new StdioBackupPort(session)),
           appVersion: session.appVersion ?? '',
-          // Owner-only models are constructed only where their commands exist.
-          ...(__OWNER_EDITION__
-            ? {
-                tunnel: new TunnelModel(new StdioTunnelPort(session)),
-                clients: new ClientsModel(new StdioClientsPort(session)),
-              }
-            : {}),
+          // One build serves every workspace.
+          tunnel: new TunnelModel(new StdioTunnelPort(session)),
+          clients: new ClientsModel(new StdioClientsPort(session)),
         }
         if (disposed) { shutdown(); return }
         setState({ phase: 'ready', services })

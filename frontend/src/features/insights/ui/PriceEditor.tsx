@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Coins, Trash2 } from 'lucide-react'
 import type { ModelPrice } from '../domain/insights'
 import type { PriceDraft } from '../application/insights-port'
@@ -9,6 +9,9 @@ interface PriceEditorProps {
   readonly currency: string
   readonly phase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly knownModels: readonly string[]
+  /** A row elsewhere on the page asked for this model's editor. */
+  readonly presetModel?: string | null
+  readonly onPresetHandled?: () => void
   readonly onSave: (draft: PriceDraft) => Promise<boolean>
   readonly onRemove: (model: string) => Promise<boolean>
   readonly onSetCurrency: (currency: string) => Promise<boolean>
@@ -27,13 +30,26 @@ const emptyDraft: EditorState = { model: '', input: '', cachedInput: '', output:
 /** The currencies most operators bill in; the field also takes any ISO code. */
 const POPULAR_CURRENCIES = ['USD', 'EUR', 'CNY', 'RUB', 'GBP', 'JPY', 'KRW', 'INR', 'TRY', 'BRL', 'PLN', 'UAH', 'KZT', 'ILS', 'THB', 'VND', 'HKD', 'SGD', 'TWD', 'AED'] as const
 
-export function PriceEditor({ prices, currency, phase, knownModels, onSave, onRemove, onSetCurrency }: PriceEditorProps) {
+export function PriceEditor({ prices, currency, phase, knownModels, presetModel, onPresetHandled, onSave, onRemove, onSetCurrency }: PriceEditorProps) {
   const [open, setOpen] = useState(false)
+  // The preset is captured, not read live: the parent clears its signal the
+  // moment it is handled, and a dialog keyed on a cleared prop would remount
+  // empty under the operator's eyes.
+  const [preset, setPreset] = useState<string | null>(null)
   const busy = phase === 'saving' || phase === 'loading'
   const knownList = useMemo(
     () => [...new Set([...knownModels, ...prices.map((price) => price.model)])],
     [knownModels, prices],
   )
+  // A table row's "Set price" opens the dialog with that model already in.
+  useEffect(() => {
+    if (presetModel) {
+      setPreset(presetModel)
+      setOpen(true)
+      onPresetHandled?.()
+    }
+  }, [presetModel, onPresetHandled])
+  const close = () => { setOpen(false); setPreset(null) }
   return (
     <>
       <button type="button" className="price-button" onClick={() => setOpen(true)} disabled={busy}>
@@ -43,16 +59,16 @@ export function PriceEditor({ prices, currency, phase, knownModels, onSave, onRe
           the mount it belongs to: a conditional child of a persistent parent
           would run the hook's effect while the dialog does not exist. */}
       {open ? (
-        // The currency draft is captured at mount; keying on it reseeds the
-        // dialog if the catalog arrives while it is open, instead of letting a
-        // stale draft Apply over the freshly loaded one.
+        // Keyed on what seeds it: the currency reseeds a draft the catalog
+        // corrected, and a new preset model reseeds the form it fills.
         <PriceDialog
-          key={currency}
+          key={`${currency}:${preset ?? ''}`}
           prices={prices}
           currency={currency}
           phase={phase}
           knownList={knownList}
-          onClose={() => setOpen(false)}
+          initialModel={preset ?? ''}
+          onClose={close}
           onSave={onSave}
           onRemove={onRemove}
           onSetCurrency={onSetCurrency}
@@ -67,14 +83,15 @@ interface PriceDialogProps {
   readonly currency: string
   readonly phase: 'idle' | 'loading' | 'saving' | 'ready' | 'error'
   readonly knownList: readonly string[]
+  readonly initialModel?: string
   readonly onClose: () => void
   readonly onSave: (draft: PriceDraft) => Promise<boolean>
   readonly onRemove: (model: string) => Promise<boolean>
   readonly onSetCurrency: (currency: string) => Promise<boolean>
 }
 
-function PriceDialog({ prices, currency, phase, knownList, onClose, onSave, onRemove, onSetCurrency }: PriceDialogProps) {
-  const [state, setState] = useState<EditorState>(emptyDraft)
+function PriceDialog({ prices, currency, phase, knownList, initialModel = '', onClose, onSave, onRemove, onSetCurrency }: PriceDialogProps) {
+  const [state, setState] = useState<EditorState>({ ...emptyDraft, model: initialModel })
   const [currencyDraft, setCurrencyDraft] = useState(currency)
   const [currencyError, setCurrencyError] = useState('')
   const busy = phase === 'saving' || phase === 'loading'

@@ -1,5 +1,3 @@
-//go:build !public
-
 package bootstrap
 
 import (

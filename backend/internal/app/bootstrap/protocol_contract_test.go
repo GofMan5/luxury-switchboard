@@ -77,27 +77,17 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 		t.Fatalf("handshake reports %q while the binary is %q", handshake.Payload.Edition, systemstdio.Edition)
 	}
 
-	owner := systemstdio.Edition == "owner"
-	for _, method := range []string{"tunnel.get", "clients.list"} {
-		answer := call(t, toApp, answers, method)
-		if owner && !answer.OK {
-			t.Fatalf("the owner edition refused %s: %s", method, answer.Error.Code)
-		}
-		if !owner && (answer.OK || answer.Error.Code != "method_not_found") {
-			t.Fatalf("the public edition still serves %s: ok=%v code=%q", method, answer.OK, answer.Error.Code)
+	// One build serves everything: the publishing stack is part of the product,
+	// and the handshake's capability list must admit what the binary answers.
+	for _, method := range []string{"tunnel.get", "clients.list", "relay.status", "guardrails.status"} {
+		if answer := call(t, toApp, answers, method); !answer.OK {
+			t.Fatalf("the build refused %s: %s", method, answer.Error.Code)
 		}
 	}
-	// A command every edition owns must keep working next to the refusals.
-	if relay := call(t, toApp, answers, "relay.status"); !relay.OK {
-		t.Fatalf("a shared command broke: %s", relay.Error.Code)
-	}
-	// Guardrails belong to both editions, and the handshake has to admit it: the
-	// interface is told not to offer a workspace the capability list omits.
-	if guardrails := call(t, toApp, answers, "guardrails.status"); !guardrails.OK {
-		t.Fatalf("this edition lost the guardrails: %s", guardrails.Error.Code)
-	}
-	if !slices.Contains(handshake.Payload.Capabilities, "guardrails.manage") {
-		t.Fatalf("the handshake hides a workspace this binary serves: %v", handshake.Payload.Capabilities)
+	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage"} {
+		if !slices.Contains(handshake.Payload.Capabilities, capability) {
+			t.Fatalf("the handshake hides a workspace this binary serves: %v", handshake.Payload.Capabilities)
+		}
 	}
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "provider-switchboard",
   "private": true,
-  "version": "1.0.40",
+  "version": "1.0.41",
   "packageManager": "pnpm@10.26.2",
   "scripts": {
     "dev": "tauri dev",
@@ -15,7 +15,7 @@
     "check": "pnpm version:check && pnpm frontend:check && pnpm backend:check && cargo check --manifest-path src-tauri/Cargo.toml",
     "frontend:check": "pnpm --dir frontend check",
     "frontend:test": "pnpm --dir frontend test",
-    "backend:check": "go -C backend test ./... && go -C backend test -tags public ./...",
+    "backend:check": "go -C backend test ./...",
     "backend:race": "go -C backend test -race ./..."
   },
   "devDependencies": {

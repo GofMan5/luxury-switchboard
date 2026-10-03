@@ -62,24 +62,18 @@ export const navigation: readonly NavigationSection[] = [
   {
     label: 'Safety',
     items: [
-      // Both editions inspect provider answers. A public user has the same right
+      // Everyone inspects provider answers. Every user has the same right
       // to know what a provider sent them as the owner does.
       { id: 'guardrails', label: 'Guardrails', icon: ShieldAlert },
     ],
   },
-  ...(__OWNER_EDITION__
-    ? ([
-        {
-          label: 'Publishing',
-          // The literal is tested here rather than the re-export, so the public
-          // bundle drops their icons too.
-          items: [
-            { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
-            { id: 'clients', label: 'Clients', icon: UsersRound },
-          ],
-        },
-      ] as const satisfies readonly NavigationSection[])
-    : []),
+  {
+    label: 'Publishing',
+    items: [
+      { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
+      { id: 'clients', label: 'Clients', icon: UsersRound },
+    ],
+  },
   {
     label: '',
     items: [{ id: 'settings', label: 'Settings', icon: Settings }],

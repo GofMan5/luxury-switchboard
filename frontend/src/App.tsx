@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type ComponentType } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { AppShell } from './app/AppShell'
 import { ServicesProvider } from './app/ServicesProvider'
 import { navigation, type AppRoute } from './app/navigation'
@@ -15,8 +15,8 @@ const GuardrailsPage = lazy(() => import('./features/guardrails/ui/GuardrailsPag
 
 // The public build never references these modules, so the bundler drops the
 // publishing workspaces instead of shipping unreachable code.
-const TunnelPage: ComponentType | null = __OWNER_EDITION__ ? lazy(() => import('./features/tunnel/ui/TunnelPage')) : null
-const ClientsPage: ComponentType | null = __OWNER_EDITION__ ? lazy(() => import('./features/clients/ui/ClientsPage')) : null
+const TunnelPage = lazy(() => import('./features/tunnel/ui/TunnelPage'))
+const ClientsPage = lazy(() => import('./features/clients/ui/ClientsPage'))
 
 export default function App() {
   return (
@@ -52,8 +52,8 @@ function Switchboard() {
         {route === 'routes' ? <ModelRoutesPage /> : null}
         {route === 'tests' ? <TestsPage /> : null}
         {route === 'guardrails' ? <GuardrailsPage /> : null}
-        {route === 'tunnel' && TunnelPage ? <TunnelPage /> : null}
-        {route === 'clients' && ClientsPage ? <ClientsPage /> : null}
+        {route === 'tunnel' ? <TunnelPage /> : null}
+        {route === 'clients' ? <ClientsPage /> : null}
       </Suspense>
     </AppShell>
   )

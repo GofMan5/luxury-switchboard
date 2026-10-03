@@ -1,5 +1,3 @@
-//go:build !public
-
 package bootstrap
 
 import (
@@ -25,11 +23,11 @@ import (
 	clientapp "github.com/luxuryprivate/switchboard/backend/internal/slices/tunnelclients/application"
 )
 
-// registerEdition wires the owner-only publishing stack: the public gateway and
-// its per-client governance. The tunnel publishes through a Cloudflare quick
+// registerPublishing wires the publishing stack: the public gateway and its
+// per-client governance. The tunnel publishes through a Cloudflare quick
 // tunnel the app runs itself — no host of ours, no SSH keys, no dashboard: one
 // click and the public address is on screen.
-func registerEdition(protocol *platform.Server, dependencies editionDependencies) (editionRuntime, error) {
+func registerPublishing(protocol *platform.Server, dependencies editionDependencies) (editionRuntime, error) {
 	logger := dependencies.logger
 	markers := publicmarkers.NewMarkers(dependencies.catalog, dependencies.keys)
 	routes := publicroutes.NewSource(dependencies.routes, markers)

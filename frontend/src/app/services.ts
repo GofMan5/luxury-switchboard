@@ -29,9 +29,9 @@ export interface AppServices {
   readonly guardrails: GuardrailsModel
   readonly notifications: NotificationsModel
   readonly backup: BackupModel
-  /** Publishing workspaces exist only in the owner edition. */
-  readonly tunnel?: TunnelModel
-  readonly clients?: ClientsModel
+  /** One build serves every workspace, publishing included. */
+  readonly tunnel: TunnelModel
+  readonly clients: ClientsModel
   /** Version the control plane reported during the handshake. */
   readonly appVersion: string
 }

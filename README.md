@@ -76,7 +76,7 @@ It is a native desktop app (Tauri + Go + React). Everything is local: the config
 
 ## Quick start
 
-1. Download the installer for your platform from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest). Windows ships an NSIS setup, Linux an AppImage and a deb; each edition has its own `SHA256SUMS.txt`.
+1. Download the installer from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest). Windows ships an NSIS setup, Linux an AppImage and a deb; `SHA256SUMS.txt` rides along.
 2. Add a provider in **Providers** — any OpenAI- or Anthropic-compatible endpoint. Loopback HTTP is allowed; remote plaintext HTTP is refused.
 3. Add keys in **API Keys** — one per line, priorities and RPM per key, an optional per-key proxy. Keys are encrypted with your OS user store and are write-only after saving.
 4. Point your client at `http://127.0.0.1:8798/v1`. That is the whole setup.
@@ -102,9 +102,9 @@ A provider that serves cheap inference is not automatically a provider you want 
 
 The engine skips a rule when the literals it cannot match without are absent — ordinary prose reaches almost no rule at all and is checked in under a millisecond. **Monitor** is the default on purpose: the rules match shell idiom an honest assistant writes all day, and **Block** is there for providers you do not trust. Rule and indicator data is vendored from [holone](https://github.com/vanndh/holone) (MIT, attribution ships with both installers); the differences this project made are recorded in the rule file's own `note`.
 
-## Editions
+## One build, no tiers
 
-Two editions build from one tree. **Owner** is the full product, including the tunnel. **Public** is the same product with the publishing stack compiled out — not hidden in the UI, absent from the binary, so the commands do not exist even if you drive the sidecar by hand. The handshake reports the edition and the capabilities it actually serves; a workspace the binary cannot serve is a workspace the interface does not offer.
+There is exactly one installer, and it is the full product — tunnel included. Nothing is gated, hidden, or compiled out; the handshake lists every capability the binary serves, and the interface offers exactly those workspaces.
 
 ## Data & storage
 

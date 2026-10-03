@@ -90,6 +90,18 @@
 :global(.price-currency button:disabled) { color: var(--text-disabled); cursor: not-allowed; }
 :global(.price-currency-note) { margin: 6px 0 0; color: var(--text-muted); font-size: 11px; }
 :global(.price-currency-error) { margin: 6px 0 0; color: var(--text-danger); font-size: 11.5px; }
+
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.priceCell { text-align: right; }
+.priceAction {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  border: 1px solid transparent; border-radius: var(--radius-control);
+  color: var(--text-muted); background: transparent; cursor: pointer; font-size: 11.5px;
+  transition: color var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast);
+}
+.priceAction:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.priceAction:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.priceAction[data-priced] { color: var(--text-secondary); border-color: var(--border-subtle); }
 :global(.price-grid) { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
 :global(.price-error) { margin: 0; color: color-mix(in srgb, var(--status-danger) 72%, var(--text-primary)); font-size: 12px; }
 :global(.price-actions) { display: flex; gap: 8px; align-items: center; }

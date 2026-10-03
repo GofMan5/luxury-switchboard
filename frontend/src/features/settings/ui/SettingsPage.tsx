@@ -121,7 +121,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
           ))}
           <div className={styles.railNote}>
             <History size={14} aria-hidden="true" />
-            <p>Security boundaries are fixed: loopback binding, remote HTTPS, secret redaction, body and frame caps{__OWNER_EDITION__ ? ', fail-closed tunnel sanitization' : ''} cannot be disabled from here.</p>
+            <p>Security boundaries are fixed: loopback binding, remote HTTPS, secret redaction, body and frame caps, fail-closed tunnel sanitization cannot be disabled from here.</p>
           </div>
         </nav>
 
@@ -192,15 +192,10 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
                 label="History retention" min={1} max={365} suffix="days" presets={[7, 30, 90]} {...field('historyRetentionDays')}
                 note="How long the persisted journal — Insights, token counting, cost — is kept. Shrinking the window prunes the old records right away."
               />
-              {/* The public sidecar has no tunnel, so it keeps no tunnel log to retain.
-                  The literal is tested here rather than a runtime flag so the field
-                  leaves the public bundle entirely. */}
-              {__OWNER_EDITION__ ? (
-                <NumberField
-                  label="Tunnel log retention" min={24} max={720} suffix="hours" presets={[72, 168, 720]} {...field('tunnelRetentionHours')}
-                  note="How long the per-client tunnel log is kept. Shrinking it prunes right away."
-                />
-              ) : null}
+              <NumberField
+                label="Tunnel log retention" min={24} max={720} suffix="hours" presets={[72, 168, 720]} {...field('tunnelRetentionHours')}
+                note="How long the per-client tunnel log is kept. Shrinking it prunes right away."
+              />
               <NumberField
                 label="Guardrail findings" min={50} max={5000} presets={[250, 500, 1_000]} {...field('guardrailFindings')}
                 note="How many inspection findings are kept. They live in memory only and are never sent anywhere. The inspection mode itself is chosen on the Guardrails page."

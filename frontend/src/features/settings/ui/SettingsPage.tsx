@@ -86,6 +86,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
     value: settings[key],
     saved: initial[key],
     fallback: SETTINGS_DEFAULTS[key],
+    disabled: pending,
     onChange: (value: Settings[K]) => set(key, value),
   })
 
@@ -93,7 +94,10 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
     <form className={styles.page} onSubmit={submit}>
       <header className="page-header">
         <div><h1>Settings</h1><p>Every value applies the moment you save — no restart</p></div>
-        <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={15} />{pending ? 'Saving…' : 'Save settings'}</Button>
+        <div className={styles.headerActions}>
+          {dirty && !pending ? <Button type="button" variant="ghost" onClick={() => setSettings(initial)}>Discard changes</Button> : null}
+          <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={15} />{pending ? 'Saving…' : 'Save settings'}</Button>
+        </div>
       </header>
       {error ? <div className={styles.error} role="alert">{error}</div> : null}
 
@@ -216,7 +220,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
                   <span className={styles.fieldControl}>
                     <FieldReset show={settings.chainMode !== initial.chainMode} label="Chain mode" onReset={() => set('chainMode', initial.chainMode)} />
                     <span className={styles.inputWrap}>
-                      <select value={settings.chainMode} onChange={(event) => set('chainMode', event.currentTarget.value as Settings['chainMode'])} aria-label="Chain mode">
+                      <select value={settings.chainMode} disabled={pending} onChange={(event) => set('chainMode', event.currentTarget.value as Settings['chainMode'])} aria-label="Chain mode">
                         <option value="balance">Balance (round-robin)</option>
                         <option value="failover">Failover (strict order)</option>
                       </select>
@@ -361,8 +365,9 @@ function FieldReset({ show, label, onReset }: { show: boolean; label: string; on
 
 /** A numeric setting with its explanation, the values that cover most cases,
  * and a way back: to the saved value per field, to the shipped defaults per
- * tab. The input is the precise tool; the presets are the fast one. */
-function NumberField({ label, value, saved, fallback, min, max, suffix, note, presets, onChange }: {
+ * tab. The input holds raw text while typing — a field you can empty — and the
+ * value commits parsed and clamped into the valid range on blur. */
+function NumberField({ label, value, saved, fallback, min, max, suffix, note, presets, disabled, onChange }: {
   label: string
   value: number
   saved: number
@@ -372,9 +377,24 @@ function NumberField({ label, value, saved, fallback, min, max, suffix, note, pr
   suffix?: string
   note?: string
   presets?: readonly number[]
+  disabled?: boolean
   onChange: (value: number) => void
 }) {
   const dirty = value !== saved
+  const [draft, setDraft] = useState<string | null>(null)
+  const change = (raw: string) => {
+    setDraft(raw)
+    const parsed = Number(raw)
+    if (raw.trim() !== '' && Number.isFinite(parsed)) onChange(parsed)
+  }
+  const commit = () => {
+    if (draft === null) return
+    const parsed = Number(draft)
+    // An empty or unreadable field returns to the saved value; an out-of-range
+    // one lands on the nearest bound rather than shipping a backend refusal.
+    onChange(draft.trim() === '' || !Number.isFinite(parsed) ? saved : Math.min(max, Math.max(min, Math.round(parsed))))
+    setDraft(null)
+  }
   return (
     <div className={styles.field} data-dirty={dirty || undefined}>
       <span className={styles.fieldHead}>
@@ -382,7 +402,7 @@ function NumberField({ label, value, saved, fallback, min, max, suffix, note, pr
         <span className={styles.fieldControl}>
           <FieldReset show={dirty} label={label} onReset={() => onChange(saved)} />
           <span className={styles.inputWrap}>
-            <input type="number" value={value} min={min} max={max} step="1" aria-label={label} onChange={(event) => onChange(Number(event.currentTarget.value))} />
+            <input type="number" value={draft ?? value} min={min} max={max} step="1" aria-label={label} disabled={disabled} onChange={(event) => change(event.currentTarget.value)} onBlur={commit} />
             {suffix ? <small>{suffix}</small> : null}
           </span>
         </span>
@@ -397,7 +417,8 @@ function NumberField({ label, value, saved, fallback, min, max, suffix, note, pr
               className={styles.preset}
               data-active={value === preset || undefined}
               aria-pressed={value === preset}
-              onClick={() => onChange(preset)}
+              disabled={disabled}
+              onClick={() => { setDraft(null); onChange(preset) }}
             >
               {preset.toLocaleString('en-US')}
             </button>
@@ -409,7 +430,7 @@ function NumberField({ label, value, saved, fallback, min, max, suffix, note, pr
   )
 }
 
-function ToggleField({ label, value, saved, note, onChange }: { label: string; value: boolean; saved: boolean; note?: string; onChange: (value: boolean) => void }) {
+function ToggleField({ label, value, saved, note, disabled, onChange }: { label: string; value: boolean; saved: boolean; note?: string; disabled?: boolean; onChange: (value: boolean) => void }) {
   const dirty = value !== saved
   return (
     <div className={styles.field} data-dirty={dirty || undefined}>
@@ -423,6 +444,7 @@ function ToggleField({ label, value, saved, note, onChange }: { label: string; v
             role="switch"
             aria-checked={value}
             aria-label={label}
+            disabled={disabled}
             onClick={() => onChange(!value)}
           >
             <span className={styles.knob} aria-hidden="true" />

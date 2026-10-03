@@ -3,6 +3,8 @@
 
 .error { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 12px 24px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
 
+.headerActions { display: flex; align-items: center; gap: 8px; }
+
 .layout {
   display: grid;
   min-width: 0;

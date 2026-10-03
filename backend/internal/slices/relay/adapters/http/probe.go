@@ -96,6 +96,26 @@ func probeChatBody(model string) []byte {
 	return body
 }
 
+// probeOutcome classifies the refused attempt for the key pool exactly the way
+// the retry ladder does: a dead key keeps counting its streak, a throttled one
+// earns its cooldown, and a balance verdict is the provider's, not the key's.
+// A probe that filed every refusal as a generic error would actively reset
+// dead-key detection and re-pick hot keys for the next real request.
+func probeOutcome(response *http.Response, config Config) relayapp.AttemptOutcome {
+	switch {
+	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication}
+	case response.StatusCode == http.StatusPaymentRequired:
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted}
+	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode == 529:
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRateLimited, RetryAfter: retryDelay(0, response, config)}
+	case response.StatusCode >= 500:
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError}
+	default:
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
+	}
+}
+
 func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path string, body []byte, dialect, publicModel string) (relayapp.ProbeReport, error) {
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: publicModel, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
@@ -140,7 +160,7 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 	defer response.Body.Close()
 	report := relayapp.ProbeReport{Status: response.StatusCode}
 	if response.StatusCode >= 400 {
-		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+		finishLease(lease, probeOutcome(response, server.configSnapshot()))
 		// The body of a refused probe is small and carries the reason; read it
 		// bounded, scrub it, file it.
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
@@ -155,10 +175,28 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 	report.TTFTMs = measured.ttft
 	report.TotalMs = measured.total
 	report.OutputTokens = measured.tokens
-	if readErr != nil {
-		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+	switch {
+	case readErr != nil:
 		report.ErrorCode = "transport"
 		report.ErrorDetail = truncateErrorDetail(redactSecrets(readErr.Error(), markers))
+	case measured.terminal == probeTerminalFailed:
+		// HTTP 200 is the standard streaming failure mode: the verdict rides a
+		// terminal event, not the status line.
+		report.ErrorCode = "upstream_status"
+	case measured.terminal == probeTerminalMissing:
+		// No terminal event at all: the answer ended mid-stream, or the
+		// provider answered a stream:true request with a plain object. The
+		// second shape can still carry the verdict in the body.
+		if probeJSONFailure(collected) {
+			report.ErrorCode = "upstream_status"
+		} else {
+			report.ErrorCode = "stream_incomplete"
+		}
+	}
+	if readErr != nil {
+		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+	} else if report.ErrorCode != "" {
+		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 	} else {
 		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
 	}
@@ -182,10 +220,19 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 	return report, nil
 }
 
+type probeTerminal int
+
+const (
+	probeTerminalMissing probeTerminal = iota
+	probeTerminalOK
+	probeTerminalFailed
+)
+
 type probeMeasurement struct {
-	ttft   float64
-	total  float64
-	tokens int
+	ttft     float64
+	total    float64
+	tokens   int
+	terminal probeTerminal
 }
 
 // measureProbeStream reads the SSE frames as they arrive, under the same idle
@@ -197,9 +244,7 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 		err   error
 	}
 	lines := make(chan line, 128)
-	reading := make(chan struct{})
 	go func() {
-		defer close(reading)
 		reader := bufio.NewReaderSize(body, 64*1024)
 		for {
 			value, err := reader.ReadBytes('\n')
@@ -211,7 +256,10 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 				}
 			}
 			if err != nil {
-				lines <- line{err: err}
+				select {
+				case lines <- line{err: err}:
+				case <-ctx.Done():
+				}
 				return
 			}
 		}
@@ -246,8 +294,11 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 			collected.Write(next.value)
 			trimmed := bytes.TrimRight(next.value, "\r\n")
 			if len(trimmed) == 0 {
-				delta, tokens := probeFrameDelta(frame.Bytes(), dialect)
+				delta, tokens, terminal := probeFrameDelta(frame.Bytes(), dialect)
 				frame.Reset()
+				if terminal != probeTerminalMissing {
+					measurement.terminal = terminal
+				}
 				if delta != "" {
 					contentFrames++
 					if measurement.ttft == 0 {
@@ -271,40 +322,53 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 	}
 }
 
-// probeFrameDelta extracts the content delta and the reported output-token
-// count from one SSE frame, in the dialect the provider speaks.
-func probeFrameDelta(frame []byte, dialect string) (string, int) {
+// probeFrameDelta extracts the content delta, the reported output-token count
+// and the terminal verdict from one SSE frame, in the dialect the provider
+// speaks. The terminal is what makes an HTTP 200 failure a failure.
+func probeFrameDelta(frame []byte, dialect string) (string, int, probeTerminal) {
 	for _, raw := range bytes.Split(frame, []byte("\n")) {
 		line := bytes.TrimSpace(raw)
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
 		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		if len(data) == 0 {
 			continue
+		}
+		if bytes.Equal(data, []byte("[DONE]")) {
+			return "", 0, probeTerminalOK
 		}
 		var payload map[string]any
 		if json.Unmarshal(data, &payload) != nil {
 			continue
 		}
+		// Any dialect's error object ends the probe as a failure.
+		if payload["error"] != nil {
+			return "", 0, probeTerminalFailed
+		}
+		eventType, _ := payload["type"].(string)
 		switch dialect {
 		case "anthropic":
-			if payload["type"] == "content_block_delta" {
+			switch eventType {
+			case "content_block_delta":
 				if delta, ok := payload["delta"].(map[string]any); ok {
 					if text, _ := delta["text"].(string); text != "" {
-						return text, 0
+						return text, 0, probeTerminalMissing
 					}
 				}
-			}
-			if payload["type"] == "message_delta" {
+			case "message_delta":
 				if usage, ok := payload["usage"].(map[string]any); ok {
-					return "", intNumber(usage["output_tokens"])
+					return "", intNumber(usage["output_tokens"]), probeTerminalMissing
 				}
+			case "message_stop":
+				return "", 0, probeTerminalOK
+			case "error":
+				return "", 0, probeTerminalFailed
 			}
 		case "chat":
-			if usage, ok := payload["usage"].(map[string]any); ok && usage != nil {
+			if usage, ok := payload["usage"].(map[string]any); ok {
 				if tokens := intNumber(usage["completion_tokens"]); tokens > 0 {
-					return "", tokens
+					return "", tokens, probeTerminalMissing
 				}
 			}
 			choices, _ := payload["choices"].([]any)
@@ -312,26 +376,47 @@ func probeFrameDelta(frame []byte, dialect string) (string, int) {
 				choice, _ := rawChoice.(map[string]any)
 				if delta, ok := choice["delta"].(map[string]any); ok {
 					if text, _ := delta["content"].(string); text != "" {
-						return text, 0
+						return text, 0, probeTerminalMissing
 					}
 				}
 			}
 		default:
-			if payload["type"] == "response.output_text.delta" {
+			switch eventType {
+			case "response.output_text.delta":
 				if text, _ := payload["delta"].(string); text != "" {
-					return text, 0
+					return text, 0, probeTerminalMissing
 				}
-			}
-			if payload["type"] == "response.completed" {
+			case "response.completed":
+				tokens := 0
 				if response, ok := payload["response"].(map[string]any); ok {
 					if usage, ok := response["usage"].(map[string]any); ok {
-						return "", intNumber(usage["output_tokens"])
+						tokens = intNumber(usage["output_tokens"])
 					}
 				}
+				return "", tokens, probeTerminalOK
+			case "response.failed", "response.incomplete", "error":
+				return "", 0, probeTerminalFailed
 			}
 		}
 	}
-	return "", 0
+	return "", 0, probeTerminalMissing
+}
+
+// probeJSONFailure answers the non-stream shape: a gateway that replies to a
+// stream:true body with one plain JSON object whose own status says failed.
+func probeJSONFailure(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var payload map[string]any
+	if json.Unmarshal(trimmed, &payload) != nil {
+		return false
+	}
+	if status, _ := payload["status"].(string); status == "failed" || status == "cancelled" {
+		return true
+	}
+	return payload["error"] != nil
 }
 
 func intNumber(value any) int {

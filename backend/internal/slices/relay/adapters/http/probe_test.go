@@ -117,6 +117,77 @@ func TestTheProbeFallsBackToChatLikeTheAvailabilityTest(t *testing.T) {
 	}
 }
 
+// HTTP 200 is the standard streaming failure mode: the verdict rides the
+// terminal event. A probe that read only the status line would report the
+// failure as "available".
+func TestTheProbeReadsTheTerminalVerdictNotTheStatusLine(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"O"}`+"\n\n")
+		fmt.Fprint(writer, `data: {"type":"response.failed","response":{"status":"failed"}}`+"\n\n")
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer", Format: "auto"}},
+		Credentials: &credentialSource{values: []string{"test-key"}},
+		Config:      Config{StreamIdleTimeout: 5 * time.Second},
+	})
+	report, err := server.Probe(context.Background(), "echo", "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != http.StatusOK || report.ErrorCode != "upstream_status" {
+		t.Fatalf("a failed terminal event was misreported: %+v", report)
+	}
+}
+
+// A gateway that answers stream:true with one plain object never sends an SSE
+// frame; the verdict sits in the body.
+func TestTheProbeReadsAPlainJSONFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, `{"status":"failed","error":{"message":"model unavailable"}}`)
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer", Format: "auto"}},
+		Credentials: &credentialSource{values: []string{"test-key"}},
+		Config:      Config{StreamIdleTimeout: 5 * time.Second},
+	})
+	report, err := server.Probe(context.Background(), "echo", "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ErrorCode != "upstream_status" {
+		t.Fatalf("a plain JSON failure read as success: %+v", report)
+	}
+}
+
+// A stream that ends without any terminal event is an incomplete answer, not
+// a fast one.
+func TestTheProbeReportsAMissingTerminal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, `data: {"choices":[{"delta":{"content":"OK"}}]}`+"\n\n")
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer", Format: "chat", ChatPath: "/v1/chat/completions"}},
+		Credentials: &credentialSource{values: []string{"test-key"}},
+		Config:      Config{StreamIdleTimeout: 5 * time.Second},
+	})
+	report, err := server.Probe(context.Background(), "echo", "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ErrorCode != "stream_incomplete" {
+		t.Fatalf("a stream without a terminal read as complete: %+v", report)
+	}
+}
+
 func TestTheProbeReportsARefusalAsARefusal(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusUnauthorized)
@@ -147,6 +218,7 @@ func TestTheProbeReadsTheAnthropicDialect(t *testing.T) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(writer, `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"OK"}}`+"\n\n")
 		fmt.Fprint(writer, `data: {"type":"message_delta","usage":{"output_tokens":9}}`+"\n\n")
+		fmt.Fprint(writer, `data: {"type":"message_stop"}`+"\n\n")
 	}))
 	defer upstream.Close()
 	parsed, _ := url.Parse(upstream.URL)

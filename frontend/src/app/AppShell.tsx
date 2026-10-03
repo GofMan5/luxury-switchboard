@@ -110,11 +110,12 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <button
               type="button"
               className={styles.updatePill}
+              aria-label={`Update to version ${update.latest} — open the release page`}
               title={`Version ${update.latest} is out — open the release page`}
               onClick={() => void openExternal(update.url)}
             >
               <ArrowUpCircle size={12} aria-hidden="true" />
-              v{update.latest}
+              <span>v{update.latest}</span>
             </button>
           ) : null}
           <span title={appVersion ? `Luxury Switchboard ${appVersion}` : 'Luxury Switchboard'}>{appVersion ? `v${appVersion}` : 'Luxury Switchboard'}</span>

@@ -57,17 +57,17 @@ var (
 )
 
 type Server struct {
-	address      string
-	routes       relayapp.RouteSource
-	credentials  relayapp.CredentialSource
-	activity     relayapp.ActivitySink
-	guardrail    relayapp.Guardrail
-	failovers    relayapp.FailoverSource
-	routeEvents  relayapp.RouteEventSink
-	// config is written only by Reconfigure, under configMu; every read goes
-	// through configSnapshot(). Tests may still mutate the field directly
-	// because they do so before the server serves.
-	configMu     sync.RWMutex
+	address     string
+	routes      relayapp.RouteSource
+	credentials relayapp.CredentialSource
+	activity    relayapp.ActivitySink
+	guardrail   relayapp.Guardrail
+	failovers   relayapp.FailoverSource
+	routeEvents relayapp.RouteEventSink
+	// config, client and transport are one invariant: Reconfigure swaps all
+	// three under mu, so a request never reads a new client with the old
+	// timeouts. Tests may still mutate config directly because they do so
+	// before the server serves.
 	config       Config
 	client       *http.Client
 	transport    *http.Transport
@@ -1944,15 +1944,17 @@ func newTransport(config Config) *http.Transport {
 // configSnapshot reads the live config; Reconfigure is the only writer, and a
 // request that races a save gets either side whole, never a torn mix.
 func (server *Server) configSnapshot() Config {
-	server.configMu.RLock()
-	defer server.configMu.RUnlock()
+	server.mu.Lock()
+	defer server.mu.Unlock()
 	return server.config
 }
 
 // Reconfigure applies saved settings without a restart. In-flight requests
 // finish on the client they started with — the transport is rebuilt rather
 // than mutated, because http.Transport fields are read by RoundTrip without a
-// lock. Proxy-specific clients are dropped so they rebuild from the new one.
+// lock. Config, client and transport swap under the one mutex, so no request
+// can ever hold a new client with the old timeouts. Proxy-specific clients
+// are dropped so they rebuild from the new template.
 func (server *Server) Reconfigure(config Config) {
 	config = normalizeConfig(config)
 	server.mu.Lock()
@@ -1963,10 +1965,8 @@ func (server *Server) Reconfigure(config Config) {
 		client.CloseIdleConnections()
 		delete(server.proxyClients, key)
 	}
-	server.mu.Unlock()
-	server.configMu.Lock()
 	server.config = config
-	server.configMu.Unlock()
+	server.mu.Unlock()
 }
 
 // SetAddress moves the listener target; it binds on the next Start. A running

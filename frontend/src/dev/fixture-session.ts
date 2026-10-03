@@ -197,6 +197,7 @@ const prices: ModelPrice[] = [
 export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = '1.0.37-fixture'
   readonly #listeners = new Map<string, Set<EventListener>>()
+  readonly #runTimers = new Set<number>()
   #tick = 0
   #seq = 0
   #timer: ReturnType<typeof setInterval> | undefined
@@ -224,9 +225,22 @@ export class FixtureSession implements ControlPlaneSession {
     return () => set.delete(listener as EventListener)
   }
 
-  call<T>(method: string, payload?: unknown): Promise<T> {
+  call<T>(method: string, payload?: unknown, signal?: AbortSignal): Promise<T> {
     try {
-      return Promise.resolve(this.#answer(method, payload) as T)
+      const answer = this.#answer(method, payload) as T
+      // The long-running answer (a test run) honors cancellation the way the
+      // real session does: an abort rejects it and stops the pending events.
+      if (answer instanceof Promise) {
+        return new Promise<T>((resolve, reject) => {
+          answer.then(resolve, reject)
+          signal?.addEventListener('abort', () => {
+            for (const timer of this.#runTimers) window.clearTimeout(timer)
+            this.#runTimers.clear()
+            reject(new DOMException('Aborted', 'AbortError'))
+          }, { once: true })
+        })
+      }
+      return Promise.resolve(answer)
     } catch (error) {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)))
     }
@@ -268,7 +282,8 @@ export class FixtureSession implements ControlPlaneSession {
         // copied data, and the page exists to compare them.
         const seed = providerId.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0)
         models.forEach((model, index) => {
-          window.setTimeout(() => {
+          const timer = window.setTimeout(() => {
+            this.#runTimers.delete(timer)
             const failed = model.includes('flash') && providerId === 'sigma-llm'
             const ttft = 380 + ((index * 211 + seed * 7) % 2_600)
             const total = ttft + 700 + ((index * 503 + seed * 31) % 4_000)
@@ -282,6 +297,7 @@ export class FixtureSession implements ControlPlaneSession {
               ...(failed ? { errorCode: 'rate_limited' } : {}),
             })
           }, 320 * (index + 1))
+          this.#runTimers.add(timer)
         })
         const pending = new Promise<{ tested: number }>((resolve) => {
           window.setTimeout(() => resolve({ tested: models.length }), 320 * (models.length + 1))

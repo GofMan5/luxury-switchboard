@@ -1,5 +1,13 @@
 .page { display: flex; height: 100%; overflow: hidden; flex-direction: column; }
 
+.error {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 10px 24px;
+  color: var(--text-danger);
+  background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas));
+  font-size: 12.5px;
+}
+
 .scopeRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .tableWrap { overflow: auto; }

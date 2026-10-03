@@ -7,7 +7,11 @@
   transition: grid-template-columns var(--motion-standard) var(--ease-standard);
 }
 
-.shell[data-sidebar='collapsed'] { grid-template-columns: 60px minmax(0, 1fr); }
+/* Manual collapse lives above the compact breakpoint; under it the media
+ * query owns the rail and the toggle is hidden. */
+@media (min-width: 960px) {
+  .shell[data-sidebar='collapsed'] { grid-template-columns: 60px minmax(0, 1fr); }
+}
 
 .sidebar {
   position: sticky;
@@ -170,26 +174,32 @@
 }
 .updatePill:hover { background: color-mix(in srgb, var(--accent-blue) 14%, transparent); }
 .updatePill:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.shell[data-sidebar='collapsed'] .updatePill { display: none; }
+/* Collapsed keeps the signal as a bare icon: an update is exactly the thing
+ * the minimal-chrome state should still surface. */
+.shell[data-sidebar='collapsed'] .updatePill { padding: 5px; border-radius: 8px; }
+.shell[data-sidebar='collapsed'] .updatePill span { display: none; }
 
-/* The manual rail: same layout the compact breakpoint forces, at any width. */
-.shell[data-sidebar='collapsed'] .brand { justify-content: center; padding: 0; }
-.shell[data-sidebar='collapsed'] .brandName,
-.shell[data-sidebar='collapsed'] .navItem span,
-.shell[data-sidebar='collapsed'] .sidebarFooter span { display: none; }
-.shell[data-sidebar='collapsed'] .navSectionLabel {
-  display: block;
-  height: 1px;
-  overflow: hidden;
-  margin: 2px 8px;
-  padding: 0;
-  background: var(--border-subtle);
+/* The manual rail: same layout the compact breakpoint forces, but only where
+ * the breakpoint does not already own it. */
+@media (min-width: 960px) {
+  .shell[data-sidebar='collapsed'] .brand { justify-content: center; padding: 0; }
+  .shell[data-sidebar='collapsed'] .brandName,
+  .shell[data-sidebar='collapsed'] .navItem span,
+  .shell[data-sidebar='collapsed'] .sidebarFooter > span { display: none; }
+  .shell[data-sidebar='collapsed'] .navSectionLabel {
+    display: block;
+    height: 1px;
+    overflow: hidden;
+    margin: 2px 8px;
+    padding: 0;
+    background: var(--border-subtle);
+  }
+  .shell[data-sidebar='collapsed'] .navSection + .navSection { margin-top: 6px; }
+  .shell[data-sidebar='collapsed'] .navigation { gap: 0; padding: 6px; }
+  .shell[data-sidebar='collapsed'] .navItem { justify-content: center; min-height: 42px; padding: 0; }
+  .shell[data-sidebar='collapsed'] .navItem[data-active='true']::before { height: 20px; }
+  .shell[data-sidebar='collapsed'] .sidebarFooter { justify-content: center; padding: 0; }
 }
-.shell[data-sidebar='collapsed'] .navSection + .navSection { margin-top: 6px; }
-.shell[data-sidebar='collapsed'] .navigation { gap: 0; padding: 6px; }
-.shell[data-sidebar='collapsed'] .navItem { justify-content: center; min-height: 42px; padding: 0; }
-.shell[data-sidebar='collapsed'] .navItem[data-active='true']::before { height: 20px; }
-.shell[data-sidebar='collapsed'] .sidebarFooter { justify-content: center; padding: 0; }
 
 .workspace { min-width: 0; }
 
@@ -248,6 +258,9 @@
 }
 
 @media (max-width: 959px) {
+  /* The compact breakpoint forces the rail itself, so the manual toggle has
+   * nothing to add — and a click that only wrote invisible state was worse. */
+  .collapse { display: none; }
   .shell { grid-template-columns: 56px minmax(0, 1fr); }
   .brand { justify-content: center; padding: 0; }
   .brandName,

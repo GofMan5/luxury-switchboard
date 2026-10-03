@@ -306,6 +306,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		modelGateway.SetTimeout(max(time.Duration(applied.HeaderTimeoutSeconds)*time.Second, 90*time.Second))
 		next := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(applied.ListenerPort)))
 		if next != httpRuntime.Address() {
+			previous := httpRuntime.Address()
 			live := relay.Snapshot().State == relaydomain.StateLive
 			if live {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -313,9 +314,15 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 				cancel()
 			}
 			httpRuntime.SetAddress(next)
-			if live {
+			// A relay.stop racing the rebind wins: the address moved, but nobody
+			// resurrects a relay the operator just stopped.
+			if live && relay.Snapshot().State == relaydomain.StateStopped {
 				if _, err := relay.Start(); err != nil {
-					logger.Printf("relay could not bind the new port; it is stopped")
+					// Roll the address back so the recorded settings and the
+					// bound listener cannot disagree silently; saving the same
+					// port again then retries instead of no-op'ing.
+					httpRuntime.SetAddress(previous)
+					logger.Printf("relay could not bind the new port; the listener stayed on the old one")
 				}
 			}
 		}

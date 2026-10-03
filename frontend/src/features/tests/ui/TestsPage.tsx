@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { FlaskConical, Play, RefreshCw, Square } from 'lucide-react'
 import { useAppServices } from '../../../app/services'
 import { useProviders } from '../../providers/ui/useProviders'
-import { formatDecimal, formatDuration } from '../../../shared/format/metrics'
+import { formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { EmptyState, Panel, Pill, Segmented } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
@@ -33,7 +33,12 @@ export default function TestsPage() {
     () => providers.catalog.providers.filter((provider) => provider.enabled),
     [providers.catalog.providers],
   )
-  const scopedProviders = scope === 'all' ? enabledProviders : enabledProviders.filter((provider) => provider.id === scope)
+  // A fresh array every render would re-fire the catalog effect; the scope
+  // changes the list, nothing else does.
+  const scopedProviders = useMemo(
+    () => scope === 'all' ? enabledProviders : enabledProviders.filter((provider) => provider.id === scope),
+    [enabledProviders, scope],
+  )
 
   // Catalogs arrive lazily: the page asks for what it shows, and the model
   // answers from its cache on the second visit.
@@ -51,16 +56,28 @@ export default function TestsPage() {
       }
     }
     const direction = ascending ? 1 : -1
+    // One sink for "no data" on every numeric column: absent and zero both
+    // mean unmeasured, and unmeasured always sorts last ascending.
+    const numeric = (result: ModelTestResult | null, read: (result: ModelTestResult) => number): number => {
+      if (!result) return Number.MAX_SAFE_INTEGER
+      const value = read(result)
+      return value > 0 ? value : Number.MAX_SAFE_INTEGER
+    }
     list.sort((left, right) => {
       switch (sort) {
-        case 'ttft': return ((left.result?.ttftMs ?? Number.MAX_SAFE_INTEGER) - (right.result?.ttftMs ?? Number.MAX_SAFE_INTEGER)) * direction
-        case 'total': return ((left.result?.latencyMs || Number.MAX_SAFE_INTEGER) - (right.result?.latencyMs || Number.MAX_SAFE_INTEGER)) * direction
-        case 'rate': return ((left.result ? tokensPerSecond(left.result) : -1) - (right.result ? tokensPerSecond(right.result) : -1)) * direction
+        case 'ttft': return (numeric(left.result, (r) => r.ttftMs ?? 0) - numeric(right.result, (r) => r.ttftMs ?? 0)) * direction
+        case 'total': return (numeric(left.result, (r) => r.latencyMs) - numeric(right.result, (r) => r.latencyMs)) * direction
+        case 'rate': return (numeric(left.result, tokensPerSecond) - numeric(right.result, tokensPerSecond)) * direction
         default: return (left.model.localeCompare(right.model) || left.providerName.localeCompare(right.providerName)) * direction
       }
     })
     return list
   }, [scopedProviders, state.catalogs, state.results, sort, ascending])
+
+  // A run starts when every catalog in scope answered: silently skipping a
+  // provider whose catalog errored would read as measured-and-fine.
+  const catalogsReady = scopedProviders.every((provider) => Array.isArray(state.catalogs[provider.id]))
+  const erroredCatalogs = scopedProviders.filter((provider) => state.catalogs[provider.id] === 'error')
 
   const runScope = () => {
     const targets: TestTarget[] = []
@@ -88,8 +105,14 @@ export default function TestsPage() {
         </div>
         {state.running
           ? <Button variant="secondary" onClick={() => tests.cancel()}><Square size={14} />Stop</Button>
-          : <Button variant="primary" disabled={rows.length === 0} onClick={runScope}><Play size={14} />Run {scope === 'all' ? 'all' : 'shown'}</Button>}
+          : <Button variant="primary" disabled={rows.length === 0 || !catalogsReady} onClick={runScope}><Play size={14} />Run {scope === 'all' ? 'all' : 'shown'}</Button>}
       </header>
+      {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
+      {erroredCatalogs.length > 0 ? (
+        <div className={styles.error} role="alert">
+          No model catalog from {erroredCatalogs.map((provider) => provider.name).join(', ')} — check the provider and its key, then Refresh catalog.
+        </div>
+      ) : null}
 
       <div className="page-body">
         <Panel
@@ -155,14 +178,14 @@ function TestRow({ row, running, onRun }: { row: { providerId: string; providerN
         {state === 'testing' ? <span className={styles.state}><StatusDot state="active" />Testing</span>
           : state === 'available' ? <span className={styles.state}><StatusDot state="healthy" />OK</span>
           : state === 'timeout' ? <Pill tone="warning">Timeout</Pill>
-          : state === 'unavailable' && result ? <Pill tone="danger">{result.errorCode === 'result_missing' ? 'No answer' : result.errorCode === 'interrupted' ? 'Stopped' : `HTTP ${result.status || '—'}`}</Pill>
+          : state === 'unavailable' && result ? <Pill tone="danger">{result.errorCode === 'result_missing' ? 'No answer' : result.errorCode === 'interrupted' ? 'Stopped' : result.errorCode === 'provider_failed' ? 'Unreachable' : `HTTP ${result.status || '—'}`}</Pill>
           : <Pill>Untested</Pill>}
       </td>
       <td className={styles.modelCell} title={row.model}>{row.model}</td>
       <td>{row.providerName}</td>
       <td className={styles.num}>{result?.ttftMs ? formatDuration(result.ttftMs) : '—'}</td>
       <td className={styles.num}>{result?.latencyMs ? formatDuration(result.latencyMs) : '—'}</td>
-      <td className={styles.num}>{result && tokensPerSecond(result) > 0 ? formatDecimal(tokensPerSecond(result)) : '—'}</td>
+      <td className={styles.num}>{result && tokensPerSecond(result) > 0 ? tokensPerSecond(result).toFixed(1) : '—'}</td>
       <td className={styles.num}>
         <button type="button" className={styles.rowRun} disabled={running} aria-label={`Test ${row.model} on ${row.providerName}`} onClick={onRun}>
           <Play size={13} aria-hidden="true" />

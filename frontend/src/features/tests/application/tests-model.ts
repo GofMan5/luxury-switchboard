@@ -55,7 +55,9 @@ export class TestsModel {
   async ensureCatalog(providerId: string): Promise<readonly string[]> {
     const known = this.#state.catalogs[providerId]
     if (Array.isArray(known)) return known
-    if (known === 'loading') return []
+    // 'error' is terminal until the operator asks again: an unreadable catalog
+    // must not be re-fetched by every render of the page that shows it.
+    if (known === 'loading' || known === 'error') return []
     this.#set({ ...this.#state, catalogs: { ...this.#state.catalogs, [providerId]: 'loading' } })
     try {
       const models = await this.#port.discover(providerId)
@@ -82,7 +84,8 @@ export class TestsModel {
   /**
    * Runs the scope sequentially: the control plane runs one test batch at a
    * time, so parallel calls would only bounce off its lock. Each provider's
-   * batch publishes per-model events as they land.
+   * batch publishes per-model events as they land, and one provider's failure
+   * never stops the rest of the run.
    */
   async run(targets: readonly TestTarget[]): Promise<void> {
     if (this.#state.running) return
@@ -93,30 +96,39 @@ export class TestsModel {
     this.#activeRun = runId
     const controller = new AbortController()
     this.#controller = controller
-    const timer = setTimeout(() => controller.abort(), RUN_TIMEOUT_MS * planned.length)
-    const results = { ...this.#state.results }
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; controller.abort() }, RUN_TIMEOUT_MS * planned.length)
+    this.#set({ ...this.#state, running: true, error: '' })
+    let failedProviders = 0
     for (const target of planned) {
+      if (controller.signal.aborted || generation !== this.#generation) break
+      // Rows go testing as their batch starts, not all at once: mid-run the
+      // table shows what is actually being measured.
+      const results = { ...this.#state.results }
       for (const model of target.models) {
         results[resultKey(target.providerId, model)] = { runId, providerId: target.providerId, model, state: 'testing', status: 0, latencyMs: 0 }
       }
-    }
-    this.#set({ ...this.#state, running: true, results, error: '' })
-    try {
-      for (const target of planned) {
-        if (controller.signal.aborted || generation !== this.#generation) break
+      this.#set({ ...this.#state, results })
+      try {
         await this.#port.test(target.providerId, runId, target.models, controller.signal)
+        this.#settle([target], runId, 'result_missing')
+      } catch {
+        // One provider down must not strand the rest of the scope.
+        failedProviders++
+        this.#settle([target], runId, controller.signal.aborted ? (timedOut ? 'timeout' : 'interrupted') : 'provider_failed')
       }
-      this.#settle(planned, runId, 'result_missing')
-      this.#set({ ...this.#state, running: false })
-    } catch {
-      if (generation !== this.#generation) return
-      this.#settle(planned, runId, 'interrupted')
-      this.#set({ ...this.#state, running: false, error: 'The test run was interrupted' })
-    } finally {
-      clearTimeout(timer)
-      if (this.#controller === controller) this.#controller = null
-      if (this.#activeRun === runId) this.#activeRun = ''
     }
+    clearTimeout(timer)
+    if (generation !== this.#generation) return
+    this.#set({
+      ...this.#state,
+      running: false,
+      error: controller.signal.aborted
+        ? (timedOut ? 'The run reached the time limit; unfinished models are marked Timeout' : '')
+        : failedProviders > 0 ? `${failedProviders} provider${failedProviders === 1 ? '' : 's'} could not be reached — the rest were measured` : '',
+    })
+    if (this.#controller === controller) this.#controller = null
+    if (this.#activeRun === runId) this.#activeRun = ''
   }
 
   cancel(): void {
@@ -132,7 +144,7 @@ export class TestsModel {
       for (const model of target.models) {
         const key = resultKey(target.providerId, model)
         if (results[key]?.state === 'testing') {
-          results[key] = { runId, providerId: target.providerId, model, state: 'unavailable', status: 0, latencyMs: 0, errorCode }
+          results[key] = { runId, providerId: target.providerId, model, state: errorCode === 'timeout' ? 'timeout' : 'unavailable', status: 0, latencyMs: 0, errorCode }
         }
       }
     }

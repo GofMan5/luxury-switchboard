@@ -1,5 +1,6 @@
 import type { Settings } from '../domain/settings'
 import type { SettingsPort } from './settings-port'
+import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
 export interface SettingsState {
   readonly phase: 'loading' | 'ready' | 'error'
@@ -41,8 +42,11 @@ export class SettingsModel {
       const result = await this.#port.update(settings)
       this.#set({ phase: 'ready', settings: result.settings, pending: false, error: '' })
       return true
-    } catch {
-      this.#set({ ...this.#state, pending: false, error: 'Settings could not be saved. Check every value.' })
+    } catch (error) {
+      // The control plane names the field that failed validation ("listener
+      // port is out of range") — the banner repeats it instead of a shrug.
+      const message = error instanceof ControlPlaneError ? `Settings could not be saved: ${error.message}.` : 'Settings could not be saved. Check every value.'
+      this.#set({ ...this.#state, pending: false, error: message })
       return false
     }
   }

@@ -148,7 +148,10 @@ export default function OverviewPage() {
                     const health = providers.health.get(provider.id)
                     return (
                       <div className={styles.providerRow} key={provider.id}>
-                        <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : provider.enabled ? 'healthy' : 'stopped'} />
+                        {/* Unknown health is neutral, not green: with the probe
+                          disabled the map is empty, and a green dot would be a
+                          claim nobody measured. */}
+                      <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : 'stopped'} />
                         <div>
                           <strong>{provider.name}</strong>
                           <span>{provider.rpm === 0 ? 'Unlimited' : `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`} · {provider.authMode === 'passthrough' ? 'Passthrough' : provider.keyCount > 0 ? `${provider.keyCount} key${provider.keyCount === 1 ? '' : 's'}` : 'No key'}</span>

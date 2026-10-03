@@ -124,7 +124,10 @@ func (runtime *Runtime) Stop(ctx context.Context) error {
 // and clears the handle: a connector that never answered must not wedge the
 // next start behind "already running".
 func (runtime *Runtime) serve(ctx context.Context, binary, local string) (string, error) {
-	command := exec.CommandContext(ctx, binary, "tunnel", "--no-autoupdate", "--url", local)
+	// http2, not the QUIC default: a quick tunnel behind a network that drops
+	// UDP/7844 — corporate lines, some ISPs — otherwise retries QUIC forever
+	// where plain TCP 443 would have connected on the first try.
+	command := exec.CommandContext(ctx, binary, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", local)
 	hideConsole(command)
 	output, err := command.StderrPipe()
 	if err != nil {

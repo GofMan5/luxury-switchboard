@@ -18,7 +18,7 @@ function record(id: string, overrides: Partial<GuardrailRecord> = {}): Guardrail
 }
 
 class FakeGuardrailsPort implements GuardrailsPort {
-  statusValue: GuardrailStatus = { mode: 'monitor', ruleCount: 105, indicatorCount: 8, ruleSetVersion: 4, findingCount: 0 }
+  statusValue: GuardrailStatus = { mode: 'monitor', providerModes: {}, ruleCount: 105, indicatorCount: 8, ruleSetVersion: 4, findingCount: 0 }
   records: readonly GuardrailRecord[] = []
   statusCalls = 0
   findingsCalls = 0
@@ -74,7 +74,7 @@ describe('GuardrailsModel', () => {
     const model = new GuardrailsModel(port)
     await model.connect()
     expect(model.snapshot()).toMatchObject({ phase: 'ready', findings: [{ id: 'a' }, { id: 'b' }], error: '' })
-    expect(model.snapshot().status).toMatchObject({ mode: 'monitor', ruleCount: 105 })
+    expect(model.snapshot().status).toMatchObject({ mode: 'monitor', providerModes: {}, ruleCount: 105 })
     model.dispose()
   })
 

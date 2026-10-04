@@ -42,6 +42,8 @@ export interface GuardrailRecord {
 
 export interface GuardrailStatus {
   readonly mode: GuardrailMode
+  /** Live per-provider overrides, keyed by provider id: monitor or block. */
+  readonly providerModes: Readonly<Record<string, 'monitor' | 'block'>>
   readonly ruleCount: number
   readonly indicatorCount: number
   readonly ruleSetVersion: number

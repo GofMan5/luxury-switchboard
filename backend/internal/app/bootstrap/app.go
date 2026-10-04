@@ -277,12 +277,14 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		)
 	})
 	// The mode is a setting, so changing it must take effect on the next request
-	// rather than at the next launch.
+	// rather than at the next launch. The per-provider override table rides the
+	// same path: settings own it, the inspector enforces it.
 	settingsService.OnApplied(func(applied settingsdomain.Settings) {
 		normalized := applied.Normalized()
 		if mode, err := guardraildomain.ParseMode(normalized.GuardrailMode); err == nil {
 			_ = guardrails.SetMode(mode)
 		}
+		guardrails.SetProviderModes(normalized.GuardrailProviderModes)
 		healthMonitor.SetEnabled(applied.ProviderHealthEnabled)
 		routeService.SetChainMode(normalized.ChainMode)
 		routes.SetFailoverEnabled(applied.FailoverEnabled)
@@ -404,7 +406,12 @@ func defaultGuardrails(settings settingsdomain.Settings) (*guardrailapp.Inspecto
 	if err != nil {
 		return nil, err
 	}
-	return guardrailapp.NewInspector(engine, mode, normalized.GuardrailFindings)
+	inspector, err := guardrailapp.NewInspector(engine, mode, normalized.GuardrailFindings)
+	if err != nil {
+		return nil, err
+	}
+	inspector.SetProviderModes(normalized.GuardrailProviderModes)
+	return inspector, nil
 }
 
 func defaultProviders() ([]providerdomain.Provider, string, error) {

@@ -28,7 +28,7 @@ func TestSettingsRepositoryRoundTripIsEncrypted(t *testing.T) {
 		t.Fatal("settings were stored as plaintext")
 	}
 	loaded, found, err := repository.Load(context.Background())
-	if err != nil || !found || loaded != settings {
+	if err != nil || !found || !loaded.Equal(settings) {
 		t.Fatalf("unexpected restored settings: %+v %v %v", loaded, found, err)
 	}
 }

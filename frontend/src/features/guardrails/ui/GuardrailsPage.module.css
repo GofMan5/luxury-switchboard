@@ -22,6 +22,17 @@
 .modeChoices small { color: var(--text-muted); font-size: 11.5px; line-height: 1.45; }
 .modeNote { border-top: 1px solid var(--border-subtle); padding: 11px 16px; color: var(--text-muted); font-size: 11.5px; }
 
+/* The per-provider override table under the modes: distrust is a list, not a
+ * global. Rows are quiet; the segmented control is the whole interaction. */
+.overrides { border-top: 1px solid var(--border-subtle); padding: 10px 16px 14px; }
+.overrides header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.overrides h3 { color: var(--text-secondary); font-size: 12px; font-weight: 620; letter-spacing: 0.03em; text-transform: uppercase; }
+.overrides header span { color: var(--text-muted); font-size: 11px; }
+.overrideRow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 5px 0; }
+.overrideRow > span { overflow: hidden; color: var(--text-secondary); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+.wouldRefuse { display: block; margin-top: 1px; color: var(--status-warning); font-size: 10.5px; }
+
 .tableWrap { overflow: auto; }
 /* The fixed columns come to 862px, so the minimum leaves the one flexible column —
    what was actually detected — room to be read instead of an ellipsis. */

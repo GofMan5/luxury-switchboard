@@ -22,7 +22,7 @@ const initial: Settings = {
   activityCapacity: 2_000,
   historyRetentionDays: 30,
   tunnelRetentionHours: 72,
-  guardrailMode: 'monitor',
+  guardrailMode: 'monitor', guardrailProviderModes: {},
   guardrailFindings: 500,
   notificationsEnabled: true,
   providerHealthEnabled: true,

@@ -41,7 +41,11 @@ type storedSettings struct {
 	HistoryRetentionDays  int    `json:"historyRetentionDays"`
 	TunnelRetentionHours  int    `json:"tunnelRetentionHours"`
 	GuardrailMode         string `json:"guardrailMode"`
-	GuardrailFindings     int    `json:"guardrailFindings"`
+	// GuardrailProviderModes rides the same document; an absent field (a file
+	// from before the overrides existed) restores as no overrides, which is
+	// the same behavior the domain's Normalized would give it.
+	GuardrailProviderModes map[string]string `json:"guardrailProviderModes"`
+	GuardrailFindings      int               `json:"guardrailFindings"`
 	NotificationsEnabled  *bool  `json:"notificationsEnabled"`
 	ProviderHealthEnabled *bool  `json:"providerHealthEnabled"`
 	AnimationsEnabled     *bool  `json:"animationsEnabled"`
@@ -92,8 +96,9 @@ func (stored storedSettings) restore() domain.Settings {
 		ActivityCapacity:      stored.ActivityCapacity,
 		HistoryRetentionDays:  stored.HistoryRetentionDays,
 		TunnelRetentionHours:  stored.TunnelRetentionHours,
-		GuardrailMode:         stored.GuardrailMode,
-		GuardrailFindings:     stored.GuardrailFindings,
+		GuardrailMode:          stored.GuardrailMode,
+		GuardrailProviderModes: stored.GuardrailProviderModes,
+		GuardrailFindings:      stored.GuardrailFindings,
 	}
 
 	settings.NotificationsEnabled = stored.NotificationsEnabled == nil || *stored.NotificationsEnabled

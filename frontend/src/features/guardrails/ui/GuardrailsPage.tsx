@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import { RefreshCw, ScanEye, ShieldAlert, ShieldCheck, ShieldOff, Trash2, X } from 'lucide-react'
+import { useAppServices } from '../../../app/services'
+import { useProviders } from '../../providers/ui/useProviders'
 import { formatClock } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
-import { Metric, MetricStrip } from '../../../shared/ui/chrome'
+import { Metric, MetricStrip, Segmented } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import {
@@ -10,6 +12,7 @@ import {
   modeDescription,
   modeLabel,
   type GuardrailFinding,
+  type GuardrailMode,
   type GuardrailRecord,
   type GuardrailSeverity,
 } from '../domain/guardrail'
@@ -21,6 +24,10 @@ export default function GuardrailsPage() {
   const [openId, setOpenId] = useState('')
   const status = state.status
   const mode = status?.mode ?? 'monitor'
+  const { settings: settingsModel } = useAppServices()
+  const settingsState = useSyncExternalStore(settingsModel.subscribe, settingsModel.snapshot)
+  const { state: providersState } = useProviders()
+  const overrides = settingsState.settings?.guardrailProviderModes ?? {}
   const counts = state.findings.reduce(
     (total, record) => {
       if (record.verdict === 'blocked') total.blocked++
@@ -95,6 +102,15 @@ export default function GuardrailsPage() {
               ? `${status.ruleCount.toLocaleString()} detection rules and ${status.indicatorCount.toLocaleString()} known indicators, rule set version ${status.ruleSetVersion}. The rules themselves stay inside the application.`
               : 'Loading the detection rule set…'}
           </p>
+          {mode !== 'off' ? (
+            <ProviderOverrides
+              mode={mode}
+              providers={providersState.catalog.providers}
+              overrides={settingsState.settings?.guardrailProviderModes ?? {}}
+              disabled={settingsState.pending || settingsState.phase !== 'ready'}
+              onChange={(next) => void settingsModel.save({ ...(settingsState.settings as NonNullable<typeof settingsState.settings>), guardrailProviderModes: next })}
+            />
+          ) : null}
         </section>
 
         <section className={styles.findings}>
@@ -115,9 +131,14 @@ export default function GuardrailsPage() {
                 <tr><th>Verdict</th><th>Severity</th><th>Provider</th><th>Model</th><th>Detected</th><th>Evidence</th><th>Time</th></tr>
               </thead>
               <tbody>
-                {state.findings.map((record) => (
-                  <FindingRow key={record.id} record={record} onOpen={() => setOpenId(record.id)} />
-                ))}
+                {state.findings.map((record) => {
+                  // A high-severity finding delivered under monitor is exactly
+                  // what block refuses; the hint names the mode that provider
+                  // runs under, override included.
+                  const providerMode = record.providerId && (overrides[record.providerId] === 'monitor' || overrides[record.providerId] === 'block') ? overrides[record.providerId] : mode
+                  const wouldRefuse = record.verdict !== 'blocked' && record.severity === 'high' && providerMode === 'monitor'
+                  return <FindingRow key={record.id} record={record} onOpen={() => setOpenId(record.id)} wouldRefuse={wouldRefuse} />
+                })}
                 {state.phase !== 'loading' && state.findings.length === 0 ? (
                   <tr>
                     <td colSpan={7} className={styles.empty}>
@@ -142,7 +163,60 @@ function verdictView(record: Pick<GuardrailRecord, 'verdict'>) {
   return { label: 'Delivered', tone: 'retrying' as const }
 }
 
-function FindingRow({ record, onOpen }: { record: GuardrailRecord; onOpen: () => void }) {
+/** The override table: distrust is per provider, and the global mode is the
+ * default rather than the verdict. An entry equal to the global mode reads
+ * back as "default" so the table never carries a no-op row. */
+function ProviderOverrides({ mode, providers, overrides, disabled, onChange }: {
+  readonly mode: 'monitor' | 'block'
+  readonly providers: readonly { readonly id: string; readonly name: string; readonly enabled: boolean; readonly builtin: boolean }[]
+  readonly overrides: Readonly<Record<string, GuardrailMode | ''>>
+  readonly disabled: boolean
+  readonly onChange: (next: Record<string, GuardrailMode | ''>) => void
+}) {
+  const relevant = providers.filter((provider) => !provider.builtin)
+  const setOverride = (providerId: string, value: 'monitor' | 'block' | '') => {
+    const next: Record<string, GuardrailMode | ''> = { ...overrides }
+    if (value === '' || value === mode) delete next[providerId]
+    else next[providerId] = value
+    onChange(next)
+  }
+  if (relevant.length === 0) return null
+  const overrideCount = Object.values(overrides).filter((value) => value === 'monitor' || value === 'block').length
+  return (
+    <div className={styles.overrides}>
+      <header>
+        <h3>Provider overrides</h3>
+        <span>
+          {overrideCount > 0
+            ? `${overrideCount} provider${overrideCount === 1 ? ' deviates' : 's deviate'} from the global ${mode === 'block' ? 'Block' : 'Monitor'}.`
+            : `Every provider follows the global ${mode === 'block' ? 'Block' : 'Monitor'}.`}
+        </span>
+      </header>
+      {relevant.map((provider) => {
+        const value = overrides[provider.id]
+        const chosen: 'monitor' | 'block' | '' = value === 'monitor' || value === 'block' ? (value === mode ? '' : value) : ''
+        return (
+          <div key={provider.id} className={styles.overrideRow}>
+            <span title={provider.id}>{provider.name}</span>
+            <Segmented<'monitor' | 'block' | ''>
+              label={`Inspection mode for ${provider.name}`}
+              value={chosen}
+              disabled={disabled}
+              onChange={(next) => setOverride(provider.id, next)}
+              options={[
+                { id: '', label: 'Default' },
+                { id: 'monitor', label: 'Monitor' },
+                { id: 'block', label: 'Block' },
+              ]}
+            />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function FindingRow({ record, onOpen, wouldRefuse }: { record: GuardrailRecord; onOpen: () => void; wouldRefuse: boolean }) {
   const view = verdictView(record)
   const headline = record.findings[0]
   const repeats = record.occurrences ?? 1
@@ -156,7 +230,12 @@ function FindingRow({ record, onOpen }: { record: GuardrailRecord; onOpen: () =>
         onOpen()
       }}
     >
-      <td><span className={styles.state}><StatusDot state={view.tone} />{view.label}</span></td>
+      <td>
+        <span className={styles.state}><StatusDot state={view.tone} />{view.label}</span>
+        {/* The honest bridge from monitor to block: this very answer is the one
+          * the other mode would have stopped. */}
+        {wouldRefuse ? <small className={styles.wouldRefuse}>would refuse in Block</small> : null}
+      </td>
       <td><SeverityTag severity={record.severity} /></td>
       <td title={record.providerName}>{record.providerName || <span className={styles.muted}>—</span>}</td>
       <td title={record.model}>{record.model || <span className={styles.muted}>—</span>}</td>

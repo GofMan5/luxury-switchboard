@@ -43,6 +43,7 @@ func Register(server *platform.Server, inspector *application.Inspector) {
 func status(inspector *application.Inspector) map[string]any {
 	return map[string]any{
 		"mode":           string(inspector.Mode()),
+		"providerModes":  inspector.ProviderModes(),
 		"ruleCount":      inspector.RuleCount(),
 		"indicatorCount": inspector.IndicatorCount(),
 		"ruleSetVersion": inspector.RuleSetVersion(),

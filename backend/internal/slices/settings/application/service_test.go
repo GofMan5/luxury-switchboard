@@ -103,7 +103,7 @@ func TestCorruptSettingsAreStillRejected(t *testing.T) {
 	if err := service.Load(context.Background()); err == nil {
 		t.Fatal("an out-of-range setting was accepted")
 	}
-	if service.Snapshot() != domain.Defaults() {
+	if !service.Snapshot().Equal(domain.Defaults()) {
 		t.Fatal("a rejected file replaced the running defaults")
 	}
 }

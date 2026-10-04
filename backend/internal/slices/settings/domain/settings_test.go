@@ -47,7 +47,7 @@ func TestNormalizedLeavesConfiguredGuardrailValuesAlone(t *testing.T) {
 	if filled.GuardrailMode != "off" || filled.GuardrailFindings != 50 {
 		t.Fatalf("normalization overrode a deliberate choice: %+v", filled)
 	}
-	if Defaults().Normalized() != Defaults() {
+	if !Defaults().Normalized().Equal(Defaults()) {
 		t.Fatal("normalizing the defaults changed them")
 	}
 }

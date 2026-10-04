@@ -92,6 +92,7 @@ const settings: Settings = {
   historyRetentionDays: 90,
   tunnelRetentionHours: 168,
   guardrailMode: 'monitor',
+  guardrailProviderModes: { 'sigma-llm': 'block' },
   guardrailFindings: 500,
   notificationsEnabled: true,
   providerHealthEnabled: true,
@@ -315,7 +316,7 @@ export class FixtureSession implements ControlPlaneSession {
         { id: 'k4', providerId: body.providerId, label: 'pinned-ip', priority: 3, rpm: 20, pinned: true, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 2, authStreak: 0, lastOutcome: 'success' },
       ] }
       case 'keys.check': return { checked: 4, rejected: 1, reachable: true }
-      case 'guardrails.status': return { mode: 'monitor', ruleCount: 106, indicatorCount: 1_900, ruleSetVersion: 7, findingCount: 12 }
+      case 'guardrails.status': return { mode: 'monitor', providerModes: { 'sigma-llm': 'block' }, ruleCount: 106, indicatorCount: 1_900, ruleSetVersion: 7, findingCount: 12 }
       case 'guardrails.findings': return { findings }
       case 'tunnel.get': case 'tunnel.configure': case 'tunnel.start': return { state: 'online', port: 8797, address: 'https://fresh-words-mild-orbit.trycloudflare.com/v1', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', tokenConfigured: true }
       case 'tunnel.stop': return { state: 'stopped', port: 8797, address: '', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', tokenConfigured: true }

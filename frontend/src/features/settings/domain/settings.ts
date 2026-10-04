@@ -18,6 +18,10 @@ export interface Settings {
    * field missing from this type would be silently reset by any other change.
    */
   readonly guardrailMode: GuardrailMode
+  /** Per-provider inspection overrides: monitor or block for providers that
+   * earned distrust, regardless of the global mode. An older control plane
+   * omits the field; it reads as no overrides. */
+  readonly guardrailProviderModes: Readonly<Record<string, GuardrailMode | ''>>
   readonly guardrailFindings: number
   /**
    * Master switch for notification toasts and the unread badge. The feed
@@ -64,6 +68,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   historyRetentionDays: 30,
   tunnelRetentionHours: 72,
   guardrailMode: 'monitor',
+  guardrailProviderModes: {},
   guardrailFindings: 500,
   notificationsEnabled: true,
   providerHealthEnabled: true,

@@ -1,6 +1,9 @@
 package domain
 
-import "errors"
+import (
+	"errors"
+	"reflect"
+)
 
 type Settings struct {
 	ListenerPort          int `json:"listenerPort"`
@@ -16,8 +19,13 @@ type Settings struct {
 	TunnelRetentionHours  int `json:"tunnelRetentionHours"`
 	// GuardrailMode is off, monitor or block. Settings persisted before the
 	// guardrails existed carry an empty value, which reads as the default.
-	GuardrailMode     string `json:"guardrailMode"`
-	GuardrailFindings int    `json:"guardrailFindings"`
+	GuardrailMode string `json:"guardrailMode"`
+	// GuardrailProviderModes overrides the inspection mode per provider:
+	// monitor or block for a provider that distrust earned, regardless of the
+	// global mode. An entry equal to the global mode is redundant and reads
+	// back as absent. Empty values delete the override.
+	GuardrailProviderModes map[string]string `json:"guardrailProviderModes"`
+	GuardrailFindings      int               `json:"guardrailFindings"`
 	// NotificationsEnabled is the master switch for the notification feed and
 	// its toasts. Badges and health dots stay on: they are ambient state, not
 	// interruptions. Settings persisted before notifications existed read as
@@ -48,6 +56,11 @@ type Settings struct {
 // the operator turns block on for providers they do not trust.
 const DefaultGuardrailMode = "monitor"
 
+// GuardrailProviderModeCap bounds the override table. One entry per
+// configured provider is the intended use; a bound keeps a corrupted file
+// from growing the settings frame without a limit voting on it.
+const GuardrailProviderModeCap = 128
+
 func Defaults() Settings {
 	return Settings{
 		ListenerPort: 8798, MaxRequestMiB: 64,
@@ -57,6 +70,7 @@ func Defaults() Settings {
 		ActivityCapacity: 2_000, HistoryRetentionDays: 30,
 		TunnelRetentionHours:  72,
 		GuardrailMode:         DefaultGuardrailMode,
+		GuardrailProviderModes: map[string]string{},
 		GuardrailFindings:     500,
 		NotificationsEnabled:  true,
 		ProviderHealthEnabled: true,
@@ -72,6 +86,13 @@ func Defaults() Settings {
 // one. Strict-priority routing stays one toggle away.
 const DefaultChainMode = "balance"
 
+// Equal answers whether two settings are the same value, map included. The
+// struct stopped being comparable when it gained a map field; tests and the
+// settings service compare values, not identities.
+func (settings Settings) Equal(other Settings) bool {
+	return reflect.DeepEqual(settings, other)
+}
+
 // Normalized fills in values that predate a field, so settings written by an
 // older build load instead of failing validation.
 func (settings Settings) Normalized() Settings {
@@ -83,6 +104,15 @@ func (settings Settings) Normalized() Settings {
 	}
 	if settings.ChainMode == "" {
 		settings.ChainMode = DefaultChainMode
+	}
+	if settings.GuardrailProviderModes == nil {
+		settings.GuardrailProviderModes = map[string]string{}
+	}
+	// A global "off" overrides nothing per provider: inspection disabled is
+	// disabled everywhere, and a table that would silently re-enable it under
+	// some providers is a settings file that lies about what it does.
+	if settings.GuardrailMode == "off" {
+		settings.GuardrailProviderModes = map[string]string{}
 	}
 	return settings
 }
@@ -117,7 +147,17 @@ func (settings Settings) Validate() error {
 		return errors.New("guardrail finding capacity is out of range")
 	case settings.ChainMode != "failover" && settings.ChainMode != "balance":
 		return errors.New("chain mode must be failover or balance")
+	case len(settings.GuardrailProviderModes) > GuardrailProviderModeCap:
+		return errors.New("too many guardrail provider overrides")
 	default:
+		for provider, mode := range settings.GuardrailProviderModes {
+			if provider == "" {
+				return errors.New("guardrail provider override needs a provider")
+			}
+			if mode != "monitor" && mode != "block" {
+				return errors.New("guardrail provider override must be monitor or block")
+			}
+		}
 		return nil
 	}
 }

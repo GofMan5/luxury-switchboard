@@ -17,9 +17,13 @@ type Inspector struct {
 
 	mu       sync.RWMutex
 	mode     domain.Mode
-	records  []Record
-	capacity int
-	sequence uint64
+	// providerModes overrides the inspection mode per provider: distrust
+	// earned by one reseller does not have to be served to every other. A
+	// global off wins over everything.
+	providerModes map[string]domain.Mode
+	records       []Record
+	capacity      int
+	sequence      uint64
 
 	listenersMu sync.RWMutex
 	listeners   []func(Record)
@@ -99,13 +103,6 @@ func (inspector *Inspector) SetCapacity(capacity int) {
 	inspector.mu.Unlock()
 }
 
-// Mode reports the active mode.
-func (inspector *Inspector) Mode() domain.Mode {
-	inspector.mu.RLock()
-	defer inspector.mu.RUnlock()
-	return inspector.mode
-}
-
 // SetMode switches the mode at runtime. Settings changes must take effect without
 // a restart, and an in-flight request keeps whichever mode it started with.
 func (inspector *Inspector) SetMode(mode domain.Mode) error {
@@ -114,8 +111,66 @@ func (inspector *Inspector) SetMode(mode domain.Mode) error {
 	}
 	inspector.mu.Lock()
 	inspector.mode = mode
+	// "Off" is a global statement: it disables inspection everywhere, and a
+	// provider table that would quietly re-enable it under one provider is a
+	// settings file that lies about what it does.
+	if mode == domain.ModeOff {
+		inspector.providerModes = map[string]domain.Mode{}
+	}
 	inspector.mu.Unlock()
 	return nil
+}
+
+// SetProviderModes replaces the whole per-provider override table at once. The
+// settings slice owns the table; the inspector only enforces what it says.
+// Empty and unknown values read as "follow the global mode".
+func (inspector *Inspector) SetProviderModes(modes map[string]string) {
+	parsed := make(map[string]domain.Mode, len(modes))
+	for provider, mode := range modes {
+		if value, err := domain.ParseMode(mode); err == nil && value != domain.ModeOff {
+			parsed[provider] = value
+		}
+	}
+	inspector.mu.Lock()
+	inspector.providerModes = parsed
+	if inspector.mode == domain.ModeOff {
+		inspector.providerModes = map[string]domain.Mode{}
+	}
+	inspector.mu.Unlock()
+}
+
+// Mode reports the global default. The Guardrails page shows it; requests
+// resolve through ModeFor.
+func (inspector *Inspector) Mode() domain.Mode {
+	inspector.mu.RLock()
+	defer inspector.mu.RUnlock()
+	return inspector.mode
+}
+
+// ProviderModes reports the live override table, for the status the settings
+// page reads back.
+func (inspector *Inspector) ProviderModes() map[string]string {
+	inspector.mu.RLock()
+	defer inspector.mu.RUnlock()
+	result := make(map[string]string, len(inspector.providerModes))
+	for provider, mode := range inspector.providerModes {
+		result[provider] = string(mode)
+	}
+	return result
+}
+
+// ModeFor answers the mode one request is actually inspected under. The
+// global off wins; otherwise a provider override replaces the default.
+func (inspector *Inspector) ModeFor(providerID string) domain.Mode {
+	inspector.mu.RLock()
+	defer inspector.mu.RUnlock()
+	if inspector.mode == domain.ModeOff {
+		return domain.ModeOff
+	}
+	if mode, ok := inspector.providerModes[providerID]; ok {
+		return mode
+	}
+	return inspector.mode
 }
 
 // RuleCount reports how many rules are loaded, for the operator's confidence.
@@ -128,9 +183,11 @@ func (inspector *Inspector) IndicatorCount() int { return inspector.engine.Indic
 func (inspector *Inspector) RuleSetVersion() int { return inspector.engine.Version() }
 
 // Inspect judges one finished answer. In ModeOff it does no work at all — not
-// even extraction — so a user who turns the guardrails off pays nothing.
+// even extraction — so a user who turns the guardrails off pays nothing. The
+// mode is this provider's: an override that hardens one distrusted reseller
+// must not change what any other provider's answers are judged under.
 func (inspector *Inspector) Inspect(body []byte, eventStream bool, subject Subject) Decision {
-	mode := inspector.Mode()
+	mode := inspector.ModeFor(subject.ProviderID)
 	if !mode.Inspects() || len(body) == 0 {
 		return Decision{Verdict: domain.VerdictClean}
 	}

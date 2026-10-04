@@ -149,11 +149,15 @@ h1 {
   line-height: 1.4;
 }
 
-/* The scrollable area under a page header: uniform gutters, uniform gaps. */
+/* The scrollable area under a page header: uniform gutters, uniform gaps.
+ * Capped past 1680px: a table stretched across an ultrawide is not readable,
+ * and the gutter rhythm stays the same either way. */
 .page-body {
   display: grid;
   align-content: start;
   gap: 14px;
+  width: 100%;
+  max-width: 1680px;
   padding: 16px 24px 24px;
 }
 

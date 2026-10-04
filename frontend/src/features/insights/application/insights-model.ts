@@ -16,9 +16,18 @@ export interface InsightsState {
 }
 
 /** Reload the report after a price edit: the cost columns are the point. */
+type PeriodAnswer = {
+  readonly report: InsightsReport
+  readonly recent: readonly HistoryRequest[]
+  readonly recentAvailable: number
+}
+
 export class InsightsModel {
   readonly #port: InsightsPort
   #state: InsightsState = { phase: 'idle', period: '24h', report: null, recent: [], recentAvailable: 0, prices: [], pricesCurrency: 'USD', pricesPhase: 'idle', error: '' }
+  /** Every answered period stays: switching back is instant, and the quiet
+   * refresh rewrites the answer underneath. */
+  readonly #cache = new Map<InsightsPeriod, PeriodAnswer>()
   #listeners = new Set<() => void>()
   #generation = 0
   #refreshing = false
@@ -28,6 +37,14 @@ export class InsightsModel {
 
   async load(period: InsightsPeriod): Promise<void> {
     const generation = ++this.#generation
+    const cached = this.#cache.get(period)
+    if (cached) {
+      // Cache hit: the screen answers now, and a background re-read keeps it
+      // honest. No skeleton for data we already know.
+      this.#set({ ...this.#state, phase: 'ready', period, report: cached.report, recent: cached.recent, recentAvailable: cached.recentAvailable, error: '' })
+      void this.refresh()
+      return
+    }
     this.#set({ ...this.#state, phase: 'loading', period, report: period === this.#state.period ? this.#state.report : null, recent: period === this.#state.period ? this.#state.recent : [], recentAvailable: period === this.#state.period ? this.#state.recentAvailable : 0, error: '' })
     try {
       const [report, recent, catalog] = await Promise.all([
@@ -35,6 +52,7 @@ export class InsightsModel {
         this.#port.recent(period),
         this.#state.pricesPhase === 'idle' ? this.#port.prices() : Promise.resolve({ prices: this.#state.prices, currency: this.#state.pricesCurrency }),
       ])
+      this.#cache.set(period, { report, recent: recent.rows, recentAvailable: recent.available })
       if (generation === this.#generation) this.#set({ phase: 'ready', period, report, recent: recent.rows, recentAvailable: recent.available, prices: catalog.prices, pricesCurrency: catalog.currency, pricesPhase: 'ready', error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Insights are unavailable' })
@@ -60,7 +78,10 @@ export class InsightsModel {
     try {
       const [report, recent] = await Promise.all([this.#port.report(period), this.#port.recent(period)])
       // A load() that started while this read was in flight owns the screen.
-      if (generation === this.#generation) this.#set({ ...this.#state, report, recent: recent.rows, recentAvailable: recent.available, error: '' })
+      if (generation === this.#generation) {
+        this.#cache.set(period, { report, recent: recent.rows, recentAvailable: recent.available })
+        this.#set({ ...this.#state, report, recent: recent.rows, recentAvailable: recent.available, error: '' })
+      }
     } catch {
       // Quiet by contract: the visible report stays the latest known truth.
     } finally {
@@ -71,6 +92,9 @@ export class InsightsModel {
   /** True when the price reached the catalog; false leaves the editor open. */
   async savePrice(draft: PriceDraft): Promise<boolean> {
     const generation = this.#generation
+    // A price edit changes every period's cost: the cache is the old prices
+    // and may not answer for them.
+    this.#cache.clear()
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
       const catalog = await this.#port.setPrice(draft)
@@ -88,6 +112,7 @@ export class InsightsModel {
   /** True when the model was dropped; false leaves the editor open. */
   async removePrice(model: string): Promise<boolean> {
     const generation = this.#generation
+    this.#cache.clear()
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
       const catalog = await this.#port.removePrice(model)

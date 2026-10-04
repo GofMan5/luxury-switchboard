@@ -60,6 +60,33 @@ describe('InsightsModel', () => {
     expect(model.snapshot().recent[0]?.id).toBe('r-48h')
   })
 
+  it('answers a revisited period from the cache before the network replies', async () => {
+    await model.load('24h')
+    await model.load('48h')
+    port.report.mockClear()
+    port.recent.mockClear()
+    // Park the re-read: if the screen waited for it, the answer would hang.
+    port.report.mockImplementation(() => new Promise(() => {}))
+    port.recent.mockImplementation(() => new Promise(() => {}))
+    const loading = model.load('24h')
+    // The cached answer is on screen synchronously; the in-flight re-read is
+    // the background refresh, not the answer.
+    expect(model.snapshot().phase).toBe('ready')
+    expect(model.snapshot().report?.period).toBe('24h')
+    expect(model.snapshot().recent[0]?.id).toBe('r-24h')
+    await loading
+  })
+
+  it('a price edit invalidates the cache instead of serving old costs', async () => {
+    await model.load('24h')
+    await model.savePrice({ model: 'm', input: 1, cachedInput: 0, output: 2, reasoning: 0 })
+    port.report.mockClear()
+    await model.load('24h')
+    // The screen answers from the re-loaded period, and the background
+    // re-read still runs — but the stale pre-edit answer was never served.
+    expect(port.report).toHaveBeenCalled()
+  })
+
   it('carries the untruncated row count so a short list reads as the newest part', async () => {
     port.recent.mockResolvedValueOnce({ rows: [request('r-24h')], available: 250 })
     await model.load('24h')

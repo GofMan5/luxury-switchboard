@@ -65,6 +65,8 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
   const tabAtDefaults = tab !== 'backup' && tabFields[tab].every((field) => settings[field] === SETTINGS_DEFAULTS[field])
   const submit = (event: FormEvent) => { event.preventDefault(); void onSave(settings) }
   const activeTab = tabs.find((entry) => entry.id === tab) ?? tabs[0]
+  // The save bar counts what actually differs, so "Save" never lies.
+  const changedCount = (Object.keys(settings) as (keyof Settings)[]).filter((key) => settings[key] !== initial[key]).length
   // The rail is vertical on wide windows and a horizontal strip under 959px —
   // the orientation is announced, and the arrows follow both axes either way.
   const horizontal = useMediaQuery('(max-width: 959px)')
@@ -94,10 +96,6 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
     <form className={styles.page} onSubmit={submit}>
       <header className="page-header">
         <div><h1>Settings</h1><p>Every value applies the moment you save — no restart</p></div>
-        <div className={styles.headerActions}>
-          {dirty && !pending ? <Button type="button" variant="ghost" onClick={() => setSettings(initial)}>Discard changes</Button> : null}
-          <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={15} />{pending ? 'Saving…' : 'Save settings'}</Button>
-        </div>
       </header>
       {error ? <div className={styles.error} role="alert">{error}</div> : null}
 
@@ -251,6 +249,19 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
           {tab === 'backup' ? (
             <div className={styles.fields}>
               <BackupPanel />
+            </div>
+          ) : null}
+
+          {/* The save action lives where the work happens: a bar that sticks to
+              the bottom of the section and appears exactly when there is
+              something to save. */}
+          {dirty || pending ? (
+            <div className={styles.saveBar} role="status">
+              <span>{pending ? 'Saving…' : `${changedCount} unsaved ${changedCount === 1 ? 'change' : 'changes'}`}</span>
+              <div className={styles.saveBarActions}>
+                {dirty && !pending ? <Button type="button" variant="ghost" onClick={() => setSettings(initial)}>Discard</Button> : null}
+                <Button type="submit" variant="primary" disabled={!dirty || pending}><Save size={14} />{pending ? 'Saving…' : 'Save settings'}</Button>
+              </div>
             </div>
           ) : null}
         </div>
@@ -418,7 +429,7 @@ function NumberField({ label, value, saved, fallback, min, max, suffix, note, pr
               {preset.toLocaleString('en-US')}
             </button>
           ))}
-          <span className={styles.presetDefault}>Default: {fallback.toLocaleString('en-US')}{suffix ? ` ${suffix}` : ''}</span>
+          <span className={styles.presetDefault} title="The shipped default — the tab's Defaults button restores them all">auto · {fallback.toLocaleString('en-US')}{suffix ? ` ${suffix}` : ''}</span>
         </span>
       ) : null}
     </div>

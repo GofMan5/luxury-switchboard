@@ -1,9 +1,9 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Copy, Pause, Play, Search, SlidersHorizontal, X } from 'lucide-react'
+import { Check, Copy, Pause, Play, Search, X } from 'lucide-react'
 import { useAppServices } from '../../../app/services'
 import { formatBytes, formatClock, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
-import { Pill } from '../../../shared/ui/chrome'
+import { Pill, Segmented } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import type { ActivityRequest, ActivityState } from '../domain/activity'
 import { activityLabels } from './activity-view'
@@ -84,18 +84,19 @@ export default function ActivityPage() {
             onChange={(event) => setSearch(event.currentTarget.value)}
           />
         </label>
-        <label className={styles.filter}>
-          <SlidersHorizontal size={14} aria-hidden="true" />
-          <span className="sr-only">Filter state</span>
-          <select value={stateFilter} onChange={(event) => setStateFilter(event.currentTarget.value as StateFilter)}>
-            <option value="all">All states</option>
-            <option value="active">Streaming</option>
-            <option value="retrying">Retrying</option>
-            <option value="completed">Complete</option>
-            <option value="failed">Error</option>
-            <option value="cancelled">Cancelled</option>
-          </select>
-        </label>
+        <Segmented<StateFilter>
+          label="Filter state"
+          value={stateFilter}
+          onChange={setStateFilter}
+          options={[
+            { id: 'all', label: 'All' },
+            { id: 'active', label: 'Live' },
+            { id: 'retrying', label: 'Retrying' },
+            { id: 'completed', label: 'Done' },
+            { id: 'failed', label: 'Error' },
+            { id: 'cancelled', label: 'Cancelled' },
+          ]}
+        />
         <span className={styles.toolbarSpacer} aria-hidden="true" />
         <Button variant="secondary" onClick={togglePause}>
           {paused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}

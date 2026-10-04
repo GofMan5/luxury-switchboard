@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { FlaskConical, Play, RefreshCw, Square } from 'lucide-react'
 import { useAppServices } from '../../../app/services'
 import { useProviders } from '../../providers/ui/useProviders'
-import { formatDuration } from '../../../shared/format/metrics'
+import { formatClock, formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { EmptyState, Panel, Pill, Segmented } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
@@ -95,10 +95,10 @@ export default function TestsPage() {
     void tests.run(targets)
   }
 
-  const sortable = (key: SortKey, label: string) => (
-    <th aria-sort={sort === key ? (ascending ? 'ascending' : 'descending') : 'none'}>
-      <button type="button" className={styles.sort} onClick={() => { if (sort === key) setAscending(!ascending); else { setSort(key); setAscending(true) } }}>
-        {label}<span aria-hidden="true">{sort === key ? (ascending ? '↑' : '↓') : ''}</span>
+  const sortable = (key: SortKey, label: string, numeric = false) => (
+    <th aria-sort={sort === key ? (ascending ? 'ascending' : 'descending') : 'none'} className={numeric ? styles.num : undefined}>
+      <button type="button" className={styles.sort} title={`Sort by ${label}`} onClick={() => { if (sort === key) setAscending(!ascending); else { setSort(key); setAscending(true) } }}>
+        {label}<span className={styles.sortArrow} aria-hidden="true">{sort === key ? (ascending ? '↑' : '↓') : '↕'}</span>
       </button>
     </th>
   )
@@ -108,12 +108,21 @@ export default function TestsPage() {
       <header className="page-header">
         <div>
           <h1>Tests</h1>
-          <p>Real streaming probes — each is one request against the provider's rate limit; a busy pool answers «Pool busy» instead of queueing ahead of your traffic</p>
+          <p>Real streaming probes against every model in scope — first token, total, decode rate. A probe never queues ahead of your traffic.</p>
         </div>
-        {state.running
-          ? <Button variant="secondary" onClick={() => tests.cancel()}><Square size={14} />Stop</Button>
-          : <Button variant="primary" disabled={testableRows === 0 || !catalogsReady} onClick={runScope}><Play size={14} />Run {scope === 'all' ? 'all' : 'shown'}</Button>}
+        <div className={styles.headerActions}>
+          {state.lastRunAt && !state.running ? <span className={styles.lastRun}>Last run {formatClock(state.lastRunAt)}</span> : null}
+          {state.running
+            ? <Button variant="secondary" onClick={() => tests.cancel()}><Square size={14} />Stop</Button>
+            : <Button variant="primary" disabled={testableRows === 0 || !catalogsReady} onClick={runScope}><Play size={14} />Run {scope === 'all' ? 'all' : 'shown'}</Button>}
+        </div>
       </header>
+      {state.running ? (
+        <div className={styles.runProgress} role="status">
+          <div className={styles.runTrack}><div className={styles.runFill} style={{ width: `${state.runTotal > 0 ? Math.round(100 * state.runDone / state.runTotal) : 0}%` }} /></div>
+          <span>{state.runDone} of {state.runTotal} measured{state.runFailed > 0 ? ` · ${state.runFailed} failed` : ''}</span>
+        </div>
+      ) : null}
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
       {erroredCatalogs.length > 0 ? (
         <div className={styles.error} role="alert">
@@ -158,9 +167,9 @@ export default function TestsPage() {
                     <th>State</th>
                     {sortable('model', 'Model')}
                     <th>Provider</th>
-                    {sortable('ttft', 'First token')}
-                    {sortable('total', 'Total')}
-                    {sortable('rate', 'Tok/s')}
+                    {sortable('ttft', 'First token', true)}
+                    {sortable('total', 'Total', true)}
+                    {sortable('rate', 'Tok/s', true)}
                     <th><span className="sr-only">Actions</span></th>
                   </tr>
                 </thead>
@@ -196,8 +205,8 @@ function TestRow({ row, running, onRun }: { row: { providerId: string; providerN
   return (
     <tr data-testing={state === 'testing' || undefined}>
       <td>
-        {state === 'testing' ? <span className={styles.state}><StatusDot state="active" />Testing</span>
-          : state === 'available' ? <span className={styles.state}><StatusDot state="healthy" />OK</span>
+        {state === 'testing' ? <Pill tone="info"><StatusDot state="active" />Testing</Pill>
+          : state === 'available' ? <Pill tone="success"><StatusDot state="healthy" />OK</Pill>
           : state === 'timeout' ? <Pill tone="warning">Timeout</Pill>
           : state === 'unavailable' && result ? <Pill tone={result.errorCode === 'pool_busy' ? 'warning' : 'danger'}>{result.errorCode === 'result_missing' ? 'No answer' : result.errorCode === 'interrupted' ? 'Stopped' : result.errorCode === 'provider_failed' ? 'Unreachable' : result.errorCode === 'pool_busy' ? 'Pool busy' : `HTTP ${result.status || '—'}`}</Pill>
           : <Pill>Untested</Pill>}

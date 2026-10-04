@@ -142,7 +142,13 @@ function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDe
       </header>
       <div className={styles.inspectorActions}>
         <Button variant="secondary" onClick={onEdit}><Pencil size={14} />Edit</Button>
-        {!provider.builtin ? <Button variant="danger" disabled={active || provider.keyCount > 0} onClick={onDelete}><Trash2 size={14} />Delete</Button> : null}
+        {!provider.builtin ? (
+          <span className={styles.deleteCell}>
+            <Button variant="danger" disabled={active || provider.keyCount > 0} onClick={onDelete}><Trash2 size={14} />Delete</Button>
+            {provider.keyCount > 0 ? <small className={styles.deleteHint}>{provider.keyCount} {provider.keyCount === 1 ? 'key' : 'keys'} — remove them in API Keys first</small> : null}
+            {active && provider.keyCount === 0 ? <small className={styles.deleteHint}>The active provider cannot be deleted</small> : null}
+          </span>
+        ) : null}
       </div>
       <div className={styles.inspectorScroll}>
         <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>

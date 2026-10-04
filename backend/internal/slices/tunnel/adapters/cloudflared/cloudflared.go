@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"sync"
@@ -94,8 +95,68 @@ func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string
 		_ = runtime.gateway.Stop(context.Background())
 		return "", err
 	}
+	// The address line arrives before the edge can actually reach the
+	// connector; a visitor in those seconds gets Cloudflare's 1033. Online is
+	// declared only once the public URL answers — any status, even the
+	// gateway's own unauthenticated refusal, proves resolution.
+	runtime.emit(domain.StateStarting, "", "Verifying the public address")
+	if err := waitServed(ctx, address); err != nil {
+		cancel()
+		runtime.teardownConnector()
+		_ = runtime.gateway.Stop(context.Background())
+		return "", err
+	}
 	go runtime.supervise(runCtx, binary, local)
 	return address, nil
+}
+
+// teardownConnector kills and reaps whatever serve left behind: the run's
+// context is deliberately not the caller's, so a caller-side failure owns
+// this cleanup itself.
+func (runtime *Runtime) teardownConnector() {
+	runtime.mu.Lock()
+	cmd := runtime.cmd
+	exited := runtime.exited
+	runtime.cmd = nil
+	runtime.exited = nil
+	runtime.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	if exited != nil {
+		<-exited
+	}
+}
+
+// waitServed polls the fresh public address until Cloudflare answers for it —
+// the connector registered and the edge resolves the name — or the patience
+// runs out. Any HTTP status counts; what must not answer is Cloudflare's own
+// tunnel error page.
+func waitServed(ctx context.Context, address string) error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		if err != nil {
+			return err
+		}
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode != 530 && response.StatusCode != 1033 {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("the public address never started answering")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1200 * time.Millisecond):
+		}
+	}
 }
 
 func (runtime *Runtime) Stop(ctx context.Context) error {

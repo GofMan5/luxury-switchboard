@@ -28,8 +28,7 @@
 
 .toolbarSpacer { flex: 1; }
 
-.search,
-.filter {
+.search {
   display: flex;
   min-height: 36px;
   align-items: center;
@@ -41,17 +40,14 @@
   background: var(--bg-field);
   transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
 }
-.search:hover,
-.filter:hover { border-color: var(--border-field); background: var(--bg-raised); }
-.search:focus-within,
-.filter:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 22%, transparent); }
+.search:hover { border-color: var(--border-field); background: var(--bg-raised); }
+.search:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 22%, transparent); }
 
 .search {
   width: min(360px, 34vw);
 }
 
-.search input,
-.filter select {
+.search input {
   min-width: 0;
   flex: 1;
   border: 0;
@@ -61,7 +57,6 @@
 }
 
 .search input::placeholder { color: var(--text-muted); }
-.filter select { min-width: 112px; cursor: pointer; }
 
 .body {
   position: relative;
@@ -449,8 +444,6 @@
   .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; padding: 10px 16px; }
   .toolbarSpacer { display: none; }
   .search { width: 100%; grid-column: 1 / -1; }
-  .filter,
-  .filter select { min-width: 0; }
   .close { width: 44px; height: 44px; }
   .table { min-width: 640px; }
   .table th:nth-child(3), .table td:nth-child(3),

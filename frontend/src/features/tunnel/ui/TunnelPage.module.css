@@ -20,8 +20,36 @@
 .status,
 .settings,
 .privacy { border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); box-shadow: inset 0 1px rgb(255 255 255 / 2%); }
-.status { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px; }
+.status { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px; overflow: hidden; }
+.status[data-working] { padding-bottom: 22px; }
 .statusMain { display: flex; align-items: center; gap: 12px; }
+.statusStep { color: var(--text-secondary) !important; font-size: 11.5px !important; }
+
+/* The connector works in steps with no honest percentage: an indeterminate
+ * strip along the card's foot, calm enough to stare at for a minute. */
+.progress {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 3px;
+  background: color-mix(in srgb, var(--status-info) 10%, transparent);
+  overflow: hidden;
+}
+.progress::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 38%;
+  border-radius: 2px;
+  background: var(--status-info);
+  animation: tunnel-progress 1.6s ease-in-out infinite;
+}
+@keyframes tunnel-progress {
+  0% { left: -38%; }
+  100% { left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress::after { animation: none; left: 31%; }
+}
 .status h2,
 .settings h2,
 .privacy h2 { color: var(--text-primary); font-size: 15px; font-weight: 640; }

@@ -77,19 +77,22 @@ function TunnelForm({ snapshot, pending, error, onSave, onStart, onStop, onRevea
   }
   const stateLabel = snapshot.state === 'online' ? 'Online' : snapshot.state === 'starting' ? 'Connecting' : snapshot.state === 'installing' ? 'Installing the connector' : snapshot.state === 'error' ? 'Unavailable' : 'Stopped'
   const stateTone = snapshot.state === 'online' ? 'healthy' : snapshot.state === 'error' ? 'error' : snapshot.state === 'starting' || snapshot.state === 'installing' ? 'active' : 'stopped'
+  const working = snapshot.state === 'starting' || snapshot.state === 'installing'
 
   return <form className={styles.page} onSubmit={submit}>
     <header className="page-header"><div><h1>Tunnel</h1><p>Fail-closed public model gateway over a quick tunnel — no host, no account, no SSH</p></div><div className={styles.actions}>{running ? <Button type="button" variant="danger" disabled={pending} onClick={() => void onStop()}><Square size={13} fill="currentColor" />{retryStop ? 'Retry stop' : 'Stop'}</Button> : <Button type="button" variant="primary" disabled={pending || !valid} onClick={() => void start()}><Play size={15} />{dirty ? 'Save & start' : 'Start'}</Button>}</div></header>
     {error ? <div className={styles.error} role="alert">{error}</div> : null}{notice ? <div className={styles.notice} aria-live="polite">{notice}</div> : null}
     <div className={`page-body ${styles.content}`}>
-      <section className={styles.status}>
+      <section className={styles.status} data-working={working || undefined}>
         <div className={styles.statusMain}>
           <StatusDot state={stateTone} />
           <div>
             <h2>{stateLabel}</h2>
             <p>{snapshot.state === 'installing' ? 'First start downloads the tunnel connector once — verified against its pinned checksum.' : snapshot.address || 'Gateway is closed to public traffic.'}</p>
+            {snapshot.error && snapshot.state !== 'error' ? <p className={styles.statusStep}>{snapshot.error}</p> : null}
           </div>
         </div>
+        {working ? <div className={styles.progress} role="progressbar" aria-label={stateLabel} /> : null}
         <div className={styles.statusActions}>
           <Button type="button" disabled={snapshot.state !== 'online'} onClick={() => void copy(snapshot.address, 'Tunnel URL')}><Copy size={14} />Copy URL</Button>
           <CopyKey onReveal={onReveal} />

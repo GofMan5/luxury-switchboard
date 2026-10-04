@@ -15,6 +15,12 @@ export interface TestsState {
   /** Results keyed `${providerId}${model}` — one row per measured pair. */
   readonly results: Readonly<Record<string, ModelTestResult>>
   readonly running: boolean
+  /** Live run progress: settled probes of the current run's total. */
+  readonly runDone: number
+  readonly runTotal: number
+  readonly runFailed: number
+  /** When the last run finished; empty before the first. */
+  readonly lastRunAt: string
   readonly error: string
 }
 
@@ -32,7 +38,7 @@ const resultKey = testResultKey
  */
 export class TestsModel {
   readonly #port: ModelsPort
-  #state: TestsState = { catalogs: {}, results: {}, running: false, error: '' }
+  #state: TestsState = { catalogs: {}, results: {}, running: false, runDone: 0, runTotal: 0, runFailed: 0, lastRunAt: '', error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #controller: AbortController | null = null
@@ -46,7 +52,7 @@ export class TestsModel {
   connect(): void {
     this.#unsubscribe ??= this.#port.subscribe((result) => {
       if (result.runId !== this.#activeRun) return
-      this.#set({ ...this.#state, results: { ...this.#state.results, [resultKey(result.providerId, result.model)]: result } })
+      this.#set({ ...this.#state, runDone: this.#state.runDone + 1, runFailed: this.#state.runFailed + (result.state === 'available' ? 0 : 1), results: { ...this.#state.results, [resultKey(result.providerId, result.model)]: result } })
     })
   }
 
@@ -98,7 +104,7 @@ export class TestsModel {
     this.#controller = controller
     let timedOut = false
     const timer = setTimeout(() => { timedOut = true; controller.abort() }, RUN_TIMEOUT_MS * planned.length)
-    this.#set({ ...this.#state, running: true, error: '' })
+    this.#set({ ...this.#state, running: true, runDone: 0, runFailed: 0, runTotal: planned.reduce((sum, target) => sum + target.models.length, 0), error: '' })
     let failedProviders = 0
     for (const target of planned) {
       if (controller.signal.aborted || generation !== this.#generation) break
@@ -123,6 +129,7 @@ export class TestsModel {
     this.#set({
       ...this.#state,
       running: false,
+      lastRunAt: new Date().toISOString(),
       error: controller.signal.aborted
         ? (timedOut ? 'The run reached the time limit; unfinished models are marked Timeout' : '')
         : failedProviders > 0 ? `${failedProviders} provider${failedProviders === 1 ? '' : 's'} could not be reached — the rest were measured` : '',
@@ -140,15 +147,17 @@ export class TestsModel {
    * answer is an unavailable row, not a spinner that never stops. */
   #settle(targets: readonly TestTarget[], runId: string, errorCode: string): void {
     const results = { ...this.#state.results }
+    let settled = 0
     for (const target of targets) {
       for (const model of target.models) {
         const key = resultKey(target.providerId, model)
         if (results[key]?.state === 'testing') {
           results[key] = { runId, providerId: target.providerId, model, state: errorCode === 'timeout' ? 'timeout' : 'unavailable', status: 0, latencyMs: 0, errorCode }
+          settled++
         }
       }
     }
-    this.#set({ ...this.#state, results })
+    this.#set({ ...this.#state, runDone: this.#state.runDone + settled, runFailed: this.#state.runFailed + settled, results })
   }
 
   dispose(): void {

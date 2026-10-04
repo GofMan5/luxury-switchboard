@@ -81,6 +81,37 @@
   padding: 22px 28px 28px;
 }
 
+/* The save bar rides the section's own scroll: always at the bottom edge of
+ * the visible content, never over it — it reserves its space, not overlays. */
+.saveBar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  max-width: 760px;
+  margin: 18px 0 -28px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 10px 10px 10px 16px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  box-shadow: 0 10px 32px rgb(0 0 0 / 35%);
+  font-size: 12.5px;
+  backdrop-filter: blur(10px);
+  animation: savebar-in var(--motion-base) var(--ease-standard);
+}
+.saveBarActions { display: flex; align-items: center; gap: 8px; }
+@keyframes savebar-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .saveBar { animation: none; }
+}
+
 .tabHeader {
   display: flex;
   align-items: flex-start;

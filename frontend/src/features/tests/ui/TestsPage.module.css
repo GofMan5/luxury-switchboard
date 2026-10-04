@@ -12,7 +12,10 @@
 
 .tableWrap { overflow: auto; }
 
-.table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.table { width: 100%; min-width: 660px; border-collapse: collapse; font-size: 12.5px; }
+
+.sortArrow { display: inline-block; min-width: 12px; margin-left: 4px; color: var(--text-disabled); font-size: 10px; }
+.sort:hover .sortArrow, th[aria-sort='ascending'] .sortArrow, th[aria-sort='descending'] .sortArrow { color: var(--text-secondary); }
 
 .table th {
   position: sticky;
@@ -58,6 +61,38 @@
 .state { display: inline-flex; align-items: center; gap: 7px; }
 
 .imageNote { color: var(--text-disabled); font-size: 11.5px; }
+
+.headerActions { display: flex; align-items: center; gap: 12px; }
+.lastRun { color: var(--text-muted); font-size: 12px; }
+
+/* A running sweep reports itself: the track fills as probes settle. */
+.runProgress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 10px 24px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--status-info) 4%, var(--bg-canvas));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.runTrack {
+  width: min(280px, 30%);
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.runFill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--status-info);
+  transition: width 300ms var(--ease-standard);
+}
+@media (prefers-reduced-motion: reduce) {
+  .runFill { transition: none; }
+}
 
 .modelCell {
   max-width: 320px;

@@ -68,15 +68,15 @@ func Defaults() Settings {
 		RetryBaseMilliseconds: 500, RetryMaxSeconds: 30,
 		PermanentAttempts: 2, MaxQueued: 10_000,
 		ActivityCapacity: 2_000, HistoryRetentionDays: 30,
-		TunnelRetentionHours:  72,
-		GuardrailMode:         DefaultGuardrailMode,
+		TunnelRetentionHours:   72,
+		GuardrailMode:          DefaultGuardrailMode,
 		GuardrailProviderModes: map[string]string{},
-		GuardrailFindings:     500,
-		NotificationsEnabled:  true,
-		ProviderHealthEnabled: true,
-		AnimationsEnabled:     true,
-		FailoverEnabled:       true,
-		ChainMode:             DefaultChainMode,
+		GuardrailFindings:      500,
+		NotificationsEnabled:   true,
+		ProviderHealthEnabled:  true,
+		AnimationsEnabled:      true,
+		FailoverEnabled:        true,
+		ChainMode:              DefaultChainMode,
 	}
 }
 

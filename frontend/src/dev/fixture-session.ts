@@ -260,7 +260,22 @@ export class FixtureSession implements ControlPlaneSession {
     const body = (payload ?? {}) as Record<string, never>
     switch (method) {
       case 'relay.status': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
-      case 'updates.check': return { current: this.appVersion, latest: this.appVersion, url: '', newer: false, reachable: true, checkedAt: iso(0) }
+      case 'updates.check': return { current: '1.0.40-fixture', latest: '1.0.99', url: 'https://github.com/GofMan5/luxury-switchboard/releases/tag/v1.0.99', newer: true, reachable: true, checkedAt: iso(0) }
+      case 'updates.install': {
+        // The fixture reports progress the way the sidecar does, then parks a
+        // file that names itself: no real bytes ever move in the dev shell.
+        return (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          this.#emit('updates.installProgress', { phase: 'downloading', received: 0, total: 11_865_030, percent: 0 })
+          await new Promise((resolve) => setTimeout(resolve, 350))
+          this.#emit('updates.installProgress', { phase: 'downloading', received: 5_932_515, total: 11_865_030, percent: 50 })
+          await new Promise((resolve) => setTimeout(resolve, 350))
+          this.#emit('updates.installProgress', { phase: 'downloading', received: 11_865_030, total: 11_865_030, percent: 100 })
+          await new Promise((resolve) => setTimeout(resolve, 250))
+          this.#emit('updates.installProgress', { phase: 'ready', received: 11_865_030, total: 11_865_030, percent: 100 })
+          return { path: 'C:\\Users\\dev\\AppData\\Local\\ProviderSwitchboard\\update\\Luxury-Switchboard-1.0.99-windows-x64-setup.exe', version: '1.0.99' }
+        })()
+      }
       case 'relay.start': case 'relay.stop': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
       case 'providers.list': return { activeId: 'north-relay', providers }
       case 'providers.health': return { states: providers.map((provider) => ({ providerId: provider.id, up: provider.enabled, reason: provider.enabled ? '' : 'Disabled' })) }

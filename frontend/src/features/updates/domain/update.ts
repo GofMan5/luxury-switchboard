@@ -6,3 +6,17 @@ export interface UpdateCheck {
   readonly reachable: boolean
   readonly checkedAt: string
 }
+
+/** One progress report of an in-flight installer download. */
+export interface UpdateInstallProgress {
+  readonly phase: 'downloading' | 'verifying' | 'ready'
+  readonly received: number
+  readonly total: number
+  readonly percent: number
+}
+
+/** Where a verified installer waits for the shell to run it. */
+export interface UpdateInstall {
+  readonly path: string
+  readonly version: string
+}

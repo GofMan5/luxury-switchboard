@@ -46,11 +46,11 @@ type storedSettings struct {
 	// the same behavior the domain's Normalized would give it.
 	GuardrailProviderModes map[string]string `json:"guardrailProviderModes"`
 	GuardrailFindings      int               `json:"guardrailFindings"`
-	NotificationsEnabled  *bool  `json:"notificationsEnabled"`
-	ProviderHealthEnabled *bool  `json:"providerHealthEnabled"`
-	AnimationsEnabled     *bool  `json:"animationsEnabled"`
-	FailoverEnabled       *bool  `json:"failoverEnabled"`
-	ChainMode             string `json:"chainMode"`
+	NotificationsEnabled   *bool             `json:"notificationsEnabled"`
+	ProviderHealthEnabled  *bool             `json:"providerHealthEnabled"`
+	AnimationsEnabled      *bool             `json:"animationsEnabled"`
+	FailoverEnabled        *bool             `json:"failoverEnabled"`
+	ChainMode              string            `json:"chainMode"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -85,17 +85,17 @@ func (repository *Repository) Load(ctx context.Context) (domain.Settings, bool, 
 // switch fields a previous build never wrote.
 func (stored storedSettings) restore() domain.Settings {
 	settings := domain.Settings{
-		ListenerPort:          stored.ListenerPort,
-		MaxRequestMiB:         stored.MaxRequestMiB,
-		HeaderTimeoutSeconds:  stored.HeaderTimeoutSeconds,
-		StreamIdleSeconds:     stored.StreamIdleSeconds,
-		RetryBaseMilliseconds: stored.RetryBaseMilliseconds,
-		RetryMaxSeconds:       stored.RetryMaxSeconds,
-		PermanentAttempts:     stored.PermanentAttempts,
-		MaxQueued:             stored.MaxQueued,
-		ActivityCapacity:      stored.ActivityCapacity,
-		HistoryRetentionDays:  stored.HistoryRetentionDays,
-		TunnelRetentionHours:  stored.TunnelRetentionHours,
+		ListenerPort:           stored.ListenerPort,
+		MaxRequestMiB:          stored.MaxRequestMiB,
+		HeaderTimeoutSeconds:   stored.HeaderTimeoutSeconds,
+		StreamIdleSeconds:      stored.StreamIdleSeconds,
+		RetryBaseMilliseconds:  stored.RetryBaseMilliseconds,
+		RetryMaxSeconds:        stored.RetryMaxSeconds,
+		PermanentAttempts:      stored.PermanentAttempts,
+		MaxQueued:              stored.MaxQueued,
+		ActivityCapacity:       stored.ActivityCapacity,
+		HistoryRetentionDays:   stored.HistoryRetentionDays,
+		TunnelRetentionHours:   stored.TunnelRetentionHours,
 		GuardrailMode:          stored.GuardrailMode,
 		GuardrailProviderModes: stored.GuardrailProviderModes,
 		GuardrailFindings:      stored.GuardrailFindings,

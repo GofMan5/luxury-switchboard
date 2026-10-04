@@ -1,0 +1,43 @@
+.dialog {
+  display: grid;
+  gap: 16px;
+  width: min(430px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  padding: 20px 22px;
+  background: var(--bg-surface);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 40%);
+}
+.dialog header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.dialog h2 { color: var(--text-primary); font-size: 16px; font-weight: 640; }
+.dialog header p { margin-top: 5px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.dialog header > svg { color: var(--status-success); flex: 0 0 auto; margin-top: 2px; }
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.progress { display: flex; align-items: center; gap: 12px; color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.track { position: relative; height: 5px; flex: 1; border-radius: 3px; background: var(--bg-elevated); overflow: hidden; }
+.fill { height: 100%; border-radius: 3px; background: var(--status-success); transition: width 250ms var(--ease-standard); }
+@media (prefers-reduced-motion: reduce) {
+  .fill { transition: none; }
+}
+
+.ready > div:first-child { display: flex; align-items: center; gap: 8px; color: var(--status-success); font-size: 13px; }
+.ready { display: grid; gap: 12px; }
+
+.error p { margin: 0 0 4px; color: var(--text-danger); font-size: 12.5px; line-height: 1.5; }
+.error { display: grid; gap: 6px; }
+
+.launchError { margin: 0; color: var(--text-danger); font-size: 12px; line-height: 1.5; }
+.path { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+
+footer { display: flex; justify-content: center; border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+.close { border: 0; background: none; color: var(--text-muted); font: inherit; font-size: 12px; cursor: pointer; padding: 4px 10px; border-radius: 7px; }
+.close:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.close:disabled { color: var(--text-disabled); cursor: default; }

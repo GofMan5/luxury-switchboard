@@ -15,8 +15,8 @@ import (
 type Inspector struct {
 	engine *domain.Engine
 
-	mu       sync.RWMutex
-	mode     domain.Mode
+	mu   sync.RWMutex
+	mode domain.Mode
 	// providerModes overrides the inspection mode per provider: distrust
 	// earned by one reseller does not have to be served to every other. A
 	// global off wins over everything.

@@ -252,6 +252,7 @@ fn allowed_method(method: &str) -> bool {
             | "models.discover"
             | "models.test"
             | "analytics.prices.setCurrency"
+            | "updates.install"
             | "tunnel.get"
             | "tunnel.configure"
             | "tunnel.start"

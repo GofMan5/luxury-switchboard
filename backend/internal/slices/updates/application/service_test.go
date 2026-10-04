@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -18,6 +19,10 @@ type fakeReleases struct {
 func (releases *fakeReleases) LatestRelease(context.Context) (domain.Latest, error) {
 	releases.calls++
 	return releases.latest, releases.err
+}
+
+func (releases *fakeReleases) Open(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("no assets in this fixture")
 }
 
 func TestAnUpdateIsReportedOnlyWhenTheTagIsNewer(t *testing.T) {

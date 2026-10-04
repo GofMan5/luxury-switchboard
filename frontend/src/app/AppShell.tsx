@@ -1,11 +1,11 @@
 import type { PropsWithChildren } from 'react'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { ArrowUpCircle, PanelLeftClose, PanelLeftOpen, Square } from 'lucide-react'
-import { openExternal } from '../platform/lifecycle/open-external'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
 import { useSettings } from '../features/settings/ui/useSettings'
 import { NotificationsSurface } from '../features/notifications/ui/NotificationsSurface'
+import { UpdateDialog } from '../features/updates/ui/UpdateDialog'
 import { useAppServices } from './services'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
@@ -38,7 +38,9 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   // The toast master switch follows the settings record: the feed stays, the
   // interruptions stop.
   const { notifications, updates } = useAppServices()
-  const update = useSyncExternalStore(updates.subscribe, updates.snapshot).check
+  const updateState = useSyncExternalStore(updates.subscribe, updates.snapshot)
+  const update = updateState.check
+  const [updateOpen, setUpdateOpen] = useState(false)
   const notificationsEnabled = settingsState.settings?.notificationsEnabled ?? true
   useEffect(() => {
     notifications.setEnabled(notificationsEnabled)
@@ -110,9 +112,9 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <button
               type="button"
               className={styles.updatePill}
-              aria-label={`Update to version ${update.latest} — open the release page`}
-              title={`Version ${update.latest} is out — open the release page`}
-              onClick={() => void openExternal(update.url)}
+              aria-label={`Update to version ${update.latest} — open the update dialog`}
+              title={`Version ${update.latest} is out — download and verify`}
+              onClick={() => setUpdateOpen(true)}
             >
               <ArrowUpCircle size={12} aria-hidden="true" />
               <span>v{update.latest}</span>
@@ -156,6 +158,9 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
           <WorkspaceBoundary key={route}>{children}</WorkspaceBoundary>
         </main>
       </section>
+      {updateOpen && update ? (
+        <UpdateDialog check={update} state={updateState} onClose={() => setUpdateOpen(false)} onInstall={() => updates.install()} />
+      ) : null}
     </div>
   )
 }

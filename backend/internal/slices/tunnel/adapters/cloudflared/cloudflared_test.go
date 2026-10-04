@@ -1,6 +1,9 @@
 package cloudflared
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"os"
@@ -26,6 +29,89 @@ func TestTheChecksumPinsAreLowercaseHex(t *testing.T) {
 		if pin != strings.ToLower(pin) {
 			t.Fatalf("%s pin is uppercase; it can never match EncodeToString", platform)
 		}
+	}
+}
+
+// The asset each platform downloads is named once here: a wrong name is a
+// refused tunnel on a whole OS, and the darwin archives are the one shape that
+// is not a raw binary.
+func TestEveryPinnedPlatformNamesItsAsset(t *testing.T) {
+	for platform := range connectorSHA256 {
+		goos, goarch, _ := strings.Cut(platform, "/")
+		url, _, err := connectorAssetFor(goos, goarch)
+		if err != nil {
+			t.Fatalf("%s has a pin but no asset: %v", platform, err)
+		}
+		want := connectorURLBase + assetNameFor(goos, goarch)
+		if url != want {
+			t.Fatalf("%s asset URL mismatch: %s", platform, url)
+		}
+	}
+	for _, platform := range []string{"windows/arm64", "freebsd/amd64", "plan9/amd64"} {
+		goos, goarch, _ := strings.Cut(platform, "/")
+		if _, _, err := connectorAssetFor(goos, goarch); err == nil {
+			t.Fatalf("%s is not pinned but answered with an asset", platform)
+		}
+	}
+	if assetNameFor("darwin", "arm64") != "cloudflared-darwin-arm64.tgz" {
+		t.Fatal("darwin must download the .tgz archive the release actually ships")
+	}
+	if assetNameFor("linux", "arm64") != "cloudflared-linux-arm64" {
+		t.Fatal("linux/arm64 must download the raw binary")
+	}
+}
+
+// The darwin flow extracts the runnable binary from the verified archive. A
+// member that is not exactly "cloudflared", or a payload that overstates its
+// size, is refused rather than extracted: an archive is input from the
+// network, and the tar layer has had its share of surprises.
+func TestTheDarwinArchiveExtractsOnlyTheNamedBinary(t *testing.T) {
+	binary := []byte("pretend cloudflared elf, plenty of bytes for a real check")
+	archive := filepath.Join(t.TempDir(), "cloudflared.tgz")
+
+	writeArchive := func(t *testing.T, name string, payload []byte) {
+		t.Helper()
+		file, err := os.Create(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gzipWriter := gzip.NewWriter(file)
+		tarWriter := tar.NewWriter(gzipWriter)
+		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o700, Size: int64(len(payload))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tarWriter.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := tarWriter.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gzipWriter.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runnable := filepath.Join(t.TempDir(), "cloudflared")
+	writeArchive(t, "cloudflared", binary)
+	if err := extractConnector(archive, runnable); err != nil {
+		t.Fatalf("the named binary was refused: %v", err)
+	}
+	got, err := os.ReadFile(runnable)
+	if err != nil || !bytes.Equal(got, binary) {
+		t.Fatalf("the extracted binary is not the archive's: %v", err)
+	}
+
+	// A member with a path in its name never lands anywhere.
+	os.Remove(runnable)
+	writeArchive(t, "evil/cloudflared", binary)
+	if err := extractConnector(archive, runnable); err == nil {
+		t.Fatal("a pathed member was extracted: tar names are not directories to trust")
+	}
+	if _, statErr := os.Stat(runnable); statErr == nil {
+		t.Fatal("a refused extraction left a file behind")
 	}
 }
 

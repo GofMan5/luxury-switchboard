@@ -1,0 +1,43 @@
+name: Bug report
+description: Something broke or behaved wrong
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. The exact wording of any error the app showed.
+      placeholder: |
+        I added provider X, clicked Activate, and the status pill stayed "Retrying" for a minute.
+        Expected: the request to go through or the pill to say why it is waiting.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From the sidebar footer, not from memory.
+      placeholder: "1.0.43"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: screen
+    attributes:
+      label: Which screen
+      description: The workspace the problem lives on (Overview, Live Activity, Tests, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Never paste provider keys or full URLs of your providers here. Redact before posting.

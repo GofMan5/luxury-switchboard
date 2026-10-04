@@ -1,0 +1,17 @@
+name: Feature request
+description: Something the app should do, or do better
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem you are hitting
+      description: What you were trying to get done when the app got in the way. The user scenario, not the solution.
+      placeholder: I have three providers for the same model and no way to see which one was faster this week without opening Insights and counting.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would want instead
+      description: Optional. If you already know the shape of the answer, describe it; if not, leave it empty.

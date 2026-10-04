@@ -13,7 +13,7 @@ Luxury Switchboard is a local operator tool, and operators use keyboards. The in
 
 ## Supported environments
 
-Windows and Linux desktops, window sizes from 800x600 up. The dark palette is the only palette; contrast targets WCAG AA for text on its backgrounds, and several intentionally dimmed secondary elements (table headers, unit suffixes) sit near the AA boundary and are treated as known debt.
+Windows, Linux and macOS desktops, window sizes from 800x600 up. The dark palette is the only palette; contrast targets WCAG AA for text on its backgrounds, and several intentionally dimmed secondary elements (table headers, unit suffixes) sit near the AA boundary and are treated as known debt.
 
 ## Known limitations
 

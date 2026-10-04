@@ -28,15 +28,23 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
     dialogRef.current?.focus()
   }, [state.installPhase, dialogRef])
 
+  // A platform the release ships no installer for is not a transient failure:
+  // no amount of retrying changes what the release contains, so "Try again"
+  // goes away and the release page becomes the action worth taking.
+  const noSelfUpdate = state.installPhase === 'error' && state.installError.includes('no self-update')
+
   const launch = async () => {
     setLaunchError('')
     setLaunching(true)
     try {
       await runInstaller(state.installerPath, true)
-    } catch {
-      // The shell refused or is absent (dev fixture in a browser): the file
-      // is verified and on disk; the operator can run it by hand.
-      setLaunchError('The shell could not start the installer. It is verified and on disk:')
+    } catch (error) {
+      // The shell refused or is absent (dev fixture in a browser). The refusal
+      // carries its own reason; the Rust command rejects with plain strings,
+      // not Error, so both shapes are read. The file stays verified and on
+      // disk either way: the operator can run it by hand.
+      const reason = error instanceof Error ? error.message : String(error)
+      setLaunchError(`The shell could not start the installer: ${reason}. It is verified and on disk:`)
     } finally {
       setLaunching(false)
     }
@@ -83,8 +91,10 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
           <div className={styles.error} role="alert">
             <p>{state.installError || 'The update could not be downloaded.'}</p>
             <div className={styles.actions}>
-              <Button variant="primary" onClick={() => void onInstall()}>Try again</Button>
-              <Button onClick={() => void openExternal(check.url)}>Release page</Button>
+              {noSelfUpdate ? null : (
+                <Button variant="primary" onClick={() => void onInstall()}>Try again</Button>
+              )}
+              <Button variant={noSelfUpdate ? 'primary' : 'secondary'} onClick={() => void openExternal(check.url)}>Release page</Button>
             </div>
           </div>
         ) : null}

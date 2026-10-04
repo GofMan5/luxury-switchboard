@@ -264,10 +264,9 @@ fn allowed_method(method: &str) -> bool {
             | "clients.events"
             | "clients.profile"
             | "shared.list"
-            | "shared.control"
-            // Removed commands stay listed until every shipped sidecar is
-            // newer than every shipped shell: an old shell's call gets a clean
-            // method_not_found, not a frame error.
+            | "shared.control" // Removed commands stay listed until every shipped sidecar is
+                               // newer than every shipped shell: an old shell's call gets a clean
+                               // method_not_found, not a frame error.
     )
 }
 

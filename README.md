@@ -8,7 +8,7 @@ No account. No cloud of ours. No restart after any setting.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-7d8590?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/GofMan5/luxury-switchboard?style=flat-square&color=3fb950)](https://github.com/GofMan5/luxury-switchboard/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux-58a6ff?style=flat-square)](https://github.com/GofMan5/luxury-switchboard/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-58a6ff?style=flat-square)](https://github.com/GofMan5/luxury-switchboard/releases/latest)
 [![Stars](https://img.shields.io/github/stars/GofMan5/luxury-switchboard?style=flat-square&color=e3b341)](https://github.com/GofMan5/luxury-switchboard/stargazers)
 
 ![Overview](docs/screenshots/overview.png)
@@ -17,11 +17,13 @@ No account. No cloud of ours. No restart after any setting.
 
 ## Install
 
-Grab the installer from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest): NSIS on Windows, AppImage/deb on Linux. Then:
+Grab the installer from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest): NSIS on Windows, AppImage/deb on Linux, dmg on macOS, in x64 and arm64 flavors. Then:
 
 1. **Providers**: add any OpenAI/Anthropic-compatible endpoint.
 2. **API Keys**: paste keys, one per line. Encrypted per OS user, write-only after saving.
 3. Point your client at `http://127.0.0.1:8798/v1`. Done.
+
+Updates arrive in-app on every platform: the app downloads the installer for your OS and CPU, checks it against the release's own checksum and restarts into it. Where the release ships no installer for a platform, the dialog says so and points at the release page.
 
 ## What you get
 
@@ -88,7 +90,7 @@ Press **Start** on the Tunnel page and you get an HTTPS address plus a stable ac
 
 ## Private by construction
 
-Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` / `~/.config/provider-switchboard`): config encrypted with DPAPI or the desktop keyring, no plaintext fallback, and the history in local SQLite. The app's only self-initiated outbound call is the GitHub release check; read it in one file (`backend/internal/slices/updates`). Delete the folder, nothing remains.
+Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` on Windows, `~/.config/provider-switchboard` on Linux, `~/Library/Application Support/provider-switchboard` on macOS): config encrypted with DPAPI or the desktop keyring, no plaintext fallback, and the history in local SQLite. The app's only self-initiated outbound call is the GitHub release check; read it in one file (`backend/internal/slices/updates`). Delete the folder, nothing remains.
 
 ## Development
 
@@ -101,7 +103,7 @@ pnpm check    # the whole gate: go vet + tests + race, tsc, lint, vitest, builds
 pnpm build    # the native installer for this host
 ```
 
-Linux build hosts also need `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2`.
+Linux build hosts also need `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2`. `pnpm build` produces the installer for the host it runs on: Windows and Linux build their own, macOS bundles build only on a Mac, and each CPU architecture needs its own host. CI builds all six on their native runners.
 
 The engineering contract (hexagonal slices, the fail-closed boundary, the honesty rules) lives in [AGENTS.md](AGENTS.md), written for people and coding agents alike.
 

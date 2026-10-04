@@ -17,10 +17,10 @@ No account. No cloud of ours. No restart after any setting.
 
 ## Install
 
-Grab the installer from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest) — NSIS on Windows, AppImage/deb on Linux. Then:
+Grab the installer from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest): NSIS on Windows, AppImage/deb on Linux. Then:
 
-1. **Providers** — add any OpenAI/Anthropic-compatible endpoint.
-2. **API Keys** — paste keys, one per line. Encrypted per OS user, write-only after saving.
+1. **Providers**: add any OpenAI/Anthropic-compatible endpoint.
+2. **API Keys**: paste keys, one per line. Encrypted per OS user, write-only after saving.
 3. Point your client at `http://127.0.0.1:8798/v1`. Done.
 
 ## What you get
@@ -29,14 +29,14 @@ Grab the installer from the [latest release](https://github.com/GofMan5/luxury-s
 <tr>
 <td width="50%" valign="top">
 
-**Live Activity** — every request as it happens: status, queue, retries, tokens, speed. A waiting request says why.
+**Live Activity**: every request as it happens. Status, queue, retries, tokens, speed. A waiting request says why.
 
 ![Activity](docs/screenshots/activity.png)
 
 </td>
 <td width="50%" valign="top">
 
-**Insights** — usage and cost per provider and model, priced from your own catalog in your own currency.
+**Insights**: usage and cost per provider and model, priced from your own catalog in your own currency.
 
 ![Insights](docs/screenshots/insights.png)
 
@@ -45,14 +45,14 @@ Grab the installer from the [latest release](https://github.com/GofMan5/luxury-s
 <tr>
 <td width="50%" valign="top">
 
-**Tests** — real streaming probes per model: first token, total, decode rate. Probes never queue ahead of your traffic.
+**Tests**: real streaming probes per model. First token, total, decode rate. Probes never queue ahead of your traffic.
 
 ![Tests](docs/screenshots/tests.png)
 
 </td>
 <td width="50%" valign="top">
 
-**Model Routes** — discover catalogs, publish models under your aliases, pin where each is served.
+**Model Routes**: discover catalogs, publish models under your aliases, pin where each is served.
 
 ![Routes](docs/screenshots/routes.png)
 
@@ -61,14 +61,14 @@ Grab the installer from the [latest release](https://github.com/GofMan5/luxury-s
 <tr>
 <td width="50%" valign="top">
 
-**Guardrails** — every provider answer is inspected locally before your client sees a byte. Monitor by default; block when you say so.
+**Guardrails**: every provider answer is inspected locally before your client sees a byte. Monitor by default; block when you say so.
 
 ![Guardrails](docs/screenshots/guardrails.png)
 
 </td>
 <td width="50%" valign="top">
 
-**Settings** — every value applies the moment you save it, with a plain-words explanation next to each.
+**Settings**: every value applies the moment you save it, with a plain-words explanation next to each.
 
 ![Settings](docs/screenshots/settings.png)
 
@@ -78,17 +78,17 @@ Grab the installer from the [latest release](https://github.com/GofMan5/luxury-s
 
 ## The tunnel in one click
 
-**Start** on the Tunnel page and you get an HTTPS address plus a stable access key — share both, and someone else is on your models. Underneath: a pinned, checksum-verified [cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel in front of a fail-closed gateway. No account anywhere, nothing of ours in the middle.
+Press **Start** on the Tunnel page and you get an HTTPS address plus a stable access key. Share both, and someone else is on your models. Underneath: a pinned, checksum-verified [cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel in front of a fail-closed gateway. No account anywhere, nothing of ours in the middle.
 
-- **The address re-rolls every start; the key doesn't.** Need a permanent URL? Point any tunnel at the same local gateway — it doesn't care.
-- **Fail-closed means fail-closed.** Only your published aliases, only with the key. Provider names, upstream URLs and raw model IDs are structurally absent from what leaves — not redacted, absent. A refused provider answers exactly like an offline one.
-- **Clients get their own page:** per-address history, bans, notes. Stored locally, never published.
+- **The address re-rolls every start; the key doesn't.** Need a permanent URL? Point any tunnel at the same local gateway, it doesn't care.
+- **Fail-closed means fail-closed.** Only your published aliases, only with the key. Provider names, upstream URLs and raw model IDs are structurally absent from what leaves. Not redacted: absent. A refused provider answers exactly like an offline one.
+- **Clients get their own page**: per-address history, bans, notes. Stored locally, never published.
 
 ![Tunnel](docs/screenshots/tunnel.png)
 
 ## Private by construction
 
-Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` / `~/.config/provider-switchboard`): config encrypted with DPAPI or the desktop keyring — no plaintext fallback — and the history in local SQLite. The app's only self-initiated outbound call is the GitHub release check; read it in one file (`backend/internal/slices/updates`). Delete the folder, nothing remains.
+Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` / `~/.config/provider-switchboard`): config encrypted with DPAPI or the desktop keyring, no plaintext fallback, and the history in local SQLite. The app's only self-initiated outbound call is the GitHub release check; read it in one file (`backend/internal/slices/updates`). Delete the folder, nothing remains.
 
 ## Development
 
@@ -103,7 +103,7 @@ pnpm build    # the native installer for this host
 
 Linux build hosts also need `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2`.
 
-The engineering contract — hexagonal slices, the fail-closed boundary, the honesty rules — lives in [AGENTS.md](AGENTS.md), written for people and coding agents alike.
+The engineering contract (hexagonal slices, the fail-closed boundary, the honesty rules) lives in [AGENTS.md](AGENTS.md), written for people and coding agents alike.
 
 ## License
 

@@ -39,9 +39,11 @@ func (guard *Guard) ClientDeclaredTools(requestBody []byte) bool {
 	return guardrailapp.RequestDeclaresTools(requestBody)
 }
 
-// CanBlock reports whether the wired inspector can refuse an answer. Monitor
-// mode records verdicts without enforcing them, so the relay may deliver a
-// stream as it arrives and review it when it ends.
-func (guard *Guard) CanBlock() bool {
-	return guard.inspector.Mode() == guardraildomain.ModeBlock
+// CanBlockFor reports whether Review can refuse an answer from this
+// provider. Monitor mode records verdicts without enforcing them, so the
+// relay may deliver a stream as it arrives and review it when it ends; a
+// block override on the provider (or a global block) means the verdict
+// decides, and the bytes are held back.
+func (guard *Guard) CanBlockFor(providerID string) bool {
+	return guard.inspector.ModeFor(providerID) == guardraildomain.ModeBlock
 }

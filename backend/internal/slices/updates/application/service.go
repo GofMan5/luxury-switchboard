@@ -112,6 +112,8 @@ func (service *Service) Install(ctx context.Context, progress func(InstallProgre
 	service.installMu.Lock()
 	defer service.installMu.Unlock()
 
+	// The cached check is a cheap early refuse, not the verdict: the feed is
+	// re-read below, and the fresh answer is the one acted on.
 	result := service.Check(ctx)
 	if !result.Newer {
 		return InstallResult{}, ErrAlreadyCurrent
@@ -122,6 +124,13 @@ func (service *Service) Install(ctx context.Context, progress func(InstallProgre
 	latest, err := service.releases.LatestRelease(ctx)
 	if err != nil {
 		return InstallResult{}, errors.New("the release feed could not be read")
+	}
+	// The fresh release is the release that gets installed, and it must
+	// still be an upgrade: a yanked or replaced release under a cached
+	// "newer" answer would otherwise download and launch a downgrade wearing
+	// a "Verified" badge.
+	if !domain.NewerThan(latest.Version, service.current) {
+		return InstallResult{}, ErrAlreadyCurrent
 	}
 	if latest.Installer == nil || latest.Checksums == nil {
 		return InstallResult{}, ErrNoSelfUpdate
@@ -159,23 +168,39 @@ func (service *Service) Install(ctx context.Context, progress func(InstallProgre
 	}
 	hasher := sha256.New()
 	progress(InstallProgress{Phase: "downloading"})
+	// The feed names the asset's size: a stream that outgrows it is lying,
+	// and a lying stream does not get to fill the disk. The absolute cap
+	// catches a feed that lies small.
+	const absoluteCeiling = 512 * 1024 * 1024
+	limit := latest.Installer.Size
+	if limit <= 0 || limit > absoluteCeiling {
+		limit = absoluteCeiling
+	}
 	var received int64
 	buffer := make([]byte, 128*1024)
 	for {
 		read, readErr := body.Read(buffer)
 		if read > 0 {
+			received += int64(read)
+			if received > limit {
+				file.Close()
+				os.Remove(part)
+				return InstallResult{}, errors.New("the download outgrew the size the release named")
+			}
 			if _, writeErr := file.Write(buffer[:read]); writeErr != nil {
 				file.Close()
 				os.Remove(part)
 				return InstallResult{}, errors.New("the installer could not be written")
 			}
 			hasher.Write(buffer[:read])
-			received += int64(read)
+			percent := 0
 			if total > 0 {
-				progress(InstallProgress{Phase: "downloading", Received: received, Total: total, Percent: int(100 * received / total)})
-			} else {
-				progress(InstallProgress{Phase: "downloading", Received: received})
+				percent = int(100 * received / total)
+				if percent > 100 {
+					percent = 100
+				}
 			}
+			progress(InstallProgress{Phase: "downloading", Received: received, Total: total, Percent: percent})
 		}
 		if readErr == io.EOF {
 			break
@@ -237,8 +262,9 @@ func (service *Service) expectedChecksum(ctx context.Context, checksums *domain.
 	return "", errors.New("the release names no checksum for the installer")
 }
 
-// pruneSuperseded removes other verified installers from the update
-// directory: one candidate at a time is all the flow promises.
+// pruneSuperseded removes other verified installers, and any orphaned
+// partial file a crashed download left: one candidate at a time is all the
+// flow promises, and a .part nobody owns is tens of dead megabytes.
 func (service *Service) pruneSuperseded(directory, keep string) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -248,8 +274,9 @@ func (service *Service) pruneSuperseded(directory, keep string) {
 		if entry.IsDir() {
 			continue
 		}
-		if entry.Name() != keep && strings.HasSuffix(entry.Name(), "-setup.exe") {
-			os.Remove(filepath.Join(directory, entry.Name()))
+		name := entry.Name()
+		if strings.HasSuffix(name, ".part") || (name != keep && strings.HasSuffix(name, "-setup.exe")) {
+			os.Remove(filepath.Join(directory, name))
 		}
 	}
 }

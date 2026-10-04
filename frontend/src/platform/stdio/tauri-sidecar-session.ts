@@ -16,6 +16,10 @@ const SHUTDOWN_EXIT_TIMEOUT_MS = 10_000
 const TUNNEL_START_TIMEOUT_MS = 60_000
 const MODEL_DISCOVERY_TIMEOUT_MS = 2 * 60_000
 const MODEL_TEST_TIMEOUT_MS = 3 * 60_000
+// The installer download is the longest command the control plane runs: the
+// backend gives it fifteen minutes, and the shell must not cut it shorter —
+// a timeout here cancels the sidecar's download and deletes the partial file.
+const UPDATE_INSTALL_TIMEOUT_MS = 16 * 60_000
 
 interface PendingCall {
   readonly method: string
@@ -259,5 +263,6 @@ function commandTimeout(method: string): number {
   if (method === 'models.test') return MODEL_TEST_TIMEOUT_MS
   if (method === 'tunnel.start') return TUNNEL_START_TIMEOUT_MS
   if (method === 'system.shutdown') return SHUTDOWN_CALL_TIMEOUT_MS
+  if (method === 'updates.install') return UPDATE_INSTALL_TIMEOUT_MS
   return CALL_TIMEOUT_MS
 }

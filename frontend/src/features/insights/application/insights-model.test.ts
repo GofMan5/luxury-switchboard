@@ -87,6 +87,16 @@ describe('InsightsModel', () => {
     expect(port.report).toHaveBeenCalled()
   })
 
+  it('a currency change invalidates the cache: old-unit costs may not serve again', async () => {
+    await model.load('24h')
+    await model.setCurrency('CNY')
+    // Park the re-read: a cached answer would arrive instantly; a cleared
+    // cache has to wait for the network, and the screen shows the wait.
+    port.report.mockImplementation(() => new Promise(() => {}))
+    void model.load('24h')
+    expect(model.snapshot().phase).toBe('loading')
+  })
+
   it('carries the untruncated row count so a short list reads as the newest part', async () => {
     port.recent.mockResolvedValueOnce({ rows: [request('r-24h')], available: 250 })
     await model.load('24h')

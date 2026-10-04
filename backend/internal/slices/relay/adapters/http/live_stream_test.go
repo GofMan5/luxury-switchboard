@@ -40,24 +40,39 @@ func TestCanStreamLiveDecidesByModeAndDialect(t *testing.T) {
 	native := false
 
 	live := NewServer("127.0.0.1:0", Dependencies{Guardrail: guardrailrelay.New(monitor)})
-	if !live.canStreamLive(request("/v1/chat/completions"), body, &native) {
+	if !live.canStreamLive(request("/v1/chat/completions"), body, &native, "echo") {
 		t.Fatal("a monitor-mode native chat stream was buffered")
 	}
-	if !live.canStreamLive(request("/chat/completions"), body, &native) {
+	if !live.canStreamLive(request("/chat/completions"), body, &native, "echo") {
 		t.Fatal("the unprefixed chat path was buffered")
 	}
 
 	guarded := NewServer("127.0.0.1:0", Dependencies{Guardrail: guardrailrelay.New(block)})
-	if guarded.canStreamLive(request("/v1/chat/completions"), body, &native) {
+	if guarded.canStreamLive(request("/v1/chat/completions"), body, &native, "echo") {
 		t.Fatal("block mode streamed live: the verdict decides whether the client sees a byte at all")
 	}
-	if live.canStreamLive(request("/v1/responses"), body, &translated) {
+	// The same question is per provider: a block override on one distrusted
+	// reseller holds its answers back while the rest of the monitor pool
+	// keeps live delivery.
+	distrustedInspector, err := guardrailapp.NewInspector(engine, guardraildomain.ModeMonitor, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	distrustedInspector.SetProviderModes(map[string]string{"reseller": "block"})
+	distrusted := NewServer("127.0.0.1:0", Dependencies{Guardrail: guardrailrelay.New(distrustedInspector)})
+	if distrusted.canStreamLive(request("/v1/chat/completions"), body, &native, "reseller") {
+		t.Fatal("a block override streamed live: the override must hold that provider's answers back")
+	}
+	if !distrusted.canStreamLive(request("/v1/chat/completions"), body, &native, "echo") {
+		t.Fatal("a provider override leaked onto an unrelated provider's stream")
+	}
+	if live.canStreamLive(request("/v1/responses"), body, &translated, "echo") {
 		t.Fatal("a translated dialect streamed live: the conversion needs the whole answer")
 	}
-	if live.canStreamLive(request("/v1/images/generations"), body, &native) {
+	if live.canStreamLive(request("/v1/images/generations"), body, &native, "echo") {
 		t.Fatal("the image bridge streamed live")
 	}
-	if live.canStreamLive(request("/v1/chat/completions"), []byte(`{"model":"glm","messages":[]}`), &native) {
+	if live.canStreamLive(request("/v1/chat/completions"), []byte(`{"model":"glm","messages":[]}`), &native, "echo") {
 		t.Fatal("a non-stream request took the live path")
 	}
 }

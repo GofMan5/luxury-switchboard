@@ -27,7 +27,8 @@ export default function GuardrailsPage() {
   const { settings: settingsModel } = useAppServices()
   const settingsState = useSyncExternalStore(settingsModel.subscribe, settingsModel.snapshot)
   const { state: providersState } = useProviders()
-  const overrides = settingsState.settings?.guardrailProviderModes ?? {}
+  const settings = settingsState.settings
+  const overrides = settings?.guardrailProviderModes ?? {}
   const counts = state.findings.reduce(
     (total, record) => {
       if (record.verdict === 'blocked') total.blocked++
@@ -80,7 +81,22 @@ export default function GuardrailsPage() {
             <div><ScanEye size={17} aria-hidden="true" /><h2>Inspection mode</h2></div>
             <span>Takes effect on the next request. No restart needed.</span>
           </header>
-          <div className={styles.modeChoices} role="radiogroup" aria-label="Inspection mode">
+          <div
+            className={styles.modeChoices}
+            role="radiogroup"
+            aria-label="Inspection mode"
+            onKeyDown={(event) => {
+              // A radiogroup promises arrow keys; the tab order alone does not
+              // deliver the pattern the role announces.
+              const deltas: Record<string, number> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }
+              const delta = deltas[event.key]
+              if (!delta || state.pending) return
+              event.preventDefault()
+              const index = GUARDRAIL_MODES.indexOf(mode)
+              const next = GUARDRAIL_MODES[(index + delta + GUARDRAIL_MODES.length) % GUARDRAIL_MODES.length]
+              void model.setMode(next)
+            }}
+          >
             {GUARDRAIL_MODES.map((choice) => (
               <button
                 key={choice}
@@ -102,13 +118,13 @@ export default function GuardrailsPage() {
               ? `${status.ruleCount.toLocaleString()} detection rules and ${status.indicatorCount.toLocaleString()} known indicators, rule set version ${status.ruleSetVersion}. The rules themselves stay inside the application.`
               : 'Loading the detection rule set…'}
           </p>
-          {mode !== 'off' ? (
+          {mode !== 'off' && settings ? (
             <ProviderOverrides
               mode={mode}
               providers={providersState.catalog.providers}
-              overrides={settingsState.settings?.guardrailProviderModes ?? {}}
-              disabled={settingsState.pending || settingsState.phase !== 'ready'}
-              onChange={(next) => void settingsModel.save({ ...(settingsState.settings as NonNullable<typeof settingsState.settings>), guardrailProviderModes: next })}
+              overrides={settings.guardrailProviderModes}
+              disabled={settingsState.pending || settingsState.phase !== 'ready' || state.pending}
+              onChange={(next) => void settingsModel.save({ ...settings, guardrailProviderModes: next })}
             />
           ) : null}
         </section>
@@ -181,7 +197,15 @@ function ProviderOverrides({ mode, providers, overrides, disabled, onChange }: {
     onChange(next)
   }
   if (relevant.length === 0) return null
-  const overrideCount = Object.values(overrides).filter((value) => value === 'monitor' || value === 'block').length
+  // The header counts what the rows show: an entry equal to the global mode
+  // renders as Default (it deviates from nothing), and a dead entry for a
+  // provider that no longer exists is not a deviation anyone can see.
+  const deviates = (providerID: string): 'monitor' | 'block' | '' => {
+    const value = overrides[providerID]
+    if (value !== 'monitor' && value !== 'block') return ''
+    return value === mode ? '' : value
+  }
+  const overrideCount = relevant.filter((provider) => deviates(provider.id) !== '').length
   return (
     <div className={styles.overrides}>
       <header>
@@ -193,8 +217,7 @@ function ProviderOverrides({ mode, providers, overrides, disabled, onChange }: {
         </span>
       </header>
       {relevant.map((provider) => {
-        const value = overrides[provider.id]
-        const chosen: 'monitor' | 'block' | '' = value === 'monitor' || value === 'block' ? (value === mode ? '' : value) : ''
+        const chosen = deviates(provider.id)
         return (
           <div key={provider.id} className={styles.overrideRow}>
             <span title={provider.id}>{provider.name}</span>

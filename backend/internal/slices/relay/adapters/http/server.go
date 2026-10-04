@@ -1060,7 +1060,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				// flags — the path here is already rewritten), and the
 				// tunnel's dispatch reads the body back for sanitization.
 				liveAfter := time.Duration(0)
-				if liveAllowed && server.canStreamLive(incoming, body, chatActive) {
+				if liveAllowed && server.canStreamLive(incoming, body, chatActive, route.ProviderID) {
 					liveAfter = server.liveStreamProbation()
 				}
 				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, liveAfter)

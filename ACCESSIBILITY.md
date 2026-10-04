@@ -6,9 +6,9 @@ Luxury Switchboard is a local operator tool, and operators use keyboards. The in
 
 - Every control is a real button, link, or input; nothing needs a double click, and nothing important hides behind hover.
 - Focus rings are visible everywhere (`--focus-ring`), and modals trap and restore focus.
-- Tables support arrow-key row navigation; the settings rail and sidebars support Home/End and arrow keys.
+- The Live Activity table supports arrow-key row navigation; the Guardrails mode selector is a radiogroup with arrow keys; the settings rail supports Home/End and arrow keys. Other dense tables (Guardrails findings, Tests) are reached row by row with Tab and opened with Enter.
 - `prefers-reduced-motion` is honored: every animation the app has either stops or falls back to a static state.
-- Live regions announce activity and test-run progress; the sidebar update pill is text, not color alone.
+- Live regions announce activity, test-run progress and update downloads; the sidebar update pill is text, not color alone.
 - Status is never color-only: dots carry labels, state pills carry words.
 
 ## Supported environments

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ArrowUpCircle, ShieldCheck } from 'lucide-react'
 import type { UpdateCheck } from '../domain/update'
 import type { UpdatesState } from '../application/updates-model'
@@ -19,21 +19,32 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
   const busy = state.installPhase === 'downloading' || state.installPhase === 'verifying'
   const dialogRef = useModalFocus<HTMLDivElement>(onClose, busy)
   const [launchError, setLaunchError] = useState('')
+  const [launching, setLaunching] = useState(false)
+
+  // The phase swap unmounts the focused button, which would drop focus to the
+  // body and kill Escape behind the scrim: every phase change hands focus back
+  // to the dialog itself, where the keydown trap lives.
+  useEffect(() => {
+    dialogRef.current?.focus()
+  }, [state.installPhase, dialogRef])
 
   const launch = async () => {
     setLaunchError('')
+    setLaunching(true)
     try {
       await runInstaller(state.installerPath, true)
     } catch {
       // The shell refused or is absent (dev fixture in a browser): the file
       // is verified and on disk; the operator can run it by hand.
       setLaunchError('The shell could not start the installer. It is verified and on disk:')
+    } finally {
+      setLaunching(false)
     }
   }
 
   return (
     <div className="ui-scrim" role="presentation" onClick={busy ? undefined : onClose}>
-      <section ref={dialogRef} className={`ui-modal ${styles.dialog}`} role="dialog" aria-modal="true" aria-labelledby="update-title" onClick={(event) => event.stopPropagation()}>
+      <section ref={dialogRef} tabIndex={-1} className={`ui-modal ${styles.dialog}`} role="dialog" aria-modal="true" aria-labelledby="update-title" onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
             <h2 id="update-title">Version {check.latest} is out</h2>
@@ -60,8 +71,8 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
           <div className={styles.ready}>
             <div><ShieldCheck size={16} aria-hidden="true" /><span>Verified. The installer is ready.</span></div>
             <div className={styles.actions}>
-              <Button variant="primary" onClick={() => void launch()}>Restart and install</Button>
-              <Button onClick={() => void openExternal(check.url)}>Release page</Button>
+              <Button variant="primary" disabled={launching} onClick={() => void launch()}>{launching ? 'Starting…' : 'Restart and install'}</Button>
+              <Button disabled={launching} onClick={() => void openExternal(check.url)}>Release page</Button>
             </div>
             {launchError ? <p className={styles.launchError} role="alert">{launchError}</p> : null}
             {launchError ? <code className={styles.path}>{state.installerPath}</code> : null}
@@ -72,7 +83,7 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
           <div className={styles.error} role="alert">
             <p>{state.installError || 'The update could not be downloaded.'}</p>
             <div className={styles.actions}>
-              <Button onClick={() => void onInstall()}>Try again</Button>
+              <Button variant="primary" onClick={() => void onInstall()}>Try again</Button>
               <Button onClick={() => void openExternal(check.url)}>Release page</Button>
             </div>
           </div>

@@ -261,13 +261,15 @@ func (body *liveStreamBody) terminal() string {
 // canStreamLive decides whether this answer may be delivered as it arrives.
 // The dialect must be the caller's own — translation converts the whole
 // answer before re-emitting it — the request must have asked for a stream in
-// the first place, and the guardrails must be unable to refuse anything:
-// monitor mode's verdicts are recorded, never enforced, so withholding bytes
-// buys nothing the client could observe. The caller adds the entries this
-// cannot see: the image bridge and the tool repair (their caller knows the
-// compat flags), and the tunnel's dispatch (it reads the whole answer back).
-func (server *Server) canStreamLive(request *http.Request, body []byte, chatActive *bool) bool {
-	if server.guardrail == nil || server.guardrail.CanBlock() {
+// the first place, and the guardrails must be unable to refuse anything from
+// THIS provider: monitor mode's verdicts are recorded, never enforced, so
+// withholding bytes buys nothing the client could observe, while a block
+// override on the provider holds the answer back on purpose. The caller adds
+// the entries this cannot see: the image bridge and the tool repair (their
+// caller knows the compat flags), and the tunnel's dispatch (it reads the
+// whole answer back).
+func (server *Server) canStreamLive(request *http.Request, body []byte, chatActive *bool, providerID string) bool {
+	if server.guardrail == nil || server.guardrail.CanBlockFor(providerID) {
 		return false
 	}
 	if chatActive != nil && *chatActive {

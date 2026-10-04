@@ -14,14 +14,17 @@ type Guardrail interface {
 	// A tool call in an answer to a request that declared none is an anomaly, and
 	// recognising a declaration takes the same per-dialect knowledge as the review.
 	ClientDeclaredTools(requestBody []byte) bool
-	// CanBlock reports whether Review can ever refuse an answer. Monitor mode
-	// cannot: its verdicts are recorded, never enforced, so a stream may be
-	// delivered as it arrives and reviewed when it ends — the client sees the
-	// same bytes either way, and time-to-first-token is the only thing
-	// withholding them was buying. Block mode can refuse, and there the
-	// answer is held back on purpose: the verdict decides whether the client
-	// sees a byte at all.
-	CanBlock() bool
+	// CanBlockFor reports whether Review can refuse an answer from this
+	// provider. Monitor mode cannot: its verdicts are recorded, never
+	// enforced, so a stream may be delivered as it arrives and reviewed when
+	// it ends — the client sees the same bytes either way, and
+	// time-to-first-token is the only thing withholding them was buying.
+	// Block mode can refuse, and there the answer is held back on purpose:
+	// the verdict decides whether the client sees a byte at all. The mode is
+	// per provider, so the question is too: a distrusted provider under a
+	// block override gets the held-back path while the rest of the pool
+	// streams live.
+	CanBlockFor(providerID string) bool
 }
 
 // GuardrailSubject is the safe context of one answer: identifiers only — and
@@ -58,4 +61,4 @@ func (NoopGuardrail) Review([]byte, bool, GuardrailSubject) GuardrailVerdict {
 func (NoopGuardrail) ClientDeclaredTools([]byte) bool { return true }
 
 // Nothing is being compared, so nothing can be refused.
-func (NoopGuardrail) CanBlock() bool { return false }
+func (NoopGuardrail) CanBlockFor(string) bool { return false }

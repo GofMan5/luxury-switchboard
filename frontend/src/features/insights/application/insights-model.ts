@@ -128,6 +128,9 @@ export class InsightsModel {
   /** The unit of account the rates are written in; relabels every cost figure. */
   async setCurrency(currency: string): Promise<boolean> {
     const generation = this.#generation
+    // The currency relabels every cached cost figure the same way a price edit
+    // recomputes them: an old-unit answer may not serve a period again.
+    this.#cache.clear()
     this.#set({ ...this.#state, pricesPhase: 'saving', error: '' })
     try {
       const catalog = await this.#port.setCurrency(currency)

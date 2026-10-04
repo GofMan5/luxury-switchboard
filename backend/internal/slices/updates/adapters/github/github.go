@@ -29,11 +29,36 @@ const (
 )
 
 type Client struct {
+	// http answers metadata: small JSON, short deadline.
 	http *http.Client
+	// download moves the installer's bytes: no total-time Timeout here,
+	// because Go's Client.Timeout also covers reading the response body and
+	// would cap a slow-line download at six seconds. The deadline comes from
+	// the request's context instead, and the transport still bounds the
+	// handshake.
+	download *http.Client
 }
 
 func NewClient() *Client {
-	return &Client{http: &http.Client{Timeout: httpTimeout}}
+	return &Client{http: &http.Client{Timeout: httpTimeout}, download: newDownloadClient()}
+}
+
+func newDownloadClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       30 * time.Second,
+		},
+		// A redirect to a plaintext scheme is not a hop this updater takes:
+		// everything it fetches rides https, and a downgrade answers "refused"
+		// instead of being followed.
+		CheckRedirect: func(next *http.Request, _ []*http.Request) error {
+			if next.URL.Scheme != "https" {
+				return errors.New("a download redirected off https")
+			}
+			return nil
+		},
+	}
 }
 
 type assetPayload struct {
@@ -105,7 +130,7 @@ func (client *Client) Open(ctx context.Context, url string) (io.ReadCloser, int6
 		return nil, 0, err
 	}
 	request.Header.Set("User-Agent", "luxury-switchboard-update-check")
-	response, err := client.http.Do(request)
+	response, err := client.download.Do(request)
 	if err != nil {
 		cancel()
 		return nil, 0, err

@@ -29,6 +29,10 @@ const (
 )
 
 type Client struct {
+	// feedURL is the latest-release endpoint this client reads; NewClient
+	// pins it to the project's public home, and only same-package tests
+	// point it elsewhere (a local httptest feed).
+	feedURL string
 	// http answers metadata: small JSON, short deadline.
 	http *http.Client
 	// download moves the installer's bytes: no total-time Timeout here,
@@ -40,7 +44,11 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	return &Client{http: &http.Client{Timeout: httpTimeout}, download: newDownloadClient()}
+	return &Client{
+		feedURL:  releasesURL,
+		http:     &http.Client{Timeout: httpTimeout},
+		download: newDownloadClient(),
+	}
 }
 
 func newDownloadClient() *http.Client {
@@ -74,18 +82,16 @@ type releasePayload struct {
 	Assets      []assetPayload `json:"assets"`
 }
 
-// installerSuffix is the asset this platform self-updates through. Windows
-// ships an NSIS setup the app can hand to the shell; on other platforms the
-// release page stays the honest path and the installer asset reads as absent.
+// installerSuffix is the asset this platform self-updates through, named by
+// the release contract the domain owns: NSIS setups on Windows, AppImages on
+// Linux, dmg bundles on macOS. A pair the line does not build answers empty,
+// and the release page stays the honest path.
 func installerSuffix() string {
-	if runtime.GOOS == "windows" {
-		return "-windows-x64-setup.exe"
-	}
-	return ""
+	return domain.InstallerSuffix(runtime.GOOS, runtime.GOARCH)
 }
 
 func (client *Client) LatestRelease(ctx context.Context) (domain.Latest, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesURL, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, client.feedURL, nil)
 	if err != nil {
 		return domain.Latest{}, err
 	}

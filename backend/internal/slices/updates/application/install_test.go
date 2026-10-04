@@ -61,14 +61,18 @@ func installFixture(t *testing.T) string {
 	return filepath.Join(root, directory, "update")
 }
 
+// installerRelease builds a release whose installer is exactly the asset
+// this running platform self-updates through, named by the domain contract,
+// so every OS the suite runs on exercises its own staging path.
 func installerRelease(version string, payload []byte, digest string) *downloadReleases {
+	name := "Luxury-Switchboard-" + version + domain.InstallerSuffix(runtime.GOOS, runtime.GOARCH)
 	return &downloadReleases{
 		latest: domain.Latest{
 			Version: version, URL: "https://example.test/release",
-			Installer: &domain.Asset{Name: "Luxury-Switchboard-" + version + "-windows-x64-setup.exe", URL: "https://example.test/setup.exe", Size: int64(len(payload))},
+			Installer: &domain.Asset{Name: name, URL: "https://example.test/setup.exe", Size: int64(len(payload))},
 			Checksums: &domain.Asset{Name: "SHA256SUMS.txt", URL: "https://example.test/SHA256SUMS.txt"},
 		},
-		checksums: digest + "  Luxury-Switchboard-" + version + "-windows-x64-setup.exe\n",
+		checksums: digest + "  " + name + "\n",
 		installer: payload,
 	}
 }
@@ -95,7 +99,7 @@ func TestInstallParksAVerifiedInstaller(t *testing.T) {
 	if result.Version != "v1.0.99" {
 		t.Fatalf("wrong release: %+v", result)
 	}
-	if result.Path != filepath.Join(updateDir, "Luxury-Switchboard-v1.0.99-windows-x64-setup.exe") {
+	if result.Path != filepath.Join(updateDir, "Luxury-Switchboard-v1.0.99"+domain.InstallerSuffix(runtime.GOOS, runtime.GOARCH)) {
 		t.Fatalf("wrong parking spot: %s", result.Path)
 	}
 	written, err := os.ReadFile(result.Path)
@@ -167,13 +171,14 @@ func TestInstallNeedsANewerReleaseAndRefusesToRunTwice(t *testing.T) {
 	}
 }
 
+// blockingReleases stalls the installer stream until released, so the lock a
+// running download holds is observable instead of hoped for.
 type blockingReleases struct {
 	releases *downloadReleases
 	release  chan struct{}
 }
 
-// blockingReleases stalls the installer stream until released, so the lock a
-// running download holds is observable instead of hoped for.
+// digestOf names the plain sha256 a release's checksum file would carry.
 func digestOf(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
@@ -200,6 +205,36 @@ func TestInstallAdmitsWhenTheReleaseCannotSelfUpdate(t *testing.T) {
 	service := NewService("1.0.40", releases)
 	if _, err := service.Install(context.Background(), func(InstallProgress) {}); !errors.Is(err, ErrNoSelfUpdate) {
 		t.Fatalf("a page-only release was installed anyway: %v", err)
+	}
+}
+
+// A feed that hands this platform a foreign installer shape is a refusal,
+// not a download: the shell here cannot run what another platform's update
+// parked, and the staging directory stays empty.
+func TestAForeignInstallerShapeIsRefused(t *testing.T) {
+	updateDir := installFixture(t)
+	foreign := "-macos-arm64.dmg"
+	if runtime.GOOS == "darwin" {
+		foreign = "-windows-x64-setup.exe"
+	}
+	payload := []byte("another platform's installer")
+	name := "Luxury-Switchboard-v1.0.99" + foreign
+	releases := &downloadReleases{
+		latest: domain.Latest{
+			Version: "v1.0.99", URL: "https://example.test/release",
+			Installer: &domain.Asset{Name: name, URL: "https://example.test/setup.exe", Size: int64(len(payload))},
+			Checksums: &domain.Asset{Name: "SHA256SUMS.txt", URL: "https://example.test/SHA256SUMS.txt"},
+		},
+		checksums: digestOf(payload) + "  " + name + "\n",
+		installer: payload,
+	}
+	service := NewService("1.0.40", releases)
+	if _, err := service.Install(context.Background(), func(InstallProgress) {}); err == nil {
+		t.Fatal("a foreign installer shape was accepted")
+	}
+	entries, readErr := os.ReadDir(updateDir)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("a refused foreign installer left files behind: %v %v", entries, readErr)
 	}
 }
 

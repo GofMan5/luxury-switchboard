@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -149,9 +150,11 @@ func (service *Service) Install(ctx context.Context, progress func(InstallProgre
 		return InstallResult{}, err
 	}
 	// The asset name comes from the project's own feed, but a name is still
-	// a path component: only the basename, only this shape.
+	// a path component: only the basename, only this platform's self-update
+	// shape. A foreign shape would park an installer this platform's shell
+	// can only refuse to run.
 	name := filepath.Base(latest.Installer.Name)
-	if strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, "-setup.exe") {
+	if strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, domain.InstallerSuffix(runtime.GOOS, runtime.GOARCH)) {
 		return InstallResult{}, errors.New("the installer asset has no recognizable name")
 	}
 	final := filepath.Join(directory, name)
@@ -264,7 +267,9 @@ func (service *Service) expectedChecksum(ctx context.Context, checksums *domain.
 
 // pruneSuperseded removes other verified installers, and any orphaned
 // partial file a crashed download left: one candidate at a time is all the
-// flow promises, and a .part nobody owns is tens of dead megabytes.
+// flow promises, and a .part nobody owns is tens of dead megabytes. The
+// sweep is by installer shape, not by this platform's exact suffix, so a
+// candidate left by an older build or a move between platforms leaves too.
 func (service *Service) pruneSuperseded(directory, keep string) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -275,7 +280,7 @@ func (service *Service) pruneSuperseded(directory, keep string) {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".part") || (name != keep && strings.HasSuffix(name, "-setup.exe")) {
+		if strings.HasSuffix(name, ".part") || (name != keep && domain.IsParkedInstaller(name)) {
 			os.Remove(filepath.Join(directory, name))
 		}
 	}

@@ -196,6 +196,10 @@ func (service *Service) Install(ctx context.Context, progress func(InstallProgre
 		os.Remove(part)
 		return InstallResult{}, errors.New("the installer failed its checksum; nothing was installed")
 	}
+	// A second install of the same version rewrites its own verified file: on
+	// Windows a rename does not replace an existing target, and the old bytes
+	// are ours anyway.
+	os.Remove(final)
 	if err := os.Rename(part, final); err != nil {
 		os.Remove(part)
 		return InstallResult{}, err

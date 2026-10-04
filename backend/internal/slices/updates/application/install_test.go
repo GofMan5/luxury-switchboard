@@ -46,16 +46,19 @@ func (releases *downloadReleases) Open(_ context.Context, url string) (io.ReadCl
 
 // installFixture points the service's staging directory at a temp dir instead
 // of the operator's real user data, on every platform the app builds for:
-// Windows reads LOCALAPPDATA, everything else the XDG user config root.
+// Windows reads LOCALAPPDATA with an uppercase directory name, everything
+// else the XDG user config root with the lowercase one.
 func installFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	directory := "provider-switchboard"
 	if runtime.GOOS == "windows" {
+		directory = "ProviderSwitchboard"
 		t.Setenv("LOCALAPPDATA", root)
 	} else {
 		t.Setenv("XDG_CONFIG_HOME", root)
 	}
-	return filepath.Join(root, "ProviderSwitchboard", "update")
+	return filepath.Join(root, directory, "update")
 }
 
 func installerRelease(version string, payload []byte, digest string) *downloadReleases {

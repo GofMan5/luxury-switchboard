@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package secretstore
 
@@ -52,7 +52,7 @@ func Unprotect(ciphertext []byte) ([]byte, error) {
 }
 
 func UnprotectLegacy([]byte) ([]byte, error) {
-	return nil, errors.New("legacy DPAPI storage is not available on Linux")
+	return nil, errors.New("legacy DPAPI storage is not available on this platform")
 }
 
 func linuxMasterKey() ([]byte, error) {
@@ -61,7 +61,7 @@ func linuxMasterKey() ([]byte, error) {
 		return decodeLinuxKey(encoded)
 	}
 	if !errors.Is(err, keyring.ErrNotFound) {
-		return nil, unavailable("Linux Secret Service is unavailable")
+		return nil, unavailable(keyringBackend + " is unavailable")
 	}
 	return createLinuxMasterKey()
 }
@@ -84,7 +84,7 @@ func createLinuxMasterKey() ([]byte, error) {
 	if encoded, err := keyring.Get(linuxKeyService, linuxKeyUser); err == nil {
 		return decodeLinuxKey(encoded)
 	} else if !errors.Is(err, keyring.ErrNotFound) {
-		return nil, unavailable("Linux Secret Service is unavailable")
+		return nil, unavailable(keyringBackend + " is unavailable")
 	}
 	generated := make([]byte, linuxKeyBytes)
 	if _, err := rand.Read(generated); err != nil {
@@ -92,11 +92,11 @@ func createLinuxMasterKey() ([]byte, error) {
 	}
 	defer clear(generated)
 	if err := keyring.Set(linuxKeyService, linuxKeyUser, base64.RawStdEncoding.EncodeToString(generated)); err != nil {
-		return nil, unavailable("Linux Secret Service could not store the encryption key")
+		return nil, unavailable(keyringBackend + " could not store the encryption key")
 	}
 	stored, err := keyring.Get(linuxKeyService, linuxKeyUser)
 	if err != nil {
-		return nil, unavailable("Linux Secret Service could not verify the encryption key")
+		return nil, unavailable(keyringBackend + " could not verify the encryption key")
 	}
 	return decodeLinuxKey(stored)
 }
@@ -109,7 +109,7 @@ func decodeLinuxKey(encoded string) ([]byte, error) {
 	key, err := base64.RawStdEncoding.DecodeString(encoded)
 	if err != nil || len(key) != linuxKeyBytes {
 		clear(key)
-		return nil, errors.New("Linux Secret Service contains an invalid encryption key")
+		return nil, errors.New(keyringBackend + " contains an invalid encryption key")
 	}
 	return key, nil
 }

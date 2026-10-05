@@ -43,10 +43,45 @@ jobs:
       # The tauri build script validates the sidecar's externalBin path even
       # for a test build, so the sidecar must exist before cargo runs.
       - run: pnpm sidecar:build
+      - name: Probe sidecar binary before bundling
+        # Classifies the file linuxdeploy aborts on: static vs dynamic, arch,
+        # DT_NEEDED, and the exact ldd output + exit code, which is what
+        # linuxdeploy's ElfFile::traceDynamicDependencies keys its tolerance on.
+        run: |
+          set -x
+          go env CGO_ENABLED
+          go version
+          rustc -vV | grep host
+          ldd --version | head -1
+          for f in src-tauri/binaries/*aarch64*; do
+            echo "===== probe $f"
+            file "$f"
+            readelf -h "$f" | head -12
+            echo "----- dynamic section"
+            readelf -d "$f" || true
+            echo "----- ldd"
+            ldd "$f" 2>&1; echo "ldd exit: $?"
+            echo "----- rtld --verify"
+            /lib/ld-linux-aarch64.so.1 --verify "$f" 2>&1; echo "verify exit: $?"
+          done
       - name: Bundle with verbose linuxdeploy logging
         # --verbose lifts the CLI past its default error log level, where the
         # bundler captures and discards linuxdeploy's stdout and stderr; at a
         # higher level the child output is propagated on failure.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: pnpm exec tauri build --ci --verbose
+        run: |
+          set +e
+          pnpm exec tauri build --ci --verbose
+          status=$?
+          echo "tauri build exit: $status"
+          echo "===== post-mortem: every switchboard-sidecar copy under target/"
+          find src-tauri/target -name 'switchboard-sidecar*' -type f | while read -r f; do
+            echo "===== post-mortem $f"
+            file "$f"
+            readelf -d "$f" 2>/dev/null | grep -E 'RPATH|RUNPATH|NEEDED' || true
+            ldd "$f" 2>&1; echo "ldd exit: $?"
+          done
+          echo "===== post-mortem: AppDir trees"
+          find src-tauri/target -type d -name '*.AppDir' | head -5
+          exit $status

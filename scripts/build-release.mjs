@@ -53,7 +53,14 @@ function buildEdition(edition) {
     removeStaleBundles(artifact)
   }
   const startedAt = Date.now()
-  execFileSync(process.execPath, [pnpm, 'exec', 'tauri', 'build', '--ci'], {
+  // On Linux the bundle step runs linuxdeploy, whose stderr tauri-bundler
+  // captures and logs only at debug level, so a failed leg prints nothing
+  // beyond "failed to run linuxdeploy". --verbose raises the bundler's log
+  // level — and with it linuxdeploy's own verbosity — so a red leg names the
+  // failing step in the CI log instead of failing silently.
+  const tauriArguments = ['exec', 'tauri', 'build', '--ci']
+  if (process.platform === 'linux') tauriArguments.push('--verbose')
+  execFileSync(process.execPath, [pnpm, ...tauriArguments], {
     cwd: workspace,
     stdio: 'inherit',
     env: { ...process.env },

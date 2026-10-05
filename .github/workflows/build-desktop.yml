@@ -2,64 +2,27 @@ name: Build desktop
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*"
-  pull_request:
 
 permissions:
   contents: read
 
-# A release tag (or a manual dispatch) builds the installers for every
-# supported platform and uploads them. A branch push or a pull request runs
-# the same checks and stops there: a broken bump must fail the commit, not
-# the release it was cut for.
+# Diagnostic branch only, never merged to main: reproduces the linux arm64
+# bundling failure and prints the linuxdeploy output the bundler swallows at
+# its default error log level.
 concurrency:
   group: build-desktop-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Every installer is built on a native runner: scripts/build-sidecar.mjs
-      # compiles the Go sidecar for the Rust host triple, so each architecture
-      # needs its own machine instead of a cross-compile.
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows x64
-            os: windows-2022
-            artifact: switchboard-windows-x64
-          - name: Windows arm64
-            os: windows-11-arm
-            artifact: switchboard-windows-arm64
-          - name: Linux x64
-            os: ubuntu-22.04
-            artifact: switchboard-linux-x64
-            # Ubuntu 22.04 still carries the transitional libappindicator3-dev.
-            linux_packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
-          - name: Linux arm64
-            os: ubuntu-24.04-arm
-            artifact: switchboard-linux-arm64
-            # Ubuntu 24.04 dropped the transitional name, only ayatana is there.
-            linux_packages: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
-          - name: macOS arm64
-            os: macos-latest
-            artifact: switchboard-macos-arm64
-          - name: macOS x64
-            os: macos-15-intel
-            artifact: switchboard-macos-x64
+    name: Linux arm64 diagnosis
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
-      - if: runner.os == 'Linux'
-        name: Install Linux desktop build dependencies
+      - name: Install Linux desktop build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.linux_packages }}
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
       - uses: pnpm/action-setup@v4
         with:
           version: 10.26.2
@@ -77,81 +40,13 @@ jobs:
         with:
           workspaces: src-tauri -> target
       - run: pnpm install --frozen-lockfile
-      - name: Check Go formatting
-        # Cheap and deterministic, so it runs first and only once: a formatting
-        # drift should fail the commit before twenty minutes of tests spend
-        # themselves on it. The definition of done names gofmt alongside vet.
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          unformatted=$(gofmt -l backend)
-          if [ -n "$unformatted" ]; then
-            echo "these files are not gofmt-formatted:" && echo "$unformatted"
-            exit 1
-          fi
-      - name: Check source
-        run: |
-          pnpm version:check
-          pnpm --dir frontend lint
-          pnpm --dir frontend typecheck
-          pnpm --dir frontend test
-          go -C backend test ./...
-          go -C backend vet ./...
-          go -C backend mod verify
-          # The tauri build script validates the sidecar's externalBin path even
-          # for a test build, so the sidecar must exist before cargo runs.
-          pnpm sidecar:build
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Race the concurrent slices
-        # The plain runs above catch logic; only -race catches the data races
-        # in the code that owns shared state. The whole tree under race is
-        # minutes of CI for little extra signal, so the list is the slices
-        # that actually run goroutines sharing memory: the relay, the pools,
-        # the queues, the stdio server and the composition that wires them.
-        if: runner.os == 'Linux'
-        run: go -C backend test -race ./internal/platform/... ./internal/slices/keypool/... ./internal/slices/relay/... ./internal/slices/analytics/... ./internal/slices/activity/... ./internal/slices/publictunnel/... ./internal/app/...
-      - name: Build the installers
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        # linuxdeploy runs as an AppImage and arm64 runners ship no FUSE
-        # device, so it executes from its extracted directory like the
-        # Docker-based local build already does.
+      # The tauri build script validates the sidecar's externalBin path even
+      # for a test build, so the sidecar must exist before cargo runs.
+      - run: pnpm sidecar:build
+      - name: Bundle with verbose linuxdeploy logging
+        # --verbose lifts the CLI past its default error log level, where the
+        # bundler captures and discards linuxdeploy's stdout and stderr; at a
+        # higher level the child output is propagated on failure.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: pnpm build
-      - uses: actions/upload-artifact@v4
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        with:
-          name: ${{ matrix.artifact }}
-          path: |
-            artifacts/release/*.exe
-            artifacts/release/*.AppImage
-            artifacts/release/*.deb
-            artifacts/release/*.dmg
-          if-no-files-found: error
-          retention-days: 14
-
-  collect:
-    name: One release folder
-    needs: build
-    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: switchboard-*
-          # The build uploads every installer from artifacts/release, so the
-          # download has to restore that exact directory: --checksums-only
-          # reads it and refuses to invent checksums for files elsewhere.
-          path: artifacts/release
-          merge-multiple: true
-      - run: node scripts/build-release.mjs --checksums-only
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Luxury-Switchboard-All-Platforms
-          path: artifacts/release
-          if-no-files-found: error
-          retention-days: 30
+        run: pnpm exec tauri build --ci --verbose

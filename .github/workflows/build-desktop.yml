@@ -1,87 +1,68 @@
-name: Build desktop
+name: arm64 ldd repro
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-# Diagnostic branch only, never merged to main: reproduces the linux arm64
-# bundling failure and prints the linuxdeploy output the bundler swallows at
-# its default error log level.
-concurrency:
-  group: build-desktop-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build:
-    name: Linux arm64 diagnosis
-    runs-on: ubuntu-24.04-arm
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v5
-      - name: Install Linux desktop build dependencies
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq patchelf file
+      - name: Build binaries and probe ldd around the rpath patch
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.26.2
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-      - name: Install pinned Rust toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-      - run: pnpm install --frozen-lockfile
-      # The tauri build script validates the sidecar's externalBin path even
-      # for a test build, so the sidecar must exist before cargo runs.
-      - run: pnpm sidecar:build
-      - name: Probe sidecar binary before bundling
-        # Classifies the file linuxdeploy aborts on: static vs dynamic, arch,
-        # DT_NEEDED, and the exact ldd output + exit code, which is what
-        # linuxdeploy's ElfFile::traceDynamicDependencies keys its tolerance on.
-        run: |
-          set -x
-          go env CGO_ENABLED
-          go version
-          rustc -vV | grep host
-          ldd --version | head -1
-          for f in src-tauri/binaries/*aarch64*; do
-            echo "===== probe $f"
-            file "$f"
-            readelf -h "$f" | head -12
-            echo "----- dynamic section"
-            readelf -d "$f" || true
-            echo "----- ldd"
-            ldd "$f" 2>&1; echo "ldd exit: $?"
-            echo "----- rtld --verify"
-            /lib/ld-linux-aarch64.so.1 --verify "$f" 2>&1; echo "verify exit: $?"
-          done
-      - name: Bundle with verbose linuxdeploy logging
-        # --verbose lifts the CLI past its default error log level, where the
-        # bundler captures and discards linuxdeploy's stdout and stderr; at a
-        # higher level the child output is propagated on failure.
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: |
-          set +e
-          pnpm exec tauri build --ci --verbose
-          status=$?
-          echo "tauri build exit: $status"
-          echo "===== post-mortem: every switchboard-sidecar copy under target/"
-          find src-tauri/target -name 'switchboard-sidecar*' -type f | while read -r f; do
-            echo "===== post-mortem $f"
-            file "$f"
-            readelf -d "$f" 2>/dev/null | grep -E 'RPATH|RUNPATH|NEEDED' || true
-            ldd "$f" 2>&1; echo "ldd exit: $?"
-          done
-          echo "===== post-mortem: AppDir trees"
-          find src-tauri/target -type d -name '*.AppDir' | head -5
-          exit $status
+          echo "== env: arch $(uname -m), glibc: $(ldd --version | head -1), patchelf $(patchelf --version), bash $BASH_VERSION"
+          mkdir -p "/tmp/repro/Luxury Switchboard.AppDir/usr/bin" "/tmp/repro/Luxury Switchboard.AppDir/usr/lib" /tmp/repro/ns/usr/bin /tmp/repro/ns/usr/lib
+          cd backend
+          CGO_ENABLED=1 go build -trimpath -o /tmp/dyn-go ./cmd/switchboard-sidecar
+          CGO_ENABLED=0 go build -trimpath -o /tmp/static-go ./cmd/switchboard-sidecar
+          cd /tmp
+          printf 'int main(void){return 0;}' > /tmp/plain.c
+          cc /tmp/plain.c -o /tmp/plain-c
+          RTLD=/lib/ld-linux-aarch64.so.1
+          [ -x "$RTLD" ] || RTLD=/lib64/ld-linux-aarch64.so.1
+          echo "== rtld: $RTLD ($($RTLD --version | head -1))"
+
+          probe() {
+            f="$1"; tag="$2"
+            echo "##### $tag : ldd BEFORE rpath patch"
+            LC_ALL=C ldd "$f" 2>&1; echo "ldd exit: $?"
+            echo "##### $tag : direct rtld trace BEFORE rpath patch"
+            LD_TRACE_LOADED_OBJECTS=1 LC_ALL=C "$RTLD" "$f" 2>&1; echo "rtld exit: $?"
+            echo "##### $tag : patchelf --set-rpath \$ORIGIN/../lib"
+            patchelf --set-rpath '$ORIGIN/../lib' "$f" 2>&1; echo "patchelf exit: $?"
+            echo "##### $tag : readelf -d AFTER rpath patch"
+            readelf -d "$f" | grep -E 'RPATH|RUNPATH|NEEDED'
+            echo "##### $tag : ldd AFTER rpath patch"
+            LC_ALL=C ldd "$f" 2>&1; echo "ldd exit: $?"
+            echo "##### $tag : direct rtld trace AFTER rpath patch"
+            LD_TRACE_LOADED_OBJECTS=1 LC_ALL=C "$RTLD" "$f" 2>&1; echo "rtld exit: $?"
+          }
+
+          cp /tmp/dyn-go "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/switchboard-sidecar"
+          cp /tmp/plain-c "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/plain-c"
+          cp /tmp/static-go "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/static-go"
+          cp /tmp/dyn-go /tmp/repro/ns/usr/bin/switchboard-sidecar
+
+          probe "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/switchboard-sidecar" "space/dyn-go"
+          probe "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/plain-c" "space/plain-c"
+          probe "/tmp/repro/ns/usr/bin/switchboard-sidecar" "nospace/dyn-go"
+
+          echo "##### static-go : ldd (unpatched)"
+          LC_ALL=C ldd "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/static-go" 2>&1; echo "ldd exit: $?"
+          echo "##### static-go : direct rtld trace (unpatched)"
+          LD_TRACE_LOADED_OBJECTS=1 LC_ALL=C "$RTLD" "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/static-go" 2>&1; echo "rtld exit: $?"
+          echo "##### static-go : patchelf --set-rpath attempt"
+          patchelf --set-rpath '$ORIGIN/../lib' "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/static-go" 2>&1; echo "patchelf exit: $?"
+          echo "##### static-go : ldd after patch attempt"
+          LC_ALL=C ldd "/tmp/repro/Luxury Switchboard.AppDir/usr/bin/static-go" 2>&1; echo "ldd exit: $?"

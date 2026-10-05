@@ -211,7 +211,7 @@
 
 .inputWrap { display: flex; width: min(220px, 100%); align-items: center; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-field); transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast); }
 .inputWrap:hover { border-color: var(--border-field); background: var(--bg-raised); }
-.inputWrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px rgb(112 155 199 / 22%); }
+.inputWrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--border-focus) 22%, transparent); }
 .inputWrap input { min-width: 0; height: 38px; flex: 1; border: 0; outline: 0; padding: 0 10px; color: var(--text-primary); background: transparent; font-variant-numeric: tabular-nums; }
 .inputWrap select { min-width: 0; height: 38px; flex: 1; border: 0; outline: 0; padding: 0 10px; color: var(--text-primary); background: transparent; cursor: pointer; }
 .inputWrap small { padding-right: 10px; color: var(--text-muted); }
@@ -247,7 +247,7 @@
 }
 
 .switch[aria-checked='true'] .knob {
-  background: #151515;
+  background: var(--text-on-action);
   transform: translateX(18px);
 }
 

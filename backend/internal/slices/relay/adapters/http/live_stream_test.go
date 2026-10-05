@@ -1,6 +1,8 @@
 package relayhttp
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -153,6 +155,33 @@ func TestChannelReaderServesBytesAndErrorAndClosedChannels(t *testing.T) {
 	}
 }
 
+// The exit race itself: the goroutine feeding the channel races its own
+// cancellation, and whichever select arm wins, the consumer must learn why
+// the goroutine left instead of the bare abort that history used to file as
+// "live stream aborted". The stash is sequenced before the deferred close,
+// so it outranks everything; without a stash the cancelled context still
+// names cancellation. The live copy loop files both outcomes as
+// client_disconnected, and this contract is what it relies on.
+func TestAClosedChannelCarriesTheReasonTheReaderGoroutineLeft(t *testing.T) {
+	stashed := make(chan bodyRead)
+	close(stashed)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reader := &channelReader{reads: stashed, exit: &streamExit{err: context.DeadlineExceeded}, readCtx: ctx}
+	_, err := reader.Read(make([]byte, 8))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a stashed deadline must outrank the cancelled context: %v", err)
+	}
+
+	naked := make(chan bodyRead)
+	close(naked)
+	reader = &channelReader{reads: naked, readCtx: ctx}
+	_, err = reader.Read(make([]byte, 8))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled read context must name cancellation, not the bare abort: %v", err)
+	}
+}
+
 // The seamlessness case: a provider whose prefill is silent for far longer
 // than the client's own idle patience. The buffered path fed the client
 // keep-alives through the whole wait; the live path stopped at the handoff,
@@ -296,6 +325,57 @@ func TestABreakAfterContentIsFinal(t *testing.T) {
 	}
 	if sink.finish.ErrorCode != "stream_incomplete" {
 		t.Fatalf("the final break was not filed: %+v", sink.finish)
+	}
+}
+
+// A client that walks away mid-content is not a provider failure. Measured
+// in the field: the provider stalls after its content, the CLIENT's watchdog
+// fires, the request context cancels, and the reader goroutine's exit race
+// dropped the transport's own reason on the floor — history filed twelve
+// rows of "live stream aborted" and pointed the operator at the wrong end
+// of the wire. The transport surfaces a cancelled request context from the
+// body read as context.Canceled, and that is what must reach the record:
+// the client left, nobody broke.
+func TestAClientLeavingMidStreamIsFiledAsClientDisconnected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+		writer.(http.Flusher).Flush()
+		// The provider holds the stream open after its content: the read
+		// that aborts is a blocked one, the same shape the field rows had.
+		<-request.Context().Done()
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 40 * time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		// Past the probation and past the content: the consumer is parked
+		// on a blocked read when the client's own timeout fires.
+		time.Sleep(120 * time.Millisecond)
+		cancel()
+	}()
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if sink.finish.ErrorCode != "client_disconnected" {
+		t.Fatalf("the client's own exit was filed as something else: %+v", sink.finish)
+	}
+	if !sink.finish.Cancelled {
+		t.Fatalf("a client exit must be reported as cancelled, not as a failure: %+v", sink.finish)
+	}
+	if strings.Contains(sink.finish.ErrorDetail, "live stream aborted") {
+		t.Fatalf("the bare abort detail survived: %+v", sink.finish)
+	}
+	if !strings.Contains(response.Body.String(), "partial") {
+		t.Fatalf("the content the client did receive was lost: %q", response.Body.String())
 	}
 }
 

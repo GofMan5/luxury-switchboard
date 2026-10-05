@@ -446,7 +446,15 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		if err != nil {
 			if committed {
 				cancelled = errors.Is(err, context.Canceled) || errors.Is(err, errClientDisconnected)
-				errorCode = "stream_incomplete"
+				// A cancelled client is not a broken stream: the provider
+				// did its part, the consumer walked away. Filing the
+				// abort as stream_incomplete made every cancelled live
+				// stream look like a provider failure in history.
+				if cancelled {
+					errorCode = "client_disconnected"
+				} else {
+					errorCode = "stream_incomplete"
+				}
 				errorDetail = err.Error()
 				writeStreamFailure(writer, request.URL.Path, model)
 				return
@@ -589,6 +597,30 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 					errorCode = "stream_incomplete"
 					errorDetail = "the provider's stream ended without a terminal event"
 				}
+				// The terminal the stream ended on names the failure when the
+				// transport itself said nothing: a refusal, an incomplete and
+				// a failed response each mean a different row in history, and
+				// all three used to land here as a bare stream_incomplete.
+				if errorCode == "" {
+					switch {
+					case live.inspector.refused:
+						errorCode = "policy_refusal"
+						errorDetail = truncateErrorDetail(redactRequestEchoes(terminalErrorDetailUnbounded(collected, secrets), body))
+						if errorDetail == "" {
+							errorDetail = "Provider response was refused"
+						}
+					case terminal == "response.incomplete":
+						errorCode = "stream_incomplete"
+						if errorDetail == "" {
+							errorDetail = "Provider stream ended incomplete"
+						}
+					case terminal == "response.failed":
+						errorCode = "upstream_status"
+						if errorDetail == "" {
+							errorDetail = "Provider reported a failed response"
+						}
+					}
+				}
 			}
 			broke := serveLiveStream(live)
 			if !broke {
@@ -646,6 +678,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				// byte, and silence after them hangs a lifecycle-watching
 				// caller instead of failing it.
 				if committed {
+					// Headers went out, so the caller that vanished is the
+					// client — the same departure the copy loop and the live
+					// ladder file as client_disconnected. "cancelled" stays
+					// the word for a request nothing was sent on yet.
+					errorCode = "client_disconnected"
 					writeStreamFailure(writer, request.URL.Path, model)
 				}
 				return
@@ -2163,6 +2200,11 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 		}
 	}()
 	reads := make(chan bodyRead, 1)
+	// exit carries the reader goroutine's parting error across the close:
+	// see streamExit in live_stream.go. The write below is sequenced before
+	// the deferred close, and a consumer that observes the closed channel
+	// reads it safely — that is the whole handoff.
+	var exit streamExit
 	// The goroutine must close over the body it was given, not over the
 	// response: the live handoff REPLACES response.Body with the live body
 	// on this very object, and a goroutine that reads response.Body by
@@ -2188,6 +2230,11 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			select {
 			case reads <- value:
 			case <-readCtx.Done():
+				// Stash before the deferred close hands the channel over:
+				// this error — a cancellation unwinding the transport — is
+				// the reason the consumer's channel went dark, and without
+				// it the exit looks like a plain abort.
+				exit.err = err
 				return
 			}
 			if err != nil {
@@ -2220,7 +2267,12 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			// byte the client receives, prefix included — and the
 			// inspector skips the prefix, which the probation already
 			// fed it.
-			source:    &channelReader{prefix: buffered, reads: reads},
+			source: &channelReader{
+				prefix:  buffered,
+				reads:   reads,
+				exit:    &exit,
+				readCtx: readCtx,
+			},
 			inspector: inspector,
 			collected: make([]byte, 0, min(limit, 64*1024)),
 			limit:     limit,
@@ -2270,7 +2322,14 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 		case <-idle.C:
 			response.Body.Close()
 			return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
-		case result := <-reads:
+		case result, open := <-reads:
+			// A closed channel without a pending value is the goroutine's
+			// exit. The zero bodyRead a bare receive yields here would
+			// busy-spin this loop against ctx.Done; the stashed reason
+			// settles it in one step.
+			if !open {
+				return "", nil, relayapp.TokenUsage{}, nil, abandonedStreamReason(&exit, readCtx)
+			}
 			if len(result.chunk) > 0 {
 				if int64(len(buffered))+int64(len(result.chunk)) > limit {
 					response.Body.Close()
@@ -2536,6 +2595,19 @@ func (inspector *sseInspector) finishEvent() {
 	if eventType == "message_stop" && messagesDialectPath(inspector.path) {
 		inspector.terminal = eventType
 	}
+	if chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) || messagesDialectPath(inspector.path) {
+		// A chat-family stream can end mid-flight with a bare error object
+		// instead of a terminal event. Dropping it here stamped the
+		// answer as a clean completion; carrying it as terminal lets the
+		// lease outcome and the handler classify it — a content-policy
+		// refusal text files as refusal, anything else as a failed
+		// response.
+		if payload["error"] != nil {
+			inspector.refused = policyRefused(refusalText(payload))
+			inspector.terminal = "response.failed"
+			return
+		}
+	}
 	if chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) {
 		if choices, ok := payload["choices"].([]any); ok {
 			for _, choice := range choices {
@@ -2550,7 +2622,16 @@ func (inspector *sseInspector) finishEvent() {
 }
 
 func (inspector *sseInspector) retryableFailure() bool {
-	return responsesDialectPath(inspector.path) && inspector.terminal == "response.failed" && !inspector.output && !inspector.refused
+	if inspector.terminal != "response.failed" || inspector.refused {
+		return false
+	}
+	if responsesDialectPath(inspector.path) {
+		return !inspector.output
+	}
+	// A chat-family failure carries no lifecycle events, so there is no
+	// point after which a retry would see a different answer: retry only
+	// while nothing has been delivered.
+	return chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) || messagesDialectPath(inspector.path)
 }
 
 // typelessEventType names typeless stream data from its `event:` line, but only

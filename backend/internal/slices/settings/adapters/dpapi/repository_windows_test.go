@@ -17,6 +17,10 @@ func TestSettingsRepositoryRoundTripIsEncrypted(t *testing.T) {
 	settings := domain.Defaults()
 	settings.ListenerPort = 19000
 	settings.NotificationsEnabled = false
+	// The stream timers ride the same document; their tags must round-trip so
+	// a saved heartbeat survives the next launch instead of resetting.
+	settings.HeartbeatSeconds = 20
+	settings.StreamProbationMilliseconds = 300
 	if err := repository.Save(context.Background(), settings); err != nil {
 		t.Fatal(err)
 	}

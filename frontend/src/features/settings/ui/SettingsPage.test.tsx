@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ServicesContext, type AppServices } from '../../../app/services'
 import type { Settings } from '../domain/settings'
@@ -15,10 +15,12 @@ const initial: Settings = {
   maxRequestMiB: 64,
   headerTimeoutSeconds: 45,
   streamIdleSeconds: 60,
+  heartbeatSeconds: 15,
   retryBaseMilliseconds: 500,
   retryMaxSeconds: 30,
   permanentAttempts: 2,
   maxQueued: 10_000,
+  streamProbationMilliseconds: 250,
   activityCapacity: 2_000,
   historyRetentionDays: 30,
   tunnelRetentionHours: 72,
@@ -96,6 +98,40 @@ describe('SettingsForm', () => {
     expect((screen.getByLabelText(/^Maximum queued$/u) as HTMLInputElement).valueAsNumber).toBe(10_000)
     fireEvent.click(screen.getByRole('tab', { name: 'Reliability' }))
     expect((screen.getByLabelText(/^Stream idle$/u) as HTMLInputElement).valueAsNumber).toBe(300)
+  })
+
+  it('edits the new stream timers through typing, presets, and per-field reset', () => {
+    render(
+      <SettingsForm
+        initial={{ ...initial, streamProbationMilliseconds: 350 }}
+        pending={false}
+        error=""
+        onSave={vi.fn(async () => true)}
+      />,
+    )
+    // Relay tab: the probation field types like any other number, and its preset
+    // lands without typing. '500' is unique on this tab — maxQueued also ships a
+    // 1,000 preset, so the click avoids that ambiguous name.
+    fireEvent.change(screen.getByLabelText(/^Stream probation$/u), { target: { value: '750' } })
+    expect((screen.getByLabelText(/^Stream probation$/u) as HTMLInputElement).valueAsNumber).toBe(750)
+    fireEvent.click(screen.getByRole('button', { name: '500' }))
+    expect((screen.getByLabelText(/^Stream probation$/u) as HTMLInputElement).valueAsNumber).toBe(500)
+    // Reliability tab: every heartbeat preset text (15, 30, 60) also belongs to a
+    // neighbour on this tab, so the click is scoped to the field's own row.
+    fireEvent.click(screen.getByRole('tab', { name: 'Reliability' }))
+    fireEvent.change(screen.getByLabelText(/^Stream heartbeat$/u), { target: { value: '45' } })
+    expect((screen.getByLabelText(/^Stream heartbeat$/u) as HTMLInputElement).valueAsNumber).toBe(45)
+    const heartbeatRow = screen.getByLabelText(/^Stream heartbeat$/u).closest('div') as HTMLElement
+    fireEvent.click(within(heartbeatRow).getByRole('button', { name: '60' }))
+    expect((screen.getByLabelText(/^Stream heartbeat$/u) as HTMLInputElement).valueAsNumber).toBe(60)
+    expect((screen.getByRole('button', { name: 'Save settings' }) as HTMLButtonElement).disabled).toBe(false)
+    // The presets made both fields dirty; the per-field reset returns the saved
+    // value, not the shipped default — probation was saved as 350, not 250.
+    fireEvent.click(within(heartbeatRow).getByRole('button', { name: /reset stream heartbeat/i }))
+    expect((screen.getByLabelText(/^Stream heartbeat$/u) as HTMLInputElement).valueAsNumber).toBe(15)
+    fireEvent.click(screen.getByRole('tab', { name: 'Relay' }))
+    fireEvent.click(screen.getByRole('button', { name: /reset stream probation/i }))
+    expect((screen.getByLabelText(/^Stream probation$/u) as HTMLInputElement).valueAsNumber).toBe(350)
   })
 })
 

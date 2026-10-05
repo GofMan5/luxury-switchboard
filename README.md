@@ -23,7 +23,7 @@ Grab the installer from the [latest release](https://github.com/GofMan5/luxury-s
 2. **API Keys**: paste keys, one per line. Encrypted per OS user, write-only after saving.
 3. Point your client at `http://127.0.0.1:8798/v1`. Done.
 
-Updates arrive in-app on every platform: the app downloads the installer for your OS and CPU, checks it against the release's own checksum and restarts into it. Where the release ships no installer for a platform, the dialog says so and points at the release page.
+Updates arrive in-app on every platform: the app downloads the installer for your OS and CPU, checks it against the release's own checksum, then Windows restarts into the setup, Linux swaps the running AppImage in place, and macOS replaces the app bundle from the dmg and relaunches. Where no self-update path exists — a deb install, or a platform without its installer — the dialog says so and points at the release page.
 
 ## What you get
 

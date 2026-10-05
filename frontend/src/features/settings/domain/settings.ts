@@ -5,10 +5,17 @@ export interface Settings {
   readonly maxRequestMiB: number
   readonly headerTimeoutSeconds: number
   readonly streamIdleSeconds: number
+  /** Keep-alive inside a live stream: an empty SSE comment goes out this
+   * often, so NATs and clients that count silence do not mark the connection
+   * dead while the provider still sends nothing. */
+  readonly heartbeatSeconds: number
   readonly retryBaseMilliseconds: number
   readonly retryMaxSeconds: number
   readonly permanentAttempts: number
   readonly maxQueued: number
+  /** Grace before a stream goes live: the relay waits this long for the first
+   * content before switching the connection to live mode. */
+  readonly streamProbationMilliseconds: number
   readonly activityCapacity: number
   readonly historyRetentionDays: number
   readonly tunnelRetentionHours: number
@@ -60,10 +67,12 @@ export const SETTINGS_DEFAULTS: Settings = {
   maxRequestMiB: 64,
   headerTimeoutSeconds: 45,
   streamIdleSeconds: 60,
+  heartbeatSeconds: 15,
   retryBaseMilliseconds: 500,
   retryMaxSeconds: 30,
   permanentAttempts: 2,
   maxQueued: 10_000,
+  streamProbationMilliseconds: 250,
   activityCapacity: 2_000,
   historyRetentionDays: 30,
   tunnelRetentionHours: 72,

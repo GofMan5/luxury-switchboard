@@ -49,6 +49,8 @@ type channelReader struct {
 	reads      <-chan bodyRead
 	pending    []byte
 	pendingErr error
+	exit       *streamExit
+	readCtx    context.Context
 }
 
 func (reader *channelReader) Read(into []byte) (int, error) {
@@ -65,7 +67,7 @@ func (reader *channelReader) Read(into []byte) (int, error) {
 		}
 		value, open := <-reader.reads
 		if !open {
-			return 0, errLiveStreamAborted
+			return 0, reader.abandonedReason()
 		}
 		reader.pending = value.chunk
 		reader.pendingErr = value.err
@@ -86,6 +88,37 @@ func (reader *channelReader) Read(into []byte) (int, error) {
 // stream failure and the client sees the dialect failure event — the row
 // settles instead of hanging active forever.
 var errLiveStreamAborted = errors.New("live stream aborted")
+
+// streamExit carries the reader goroutine's parting error across the channel
+// close. The goroutine's exit select can drop that error half the time —
+// both cases ready, Go picks at random — while the close is the one event
+// the consumer is guaranteed to observe. So the goroutine stashes its error
+// on the way out: the write is sequenced before the deferred close, and the
+// consumer's !open receive happens-after the close, which hands the value
+// over without another synchronization point.
+type streamExit struct {
+	err error
+}
+
+// abandonedStreamReason names why a reader goroutine left its channel closed:
+// the error it stashed, else the context that was cancelled under it, else
+// the historical fallback. A nil exit or a nil ctx must stay supported —
+// tests construct channelReader without either.
+func abandonedStreamReason(exit *streamExit, ctx context.Context) error {
+	if exit != nil && exit.err != nil {
+		return exit.err
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return errLiveStreamAborted
+}
+
+func (reader *channelReader) abandonedReason() error {
+	return abandonedStreamReason(reader.exit, reader.readCtx)
+}
 
 // defaultLiveStreamProbation is the window a stream must survive before the
 // relay commits to live delivery. Short enough that the client's wait stays
@@ -161,10 +194,14 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 		select {
 		case value, open := <-body.source.reads:
 			if !open {
+				// The reason is read before complete(): onEnd files the
+				// outcome, and the goroutine's stashed cause — a client
+				// cancellation, a provider error — is the outcome.
+				reason := body.source.abandonedReason()
 				if !body.completed {
 					body.complete()
 				}
-				return 0, errLiveStreamAborted
+				return 0, reason
 			}
 			body.source.pending = value.chunk
 			body.source.pendingErr = value.err

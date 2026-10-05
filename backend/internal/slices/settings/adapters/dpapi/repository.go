@@ -29,18 +29,20 @@ type storedDocument struct {
 }
 
 type storedSettings struct {
-	ListenerPort          int    `json:"listenerPort"`
-	MaxRequestMiB         int    `json:"maxRequestMiB"`
-	HeaderTimeoutSeconds  int    `json:"headerTimeoutSeconds"`
-	StreamIdleSeconds     int    `json:"streamIdleSeconds"`
-	RetryBaseMilliseconds int    `json:"retryBaseMilliseconds"`
-	RetryMaxSeconds       int    `json:"retryMaxSeconds"`
-	PermanentAttempts     int    `json:"permanentAttempts"`
-	MaxQueued             int    `json:"maxQueued"`
-	ActivityCapacity      int    `json:"activityCapacity"`
-	HistoryRetentionDays  int    `json:"historyRetentionDays"`
-	TunnelRetentionHours  int    `json:"tunnelRetentionHours"`
-	GuardrailMode         string `json:"guardrailMode"`
+	ListenerPort                int    `json:"listenerPort"`
+	MaxRequestMiB               int    `json:"maxRequestMiB"`
+	HeaderTimeoutSeconds        int    `json:"headerTimeoutSeconds"`
+	StreamIdleSeconds           int    `json:"streamIdleSeconds"`
+	HeartbeatSeconds            int    `json:"heartbeatSeconds"`
+	StreamProbationMilliseconds int    `json:"streamProbationMilliseconds"`
+	RetryBaseMilliseconds       int    `json:"retryBaseMilliseconds"`
+	RetryMaxSeconds             int    `json:"retryMaxSeconds"`
+	PermanentAttempts           int    `json:"permanentAttempts"`
+	MaxQueued                   int    `json:"maxQueued"`
+	ActivityCapacity            int    `json:"activityCapacity"`
+	HistoryRetentionDays        int    `json:"historyRetentionDays"`
+	TunnelRetentionHours        int    `json:"tunnelRetentionHours"`
+	GuardrailMode               string `json:"guardrailMode"`
 	// GuardrailProviderModes rides the same document; an absent field (a file
 	// from before the overrides existed) restores as no overrides, which is
 	// the same behavior the domain's Normalized would give it.
@@ -85,20 +87,22 @@ func (repository *Repository) Load(ctx context.Context) (domain.Settings, bool, 
 // switch fields a previous build never wrote.
 func (stored storedSettings) restore() domain.Settings {
 	settings := domain.Settings{
-		ListenerPort:           stored.ListenerPort,
-		MaxRequestMiB:          stored.MaxRequestMiB,
-		HeaderTimeoutSeconds:   stored.HeaderTimeoutSeconds,
-		StreamIdleSeconds:      stored.StreamIdleSeconds,
-		RetryBaseMilliseconds:  stored.RetryBaseMilliseconds,
-		RetryMaxSeconds:        stored.RetryMaxSeconds,
-		PermanentAttempts:      stored.PermanentAttempts,
-		MaxQueued:              stored.MaxQueued,
-		ActivityCapacity:       stored.ActivityCapacity,
-		HistoryRetentionDays:   stored.HistoryRetentionDays,
-		TunnelRetentionHours:   stored.TunnelRetentionHours,
-		GuardrailMode:          stored.GuardrailMode,
-		GuardrailProviderModes: stored.GuardrailProviderModes,
-		GuardrailFindings:      stored.GuardrailFindings,
+		ListenerPort:                stored.ListenerPort,
+		MaxRequestMiB:               stored.MaxRequestMiB,
+		HeaderTimeoutSeconds:        stored.HeaderTimeoutSeconds,
+		StreamIdleSeconds:           stored.StreamIdleSeconds,
+		HeartbeatSeconds:            stored.HeartbeatSeconds,
+		StreamProbationMilliseconds: stored.StreamProbationMilliseconds,
+		RetryBaseMilliseconds:       stored.RetryBaseMilliseconds,
+		RetryMaxSeconds:             stored.RetryMaxSeconds,
+		PermanentAttempts:           stored.PermanentAttempts,
+		MaxQueued:                   stored.MaxQueued,
+		ActivityCapacity:            stored.ActivityCapacity,
+		HistoryRetentionDays:        stored.HistoryRetentionDays,
+		TunnelRetentionHours:        stored.TunnelRetentionHours,
+		GuardrailMode:               stored.GuardrailMode,
+		GuardrailProviderModes:      stored.GuardrailProviderModes,
+		GuardrailFindings:           stored.GuardrailFindings,
 	}
 
 	settings.NotificationsEnabled = stored.NotificationsEnabled == nil || *stored.NotificationsEnabled

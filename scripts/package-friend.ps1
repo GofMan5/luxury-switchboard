@@ -9,8 +9,8 @@ $ErrorActionPreference = "Stop"
 
 $workspace = Split-Path -Parent $PSScriptRoot
 if (-not $InstallerPath) {
-    # The bundle folder holds whichever edition was built last, so the friend package
-    # is taken from the collected owner release instead.
+    # The bundle folder holds installers of past builds and versions, so the
+    # friend package is taken from the collected release in artifacts instead.
     $version = (Get-Content -Raw -LiteralPath (Join-Path $workspace "src-tauri\tauri.conf.json") | ConvertFrom-Json).version
     $InstallerPath = Join-Path $workspace "artifacts\release\Luxury-Switchboard-${version}-windows-x64-setup.exe"
 }

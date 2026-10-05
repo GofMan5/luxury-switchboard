@@ -28,6 +28,10 @@
   --action-primary: #eeeeee;
   --action-hover: #ffffff;
   --action-pressed: #d8d8d8;
+  /* Text on filled action surfaces: primary buttons and the switch knob
+   * riding an active track. Splits from --text-primary so an inverted
+   * action surface changes one token. */
+  --text-on-action: #151515;
   --focus-ring: #7ca7d2;
   --status-info: #5594df;
   --status-success: #65b96f;
@@ -198,7 +202,7 @@ h1 {
 
 .button-primary {
   border-color: var(--action-primary);
-  color: #151515;
+  color: var(--text-on-action);
   background: var(--action-primary);
   box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
 }

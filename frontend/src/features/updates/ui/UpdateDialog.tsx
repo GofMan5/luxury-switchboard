@@ -19,6 +19,7 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
   const busy = state.installPhase === 'downloading' || state.installPhase === 'verifying'
   const dialogRef = useModalFocus<HTMLDivElement>(onClose, busy)
   const [launchError, setLaunchError] = useState('')
+  const [launchNamesThePage, setLaunchNamesThePage] = useState(false)
   const [launching, setLaunching] = useState(false)
 
   // The phase swap unmounts the focused button, which would drop focus to the
@@ -35,16 +36,27 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
 
   const launch = async () => {
     setLaunchError('')
+    setLaunchNamesThePage(false)
     setLaunching(true)
     try {
       await runInstaller(state.installerPath, true)
     } catch (error) {
       // The shell refused or is absent (dev fixture in a browser). The refusal
       // carries its own reason; the Rust command rejects with plain strings,
-      // not Error, so both shapes are read. The file stays verified and on
-      // disk either way: the operator can run it by hand.
+      // not Error, so both shapes are read. Most refusals leave the file
+      // verified and on disk, so the operator can run it by hand — except the
+      // page-only ones (a deb install on Linux, a bundle-less one on macOS):
+      // the reason itself already names the release page as the path, and a
+      // restart would just refuse again, so the file line and the dead
+      // restart button go away and the release page becomes the action.
       const reason = error instanceof Error ? error.message : String(error)
-      setLaunchError(`The shell could not start the installer: ${reason}. It is verified and on disk:`)
+      const namesThePage = reason.includes('the release page is the path')
+      setLaunchNamesThePage(namesThePage)
+      setLaunchError(
+        namesThePage
+          ? `The shell could not start the installer: ${reason}`
+          : `The shell could not start the installer: ${reason}. It is verified and on disk:`
+      )
     } finally {
       setLaunching(false)
     }
@@ -79,11 +91,13 @@ export function UpdateDialog({ check, state, onClose, onInstall }: {
           <div className={styles.ready}>
             <div><ShieldCheck size={16} aria-hidden="true" /><span>Verified. The installer is ready.</span></div>
             <div className={styles.actions}>
-              <Button variant="primary" disabled={launching} onClick={() => void launch()}>{launching ? 'Starting…' : 'Restart and install'}</Button>
-              <Button disabled={launching} onClick={() => void openExternal(check.url)}>Release page</Button>
+              {launchNamesThePage ? null : (
+                <Button variant="primary" disabled={launching} onClick={() => void launch()}>{launching ? 'Starting…' : 'Restart and install'}</Button>
+              )}
+              <Button variant={launchNamesThePage ? 'primary' : 'secondary'} disabled={launching} onClick={() => void openExternal(check.url)}>Release page</Button>
             </div>
             {launchError ? <p className={styles.launchError} role="alert">{launchError}</p> : null}
-            {launchError ? <code className={styles.path}>{state.installerPath}</code> : null}
+            {launchError && !launchNamesThePage ? <code className={styles.path}>{state.installerPath}</code> : null}
           </div>
         ) : null}
 

@@ -77,6 +77,39 @@ describe('UpdateDialog', () => {
     expect(screen.getByText(installerPath)).toBeTruthy()
   })
 
+  // A deb install on Linux cannot self-replace, and the shell says so by naming
+  // the release page as the path. Naming the page changes the whole answer:
+  // no second "path" (the file line), no restart that would just refuse again.
+  it('drops the file line and the restart, and lets the release page lead, when the shell refusal names the release page (deb Linux)', async () => {
+    mocks.runInstaller.mockRejectedValueOnce('this install was not started from an AppImage; the release page is the path')
+    renderDialog(stateAt({ installPhase: 'ready', installerPath }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart and install' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('this install was not started from an AppImage')
+    expect(alert.textContent).not.toContain('It is verified and on disk')
+    expect(screen.queryByText(installerPath)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Restart and install' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Release page' }))
+    expect(mocks.openExternal).toHaveBeenCalledWith(check.url)
+  })
+
+  it('drops the file line and the restart, and lets the release page lead, when the shell refusal names the release page (bundle-less macOS)', async () => {
+    mocks.runInstaller.mockRejectedValueOnce('this install was not started from the app bundle; the release page is the path')
+    renderDialog(stateAt({ installPhase: 'ready', installerPath }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart and install' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('this install was not started from the app bundle')
+    expect(alert.textContent).not.toContain('It is verified and on disk')
+    expect(screen.queryByText(installerPath)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Restart and install' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Release page' }))
+    expect(mocks.openExternal).toHaveBeenCalledWith(check.url)
+  })
+
   it('offers no retry when the release ships no installer for this platform, and the release page leads', () => {
     renderDialog(stateAt({
       installPhase: 'error',

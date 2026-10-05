@@ -6,17 +6,28 @@ import (
 )
 
 type Settings struct {
-	ListenerPort          int `json:"listenerPort"`
-	MaxRequestMiB         int `json:"maxRequestMiB"`
-	HeaderTimeoutSeconds  int `json:"headerTimeoutSeconds"`
-	StreamIdleSeconds     int `json:"streamIdleSeconds"`
-	RetryBaseMilliseconds int `json:"retryBaseMilliseconds"`
-	RetryMaxSeconds       int `json:"retryMaxSeconds"`
-	PermanentAttempts     int `json:"permanentAttempts"`
-	MaxQueued             int `json:"maxQueued"`
-	ActivityCapacity      int `json:"activityCapacity"`
-	HistoryRetentionDays  int `json:"historyRetentionDays"`
-	TunnelRetentionHours  int `json:"tunnelRetentionHours"`
+	ListenerPort         int `json:"listenerPort"`
+	MaxRequestMiB        int `json:"maxRequestMiB"`
+	HeaderTimeoutSeconds int `json:"headerTimeoutSeconds"`
+	StreamIdleSeconds    int `json:"streamIdleSeconds"`
+	// HeartbeatSeconds is the keep-alive cadence of a relayed stream: a
+	// comment line every HeartbeatSeconds keeps intermediaries from closing
+	// the connection while the provider is still thinking. It carries no
+	// content, so it never disturbs the client's parse.
+	HeartbeatSeconds int `json:"heartbeatSeconds"`
+	// StreamProbationMilliseconds is how long a relayed stream is buffered
+	// before the relay commits to live passthrough. A failure that starts
+	// inside the window is retried before the client sees a byte; content
+	// that begins after it streams as it comes, so the window trades
+	// first-byte latency against a retryable start.
+	StreamProbationMilliseconds int `json:"streamProbationMilliseconds"`
+	RetryBaseMilliseconds       int `json:"retryBaseMilliseconds"`
+	RetryMaxSeconds             int `json:"retryMaxSeconds"`
+	PermanentAttempts           int `json:"permanentAttempts"`
+	MaxQueued                   int `json:"maxQueued"`
+	ActivityCapacity            int `json:"activityCapacity"`
+	HistoryRetentionDays        int `json:"historyRetentionDays"`
+	TunnelRetentionHours        int `json:"tunnelRetentionHours"`
 	// GuardrailMode is off, monitor or block. Settings persisted before the
 	// guardrails existed carry an empty value, which reads as the default.
 	GuardrailMode string `json:"guardrailMode"`
@@ -65,6 +76,7 @@ func Defaults() Settings {
 	return Settings{
 		ListenerPort: 8798, MaxRequestMiB: 64,
 		HeaderTimeoutSeconds: 45, StreamIdleSeconds: 60,
+		HeartbeatSeconds: 15, StreamProbationMilliseconds: 250,
 		RetryBaseMilliseconds: 500, RetryMaxSeconds: 30,
 		PermanentAttempts: 2, MaxQueued: 10_000,
 		ActivityCapacity: 2_000, HistoryRetentionDays: 30,
@@ -99,6 +111,12 @@ func (settings Settings) Normalized() Settings {
 	if settings.GuardrailMode == "" {
 		settings.GuardrailMode = DefaultGuardrailMode
 	}
+	if settings.HeartbeatSeconds == 0 {
+		settings.HeartbeatSeconds = Defaults().HeartbeatSeconds
+	}
+	if settings.StreamProbationMilliseconds == 0 {
+		settings.StreamProbationMilliseconds = Defaults().StreamProbationMilliseconds
+	}
 	if settings.GuardrailFindings == 0 {
 		settings.GuardrailFindings = Defaults().GuardrailFindings
 	}
@@ -127,6 +145,10 @@ func (settings Settings) Validate() error {
 		return errors.New("header timeout is out of range")
 	case settings.StreamIdleSeconds < 15 || settings.StreamIdleSeconds > 900:
 		return errors.New("stream idle timeout is out of range")
+	case settings.HeartbeatSeconds < 5 || settings.HeartbeatSeconds > 300:
+		return errors.New("heartbeat interval is out of range")
+	case settings.StreamProbationMilliseconds < 50 || settings.StreamProbationMilliseconds > 2000:
+		return errors.New("stream probation window is out of range")
 	case settings.RetryBaseMilliseconds < 50 || settings.RetryBaseMilliseconds > 10_000:
 		return errors.New("retry base is out of range")
 	case settings.RetryMaxSeconds < 1 || settings.RetryMaxSeconds > 120:

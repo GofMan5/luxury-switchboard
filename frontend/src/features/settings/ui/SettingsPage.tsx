@@ -20,8 +20,8 @@ const tabs: readonly { id: SettingsTab; label: string; icon: ReactNode; descript
 
 /** Which draft fields a tab edits, so its reset touches its own and nothing else. */
 const tabFields: Record<Exclude<SettingsTab, 'backup'>, readonly (keyof Settings)[]> = {
-  relay: ['listenerPort', 'maxRequestMiB', 'maxQueued'],
-  reliability: ['headerTimeoutSeconds', 'streamIdleSeconds', 'retryBaseMilliseconds', 'retryMaxSeconds', 'permanentAttempts'],
+  relay: ['listenerPort', 'maxRequestMiB', 'maxQueued', 'streamProbationMilliseconds'],
+  reliability: ['headerTimeoutSeconds', 'streamIdleSeconds', 'heartbeatSeconds', 'retryBaseMilliseconds', 'retryMaxSeconds', 'permanentAttempts'],
   data: ['activityCapacity', 'historyRetentionDays', 'tunnelRetentionHours', 'guardrailFindings'],
   routing: ['failoverEnabled', 'chainMode'],
   interface: ['notificationsEnabled', 'providerHealthEnabled', 'animationsEnabled'],
@@ -151,6 +151,10 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
                 label="Maximum queued" min={100} max={100000} presets={[1_000, 10_000, 50_000]} {...field('maxQueued')}
                 note="A request may wait for a free key as long as it needs — but the queue itself is bounded: past this many waiting requests, new ones are refused immediately instead of piling into memory."
               />
+              <NumberField
+                label="Stream probation" min={50} max={2000} step={50} suffix="ms" presets={[250, 500, 1000]} {...field('streamProbationMilliseconds')}
+                note="Grace before a stream goes live: the relay waits this long for the first content before switching the connection to live mode. Providers that think before their first byte need this raised."
+              />
               <p className={styles.tabNote}>A port change rebinds the listener the moment you save; everything else on this page just starts applying.</p>
             </div>
           ) : null}
@@ -164,6 +168,10 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
               <NumberField
                 label="Stream idle" min={15} max={900} suffix="sec" presets={[60, 300, 900]} {...field('streamIdleSeconds')}
                 note="The silence budget inside a live stream: no bytes for this long and the attempt is abandoned and retried on another key. Providers that prefill silently for minutes need this raised."
+              />
+              <NumberField
+                label="Stream heartbeat" min={5} max={300} suffix="s" presets={[15, 30, 60]} {...field('heartbeatSeconds')}
+                note="Keep-alive inside a live stream: an empty SSE comment goes out this often, so NATs and clients that count silence do not mark the connection dead while the provider still sends nothing."
               />
               <NumberField
                 label="Retry base" min={50} max={10000} suffix="ms" presets={[250, 500, 1_000]} {...field('retryBaseMilliseconds')}
@@ -373,13 +381,15 @@ function FieldReset({ show, label, onReset }: { show: boolean; label: string; on
  * and a way back: to the saved value per field, to the shipped defaults per
  * tab. The input holds raw text while typing — a field you can empty — and the
  * value commits parsed and clamped into the valid range on blur. */
-function NumberField({ label, value, saved, fallback, min, max, suffix, note, presets, disabled, onChange }: {
+function NumberField({ label, value, saved, fallback, min, max, step, suffix, note, presets, disabled, onChange }: {
   label: string
   value: number
   saved: number
   fallback: number
   min: number
   max: number
+  /** Spinner granularity; a typed value is never snapped, only clamped. */
+  step?: number
   suffix?: string
   note?: string
   presets?: readonly number[]
@@ -408,7 +418,7 @@ function NumberField({ label, value, saved, fallback, min, max, suffix, note, pr
         <span className={styles.fieldControl}>
           <FieldReset show={dirty} label={label} onReset={() => onChange(saved)} />
           <span className={styles.inputWrap}>
-            <input type="number" value={draft ?? value} min={min} max={max} step="1" aria-label={label} disabled={disabled} onChange={(event) => change(event.currentTarget.value)} onBlur={commit} />
+            <input type="number" value={draft ?? value} min={min} max={max} step={step ?? 1} aria-label={label} disabled={disabled} onChange={(event) => change(event.currentTarget.value)} onBlur={commit} />
             {suffix ? <small>{suffix}</small> : null}
           </span>
         </span>

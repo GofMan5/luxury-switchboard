@@ -6,25 +6,37 @@ import (
 	"testing"
 )
 
+// Each fixture drives the environment variable its platform actually reads
+// through os.UserConfigDir: darwin builds its root from HOME and ignores the
+// XDG variable, so pointing XDG_CONFIG_HOME at a temp dir there would test
+// nothing while the assertions fail against the real home directory.
+
 func TestRootUsesTheNativeUserConfigDirectory(t *testing.T) {
 	base := t.TempDir()
-	wantName := "provider-switchboard"
-	if runtime.GOOS == "windows" {
+	var want string
+	switch runtime.GOOS {
+	case "windows":
 		t.Setenv("LOCALAPPDATA", base)
-		wantName = "ProviderSwitchboard"
-	} else {
+		want = filepath.Join(base, "ProviderSwitchboard")
+	case "darwin":
+		t.Setenv("HOME", base)
+		want = filepath.Join(base, "Library", "Application Support", "provider-switchboard")
+	default:
 		t.Setenv("XDG_CONFIG_HOME", base)
+		want = filepath.Join(base, "provider-switchboard")
 	}
-	root, err := Root()
-	if err != nil || root != filepath.Join(base, wantName) {
-		t.Fatalf("unexpected data root: root=%q err=%v", root, err)
+	if root, err := Root(); err != nil || root != want {
+		t.Fatalf("unexpected data root: root=%q want=%q err=%v", root, want, err)
 	}
 }
 
 func TestRootRejectsRelativePlatformDirectories(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		t.Setenv("LOCALAPPDATA", "relative")
-	} else {
+	case "darwin":
+		t.Setenv("HOME", "relative")
+	default:
 		t.Setenv("XDG_CONFIG_HOME", "relative")
 	}
 	if _, err := Root(); err == nil {

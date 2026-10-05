@@ -978,6 +978,94 @@ func TestAChatProviderThatDidNotFinishSaysSoAfterTranslation(t *testing.T) {
 	}
 }
 
+// A chat-family answer can also stop with no terminal choice at all: the
+// provider's last event is a bare error object, or a single error object when
+// a gateway ignored "stream": true. Chat carries the reason in that object;
+// Responses has a place for it too, and dropping it would repeat the lie the
+// six reasons above used to tell - a half sentence, or silence, stamped
+// completed. The failure travels as the provider's own words: status "failed",
+// error.message set, text already delivered kept in output, and the stream
+// closed with response.failed. An error with no words is not a verdict, so it
+// is not guessed at either.
+func TestAChatProviderThatFailedOutrightSaysSoAfterTranslation(t *testing.T) {
+	const usage = `,"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}`
+	for _, testCase := range []struct {
+		name    string
+		body    string
+		status  string
+		failure string
+		text    string
+		event   string
+	}{
+		{
+			name: "a mid-stream failure keeps its text and admits the failure",
+			body: `data: {"id":"chatcmpl-2","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"half an answ"},"finish_reason":null}]` + usage + "}\n\n" +
+				`data: {"error":{"message":"model overloaded"}}` + "\n\ndata: [DONE]\n\n",
+			status: "failed", failure: "model overloaded", text: "half an answ",
+			event: "response.failed",
+		},
+		{
+			name:   "a failure with no answer behind it is not silence",
+			body:   `data: {"error":{"message":"model overloaded"}}` + "\n\ndata: [DONE]\n\n",
+			status: "failed", failure: "model overloaded", text: "",
+			event: "response.failed",
+		},
+		{
+			name:   "a non-stream failure reaches the same verdict",
+			body:   `{"error":{"message":"model overloaded"}}`,
+			status: "failed", failure: "model overloaded", text: "",
+			event: "response.failed",
+		},
+		{
+			name:   "a failure with no words is not guessed at",
+			body:   `data: {"error":{"message":""}}` + "\n\ndata: [DONE]\n\n",
+			status: "completed", failure: "", text: "",
+			event: "response.completed",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			converted, err := chatToResponses([]byte(testCase.body), false)
+			if err != nil {
+				t.Fatalf("conversion failed: %v", err)
+			}
+			response := translatedBody(t, converted)
+			if response["status"] != testCase.status {
+				t.Fatalf("status is %v, want %q: %s", response["status"], testCase.status, converted)
+			}
+			if testCase.failure == "" {
+				if response["error"] != nil {
+					t.Fatalf("an answer with no failure claims one: %v", response["error"])
+				}
+			} else {
+				failure, _ := response["error"].(map[string]any)
+				if failure["message"] != testCase.failure {
+					t.Fatalf("failure message is %v, want %q: %s", failure["message"], testCase.failure, converted)
+				}
+			}
+			output, _ := response["output"].([]any)
+			text := ""
+			if len(output) > 0 {
+				item, _ := output[0].(map[string]any)
+				text = outputText(item)
+			}
+			if text != testCase.text {
+				t.Fatalf("the client reads %q, want %q: %s", text, testCase.text, converted)
+			}
+			// The same conclusion has to be reachable from the event type
+			// alone: a client that switches on it must not be told the turn
+			// completed when the provider said it failed.
+			streamed, err := chatToResponses([]byte(testCase.body), true)
+			if err != nil {
+				t.Fatalf("stream conversion failed: %v", err)
+			}
+			types := sseEventTypes(streamed)
+			if len(types) == 0 || types[len(types)-1] != testCase.event {
+				t.Fatalf("the stream closes with %v, want %q", types, testCase.event)
+			}
+		})
+	}
+}
+
 // A client that spells the endpoint differently still reaches the chat-only
 // fallback. The relay answers on its own ServeHTTP, so /V1/Responses arrives
 // verbatim; comparing it raw skips the endpoint probe and hands the provider

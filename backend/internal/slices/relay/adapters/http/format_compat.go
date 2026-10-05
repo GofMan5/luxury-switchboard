@@ -379,6 +379,9 @@ type chatAccumulator struct {
 	created json.Number
 	text    string
 	refusal string
+	// A chat-family stream can end with a bare error object instead of a
+	// terminal event; its message is the reason the answer stopped.
+	failure string
 	reason  string
 	calls   []chatCall
 	usage   map[string]any
@@ -396,6 +399,11 @@ func (state *chatAccumulator) consume(chunk map[string]any) {
 	}
 	if usage, ok := chunk["usage"].(map[string]any); ok && usage != nil {
 		state.usage = usage
+	}
+	if failure, ok := chunk["error"].(map[string]any); ok && failure != nil {
+		if message, ok := failure["message"].(string); ok && message != "" {
+			state.failure = message
+		}
 	}
 	choices, _ := chunk["choices"].([]any)
 	if len(choices) == 0 {
@@ -553,6 +561,9 @@ func (state *chatAccumulator) emit(wantsStream bool) ([]byte, error) {
 // cut short closes with `response.incomplete`, so a client that reads the event
 // type reaches the same conclusion as one that reads the envelope.
 func terminalEventType(response map[string]any) string {
+	if response["status"] == "failed" {
+		return "response.failed"
+	}
 	if response["status"] == "incomplete" {
 		return "response.incomplete"
 	}
@@ -631,13 +642,20 @@ func (state *chatAccumulator) responseObject(responseID string, createdAt int64,
 	}
 	status := "completed"
 	var incomplete any
-	if reason := incompleteReason(state.reason); reason != "" {
+	var failure any
+	// A reported failure outranks an unfinished answer: the provider said
+	// the response did not happen, and "incomplete" would claim it merely
+	// stopped early.
+	if state.failure != "" {
+		status = "failed"
+		failure = map[string]any{"code": nil, "message": state.failure, "param": nil}
+	} else if reason := incompleteReason(state.reason); reason != "" {
 		status = "incomplete"
 		incomplete = map[string]any{"reason": reason}
 	}
 	return map[string]any{
 		"id": responseID, "object": "response", "created_at": createdAt, "status": status,
-		"error": nil, "incomplete_details": incomplete, "instructions": nil,
+		"error": failure, "incomplete_details": incomplete, "instructions": nil,
 		"max_output_tokens": nil, "model": state.model, "output": items,
 		"parallel_tool_calls": true, "previous_response_id": nil,
 		"reasoning": map[string]any{"effort": nil, "summary": nil},

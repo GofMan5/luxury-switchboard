@@ -220,6 +220,12 @@
 .authRow strong { display: block; color: var(--text-secondary); font-size: 13px; }
 .authRow span { display: block; margin-top: 4px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 
+/* Codex account section: the email can outgrow the dd column, and the state
+ * row pairs the dot with its label the same way the list column does. */
+.accountEmail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.accountState { display: inline-flex; align-items: center; gap: 6px; }
+.accountActions { display: flex; justify-content: flex-end; margin-top: 12px; }
+
 .providerModal { --dialog-width: 580px; }
 
 .formBody { display: grid; gap: 15px; padding: 18px; }

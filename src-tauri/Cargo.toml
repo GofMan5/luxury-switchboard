@@ -1,6 +1,6 @@
 [package]
 name = "switchboard-desktop"
-version = "1.0.46"
+version = "1.0.47"
 description = "Luxury Switchboard desktop shell"
 authors = ["Luxury Switchboard contributors"]
 license = "MIT"
@@ -21,3 +21,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-shell = "2.3.5"
+# Native file dialog for importing Codex sign-in files. A direct rfd
+# dependency instead of the dialog plugin, for the same reason open_url uses
+# shell::open: one call does not justify a second Tauri plugin surface. The
+# default features (gtk3 on Linux) match the toolkit the Tauri Linux build
+# already carries; Windows and macOS use the platform dialogs natively.
+rfd = "0.15"

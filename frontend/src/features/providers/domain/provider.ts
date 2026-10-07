@@ -20,6 +20,13 @@ export interface Provider {
   readonly keyConfigured: boolean
   readonly keyCount: number
   readonly builtin: boolean
+  /** Preset the provider was created from ('codex' for the managed one). */
+  readonly preset?: string
+}
+
+/** True for the provider a Codex account sign-in manages. */
+export function isCodex(provider: Provider): boolean {
+  return provider.preset === 'codex'
 }
 
 export interface ProviderCatalog {

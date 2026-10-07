@@ -40,6 +40,8 @@ type storedProvider struct {
 	CacheTTLSeconds int64  `json:"cacheTtlSeconds"`
 	Enabled         bool   `json:"enabled"`
 	Builtin         bool   `json:"builtin"`
+	Preset          string `json:"preset,omitempty"`
+	AccountID       string `json:"accountId,omitempty"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -82,6 +84,8 @@ func (repository *Repository) Load(ctx context.Context) (application.SavedState,
 			RateUnit: domain.RateUnit(saved.RateUnit),
 			CacheTTL: time.Duration(saved.CacheTTLSeconds) * time.Second,
 			Enabled:  saved.Enabled, Builtin: saved.Builtin,
+			Preset:    domain.Preset(saved.Preset),
+			AccountID: domain.AccountID(saved.AccountID),
 		})
 		if err != nil {
 			return application.SavedState{}, errors.New("encrypted provider settings contain an invalid provider")
@@ -110,6 +114,8 @@ func (repository *Repository) Save(ctx context.Context, state application.SavedS
 			RateUnit:        string(provider.RateUnit),
 			CacheTTLSeconds: int64(provider.CacheTTL / time.Second),
 			Enabled:         provider.Enabled, Builtin: provider.Builtin,
+			Preset:    string(provider.Preset),
+			AccountID: string(provider.AccountID),
 		})
 	}
 	return encryptedfile.Save(repository.path, fileMagic, encryptedfile.DefaultMaxPlaintext, value)

@@ -2042,6 +2042,13 @@ func (server *Server) requestContext(client context.Context) (context.Context, c
 func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, credential string) (*http.Request, error) {
 	target := *route.BaseURL
 	target.Path = joinPath(target.Path, incoming.URL.Path)
+	if route.ResponsesPath != "" && responsesDialectPath(canonicalPath(incoming.URL.Path)) {
+		// A preset route owns where its Responses API lives: the client's
+		// spelling (/v1/responses or /responses) describes the dialect it
+		// speaks, not a path the upstream answers on. The route's own path
+		// replaces the join for both spellings.
+		target.Path = joinPath(route.BaseURL.Path, route.ResponsesPath)
+	}
 	target.RawQuery = joinQuery(target.RawQuery, incoming.URL.RawQuery)
 	request, err := http.NewRequestWithContext(ctx, incoming.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
@@ -2077,6 +2084,15 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		if credential != "" && route.AuthHeader != "" {
 			request.Header.Set(route.AuthHeader, credential)
 		}
+	}
+	for name, value := range route.ExtraHeaders {
+		// Identity headers of a preset profile, not credentials: applied with
+		// Set semantics after the auth switch so the profile owns the names it
+		// claims (a client's User-Agent never reaches a preset upstream).
+		if name == "" || value == "" {
+			continue
+		}
+		request.Header.Set(name, value)
 	}
 	request.Host = route.BaseURL.Host
 	request.Header.Del("Accept-Encoding")

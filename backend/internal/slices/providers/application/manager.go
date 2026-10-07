@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,10 +15,18 @@ import (
 )
 
 var (
-	ErrBuiltinProvider   = errors.New("builtin provider cannot be deleted")
-	ErrActiveProvider    = errors.New("active provider cannot be deleted")
+	ErrBuiltinProvider = errors.New("builtin provider cannot be deleted")
+	// ErrActiveProvider refuses to disable or delete the provider the active
+	// route depends on: switch the active route first, then retire the
+	// provider. One sentinel covers both refusals because the stdio surface
+	// and the UI match it by identity, not by text.
+	ErrActiveProvider    = errors.New("active provider cannot be disabled or deleted: switch the active route first")
 	ErrProviderHasKeys   = errors.New("provider still has keys")
 	ErrProviderHasRoutes = errors.New("provider still has model routes")
+	// ErrProviderIDExists names a refused Add: the id the caller asked for is
+	// already taken. The entry is never merged or overwritten, so the caller
+	// decides between a fresh id and refusing the request.
+	ErrProviderIDExists = errors.New("provider id is already in use")
 )
 
 type KeyPool interface {
@@ -103,9 +112,21 @@ func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.P
 	if err := manager.Availability(); err != nil {
 		return domain.Provider{}, ErrStoreUnavailable
 	}
-	id, err := randomProviderID()
-	if err != nil {
-		return domain.Provider{}, err
+	// A requested id is honored verbatim — callers like the backup import and
+	// the codex provisioner rely on the entry landing under the id they
+	// named, and domain.New validates the shape. Surrounding whitespace is
+	// not part of the id. An empty id still gets a minted one.
+	id := strings.TrimSpace(params.ID)
+	if id != "" {
+		if _, exists := manager.catalog.Lookup(id); exists {
+			return domain.Provider{}, ErrProviderIDExists
+		}
+	} else {
+		minted, err := randomProviderID()
+		if err != nil {
+			return domain.Provider{}, err
+		}
+		id = minted
 	}
 	params.ID = id
 	params.Builtin = false
@@ -131,6 +152,16 @@ func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.P
 	return provider, nil
 }
 
+// Get reads one provider by id. The boolean is existence, not admission: a
+// disabled entry is still returned, because write paths — the codex
+// provisioner deciding whether to relink a retired entry — must distinguish
+// "missing" from "off". The in-memory catalog answers even when the store
+// could not be loaded; ctx is accepted for port symmetry with the write
+// methods and is not otherwise consulted.
+func (manager *Manager) Get(ctx context.Context, id string) (domain.Provider, bool) {
+	return manager.catalog.Lookup(id)
+}
+
 func (manager *Manager) Update(ctx context.Context, id string, params domain.Params) (domain.Provider, error) {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()
@@ -145,6 +176,12 @@ func (manager *Manager) Update(ctx context.Context, id string, params domain.Par
 	current := providers[index]
 	params.ID = id
 	params.Builtin = current.Builtin
+	// Preset identity is owned by the slice that provisioned the provider; an
+	// update through the generic provider form must not strip it. The codex
+	// slice changes the account through its own command, which carries the new
+	// identity explicitly.
+	params.Preset = current.Preset
+	params.AccountID = current.AccountID
 	updated, err := domain.New(params)
 	if err != nil {
 		return domain.Provider{}, err
@@ -168,6 +205,53 @@ func (manager *Manager) Update(ctx context.Context, id string, params domain.Par
 		return domain.Provider{}, err
 	}
 	return updated, nil
+}
+
+// SetPreset replaces the preset identity a provider carries. The generic
+// update path preserves that identity on purpose, so this method exists for
+// the slice that owns the preset: it re-points the provider at a new OAuth
+// account after a re-login, or hands the entry back to manual management on
+// logout. Everything else about the provider stays as configured.
+func (manager *Manager) SetPreset(ctx context.Context, id string, preset domain.Preset, accountID domain.AccountID) (domain.Provider, error) {
+	manager.opMu.Lock()
+	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return domain.Provider{}, ErrStoreUnavailable
+	}
+	providers := manager.catalog.List()
+	index := slices.IndexFunc(providers, func(provider domain.Provider) bool { return provider.ID == id })
+	if index < 0 {
+		return domain.Provider{}, ErrProviderUnavailable
+	}
+	params := paramsOf(providers[index])
+	params.Preset = preset
+	params.AccountID = accountID
+	updated, err := domain.New(params)
+	if err != nil {
+		return domain.Provider{}, err
+	}
+	active, err := manager.catalog.Active()
+	if err != nil {
+		return domain.Provider{}, err
+	}
+	providers[index] = updated
+	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
+		return domain.Provider{}, fmt.Errorf("provider settings could not be saved: %w", err)
+	}
+	if err := manager.catalog.Replace(providers, active.ID); err != nil {
+		return domain.Provider{}, err
+	}
+	return updated, nil
+}
+
+func paramsOf(provider domain.Provider) domain.Params {
+	return domain.Params{
+		ID: provider.ID, Name: provider.Name, BaseURL: provider.BaseURL.String(),
+		AuthMode: provider.AuthMode, AuthHeader: provider.AuthHeader, Dialect: provider.Dialect,
+		ModelsPath: provider.ModelsPath, Format: provider.Format, ChatPath: provider.ChatPath,
+		ImageCompat: provider.ImageCompat, RPM: provider.RPM, RateUnit: provider.RateUnit,
+		CacheTTL: provider.CacheTTL, Enabled: provider.Enabled, Builtin: provider.Builtin,
+	}
 }
 
 func (manager *Manager) Delete(ctx context.Context, id string) error {

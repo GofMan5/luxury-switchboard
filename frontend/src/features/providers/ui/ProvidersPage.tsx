@@ -1,12 +1,19 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Database, KeyRound, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Database, KeyRound, LogIn, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react'
+import { useAppServices } from '../../../app/services'
 import { Button } from '../../../shared/ui/Button'
 import { EmptyState, Pill } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import { useMediaQuery } from '../../../shared/ui/useMediaQuery'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
+import { hasCodexLogin } from '../../codex/application/codex-capability'
+import type { CodexAccount } from '../../codex/domain/codex'
+import DisconnectCodexDialog from '../../codex/ui/DisconnectCodexDialog'
+import { useCodex } from '../../codex/ui/useCodex'
 import type { Provider, ProviderInput, RateUnit } from '../domain/provider'
+import { isCodex } from '../domain/provider'
 import { useProviders } from './useProviders'
+import AddProviderDialog from './AddProviderDialog'
 import { providerInputError } from './provider-form'
 import styles from './ProvidersPage.module.css'
 
@@ -20,10 +27,68 @@ export default function ProvidersPage() {
   // provider is the default read.
   const narrow = useMediaQuery('(max-width: 1120px)')
   const [opened, setOpened] = useState(false)
-  const selected = state.catalog.providers.find((provider) => provider.id === selectedID) ?? state.catalog.providers.find((provider) => provider.id === state.catalog.activeId)
+  // The active-provider fallback is the default read for a fresh page, not a
+  // substitute for a requested id: right after Done the catalog can still be
+  // stale, so a missing id holds the neutral state until the refresh lands
+  // instead of silently showing a different provider.
+  const selected = selectedID !== ''
+    ? state.catalog.providers.find((provider) => provider.id === selectedID)
+    : state.catalog.providers.find((provider) => provider.id === state.catalog.activeId)
   const effectiveID = selected?.id ?? ''
   const inspectorVisible = Boolean(selected) && (!narrow || opened)
   const openProvider = (id: string) => { setSelectedID(id); setOpened(true) }
+
+  const { model: codexModel, state: codexState } = useCodex()
+  const { capabilities } = useAppServices()
+  // With the Codex preset available, Add provider starts from a chooser; an
+  // older control plane never learns about it and keeps the direct route.
+  const [addProvider, setAddProvider] = useState<'choose' | 'codex' | null>(null)
+  const [disconnectCodex, setDisconnectCodex] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
+  const codexRow = state.catalog.providers.find(isCodex) ?? null
+  // Codex provisioning writes through the provider registry without a
+  // providers.changed push, so a sign-in that exits any way other than Done
+  // would leave the list without the preset row until a manual Refresh. One
+  // catalog refresh per success covers every exit; the row check in
+  // selectCodexRow then finds the row present and Done does not refresh twice.
+  const codexSigninRefreshed = useRef(false)
+  useEffect(() => {
+    if (codexState.loginPhase !== 'success') {
+      codexSigninRefreshed.current = false
+      return
+    }
+    if (codexSigninRefreshed.current) return
+    codexSigninRefreshed.current = true
+    void model.refresh()
+  }, [codexState.loginPhase, model])
+
+  const openAddFlow = () => {
+    if (hasCodexLogin(capabilities)) {
+      setAddProvider('choose')
+      return
+    }
+    model.clearError()
+    setEditor({ mode: 'add' })
+  }
+  const openCustomEditor = () => {
+    setAddProvider(null)
+    model.clearError()
+    setEditor({ mode: 'add' })
+  }
+  const selectCodexRow = () => {
+    const id = codexState.account.providerId !== '' ? codexState.account.providerId : codexRow?.id
+    setAddProvider(null)
+    if (!id) return
+    // The first sign-in creates the preset row, so the catalog may need a
+    // refresh before the inspector can resolve the selection. A success has
+    // already refreshed it, so Done does not ask twice.
+    if (!codexSigninRefreshed.current && !state.catalog.providers.some((provider) => provider.id === id)) void model.refresh()
+    openProvider(id)
+  }
+  const signInCodexAgain = () => {
+    setAddProvider('codex')
+    void codexModel.startLogin()
+  }
 
   return (
     <section className={styles.page}>
@@ -31,7 +96,7 @@ export default function ProvidersPage() {
         <div><h1>Providers</h1><p>Endpoints, limits and active routing</p></div>
         <div className={styles.headerActions}>
           <Button variant="secondary" disabled={state.phase === 'loading'} onClick={() => void model.refresh()}><RefreshCw size={15} />Refresh</Button>
-          <Button variant="primary" onClick={() => { model.clearError(); setEditor({ mode: 'add' }) }}><Plus size={16} />Add provider</Button>
+          <Button variant="primary" onClick={openAddFlow}><Plus size={16} />Add provider</Button>
         </div>
       </header>
 
@@ -43,13 +108,24 @@ export default function ProvidersPage() {
             {state.catalog.providers.map((provider) => {
               const active = provider.id === state.catalog.activeId
               const health = state.health.get(provider.id)
+              // Codex rows carry the account, not key counts. Their state
+              // column reports the sign-in first: a preset without an
+              // account routes nothing, so that is the state that matters.
+              const codexNeedsSignIn = isCodex(provider) && provider.enabled && codexState.account.state !== 'signed_in'
               return (
                 <button key={provider.id} type="button" className={styles.providerRow} data-selected={provider.id === effectiveID} onClick={() => openProvider(provider.id)}>
-                  <span className={styles.providerName}><strong>{provider.name}</strong><small>{provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
-                  <span className={styles.health} title={health && !health.up ? health.reason : undefined}>
-                    <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : provider.enabled ? 'healthy' : 'stopped'} />
-                    {provider.enabled ? (health && !health.up ? 'Unreachable' : 'Enabled') : 'Disabled'}
-                  </span>
+                  <span className={styles.providerName}><strong>{provider.name}</strong><small>{isCodex(provider) ? (codexState.account.state === 'signed_in' && codexState.account.email !== '' ? `Codex preset · ${codexState.account.email}` : 'Codex preset') : provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
+                  {codexNeedsSignIn ? (
+                    <span className={styles.health} title={codexState.account.state === 'reauth_needed' ? 'The Codex session expired. Sign in again from the provider details.' : undefined}>
+                      <StatusDot state={codexState.account.state === 'reauth_needed' ? 'degraded' : 'stopped'} />
+                      {codexState.account.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'}
+                    </span>
+                  ) : (
+                    <span className={styles.health} title={health && !health.up ? health.reason : undefined}>
+                      <StatusDot state={health ? (health.up ? 'healthy' : 'failed') : provider.enabled ? 'healthy' : 'stopped'} />
+                      {provider.enabled ? (health && !health.up ? 'Unreachable' : 'Enabled') : 'Disabled'}
+                    </span>
+                  )}
                   <span className={styles.rpm}>{rateShort(provider)}</span>
                   {active ? <Pill tone="info">Active</Pill> : <Pill>Standby</Pill>}
                 </button>
@@ -64,9 +140,12 @@ export default function ProvidersPage() {
             provider={selected}
             active={selected.id === state.catalog.activeId}
             pending={state.pendingId === selected.id}
+            codexAccount={isCodex(selected) ? codexState.account : null}
             onActivate={() => void model.activate(selected.id)}
             onEdit={() => { model.clearError(); setEditor({ mode: 'edit', provider: selected }) }}
             onDelete={() => { model.clearError(); setRemoveProvider(selected) }}
+            onCodexSignIn={signInCodexAgain}
+            onCodexDisconnect={() => setDisconnectCodex(true)}
             onClose={() => { setOpened(false); setSelectedID('') }}
           />
         ) : narrow ? null : (
@@ -106,13 +185,44 @@ export default function ProvidersPage() {
           }}
         />
       ) : null}
+      {addProvider !== null ? (
+        <AddProviderDialog
+          step={addProvider}
+          codexProviderId={codexRow?.id ?? null}
+          onDismiss={() => setAddProvider(null)}
+          onBack={() => setAddProvider('choose')}
+          onChoosePreset={() => setAddProvider('codex')}
+          onCustom={openCustomEditor}
+          onSelectCodexProvider={selectCodexRow}
+          onDisconnect={() => setDisconnectCodex(true)}
+        />
+      ) : null}
+      {disconnectCodex ? (
+        <DisconnectCodexDialog
+          email={codexState.account.email}
+          pending={disconnecting}
+          error={logoutErrorCopy(codexState.logoutError)}
+          onCancel={() => setDisconnectCodex(false)}
+          onConfirm={async () => {
+            setDisconnecting(true)
+            const ok = await codexModel.logout()
+            setDisconnecting(false)
+            if (!ok) return
+            setDisconnectCodex(false)
+            setAddProvider(null)
+            void model.refresh()
+          }}
+        />
+      ) : null}
     </section>
   )
 }
 
-function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDelete, onClose }: {
+function ProviderInspector({ provider, active, pending, codexAccount, onActivate, onEdit, onDelete, onCodexSignIn, onCodexDisconnect, onClose }: {
   provider: Provider; active: boolean; pending: boolean
-  onActivate: () => void; onEdit: () => void; onDelete: () => void; onClose: () => void
+  codexAccount: CodexAccount | null
+  onActivate: () => void; onEdit: () => void; onDelete: () => void
+  onCodexSignIn: () => void; onCodexDisconnect: () => void; onClose: () => void
 }) {
   // Not a modal: no focus trap, no autofocus — Escape and the X simply close it.
   const panelRef = useRef<HTMLElement>(null)
@@ -128,12 +238,21 @@ function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDe
     panel.addEventListener('keydown', keydown)
     return () => panel.removeEventListener('keydown', keydown)
   }, [onClose])
+  // A Codex preset without an account is the state worth acting on: the
+  // header and the action row lead with it instead of the wiring details.
+  const codexNeedsSignIn = codexAccount !== null && provider.enabled && codexAccount.state !== 'signed_in'
+  const codexStateDot = codexNeedsSignIn && codexAccount !== null
+    ? codexAccount.state === 'reauth_needed' ? 'degraded' : 'stopped'
+    : provider.enabled ? 'healthy' : 'stopped'
+  const codexStateLabel = codexNeedsSignIn && codexAccount !== null
+    ? codexAccount.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'
+    : provider.enabled ? 'Configured' : 'Disabled'
   return (
     <aside ref={panelRef} className={styles.inspector} aria-label={`${provider.name} provider details`}>
       <header className={styles.inspectorHeader}>
         <div>
           <h2>{provider.name}</h2>
-          <span><StatusDot state={provider.enabled ? 'healthy' : 'stopped'} />{provider.enabled ? 'Configured' : 'Disabled'}</span>
+          <span><StatusDot state={codexStateDot} />{codexStateLabel}</span>
         </div>
         <div className={styles.inspectorHeaderActions}>
           <Button variant={active ? 'secondary' : 'primary'} disabled={active || pending || !provider.enabled} onClick={onActivate}>{pending ? 'Switching…' : active ? 'Active route' : 'Activate'}</Button>
@@ -141,8 +260,16 @@ function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDe
         </div>
       </header>
       <div className={styles.inspectorActions}>
-        <Button variant="secondary" onClick={onEdit}><Pencil size={14} />Edit</Button>
-        {!provider.builtin ? (
+        {codexNeedsSignIn ? (
+          <Button variant="secondary" onClick={onCodexSignIn}><LogIn size={14} />Sign in again</Button>
+        ) : null}
+        {/* The codex preset is managed by the account sign-in, so like the
+            Delete below it gets no manual path; builtin providers are
+            editable configs and keep the button. */}
+        {!isCodex(provider) ? (
+          <Button variant="secondary" onClick={onEdit}><Pencil size={14} />Edit</Button>
+        ) : null}
+        {!provider.builtin && !isCodex(provider) ? (
           <span className={styles.deleteCell}>
             <Button variant="danger" disabled={active || provider.keyCount > 0} onClick={onDelete}><Trash2 size={14} />Delete</Button>
             {provider.keyCount > 0 ? <small className={styles.deleteHint}>{provider.keyCount} {provider.keyCount === 1 ? 'key' : 'keys'} — remove them in API Keys first</small> : null}
@@ -151,9 +278,24 @@ function ProviderInspector({ provider, active, pending, onActivate, onEdit, onDe
         ) : null}
       </div>
       <div className={styles.inspectorScroll}>
-        <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd><dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
+        <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd>{codexAccount !== null ? <><dt>Preset</dt><dd>Codex — managed by account sign-in</dd></> : null}<dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
         <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Request limit</dt><dd>{rateLabel(provider)}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
         <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>{provider.authMode === 'passthrough' ? 'Keys added in API Keys are used only for model discovery and tests.' : 'Secret material is never returned to the UI.'}</span></div></div></section>
+        {codexAccount !== null ? (
+          <section className={styles.section}>
+            <h3>Codex account</h3>
+            <dl>
+              <dt>Email</dt>
+              <dd className={styles.accountEmail} title={codexAccount.email !== '' ? codexAccount.email : undefined}>{codexAccount.email !== '' ? codexAccount.email : '—'}</dd>
+              {codexAccount.plan !== '' ? <><dt>Plan</dt><dd>{codexAccount.plan}</dd></> : null}
+              <dt>State</dt>
+              <dd><span className={styles.accountState}><StatusDot state={codexAccount.state === 'signed_in' ? 'healthy' : codexAccount.state === 'reauth_needed' ? 'degraded' : 'stopped'} />{codexAccount.state === 'signed_in' ? 'Signed in' : codexAccount.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'}</span></dd>
+            </dl>
+            <div className={styles.accountActions}>
+              {codexAccount.state !== 'signed_out' ? <Button variant="danger" onClick={onCodexDisconnect}>Disconnect</Button> : null}
+            </div>
+          </section>
+        ) : null}
       </div>
     </aside>
   )
@@ -178,6 +320,19 @@ function rateShort(provider: Provider): string {
 function rateLabel(provider: Provider): string {
   if (provider.rpm === 0) return 'Unlimited'
   return `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`
+}
+
+// The backend's refusal sentences (the active-route guard among them) are
+// short and user-facing, so they travel verbatim; anything this long is a
+// dump (a provider list, an error blob) that has no place in a confirm
+// dialog, so it is cut at a word boundary instead.
+const LOGOUT_ERROR_MAX = 200
+function logoutErrorCopy(error: string): string {
+  const trimmed = error.trim()
+  if (trimmed.length <= LOGOUT_ERROR_MAX) return trimmed
+  const cut = trimmed.slice(0, LOGOUT_ERROR_MAX)
+  const boundary = cut.lastIndexOf(' ')
+  return `${boundary > 0 ? cut.slice(0, boundary) : cut}…`
 }
 
 function ProviderEditor({ mode, provider, pending, operationError, active, onClose, onSubmit }: {

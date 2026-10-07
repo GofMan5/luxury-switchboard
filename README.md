@@ -78,6 +78,8 @@ Updates arrive in-app on every platform: the app downloads the installer for you
 </tr>
 </table>
 
+**Codex accounts are a preset provider.** Add Provider lists Codex: sign in the official way through the browser, use a device code on a machine without one, or import the sign-in JSON an existing Codex install already saved. An imported session is validated and refreshed before it is trusted, and the account then joins the same pool, routes, and guardrails as any other provider.
+
 ## The tunnel in one click
 
 Press **Start** on the Tunnel page and you get an HTTPS address plus a stable access key. Share both, and someone else is on your models. Underneath: a pinned, checksum-verified [cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel in front of a fail-closed gateway. No account anywhere, nothing of ours in the middle.
@@ -90,7 +92,7 @@ Press **Start** on the Tunnel page and you get an HTTPS address plus a stable ac
 
 ## Private by construction
 
-Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` on Windows, `~/.config/provider-switchboard` on Linux, `~/Library/Application Support/provider-switchboard` on macOS): config encrypted with DPAPI or the desktop keyring, no plaintext fallback, and the history in local SQLite. The app's only self-initiated outbound call is the GitHub release check; read it in one file (`backend/internal/slices/updates`). Delete the folder, nothing remains.
+Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` on Windows, `~/.config/provider-switchboard` on Linux, `~/Library/Application Support/provider-switchboard` on macOS): config encrypted with DPAPI or the desktop keyring, no plaintext fallback, and the history in local SQLite. The app's only self-initiated outbound calls are the GitHub release check (`backend/internal/slices/updates`) and the OpenAI sign-in and token endpoints (`backend/internal/slices/codex`), and the latter only while a Codex account is connected. Delete the folder, nothing remains.
 
 ## Development
 

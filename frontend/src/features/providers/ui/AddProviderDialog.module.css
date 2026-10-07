@@ -1,0 +1,51 @@
+.body {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+/* A preset is one choice out of a list, so each option is a full-width
+   selectable card, not a link. */
+.optionCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: inherit;
+  background: var(--bg-surface);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast);
+}
+
+.optionCard > svg {
+  margin-top: 2px;
+  color: var(--text-secondary);
+}
+
+.optionCard:hover:not(:disabled) { background: var(--bg-hover); }
+.optionCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.optionCard:active:not(:disabled) { transform: translateY(1px); }
+.optionCard:disabled { color: var(--text-disabled); cursor: default; }
+
+.optionText {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.optionText strong { color: var(--text-primary); font-size: 13.5px; font-weight: 600; }
+.optionText small { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+
+/* The chooser freezes while the codex account is being linked; this is the
+   one line that says why. */
+.blockedNote {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}

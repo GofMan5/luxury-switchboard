@@ -24,6 +24,7 @@ const providers: Provider[] = [
   { id: 'vendor-hub', name: 'Vendor Hub', baseUrl: 'https://router.vendor-hub.example/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'auto', modelsPath: '/v1/models', format: 'responses', chatPath: '/v1/chat/completions', imageCompat: true, rpm: 120, rateUnit: 'minute', cacheTtl: '1h0m0s', enabled: true, keyConfigured: true, keyCount: 2, builtin: false },
   { id: 'sigma-llm', name: 'Sigma LLM', baseUrl: 'https://sigma-llm.example/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'openai', modelsPath: '/v1/models', format: 'chat', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 8, rateUnit: 'second', cacheTtl: '0s', enabled: true, keyConfigured: true, keyCount: 1, builtin: false },
   { id: 'spare', name: 'Spare quota', baseUrl: 'https://backup.llm.example/v1', authMode: 'passthrough', authHeader: 'Authorization', dialect: 'auto', modelsPath: '/v1/models', format: 'auto', chatPath: '/v1/chat/completions', imageCompat: false, rpm: 0, rateUnit: 'minute', cacheTtl: '0s', enabled: false, keyConfigured: false, keyCount: 0, builtin: false },
+  { id: 'codex', name: 'Codex', baseUrl: 'https://api.codex.example/v1', authMode: 'bearer', authHeader: 'Authorization', dialect: 'openai', modelsPath: '/v1/models', format: 'responses', chatPath: '/v1/responses', imageCompat: false, rpm: 60, rateUnit: 'minute', cacheTtl: '0s', enabled: true, keyConfigured: false, keyCount: 0, builtin: false, preset: 'codex' },
 ]
 
 const modelIds = ['glm-5.3', 'glm-5.3-prime', 'qwen3.8-max', 'qwen3.8-max-0902', 'kimi-k3', 'deepseek-v4-pro-0813', 'deepseek-v4-flash', 'qwen-plus']
@@ -202,11 +203,19 @@ let catalogCurrency = 'USD'
 
 export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = '1.0.37-fixture'
+  /** The fixture advertises the Codex preset flow, like a current control plane. */
+  readonly capabilities = ['codex.login']
   readonly #listeners = new Map<string, Set<EventListener>>()
   readonly #runTimers = new Set<number>()
   #tick = 0
   #seq = 0
   #timer: ReturnType<typeof setInterval> | undefined
+  // The preset account starts signed out; a dev sign-in walks the real
+  // waiting → exchanging → success curve on timers, like a browser OAuth hop.
+  #codexPhase: 'idle' | 'waiting' | 'exchanging' | 'success' | 'error' = 'idle'
+  #codexError = ''
+  #codexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }
+  #codexTimers = new Set<number>()
 
   start(): Promise<void> {
     // Live traffic so Live Activity and the Overview move on their own.
@@ -220,6 +229,7 @@ export class FixtureSession implements ControlPlaneSession {
 
   stop(): Promise<void> {
     clearInterval(this.#timer)
+    this.#codexCancelTimers()
     this.#listeners.clear()
     return Promise.resolve()
   }
@@ -256,6 +266,43 @@ export class FixtureSession implements ControlPlaneSession {
     this.#seq++
     const frame: EventFrame = { v: 1, type: 'event', topic, seq: this.#seq, payload }
     for (const listener of this.#listeners.get(topic) ?? []) listener(frame)
+  }
+
+  #codexBeginLogin(): void {
+    this.#codexCancelTimers()
+    this.#codexPhase = 'waiting'
+    this.#codexError = ''
+    this.#emit('codex.changed', {})
+    this.#codexTimers.add(window.setTimeout(() => {
+      this.#codexPhase = 'exchanging'
+      this.#emit('codex.changed', {})
+    }, 4_000))
+    this.#codexTimers.add(window.setTimeout(() => {
+      this.#codexPhase = 'success'
+      this.#codexAccount = { state: 'signed_in', email: 'alex@example.com', plan: 'Plus', accountId: 'acct_fixture_codex', providerId: 'codex' }
+      this.#emit('codex.changed', {})
+    }, 6_500))
+  }
+
+  #codexCancel(): void {
+    this.#codexCancelTimers()
+    this.#codexPhase = 'idle'
+    this.#codexError = ''
+    this.#emit('codex.changed', {})
+  }
+
+  #codexCancelTimers(): void {
+    for (const timer of this.#codexTimers) window.clearTimeout(timer)
+    this.#codexTimers.clear()
+  }
+
+  // Imports land signed-in in one step in the fixture; the model still walks
+  // its connecting → exchanging → success curve around the promise, so the
+  // dev shell shows the same phases the real sidecar produces.
+  #codexImportResult(plan: string) {
+    this.#codexAccount = { state: 'signed_in', email: 'alex@example.com', plan, accountId: 'acct_fixture_codex', providerId: 'codex' }
+    this.#emit('codex.changed', {})
+    return { ...this.#codexAccount }
   }
 
   #answer(method: string, payload?: unknown): unknown {
@@ -357,6 +404,51 @@ export class FixtureSession implements ControlPlaneSession {
         { id: 'n2', kind: 'relay', severity: 'info', title: 'Relay is live', body: 'Listening on http://127.0.0.1:8787.', at: iso(7_200_000) },
         { id: 'n3', kind: 'backup', severity: 'success', title: 'Backup exported', body: 'Providers, keys and routes written to disk.', at: iso(86_400_000) },
       ] }
+      case 'codex.login.start': {
+        this.#codexBeginLogin()
+        return { authorizeUrl: 'https://auth.codex.example/oauth/authorize?fixture=1' }
+      }
+      case 'codex.login.device.start': {
+        // The device flow shares the login curve but never owns an authorize
+        // URL: the user completes it on another machine's browser, so there is
+        // nothing to re-open locally while the poll runs.
+        this.#codexBeginLogin()
+        return { userCode: 'WDJB-MJCD', verificationUrl: 'https://auth.codex.example/device?fixture=1', pollIntervalSeconds: 1 }
+      }
+      case 'codex.import.json': {
+        // The real parser refuses an empty text before anything moves.
+        const text = String(body.text ?? '')
+        if (text.trim() === '') throw new Error('codex import payload could not be parsed')
+        return this.#codexImportResult(text.includes('plus') ? 'Plus' : 'Pro')
+      }
+      case 'codex.import.files': {
+        const paths = Array.isArray(body.paths) ? (body.paths as readonly string[]) : []
+        if (paths.length === 0) throw new Error('none of the selected files held codex credentials')
+        const importedFrom = paths[paths.length - 1]!.split(/[\\/]/).pop() ?? 'auth.json'
+        return { ...this.#codexImportResult('Plus'), importedFrom }
+      }
+      case 'codex.login.status': {
+        const phase = this.#codexPhase
+        const error = this.#codexError
+        // Terminal phases are reported once, then the login goes back to
+        // idle: the account state carries the result from there on.
+        if (phase === 'success' || phase === 'error') {
+          this.#codexPhase = 'idle'
+          this.#codexError = ''
+        }
+        return error ? { phase, error } : { phase }
+      }
+      case 'codex.login.cancel': {
+        this.#codexCancel()
+        return {}
+      }
+      case 'codex.status': return { ...this.#codexAccount }
+      case 'codex.logout': {
+        this.#codexCancel()
+        this.#codexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }
+        this.#emit('codex.changed', {})
+        return {}
+      }
       // A command the fixture never stubbed must fail loudly in the dev
       // console, not silently succeed with an empty object.
       default: throw new Error(`fixture session has no answer for ${method}`)

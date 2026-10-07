@@ -9,4 +9,6 @@ export interface ControlPlaneSession {
   stop(): Promise<void>
   /** Version reported by the handshake, so the interface never states its own. */
   readonly appVersion?: string
+  /** Commands the control plane advertised in the handshake; empty when absent. */
+  readonly capabilities?: readonly string[]
 }

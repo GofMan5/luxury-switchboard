@@ -51,6 +51,15 @@ func (sources *Sources) Providers() ([]backupdomain.ProviderEntry, error) {
 	}
 	entries := make([]backupdomain.ProviderEntry, 0, len(state.Providers))
 	for _, provider := range state.Providers {
+		if provider.Preset != "" {
+			// A preset entry is provisioned by its own slice: the codex
+			// provisioner owns the row end-to-end and rebuilds it on the
+			// next sign-in, and the backup document has no preset field to
+			// carry the marker anyway — exporting it would freeze a
+			// hand-built stranger a restore would then refuse to relink.
+			// Only operator-managed providers travel.
+			continue
+		}
 		entries = append(entries, backupdomain.ProviderEntry{
 			ID: provider.ID, Name: provider.Name, BaseURL: provider.BaseURL.String(),
 			AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader,

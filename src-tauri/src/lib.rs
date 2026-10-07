@@ -23,6 +23,27 @@ fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Opens the native multi-file picker for Codex sign-in files. The Go side
+/// owns what a sign-in file means and reads the contents itself; this shell
+/// only hands back paths, so credential bytes never pass through Rust. An
+/// empty list is the user cancelling, which the frontend reads as "nothing
+/// selected" — a rejected invoke is the other failure mode, and the frontend
+/// turns that into its HTML file-input fallback.
+#[tauri::command]
+async fn pick_auth_files() -> Result<Vec<String>, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("Import Codex sign-in files")
+        .add_filter("Codex sign-in files", &["json", "txt", "auth"])
+        .add_filter("All files", &["*"])
+        .pick_files()
+        .await
+        .unwrap_or_default();
+    Ok(picked
+        .into_iter()
+        .map(|file| file.path().to_string_lossy().into_owned())
+        .collect())
+}
+
 /// Runs a verified update installer. The sidecar downloaded the file, hashed
 /// every byte against the release's own checksum and named the path; this side
 /// re-checks the location (the app's own update directory, nothing the caller
@@ -398,6 +419,7 @@ pub fn run() {
             sidecar::sidecar_stop,
             restart_app,
             open_url,
+            pick_auth_files,
             run_installer,
         ])
         .build(tauri::generate_context!())

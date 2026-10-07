@@ -28,6 +28,9 @@ import { StdioNotificationsPort } from '../features/notifications/adapters/stdio
 import { NotificationsModel } from '../features/notifications/application/notifications-model'
 import { StdioBackupPort } from '../features/backup/adapters/stdio-backup-port'
 import { BackupModel } from '../features/backup/application/backup-model'
+import { StdioCodexPort } from '../features/codex/adapters/stdio-codex-port'
+import { CodexModel } from '../features/codex/application/codex-model'
+import { hasCodexLogin } from '../features/codex/application/codex-capability'
 import { createControlPlaneSession } from '../platform/stdio/create-session'
 import type { ControlPlaneSession } from '../platform/stdio/session'
 import { Button } from '../shared/ui/Button'
@@ -69,6 +72,8 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         current.notifications.connect(),
         current.tunnel?.connect() ?? Promise.resolve(),
         current.clients?.connect() ?? Promise.resolve(),
+        // The Codex flow only exists when the control plane advertises it.
+        session?.capabilities && hasCodexLogin(session.capabilities) ? current.codex.connect() : Promise.resolve(),
         keys.providerId ? current.apiKeys.load(keys.providerId) : Promise.resolve(),
         routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
         models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
@@ -81,6 +86,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       unsubscribeReconnect = null
       services?.relay.dispose()
       services?.providers.dispose()
+      services?.codex.dispose()
       services?.activity.dispose()
       services?.apiKeys.dispose()
       services?.settings.dispose()
@@ -106,6 +112,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         services = {
           relay: new RelayModel(new StdioRelayPort(session)),
           providers: new ProvidersModel(new StdioProvidersPort(session)),
+          codex: new CodexModel(new StdioCodexPort(session)),
           activity: new ActivityModel(new StdioActivityPort(session)),
           apiKeys: new ApiKeysModel(new StdioApiKeysPort(session)),
           settings: new SettingsModel(new StdioSettingsPort(session)),
@@ -118,6 +125,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           notifications: new NotificationsModel(new StdioNotificationsPort(session)),
           backup: new BackupModel(new StdioBackupPort(session)),
           appVersion: session.appVersion ?? '',
+          capabilities: session.capabilities ?? [],
           // One build serves every workspace.
           tunnel: new TunnelModel(new StdioTunnelPort(session)),
           clients: new ClientsModel(new StdioClientsPort(session)),

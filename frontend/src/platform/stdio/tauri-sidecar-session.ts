@@ -39,10 +39,16 @@ export class TauriSidecarSession implements ControlPlaneSession {
   #connectedOnce = false
   #disconnectWaiters = new Set<() => void>()
   #appVersion = ''
+  #capabilities: readonly string[] = []
 
   /** Reported by the handshake, so the interface never states a version of its own. */
   get appVersion(): string {
     return this.#appVersion
+  }
+
+  /** Commands the control plane advertised in the handshake; empty when absent. */
+  get capabilities(): readonly string[] {
+    return this.#capabilities
   }
 
   start(): Promise<void> {
@@ -162,9 +168,12 @@ export class TauriSidecarSession implements ControlPlaneSession {
     try {
       await invoke('sidecar_start')
       this.#started = true
-      const handshake = await this.call<{ appVersion?: unknown }>('system.handshake')
+      const handshake = await this.call<{ appVersion?: unknown; capabilities?: unknown }>('system.handshake')
       const version = handshake?.appVersion
       this.#appVersion = typeof version === 'string' && /^\d{1,4}(\.\d{1,4}){1,3}$/u.test(version) ? version : ''
+      this.#capabilities = Array.isArray(handshake?.capabilities)
+        ? handshake.capabilities.filter((entry): entry is string => typeof entry === 'string')
+        : []
       if (this.#connectedOnce) {
         this.#publish({ v: PROTOCOL_VERSION, type: 'event', topic: 'system.reconnected', seq: 0 })
       }

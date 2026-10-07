@@ -18,6 +18,16 @@ type Route struct {
 	Format        string
 	ChatPath      string
 	CacheTTL      time.Duration
+	// ExtraHeaders ride along on every upstream request for this route. They
+	// are the provider profile's identity, not credentials: a preset source
+	// sets originator/User-Agent style headers the client form is not allowed
+	// to express. Applied with Set semantics after the auth switch, so they
+	// override whatever the client sent for the same names.
+	ExtraHeaders map[string]string
+	// ResponsesPath is the path a provider answers the Responses API on when
+	// the client's own URL cannot be trusted to name it. Empty means the
+	// route keeps using the client's path (joined onto the base URL).
+	ResponsesPath string
 }
 
 type RouteSource interface {

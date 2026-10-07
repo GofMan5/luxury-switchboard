@@ -37,7 +37,24 @@ const (
 
 	RatePerMinute RateUnit = "minute"
 	RatePerSecond RateUnit = "second"
+
+	// PresetCodex marks a provider the codex slice provisioned from a curated
+	// preset. The frontend treats it as managed: the identity lives in the
+	// OAuth session, not in the form fields. The empty preset is a
+	// hand-configured provider, which is every provider that exists today.
+	PresetCodex Preset = "codex"
 )
+
+// Preset names the curated provider list an entry came from. It is a marker,
+// not a mode: the relay profile consults it to attach the preset's identity
+// headers, and the manager preserves it across edits so the marker cannot be
+// stripped out of a provider the codex slice still manages.
+type Preset string
+
+// AccountID is the upstream account identifier of a preset provider (the
+// ChatGPT account the codex OAuth session belongs to). It is data the relay
+// needs on the wire, so it travels on the provider; it is never a credential.
+type AccountID string
 
 type Provider struct {
 	ID          string
@@ -55,6 +72,8 @@ type Provider struct {
 	CacheTTL    time.Duration
 	Enabled     bool
 	Builtin     bool
+	Preset      Preset
+	AccountID   AccountID
 }
 
 type Params struct {
@@ -73,6 +92,8 @@ type Params struct {
 	CacheTTL    time.Duration
 	Enabled     bool
 	Builtin     bool
+	Preset      Preset
+	AccountID   AccountID
 }
 
 func New(params Params) (Provider, error) {
@@ -145,6 +166,18 @@ func New(params Params) (Provider, error) {
 	if params.CacheTTL != 0 && params.CacheTTL != time.Hour {
 		return Provider{}, errors.New("provider cache TTL is unsupported")
 	}
+	params.Preset = Preset(strings.TrimSpace(string(params.Preset)))
+	params.AccountID = AccountID(strings.TrimSpace(string(params.AccountID)))
+	if params.Preset != "" && params.Preset != PresetCodex {
+		return Provider{}, errors.New("unsupported provider preset")
+	}
+	if params.Preset == PresetCodex {
+		if params.AccountID != "" && !validAccountID(params.AccountID) {
+			return Provider{}, errors.New("codex account id is malformed")
+		}
+	} else if params.AccountID != "" {
+		return Provider{}, errors.New("account id is only valid on a preset provider")
+	}
 	return Provider{
 		ID:          params.ID,
 		Name:        params.Name,
@@ -161,7 +194,24 @@ func New(params Params) (Provider, error) {
 		CacheTTL:    params.CacheTTL,
 		Enabled:     params.Enabled,
 		Builtin:     params.Builtin,
+		Preset:      params.Preset,
+		AccountID:   params.AccountID,
 	}, nil
+}
+
+func validAccountID(value AccountID) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z', character >= 'A' && character <= 'Z', character >= '0' && character <= '9':
+		case character == '-' || character == '_' || character == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // RateWindow returns the period the provider's request limit is counted over.
@@ -212,6 +262,7 @@ type PublicProvider struct {
 	RateUnit      string `json:"rateUnit"`
 	CacheTTL      string `json:"cacheTtl"`
 	Enabled       bool   `json:"enabled"`
+	Preset        string `json:"preset,omitempty"`
 	KeyConfigured bool   `json:"keyConfigured"`
 	KeyCount      int    `json:"keyCount"`
 	Builtin       bool   `json:"builtin"`
@@ -233,6 +284,7 @@ func (provider Provider) Public() PublicProvider {
 		RateUnit:    string(provider.RateUnit),
 		CacheTTL:    provider.CacheTTL.String(),
 		Enabled:     provider.Enabled,
+		Preset:      string(provider.Preset),
 		Builtin:     provider.Builtin,
 	}
 }

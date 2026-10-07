@@ -106,6 +106,17 @@ func Register(server *platform.Server, catalog *application.Catalog, manager *ap
 		if platform.DecodePayload(payload, &command) != nil || command.ID == "" {
 			return nil, invalidPayload()
 		}
+		// A preset entry belongs to the slice that provisioned it: the codex
+		// account sign-in creates, relinks and removes it, so a generic delete
+		// would strand the account link pointing at nothing. The refusal lives
+		// at this control-plane boundary — not in the manager — because the
+		// codex slice's own disconnect legitimately deletes preset-marked
+		// leftovers through the same manager. Lookup answers existence, not
+		// admission, and a miss falls through to Delete so its unavailable
+		// error stays authoritative.
+		if provider, exists := manager.Get(ctx, command.ID); exists && provider.Preset != "" {
+			return nil, platform.MethodError{Code: "provider_managed", Message: "Managed provider cannot be deleted. Disconnect its account sign-in to remove it."}
+		}
 		if err := manager.Delete(ctx, command.ID); err != nil {
 			return nil, managementError(err)
 		}

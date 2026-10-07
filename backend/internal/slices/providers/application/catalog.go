@@ -61,6 +61,18 @@ func (catalog *Catalog) Get(id string) (domain.Provider, bool) {
 	return provider, exists && provider.Enabled
 }
 
+// Lookup answers existence, not admission: the entry comes back regardless
+// of Enabled. Get keeps its enabled-only reading for the read paths, while
+// write paths — the id collision check in Add, the codex provisioner's
+// relink probe over a retired (disabled) entry — must distinguish "missing"
+// from "off".
+func (catalog *Catalog) Lookup(id string) (domain.Provider, bool) {
+	catalog.mu.RLock()
+	defer catalog.mu.RUnlock()
+	provider, exists := catalog.providers[id]
+	return provider, exists
+}
+
 func (catalog *Catalog) Activate(id string) (domain.Provider, error) {
 	catalog.mu.Lock()
 	provider, exists := catalog.providers[id]
@@ -114,7 +126,8 @@ func sameRelayProvider(left, right domain.Provider) bool {
 	return left.ID == right.ID && left.BaseURL.String() == right.BaseURL.String() &&
 		left.AuthMode == right.AuthMode && left.AuthHeader == right.AuthHeader &&
 		left.Dialect == right.Dialect && left.CacheTTL == right.CacheTTL &&
-		left.ImageCompat == right.ImageCompat && left.Enabled == right.Enabled
+		left.ImageCompat == right.ImageCompat && left.Enabled == right.Enabled &&
+		left.Preset == right.Preset && left.AccountID == right.AccountID
 }
 
 func (catalog *Catalog) OnActivated(listener func(string)) {

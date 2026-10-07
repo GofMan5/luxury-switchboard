@@ -34,6 +34,7 @@ const (
 	KindKeyHealth        Kind = "key_dead"
 	KindBalanceExhausted Kind = "balance_exhausted"
 	KindHistoryDrop      Kind = "history_drop"
+	KindCodexAuth        Kind = "codex_auth"
 )
 
 // Notification is one thing the operator should know happened. Titles and

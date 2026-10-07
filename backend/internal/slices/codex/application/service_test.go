@@ -1,0 +1,1132 @@
+package application
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
+)
+
+// fakeStore records every session it was asked to persist. saves appends
+// only on success so tests can assert exactly which sessions landed.
+type fakeStore struct {
+	mu       sync.Mutex
+	session  domain.Session
+	present  bool
+	loadErr  error
+	saveErr  error
+	clearErr error
+	// saveHook runs before a save records, parked without holding mu, so a
+	// test can hold one save in flight while Logout's Clear and other
+	// store traffic keep working.
+	saveHook func(domain.Session)
+	saves    []domain.Session
+	clears   int
+}
+
+func (store *fakeStore) Load(ctx context.Context) (domain.Session, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.loadErr != nil {
+		return domain.Session{}, false, store.loadErr
+	}
+	return store.session, store.present, nil
+}
+
+func (store *fakeStore) Save(ctx context.Context, session domain.Session) error {
+	store.mu.Lock()
+	hook := store.saveHook
+	store.mu.Unlock()
+	if hook != nil {
+		// Deliberately outside mu: the hook parks, and a Logout that runs
+		// meanwhile must reach Clear without queueing behind this save.
+		hook(session)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.saveErr != nil {
+		return store.saveErr
+	}
+	store.session = session
+	store.present = true
+	store.saves = append(store.saves, session)
+	return nil
+}
+
+func (store *fakeStore) Clear(ctx context.Context) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.clearErr != nil {
+		return store.clearErr
+	}
+	store.session = domain.Session{}
+	store.present = false
+	store.clears++
+	return nil
+}
+
+// setSaveHook installs (nil removes) the pre-record save hook.
+func (store *fakeStore) setSaveHook(hook func(domain.Session)) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.saveHook = hook
+}
+
+// savedSessions snapshots what the service persisted, in order.
+func (store *fakeStore) savedSessions() []domain.Session {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return append([]domain.Session{}, store.saves...)
+}
+
+func (store *fakeStore) wasCleared() bool {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return !store.present
+}
+
+// clearCount reports how many successful clears the store served, so a
+// test can tell the logout's clear from a compensation clear apart.
+func (store *fakeStore) clearCount() int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.clears
+}
+
+// exchangeCall pins the pair the service handed the authorizer: the code
+// from the loopback redirect and the PKCE verifier it belongs with.
+type exchangeCall struct {
+	code     string
+	verifier string
+}
+
+// fakeAuthorizer records calls and lets tests flip its behavior mid-test
+// through mu-guarded setters, so the fakes themselves stay race-clean.
+type fakeAuthorizer struct {
+	mu          sync.Mutex
+	session     domain.Session
+	exchangeErr error
+	refreshErr  error
+	// refreshBlock, when set, is what a Refresh call parks on outside mu:
+	// the test holds one refresh in flight while a login or another
+	// acquire proceeds — they must not queue on this mu behind it.
+	refreshBlock  chan struct{}
+	exchangeCalls []exchangeCall
+	refreshCalls  []string
+	states        []string
+	challenges    []string
+	// deviceStartErr makes RequestDeviceUserCode fail before any flow
+	// state exists; the service must surface it and change nothing.
+	deviceStartErr error
+	// deviceAwaitErr and deviceAuthorization answer the poll; the
+	// zero authorization means "grant the default trio", so the default
+	// fake lets a device login finish without any setup.
+	deviceAwaitErr      error
+	deviceAuthorization DeviceAuthorization
+	// deviceBlock, like refreshBlock, parks the poll outside mu so the
+	// test can flip the answer or end the flow while it is held.
+	deviceBlock     chan struct{}
+	deviceStarts    int
+	deviceExchanges []DeviceAuthorization
+}
+
+func (authorizer *fakeAuthorizer) AuthorizeURL(state, codeChallenge string) string {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.states = append(authorizer.states, state)
+	authorizer.challenges = append(authorizer.challenges, codeChallenge)
+	return "https://auth.openai.test/authorize?state=" + state + "&code_challenge=" + codeChallenge
+}
+
+func (authorizer *fakeAuthorizer) ExchangeCode(ctx context.Context, code, codeVerifier string) (domain.Session, error) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.exchangeCalls = append(authorizer.exchangeCalls, exchangeCall{code: code, verifier: codeVerifier})
+	if authorizer.exchangeErr != nil {
+		return domain.Session{}, authorizer.exchangeErr
+	}
+	return authorizer.session, nil
+}
+
+func (authorizer *fakeAuthorizer) Refresh(ctx context.Context, refreshToken string) (domain.Session, error) {
+	authorizer.mu.Lock()
+	authorizer.refreshCalls = append(authorizer.refreshCalls, refreshToken)
+	block := authorizer.refreshBlock
+	err := authorizer.refreshErr
+	session := authorizer.session
+	authorizer.mu.Unlock()
+	if block != nil {
+		// Parked outside mu: re-snapshot afterwards, so a test can flip the
+		// result while the refresh is held open.
+		<-block
+		authorizer.mu.Lock()
+		err = authorizer.refreshErr
+		session = authorizer.session
+		authorizer.mu.Unlock()
+	}
+	if err != nil {
+		return domain.Session{}, err
+	}
+	return session, nil
+}
+
+// setRefreshBlock installs (nil removes) the park a Refresh call waits on.
+func (authorizer *fakeAuthorizer) setRefreshBlock(block chan struct{}) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.refreshBlock = block
+}
+
+// setRefreshResult swaps what Refresh answers, for the tests whose point
+// is a specific rotation: the default response is a full validSession.
+// An access-only rotation — OpenAI may return no refresh token, id token
+// or identity of its own — is injected here to exercise the merge
+// fallback.
+func (authorizer *fakeAuthorizer) setRefreshResult(session domain.Session, err error) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.session = session
+	authorizer.refreshErr = err
+}
+
+func (authorizer *fakeAuthorizer) exchanges() []exchangeCall {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return append([]exchangeCall{}, authorizer.exchangeCalls...)
+}
+
+func (authorizer *fakeAuthorizer) refreshes() []string {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return append([]string{}, authorizer.refreshCalls...)
+}
+
+func (authorizer *fakeAuthorizer) recordedStates() []string {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return append([]string{}, authorizer.states...)
+}
+
+func (authorizer *fakeAuthorizer) recordedChallenges() []string {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return append([]string{}, authorizer.challenges...)
+}
+
+// RequestDeviceUserCode answers the device flow's first hop. The default
+// user code mirrors what the real endpoint hands back: a pair the user
+// types plus the poll cadence the service clamps, never obeys raw.
+func (authorizer *fakeAuthorizer) RequestDeviceUserCode(ctx context.Context) (DeviceUserCode, error) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.deviceStarts++
+	if authorizer.deviceStartErr != nil {
+		return DeviceUserCode{}, authorizer.deviceStartErr
+	}
+	return DeviceUserCode{
+		DeviceAuthID:    "device-auth-1",
+		UserCode:        "WLXB-DQK2",
+		VerificationURL: "https://auth.openai.test/codex/device",
+		PollInterval:    0,
+	}, nil
+}
+
+// AwaitDeviceAuthorization stands in for the endpoint's poll. Without a
+// block it answers at once — the default grant — and with one it parks
+// outside mu, honouring the flow's deadline so timeout tests end.
+func (authorizer *fakeAuthorizer) AwaitDeviceAuthorization(ctx context.Context, start DeviceUserCode) (DeviceAuthorization, error) {
+	authorizer.mu.Lock()
+	block := authorizer.deviceBlock
+	err := authorizer.deviceAwaitErr
+	authorization := authorizer.deviceAuthorization
+	authorizer.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return DeviceAuthorization{}, ctx.Err()
+		}
+	}
+	if err != nil {
+		return DeviceAuthorization{}, err
+	}
+	if authorization == (DeviceAuthorization{}) {
+		authorization = DeviceAuthorization{
+			AuthorizationCode: "device-auth-code",
+			CodeVerifier:      "device-verifier",
+			CodeChallenge:     "device-challenge",
+		}
+	}
+	return authorization, nil
+}
+
+// ExchangeDeviceCode trades the granted authorization for the session the
+// same way ExchangeCode does, so exchange failures are set up once.
+func (authorizer *fakeAuthorizer) ExchangeDeviceCode(ctx context.Context, authorization DeviceAuthorization) (domain.Session, error) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.deviceExchanges = append(authorizer.deviceExchanges, authorization)
+	if authorizer.exchangeErr != nil {
+		return domain.Session{}, authorizer.exchangeErr
+	}
+	return authorizer.session, nil
+}
+
+// setDeviceAwaitResult swaps what the poll answers, for tests whose point
+// is a grant that arrives, fails, or is denied mid-flight.
+func (authorizer *fakeAuthorizer) setDeviceAwaitResult(authorization DeviceAuthorization, err error) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.deviceAuthorization = authorization
+	authorizer.deviceAwaitErr = err
+}
+
+// setDeviceBlock installs (nil removes) the park a poll waits on.
+func (authorizer *fakeAuthorizer) setDeviceBlock(block chan struct{}) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.deviceBlock = block
+}
+
+func (authorizer *fakeAuthorizer) deviceUserCodeRequests() int {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return authorizer.deviceStarts
+}
+
+func (authorizer *fakeAuthorizer) deviceExchanged() []DeviceAuthorization {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return append([]DeviceAuthorization{}, authorizer.deviceExchanges...)
+}
+
+// fakeRedirects owns the loopback side. The default AwaitCode just
+// honours cancellation, standing in for "the browser never redirected".
+type fakeRedirects struct {
+	mu       sync.Mutex
+	starts   []string
+	stops    int
+	startErr error
+	awaitFn  func(ctx context.Context) (string, error)
+}
+
+func (redirects *fakeRedirects) Start(expectedState string) error {
+	redirects.mu.Lock()
+	defer redirects.mu.Unlock()
+	if redirects.startErr != nil {
+		return redirects.startErr
+	}
+	redirects.starts = append(redirects.starts, expectedState)
+	return nil
+}
+
+func (redirects *fakeRedirects) AwaitCode(ctx context.Context) (string, error) {
+	redirects.mu.Lock()
+	awaitFn := redirects.awaitFn
+	redirects.mu.Unlock()
+	if awaitFn == nil {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return awaitFn(ctx)
+}
+
+func (redirects *fakeRedirects) Stop() {
+	redirects.mu.Lock()
+	defer redirects.mu.Unlock()
+	redirects.stops++
+}
+
+// setAwaitFn swaps the loopback answer mid-test; the default blocks on
+// cancellation, standing in for "the browser never redirected".
+func (redirects *fakeRedirects) setAwaitFn(await func(ctx context.Context) (string, error)) {
+	redirects.mu.Lock()
+	defer redirects.mu.Unlock()
+	redirects.awaitFn = await
+}
+
+func (redirects *fakeRedirects) startedStates() []string {
+	redirects.mu.Lock()
+	defer redirects.mu.Unlock()
+	return append([]string{}, redirects.starts...)
+}
+
+func (redirects *fakeRedirects) stopCount() int {
+	redirects.mu.Lock()
+	defer redirects.mu.Unlock()
+	return redirects.stops
+}
+
+// fakeProvisioner records every identity the service registered and which
+// release mode Logout picked.
+type fakeProvisioner struct {
+	mu        sync.Mutex
+	ensureErr error
+	retireErr error
+	removeErr error
+	ensured   []domain.Identity
+	retired   int
+	removed   int
+}
+
+func (provisioner *fakeProvisioner) EnsureCodexProvider(ctx context.Context, identity domain.Identity) (string, error) {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	provisioner.ensured = append(provisioner.ensured, identity)
+	if provisioner.ensureErr != nil {
+		return "", provisioner.ensureErr
+	}
+	return CodexProviderID, nil
+}
+
+func (provisioner *fakeProvisioner) RetireCodexProvider(ctx context.Context) error {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	provisioner.retired++
+	return provisioner.retireErr
+}
+
+func (provisioner *fakeProvisioner) RemoveCodexProvider(ctx context.Context) error {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	provisioner.removed++
+	return provisioner.removeErr
+}
+
+func (provisioner *fakeProvisioner) ensuredIdentities() []domain.Identity {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	return append([]domain.Identity{}, provisioner.ensured...)
+}
+
+func (provisioner *fakeProvisioner) retireCount() int {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	return provisioner.retired
+}
+
+func (provisioner *fakeProvisioner) removeCount() int {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	return provisioner.removed
+}
+
+// fakeParser answers with whatever the test installed: candidates for
+// what the import found, an error for text the parser rejected. The
+// default text finds nothing, which keeps the import tests explicit
+// about what they feed the service.
+type fakeParser struct {
+	mu         sync.Mutex
+	candidates []CredentialCandidate
+	err        error
+	texts      []string
+}
+
+func (parser *fakeParser) ParseCredentials(text string) ([]CredentialCandidate, error) {
+	parser.mu.Lock()
+	defer parser.mu.Unlock()
+	parser.texts = append(parser.texts, text)
+	return append([]CredentialCandidate{}, parser.candidates...), parser.err
+}
+
+func (parser *fakeParser) parsedTexts() []string {
+	parser.mu.Lock()
+	defer parser.mu.Unlock()
+	return append([]string{}, parser.texts...)
+}
+
+// fakeFiles stands in for the adapter that reads auth files: contents by
+// path, failures by path, and the order the service asked for them.
+type fakeFiles struct {
+	mu       sync.Mutex
+	contents map[string]string
+	failures map[string]error
+	reads    []string
+}
+
+func (files *fakeFiles) ReadAuthFile(path string) (string, error) {
+	files.mu.Lock()
+	defer files.mu.Unlock()
+	files.reads = append(files.reads, path)
+	if err, ok := files.failures[path]; ok {
+		return "", err
+	}
+	return files.contents[path], nil
+}
+
+func (files *fakeFiles) readPaths() []string {
+	files.mu.Lock()
+	defer files.mu.Unlock()
+	return append([]string{}, files.reads...)
+}
+
+// fakeClock lets tests hold time still while expiry math runs.
+type fakeClock struct {
+	mu      sync.Mutex
+	current time.Time
+}
+
+func (clock *fakeClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.current
+}
+
+func (clock *fakeClock) advance(by time.Duration) {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	clock.current = clock.current.Add(by)
+}
+
+// recorder collects every snapshot OnChanged delivered.
+type recorder struct {
+	mu     sync.Mutex
+	events []Snapshot
+}
+
+func (rec *recorder) OnChanged(snapshot Snapshot) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.events = append(rec.events, snapshot)
+}
+
+func (rec *recorder) snapshots() []Snapshot {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return append([]Snapshot{}, rec.events...)
+}
+
+// testEnv wires the service against all six fakes. The backoffs are
+// zeroed so the ticker's retry budget spends no wall-clock time in tests;
+// the login timeout and refresh interval are shortened per-test when the
+// behavior under test is time itself.
+type testEnv struct {
+	service     *Service
+	store       *fakeStore
+	authorizer  *fakeAuthorizer
+	redirects   *fakeRedirects
+	provisioner *fakeProvisioner
+	parser      *fakeParser
+	files       *fakeFiles
+	clock       *fakeClock
+	events      *recorder
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	store := &fakeStore{}
+	authorizer := &fakeAuthorizer{session: validSession("user@example.com")}
+	redirects := &fakeRedirects{}
+	provisioner := &fakeProvisioner{}
+	parser := &fakeParser{}
+	files := &fakeFiles{}
+	clock := &fakeClock{current: time.Now()}
+	service := NewService(store, authorizer, redirects, provisioner, parser, files, clock.Now)
+	events := &recorder{}
+	service.OnChanged(events.OnChanged)
+	env := &testEnv{
+		service:     service,
+		store:       store,
+		authorizer:  authorizer,
+		redirects:   redirects,
+		provisioner: provisioner,
+		parser:      parser,
+		files:       files,
+		clock:       clock,
+		events:      events,
+	}
+	env.service.refreshBackoffs = []time.Duration{0, 0}
+	return env
+}
+
+// validSession is a session whose access token is comfortably fresh.
+func validSession(email string) domain.Session {
+	return domain.Session{
+		AccessToken:  "access-" + email,
+		RefreshToken: "refresh-" + email,
+		IDToken:      "id-" + email,
+		AccessExpiry: time.Now().Add(time.Hour),
+		Identity: domain.Identity{
+			Email:          email,
+			ChatGPTUserID:  "user-1",
+			Plan:           "plus",
+			AccountID:      "account-1",
+			OrganizationID: "org-1",
+		},
+	}
+}
+
+// staleSession has the same shape with an already-expired access token.
+func staleSession() domain.Session {
+	session := validSession("user@example.com")
+	session.AccessExpiry = time.Now().Add(-10 * time.Minute)
+	return session
+}
+
+// waitFor polls a condition with a deadline instead of sleeping blindly:
+// a deadlock surfaces as this timeout, and happy paths finish in the
+// first few polls.
+func waitFor(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// signIn drives a full successful login: the redirect server answers the
+// code, the flow runs to PhaseSuccess.
+func (env *testEnv) signIn(t *testing.T) string {
+	t.Helper()
+	env.redirects.setAwaitFn(func(ctx context.Context) (string, error) {
+		return "the-auth-code", nil
+	})
+	authorizeURL, err := env.service.LoginStart()
+	if err != nil {
+		t.Fatalf("LoginStart() failed: %v", err)
+	}
+	waitFor(t, "login success", func() bool {
+		return env.service.LoginStatus().Phase == PhaseSuccess
+	})
+	return authorizeURL
+}
+
+// restore runs Restore with the test's lifetime as the loop context.
+func (env *testEnv) restore(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := env.service.Restore(ctx); err != nil {
+		t.Fatalf("Restore() failed: %v", err)
+	}
+}
+
+func TestAListenerMayQueryTheServiceWhileBeingNotified(t *testing.T) {
+	env := newTestEnv(t)
+	queried := make(chan struct{}, 8)
+	// A listener that immediately queries back is the UI's actual
+	// behavior; notifying under a lock would deadlock right here.
+	env.service.OnChanged(func(snapshot Snapshot) {
+		env.service.Status()
+		env.service.LoginStatus()
+		queried <- struct{}{}
+	})
+
+	env.signIn(t)
+
+	// The login produced two notifications (waiting, then success); both
+	// must have run their queries to completion for the flow to finish.
+	seen := 0
+	for seen < 2 {
+		select {
+		case <-queried:
+			seen++
+		case <-time.After(3 * time.Second):
+			t.Fatalf("listener did not run: only %d of 2 queries completed", seen)
+		}
+	}
+}
+
+func TestConcurrentAcquiresInvalidationsAndStatusQueriesStayConsistent(t *testing.T) {
+	env := newTestEnv(t)
+	// A stale session with a live refresh token: every acquire races the
+	// others into the single-flight refresh.
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.service.refreshInterval = 5 * time.Millisecond
+	env.restore(t)
+
+	const goroutines = 8
+	const rounds = 25
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < rounds; j++ {
+				_, _ = env.service.AcquireAccessToken(context.Background())
+				env.service.InvalidateAccessToken()
+				env.service.Status()
+				env.service.LoginStatus()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Every thread asked for a token concurrently and none of the state
+	// queries may end in a torn state: the connection stays signed in.
+	if state := env.service.Status().State; state != StateSignedIn {
+		t.Fatalf("State = %q after concurrent use, want %q", state, StateSignedIn)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) == 0 {
+		t.Fatal("no refresh ever ran under concurrency")
+	}
+}
+
+// A logout from a live session retires the provider entry (it stays,
+// disabled and unbound, for a later sign-in to relink to); a logout with
+// no live session removes the leftovers instead. The mode is picked from
+// the connection state, not from what happened to be provisioned.
+func TestLogoutRetiresALiveSessionButRemovesLeftovers(t *testing.T) {
+	env := newTestEnv(t)
+
+	if err := env.service.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout() with no live account error = %v, want nil", err)
+	}
+	if retired := env.provisioner.retireCount(); retired != 0 {
+		t.Fatalf("retireCount() = %d, want 0: no live account means remove", retired)
+	}
+	if removed := env.provisioner.removeCount(); removed != 1 {
+		t.Fatalf("removeCount() = %d, want 1", removed)
+	}
+
+	env.signIn(t)
+	if err := env.service.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout() with a live account error = %v, want nil", err)
+	}
+	if retired := env.provisioner.retireCount(); retired != 1 {
+		t.Fatalf("retireCount() = %d, want 1: a live account means retire", retired)
+	}
+	if removed := env.provisioner.removeCount(); removed != 1 {
+		t.Fatalf("removeCount() = %d, want still 1: a live account must not remove", removed)
+	}
+	if conn := env.service.Status(); conn.State != StateSignedOut {
+		t.Fatalf("Status().State = %q, want %q", conn.State, StateSignedOut)
+	}
+}
+
+// An access-only rotation — OpenAI answered the refresh with no new
+// refresh token, id token or identity — must still hand out the fresh
+// access token exactly as the endpoint delivered it, and the next
+// refresh must present the refresh token the service already owned, not
+// the empty one the rotation declined to return.
+func TestAnAccessOnlyRotationKeepsTheStoredRefreshTokenAndIdentity(t *testing.T) {
+	env := newTestEnv(t)
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "",
+		IDToken:      "",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	token, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
+	}
+	if token != "rotated-access" {
+		t.Fatalf("AcquireAccessToken() = %q, want the adapter-delivered rotated token", token)
+	}
+
+	// The rotation answered no identity of its own: the account stays the
+	// one the stored id token described.
+	if conn := env.service.Status(); conn.State != StateSignedIn || conn.Email != "user@example.com" {
+		t.Fatalf("Status() = %+v, want signed in as user@example.com", conn)
+	}
+
+	// Force the next acquire through the refresh path again: it must still
+	// present the stored refresh token, because the access-only rotation
+	// must not have blanked it.
+	env.service.InvalidateAccessToken()
+	second, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("second AcquireAccessToken() error = %v, want nil", err)
+	}
+	if second != "rotated-access" {
+		t.Fatalf("second AcquireAccessToken() = %q, want %q", second, "rotated-access")
+	}
+	refreshes := env.authorizer.refreshes()
+	if len(refreshes) != 2 {
+		t.Fatalf("Refresh called %d times, want 2", len(refreshes))
+	}
+	for i, presented := range refreshes {
+		if presented != "refresh-user@example.com" {
+			t.Fatalf("refresh %d presented %q, want the stored refresh token", i+1, presented)
+		}
+	}
+}
+
+// The ticker must react to a refresh that comes back dead: the session
+// moves to reauth_needed, the UI learns who has to sign in again, and no
+// retry budget is burned on a token the endpoint already rejected.
+func TestTheTickerMarksAStaleSessionForReSignIn(t *testing.T) {
+	env := newTestEnv(t)
+	env.service.refreshInterval = 5 * time.Millisecond
+	env.authorizer.setRefreshResult(domain.Session{}, errors.New("invalid_grant"))
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	waitFor(t, "the ticker to mark the session for re-sign-in", func() bool {
+		return env.service.Status().State == StateReauthNeeded
+	})
+
+	// The identity survives the flip: the dialog must still be able to
+	// say who needs to sign in again.
+	if conn := env.service.Status(); conn.Email != "user@example.com" {
+		t.Fatalf("Status().Email = %q, want user@example.com after the flip", conn.Email)
+	}
+	seen := false
+	for _, snapshot := range env.events.snapshots() {
+		if snapshot.Conn.State == StateReauthNeeded {
+			seen = true
+			if snapshot.Conn.Email != "user@example.com" {
+				t.Fatalf("reauth_needed snapshot = %+v, want the identity intact", snapshot.Conn)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("no reauth_needed snapshot was delivered to listeners")
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1: a reauth verdict settles the cycle", len(refreshes))
+	}
+}
+
+// A session with no refresh token cannot be renewed by anyone: the
+// acquire path must say "sign in" without presenting an empty token to
+// the endpoint, and must record that the account needs re-auth.
+func TestAnUnrefreshableRestoredSessionAsksForSignIn(t *testing.T) {
+	env := newTestEnv(t)
+	session := validSession("user@example.com")
+	session.RefreshToken = ""
+	session.AccessExpiry = time.Now().Add(-10 * time.Minute)
+	env.store.mu.Lock()
+	env.store.session = session
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	_, err := env.service.AcquireAccessToken(context.Background())
+	if !errors.Is(err, errNeedsSignIn) {
+		t.Fatalf("AcquireAccessToken() error = %v, want errNeedsSignIn", err)
+	}
+	if state := env.service.Status().State; state != StateReauthNeeded {
+		t.Fatalf("State = %q, want %q", state, StateReauthNeeded)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 0 {
+		t.Fatalf("Refresh called %d times, want 0: an empty refresh token is never presented", len(refreshes))
+	}
+}
+
+// The stale-refresh clobber: a refresh in flight on the OLD token when a
+// fresh login lands must not drag the new session down with it when the
+// old token's verdict comes back. The failure belongs to the old token,
+// and the state that replaced it is what stays.
+func TestAStaleRefreshFailureDoesNotClobberAFreshLogin(t *testing.T) {
+	env := newTestEnv(t)
+	stale := staleSession()
+	stale.RefreshToken = "old-refresh"
+	env.store.mu.Lock()
+	env.store.session = stale
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	block := make(chan struct{})
+	env.authorizer.setRefreshBlock(block)
+
+	acquireDone := make(chan error, 1)
+	go func() {
+		_, err := env.service.AcquireAccessToken(context.Background())
+		acquireDone <- err
+	}()
+	waitFor(t, "the stale refresh to start", func() bool {
+		return len(env.authorizer.refreshes()) >= 1
+	})
+
+	// A fresh login lands while the old token's refresh is in flight.
+	env.signIn(t)
+
+	// Now the old token comes back dead.
+	env.authorizer.setRefreshResult(domain.Session{}, errors.New("invalid_grant"))
+	close(block)
+
+	select {
+	case err := <-acquireDone:
+		if err == nil {
+			t.Fatal("AcquireAccessToken() = nil error, want the refresh failure surfaced")
+		}
+		if !strings.Contains(err.Error(), "codex access token could not be refreshed") {
+			t.Fatalf("AcquireAccessToken() error = %q, want the refresh failure wrapped", err.Error())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the acquire to return")
+	}
+
+	// The dead verdict belonged to the old token: the fresh login's
+	// session is still the live one.
+	if conn := env.service.Status(); conn.State != StateSignedIn || conn.Email != "user@example.com" {
+		t.Fatalf("Status() = %+v, want still signed in as user@example.com", conn)
+	}
+	for _, snapshot := range env.events.snapshots() {
+		if snapshot.Conn.State == StateReauthNeeded {
+			t.Fatalf("a reauth_needed snapshot was delivered: %+v — a stale refresh failure clobbered the fresh login", snapshot.Conn)
+		}
+	}
+}
+
+// A refresh superseded by a login: the login's session is served, the
+// store holds exactly what the login wrote, and the superseded rotation
+// is dropped rather than persisted over it.
+func TestARefreshSupersededByALoginServesTheLoginSession(t *testing.T) {
+	env := newTestEnv(t)
+	stale := staleSession()
+	stale.RefreshToken = "old-refresh"
+	env.store.mu.Lock()
+	env.store.session = stale
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	block := make(chan struct{})
+	env.authorizer.setRefreshBlock(block)
+
+	type acquireResult struct {
+		token string
+		err   error
+	}
+	acquireDone := make(chan acquireResult, 1)
+	go func() {
+		token, err := env.service.AcquireAccessToken(context.Background())
+		acquireDone <- acquireResult{token: token, err: err}
+	}()
+	waitFor(t, "the superseded refresh to start", func() bool {
+		return len(env.authorizer.refreshes()) >= 1
+	})
+
+	// The login lands while the refresh is still in flight. Its exchange
+	// answers the default session; the rotation below is installed only
+	// after the login committed, while the refresh is still parked — the
+	// fake shares one session field between exchange and refresh, so
+	// setting it earlier would hand the login the rotation too.
+	env.signIn(t)
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	close(block)
+
+	select {
+	case result := <-acquireDone:
+		if result.err != nil {
+			t.Fatalf("AcquireAccessToken() error = %v, want nil: the login's session is served", result.err)
+		}
+		if result.token != "access-user@example.com" {
+			t.Fatalf("AcquireAccessToken() = %q, want the login session's token", result.token)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the acquire to return")
+	}
+
+	// The store holds exactly the login's session: the superseded
+	// rotation was dropped, not persisted over it.
+	sessions := env.store.savedSessions()
+	if len(sessions) != 1 {
+		t.Fatalf("store saved %d sessions, want 1: only the login's", len(sessions))
+	}
+	if sessions[0].RefreshToken != "refresh-user@example.com" {
+		t.Fatalf("saved session refresh token = %q, want the login's", sessions[0].RefreshToken)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1", len(refreshes))
+	}
+	if conn := env.service.Status(); conn.State != StateSignedIn {
+		t.Fatalf("State = %q, want %q", conn.State, StateSignedIn)
+	}
+}
+
+// A cancelled caller waiting on the refresh gate must be released by its
+// own cancellation, and must leave the gate to the refresh that holds it.
+func TestAnAcquireWaitingOnTheRefreshGateHonoursItsOwnCancellation(t *testing.T) {
+	env := newTestEnv(t)
+	env.service.refreshInterval = 5 * time.Millisecond
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	// Hold the gate from the ticker's side: its refresh parks mid-call.
+	block := make(chan struct{})
+	env.authorizer.setRefreshBlock(block)
+	waitFor(t, "the ticker's refresh to start", func() bool {
+		return len(env.authorizer.refreshes()) >= 1
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	token, err := env.service.AcquireAccessToken(ctx)
+	if !errors.Is(err, context.Canceled) || token != "" {
+		t.Fatalf("cancelled AcquireAccessToken() = (%q, %v), want (\"\", context.Canceled)", token, err)
+	}
+
+	// Release the parked refresh; the gate must still be usable — the
+	// cancelled caller left it to whoever was still live.
+	close(block)
+	waitFor(t, "the parked refresh to land", func() bool {
+		// The parked refresh commits the default valid session: the
+		// store's save is the observable landing.
+		return len(env.store.savedSessions()) >= 1
+	})
+	env.service.InvalidateAccessToken()
+
+	acquireDone := make(chan struct {
+		token string
+		err   error
+	}, 1)
+	go func() {
+		token, err := env.service.AcquireAccessToken(context.Background())
+		acquireDone <- struct {
+			token string
+			err   error
+		}{token, err}
+	}()
+	select {
+	case result := <-acquireDone:
+		if result.err != nil {
+			t.Fatalf("AcquireAccessToken() error = %v, want nil", result.err)
+		}
+		if result.token != "access-user@example.com" {
+			t.Fatalf("AcquireAccessToken() = %q, want the refreshed token", result.token)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the acquire never got through the gate: the cancelled caller left it held")
+	}
+}
+
+// The gate opens between refresh retries: a caller that arrives while the
+// ticker's retry cycle is sleeping off a failure is served within that
+// backoff window instead of waiting out the whole cycle.
+func TestTheGateOpensBetweenRefreshRetries(t *testing.T) {
+	env := newTestEnv(t)
+	env.service.refreshInterval = 5 * time.Millisecond
+	env.service.refreshBackoffs = []time.Duration{400 * time.Millisecond, 400 * time.Millisecond}
+	env.authorizer.setRefreshResult(domain.Session{}, errors.New("transient blip"))
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	// The ticker's cycle is now in flight: attempt 1 failed and the
+	// backoff sleep runs outside the gate.
+	waitFor(t, "the first refresh attempt to run", func() bool {
+		return len(env.authorizer.refreshes()) >= 1
+	})
+
+	started := time.Now()
+	acquireDone := make(chan error, 1)
+	go func() {
+		_, err := env.service.AcquireAccessToken(context.Background())
+		acquireDone <- err
+	}()
+	select {
+	case err := <-acquireDone:
+		if err == nil {
+			t.Fatal("AcquireAccessToken() = nil error, want the transient refresh failure")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the acquire never got through the gate: it was held across the retry backoff")
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("acquire waited %v, want it served inside the 400ms backoff window", elapsed)
+	}
+
+	// The retry cycle still spends its budget in the background.
+	waitFor(t, "the retry cycle to spend its budget", func() bool {
+		return len(env.authorizer.refreshes()) >= 3
+	})
+}
+
+// A rotation the disk refused stays live in memory: the token endpoint
+// already rotated, so re-presenting the old refresh token would strand
+// the account. The ticker must not keep re-requesting either.
+func TestTheTickerAppliesARotationTheStoreCouldNotPersist(t *testing.T) {
+	env := newTestEnv(t)
+	env.service.refreshInterval = 5 * time.Millisecond
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.saveErr = errors.New("disk full")
+	env.store.mu.Unlock()
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	env.restore(t)
+
+	waitFor(t, "the ticker to attempt a refresh", func() bool {
+		return len(env.authorizer.refreshes()) >= 1
+	})
+	// Give the ticker a few cadences to prove it does not loop on the
+	// rotation it already holds.
+	time.Sleep(20 * time.Millisecond)
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1: the in-memory rotation must not be re-requested", len(refreshes))
+	}
+
+	// The acquire path serves the rotated token the disk refused to keep.
+	token, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() error = %v, want nil: the rotation is served from memory", err)
+	}
+	if token != "rotated-access" {
+		t.Fatalf("AcquireAccessToken() = %q, want the rotated access token", token)
+	}
+}
+
+// The save seam: the first acquire after a failed save reports the store
+// failure — the rotation is live, but pretending the disk agreed would
+// hide a persistence problem — and the next acquire serves the rotation
+// without paying for another refresh.
+func TestAnAcquireSurfacesTheSaveErrorAndServesTheRotationAfter(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.saveErr = errors.New("disk full")
+	env.store.mu.Unlock()
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	env.restore(t)
+
+	_, err := env.service.AcquireAccessToken(context.Background())
+	if err == nil {
+		t.Fatal("AcquireAccessToken() = nil error, want the save failure surfaced")
+	}
+	if !strings.Contains(err.Error(), "codex session could not be stored") {
+		t.Fatalf("AcquireAccessToken() error = %q, want the store failure wrapped", err.Error())
+	}
+
+	token, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("second AcquireAccessToken() error = %v, want nil", err)
+	}
+	if token != "rotated-access" {
+		t.Fatalf("second AcquireAccessToken() = %q, want the rotated token served from memory", token)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1: the in-memory rotation must be reused", len(refreshes))
+	}
+}

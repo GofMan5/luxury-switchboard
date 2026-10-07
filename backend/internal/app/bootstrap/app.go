@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
@@ -22,6 +23,14 @@ import (
 	backuplive "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/live"
 	backupstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/stdio"
 	backupapp "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/application"
+	codeximports "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/imports"
+	codexloopback "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/loopback"
+	codexoauth "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/oauth"
+	codexproviders "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/providers"
+	codexrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/relay"
+	codexstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/stdio"
+	codexstore "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/store"
+	codexapplication "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
 	guardrailrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/relay"
 	guardrailruleset "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/ruleset"
 	guardrailstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/adapters/stdio"
@@ -76,6 +85,7 @@ type App struct {
 	logger        *log.Logger
 	healthMonitor *providerapp.HealthMonitor
 	healthCancel  context.CancelFunc
+	codex         *codexapplication.Service
 }
 
 func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
@@ -125,9 +135,64 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	providerManager.SetRouteUsage(routeService)
 	routeResolver := relayroutes.NewResolver(routeService)
 	routes := relayproviders.NewSource(catalog, routeResolver, routeResolver)
-	credentials := relaykeypool.NewSource(keyScheduler)
+	// The codex route must carry the identity headers the reference client
+	// sends (User-Agent "Codex Desktop/<version>", originator), and the
+	// version travels with the Go AppVersion the build stamped.
+	routes.SetAppVersion(systemstdio.AppVersion)
+	// The codex provider is the one provider that does not authenticate with
+	// a pooled key: it signs in with ChatGPT's OAuth and refreshes its own
+	// session, DPAPI-encrypted at its own path. The authorizer takes a nil
+	// client on purpose — every call it makes is bounded by a context the
+	// application layer already holds — and the loopback redirect server
+	// opens its listener only while a login is actually in flight.
+	codexPath, codexPathErr, err := defaultCodexStore()
+	if err != nil {
+		return nil, err
+	}
+	if codexPathErr != nil {
+		logger.Printf("codex account storage could not be located; sign-ins will not persist")
+	}
+	codexService := codexapplication.NewService(
+		codexstore.NewRepository(codexPath),
+		codexoauth.NewAuthorizer(nil, systemstdio.AppVersion),
+		codexloopback.NewRedirectServer(),
+		codexproviders.NewProvisioner(providerManager),
+		codeximports.NewParser(),
+		codeximports.NewFileReader(),
+		nil,
+	)
+	// The relay's credentials are a composite: codex traffic draws its token
+	// from the OAuth session, everything else keeps drawing from the key
+	// pool, and a codex request never falls back to a key — there is no key
+	// to fall back to.
+	credentials := codexrelay.NewCompositeSource(
+		codexrelay.NewTokenSource(codexService),
+		relaykeypool.NewSource(keyScheduler),
+	)
 	activity := activityapp.NewService(settings.ActivityCapacity)
 	notifications := notificationsapp.NewService()
+	// A session that slid into reauth-needed is the codex provider's dead-key
+	// event: the pool cannot rotate around it, so the operator is the one who
+	// has to act. The notification fires on the transition only, because
+	// OnChanged reports every observable change — login phases included —
+	// and the listener may be invoked from whichever goroutine moved the
+	// session, so the edge it watches is its own lock.
+	var codexStateMu sync.Mutex
+	codexState := codexapplication.StateSignedOut
+	codexService.OnChanged(func(snapshot codexapplication.Snapshot) {
+		state := snapshot.Conn.State
+		codexStateMu.Lock()
+		transition := state == codexapplication.StateReauthNeeded && codexState != codexapplication.StateReauthNeeded
+		codexState = state
+		codexStateMu.Unlock()
+		if transition {
+			_ = notifications.Raise(
+				notificationsdomain.KindCodexAuth, notificationsdomain.SeverityWarning,
+				"Codex sign-in is needed",
+				"The ChatGPT session expired. Sign in again from the Providers tab to keep the Codex provider working.",
+			)
+		}
+	})
 	// History is the operator's record of what happened, and a storage outage
 	// used to stop it in silence: the queue filled, records dropped, and the
 	// only symptom was a journal that quietly stopped growing. The store says
@@ -203,6 +268,11 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	}
 	healthMonitor.SetEnabled(settings.ProviderHealthEnabled)
 	providerstdio.Register(protocol, catalog, providerManager, keyScheduler, healthMonitor)
+	// The codex provider's sign-in lives beside the provider commands: it is
+	// the one provider whose credential is an OAuth session rather than a
+	// key. Registration also wires the protocol's own codex.changed event,
+	// so the frontend sees login and refresh transitions as they happen.
+	codexstdio.Register(protocol, codexService)
 	// The update check asks the project's own release feed, nothing else; a
 	// quiet answer on a machine without network is the correct one.
 	updatesstdio.Register(protocol, updatesapp.NewService(systemstdio.AppVersion, updategithub.NewClient()))
@@ -354,6 +424,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		publishing:    publishing,
 		logger:        logger,
 		healthMonitor: healthMonitor,
+		codex:         codexService,
 	}, nil
 }
 
@@ -366,6 +437,17 @@ func (app *App) Run(ctx context.Context) error {
 	if _, err := app.relay.Start(); err != nil {
 		app.logger.Printf("relay start failed")
 	}
+	// The codex session restores in the background: sign-in state is not a
+	// startup dependency, the commands answer immediately, and the session's
+	// own change events announce it when it lands. Restore gets Run's
+	// context because the refresh loop it starts outlives logins and
+	// logouts — only the application's lifetime ends it. A failed restore
+	// is logged, never fatal: the app runs with the provider signed out.
+	go func() {
+		if err := app.codex.Restore(ctx); err != nil {
+			app.logger.Printf("codex session could not be restored: %v", err)
+		}
+	}()
 	err := app.protocol.Serve(ctx)
 	publishingCtx, cancelPublishing := context.WithTimeout(context.Background(), 5*time.Second)
 	if stopErr := app.publishing.Stop(publishingCtx); stopErr != nil {
@@ -481,6 +563,21 @@ func defaultProviderManager(catalog *providerapp.Catalog, keys *keyapp.Manager) 
 		loadErr = manager.Load(context.Background())
 	}
 	return manager, repository, loadErr, nil
+}
+
+// defaultCodexStore locates the DPAPI file the codex session persists to,
+// on the settings-store convention: an explicit path must be absolute and
+// is a hard startup error otherwise, while a machine where the default
+// location cannot be resolved still boots — sign-ins just stop persisting.
+func defaultCodexStore() (string, error, error) {
+	path := os.Getenv("SWITCHBOARD_CODEX_PATH")
+	var pathErr error
+	if path == "" {
+		path, pathErr = codexstore.DefaultPath()
+	} else if !filepath.IsAbs(path) {
+		return "", nil, errors.New("codex account path must be absolute")
+	}
+	return path, pathErr, nil
 }
 
 func defaultSettingsService() (*settingsapp.Service, error, error) {

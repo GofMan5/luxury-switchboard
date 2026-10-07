@@ -1,0 +1,122 @@
+.card { display: grid; gap: 12px; }
+
+.cardHead { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 12px; }
+.cardHead > svg { color: var(--text-secondary); margin-top: 2px; }
+.cardText { display: grid; gap: 3px; min-width: 0; }
+.cardText strong { color: var(--text-primary); font-size: 14px; font-weight: 640; }
+.cardText small { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+
+/* The Pill above already carries the warning tone; the note stays neutral
+ * so a stacked red/yellow block does not shout over the card. */
+.reauthNote { margin: 0; color: var(--text-secondary); font-size: 12.5px; line-height: 1.5; }
+
+.rows { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; margin: 0; font-size: 12.5px; }
+.rows dt { color: var(--text-muted); }
+.rows dd { margin: 0; color: var(--text-secondary); }
+.email { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; vertical-align: bottom; }
+
+.cardActions { display: flex; justify-content: space-between; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
+
+/* The phase region lives inside the card, under everything the card shows
+ * while idle, separated by a hairline. */
+.phase { display: grid; gap: 7px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+.statusRow { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-primary); font-size: 13px; min-width: 0; }
+.statusRow > svg { color: var(--text-secondary); flex: 0 0 auto; }
+.statusRow > span { display: block; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.successIcon { color: var(--status-success); flex: 0 0 auto; }
+
+.hint { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.error { margin: 0; color: var(--text-danger); font-size: 12.5px; line-height: 1.5; }
+
+/* Four ways in, one picked: radio cards in the same visual language as the
+ * preset chooser one step up. A live flow disables the whole group and the
+ * running method stays marked, so the cards keep telling the truth. */
+.methods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+
+.methodCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 2px 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: inherit;
+  background: var(--bg-surface);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast);
+}
+.methodCard > svg { margin-top: 2px; color: var(--text-secondary); }
+.methodCard:hover:not(:disabled) { background: var(--bg-hover); }
+.methodCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.methodCard:active:not(:disabled) { transform: translateY(1px); }
+.methodCard:disabled { color: var(--text-disabled); cursor: default; }
+.methodCard[data-checked='true'] {
+  border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
+}
+.methodCard:disabled[data-checked='true'] { border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border-subtle)); }
+
+.methodText { display: grid; gap: 2px; min-width: 0; }
+.methodText strong { color: var(--text-primary); font-size: 13px; font-weight: 640; }
+.methodText small { color: var(--text-muted); font-size: 11.5px; line-height: 1.45; }
+
+/* Pasted credentials are code: monospace, vertically resizable, and the
+ * same field recipe every input in the app uses. */
+.importTextarea {
+  width: 100%;
+  min-height: 88px;
+  max-height: 220px;
+  padding: 10px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  background: var(--bg-field);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+  transition: border-color var(--motion-fast), background var(--motion-fast);
+}
+.importTextarea:hover { border-color: var(--border-field); background: var(--bg-raised); }
+.importTextarea:focus-visible { border-color: var(--focus-ring); outline: none; }
+
+/* The device code is the one thing the user must carry elsewhere; it gets
+ * its own row so copying is a single click and the code stays selectable. */
+.deviceCode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--bg-field);
+}
+.userCode {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  user-select: all;
+}
+
+/* Only reached without the desktop shell; its files are read through the
+ * fallback input and never named in the UI. */
+.hiddenFileInput { display: none; }
+
+/* DisconnectCodexDialog rides this module: it is the same feature surface
+ * and needs only a width override plus an error block. */
+.disconnect { --dialog-width: 460px; }
+.disconnectError { margin: 0; padding: 14px 18px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, transparent); }
+
+.spinning { animation: icon-spin 1s linear infinite; }
+[data-animations='off'] .spinning { animation: none; }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+
+@keyframes icon-spin { to { transform: rotate(360deg); } }

@@ -14,10 +14,12 @@ import type { TestsModel } from '../features/tests/application/tests-model'
 import type { UpdatesModel } from '../features/updates/application/updates-model'
 import type { NotificationsModel } from '../features/notifications/application/notifications-model'
 import type { BackupModel } from '../features/backup/application/backup-model'
+import type { CodexModel } from '../features/codex/application/codex-model'
 
 export interface AppServices {
   readonly relay: RelayModel
   readonly providers: ProvidersModel
+  readonly codex: CodexModel
   readonly activity: ActivityModel
   readonly apiKeys: ApiKeysModel
   readonly settings: SettingsModel
@@ -34,6 +36,8 @@ export interface AppServices {
   readonly clients: ClientsModel
   /** Version the control plane reported during the handshake. */
   readonly appVersion: string
+  /** Capabilities the control plane reported during the handshake. */
+  readonly capabilities: readonly string[]
 }
 
 export const ServicesContext = createContext<AppServices | null>(null)

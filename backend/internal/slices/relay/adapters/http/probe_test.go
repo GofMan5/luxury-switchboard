@@ -266,6 +266,41 @@ func TestTheProbeReportsARefusalAsARefusal(t *testing.T) {
 	}
 }
 
+// A probe that hits a revoked token files the provider's own verdict with
+// the key pool, not just a bare authentication outcome: the codex source
+// reads this code off the lease to stop serving a session the provider
+// has already killed.
+func TestTheProbeCarriesTheRevocationVerdictToTheKeyPool(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(writer, `{"error":{"code":"token_revoked","message":"Your token was revoked"}}`)
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &credentialSource{values: []string{"test-key"}}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "echo", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{StreamIdleTimeout: 5 * time.Second},
+	})
+	report, err := server.Probe(context.Background(), "echo", "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != http.StatusUnauthorized || report.ErrorCode != "request_rejected" {
+		t.Fatalf("a refusal was misreported: %+v", report)
+	}
+	if len(credentials.outcomes) != 1 {
+		t.Fatalf("expected one filed outcome, saw %+v", credentials.outcomes)
+	}
+	outcome := credentials.outcomes[0]
+	if outcome.Kind != relayapp.AttemptAuthentication ||
+		outcome.ErrorCode != "token_revoked" ||
+		outcome.ErrorMessage != "Your token was revoked" {
+		t.Fatalf("the probe lost the provider's revocation verdict: %+v", outcome)
+	}
+}
+
 func TestTheProbeReadsTheAnthropicDialect(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/messages" {

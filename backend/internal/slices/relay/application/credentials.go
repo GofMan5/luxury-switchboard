@@ -32,10 +32,23 @@ const (
 	AttemptAuthentication
 )
 
+// AttemptOutcome is one finished upstream attempt's verdict. ErrorCode and
+// ErrorMessage carry the provider's own error object when the refusal was
+// an authentication one: relay fills them with the code and message the
+// provider named, without interpreting either — which verdicts (if any) a
+// specific credential source should act on is that source's decision, not
+// the relay's. Both stay empty for every other kind; an authentication
+// refusal whose body named no code carries none, which reads as "no
+// verdict about the token family".
 type AttemptOutcome struct {
 	Kind       AttemptKind
 	Model      string
 	RetryAfter time.Duration
+	// ErrorCode is the provider's error code, trimmed of nothing and
+	// lowercased by nobody: verbatim as the JSON named it.
+	ErrorCode string
+	// ErrorMessage is the provider's error message, verbatim.
+	ErrorMessage string
 }
 
 type CredentialLease interface {

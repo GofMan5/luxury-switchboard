@@ -762,6 +762,224 @@ func TestAnAccessOnlyRotationKeepsTheStoredRefreshTokenAndIdentity(t *testing.T)
 // The ticker must react to a refresh that comes back dead: the session
 // moves to reauth_needed, the UI learns who has to sign in again, and no
 // retry budget is burned on a token the endpoint already rejected.
+// A rotation that carries no date must not read as "always refresh"
+// from then on: the merged session keeps the previous expiry, so the
+// next acquire is served from memory instead of burning a token-endpoint
+// round-trip on every request.
+func TestADatelessRotationKeepsThePreviousExpiry(t *testing.T) {
+	env := newTestEnv(t)
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+	}, nil)
+	env.store.mu.Lock()
+	env.store.session = validSession("user@example.com")
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	// The invalidate is what sends the first acquire to the token
+	// endpoint; the rotation that answers it has no expiry of its own.
+	env.service.InvalidateAccessToken()
+	first, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
+	}
+	if first != "rotated-access" {
+		t.Fatalf("AcquireAccessToken() = %q, want %q", first, "rotated-access")
+	}
+
+	second, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("second AcquireAccessToken() error = %v, want nil", err)
+	}
+	if second != "rotated-access" {
+		t.Fatalf("second AcquireAccessToken() = %q, want %q", second, "rotated-access")
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1: the kept date is the whole point", len(refreshes))
+	}
+
+	saves := env.store.savedSessions()
+	if len(saves) == 0 {
+		t.Fatal("the rotation was never stored")
+	}
+	if saves[len(saves)-1].AccessExpiry.IsZero() {
+		t.Fatal("stored rotation kept a zero access expiry, want the previous date")
+	}
+}
+
+// The upstream named the access token itself as revoked: no rotation of
+// the same session can serve another request, so the acquire path must
+// refuse before any refresh runs, and only a fresh login clears it.
+func TestARevokedAccessTokenStopsServingUntilASignIn(t *testing.T) {
+	env := newTestEnv(t)
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	token, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
+	}
+	if token != "rotated-access" {
+		t.Fatalf("AcquireAccessToken() = %q, want %q", token, "rotated-access")
+	}
+
+	env.service.RejectAccessToken("rotated-access")
+
+	conn := env.service.Status()
+	if conn.State != StateReauthNeeded {
+		t.Fatalf("Status().State = %q, want %q", conn.State, StateReauthNeeded)
+	}
+	if conn.Email != "user@example.com" {
+		t.Fatalf("Status().Email = %q, want the identity kept for the re-sign-in dialog", conn.Email)
+	}
+
+	// The failure loop from before the fix — acquire, refresh, serve the
+	// doomed token, 401, repeat — must not start: the acquire refuses
+	// outright and no second refresh is minted.
+	if _, err := env.service.AcquireAccessToken(context.Background()); !errors.Is(err, errNotSignedIn) {
+		t.Fatalf("AcquireAccessToken() error = %v, want errNotSignedIn", err)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1: a revoked session must not mint another token", len(refreshes))
+	}
+
+	// A fresh login replaces the session and the verdict with it.
+	env.authorizer.setRefreshResult(validSession("user@example.com"), nil)
+	env.signIn(t)
+	if conn := env.service.Status(); conn.State != StateSignedIn {
+		t.Fatalf("after a re-login Status().State = %q, want %q", conn.State, StateSignedIn)
+	}
+	served, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() after re-login error = %v, want nil", err)
+	}
+	if served != "access-user@example.com" {
+		t.Fatalf("AcquireAccessToken() after re-login = %q, want the logged-in token", served)
+	}
+}
+
+// A revocation is a statement about one token: one that names a token
+// nobody serves any more — the superseded token of a rotation that
+// already landed, or a session that no longer exists — is inert.
+func TestAStaleRevocationCannotSignOutANewerSession(t *testing.T) {
+	env := newTestEnv(t)
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	token, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
+	}
+	if token != "rotated-access" {
+		t.Fatalf("AcquireAccessToken() = %q, want %q", token, "rotated-access")
+	}
+
+	// The 401 that started this rotation arrives back from the dead
+	// after the rotation already landed: it names the old token.
+	env.service.RejectAccessToken("access-user@example.com")
+	if conn := env.service.Status(); conn.State != StateSignedIn {
+		t.Fatalf("Status().State = %q, want %q: a stale revocation must not clobber the rotation", conn.State, StateSignedIn)
+	}
+	served, err := env.service.AcquireAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireAccessToken() after a stale revocation error = %v, want nil", err)
+	}
+	if served != "rotated-access" {
+		t.Fatalf("AcquireAccessToken() after a stale revocation = %q, want %q", served, "rotated-access")
+	}
+
+	env.service.RejectAccessToken("a-token-nobody-served")
+	if conn := env.service.Status(); conn.State != StateSignedIn {
+		t.Fatalf("Status().State = %q, want %q: a revocation for an unknown token is inert", conn.State, StateSignedIn)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1: inert revocations trigger no work", len(refreshes))
+	}
+}
+
+// A revocation that lands while a rotation is already in flight wins
+// over that rotation: the refresh commits its tokens (the endpoint
+// rotated them; memory must serve what the server knows), but the
+// connection stays in reauth_needed — the verdict is not undone by a
+// session it did not describe, and no further token is served from it.
+func TestARevocationThatLandsMidRotationLeavesTheNewSessionUnserved(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.restore(t)
+
+	block := make(chan struct{})
+	env.authorizer.setRefreshBlock(block)
+	acquireDone := make(chan struct {
+		token string
+		err   error
+	}, 1)
+	go func() {
+		token, err := env.service.AcquireAccessToken(context.Background())
+		acquireDone <- struct {
+			token string
+			err   error
+		}{token, err}
+	}()
+	waitFor(t, "the mid-flight rotation to start", func() bool {
+		return len(env.authorizer.refreshes()) >= 1
+	})
+
+	// The 401 with the revocation verdict arrives while the old token is
+	// still the live one, so the verdict applies.
+	env.service.RejectAccessToken("access-user@example.com")
+	if conn := env.service.Status(); conn.State != StateReauthNeeded {
+		t.Fatalf("Status().State = %q, want %q", conn.State, StateReauthNeeded)
+	}
+
+	// The rotation answers after the verdict already landed.
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+	close(block)
+
+	select {
+	case result := <-acquireDone:
+		if result.err != nil {
+			t.Fatalf("AcquireAccessToken() error = %v, want nil: the in-flight rotation serves its caller", result.err)
+		}
+		if result.token != "rotated-access" {
+			t.Fatalf("AcquireAccessToken() = %q, want the in-flight rotation's token", result.token)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mid-flight acquire")
+	}
+
+	if conn := env.service.Status(); conn.State != StateReauthNeeded {
+		t.Fatalf("Status().State = %q, want %q: a landed rotation must not undo the verdict", conn.State, StateReauthNeeded)
+	}
+	if _, err := env.service.AcquireAccessToken(context.Background()); !errors.Is(err, errNotSignedIn) {
+		t.Fatalf("AcquireAccessToken() error = %v, want errNotSignedIn: the rotated session stays unserved", err)
+	}
+}
+
 func TestTheTickerMarksAStaleSessionForReSignIn(t *testing.T) {
 	env := newTestEnv(t)
 	env.service.refreshInterval = 5 * time.Millisecond

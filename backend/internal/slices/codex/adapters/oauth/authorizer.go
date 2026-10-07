@@ -452,15 +452,18 @@ func (a *Authorizer) ExchangeDeviceCode(ctx context.Context, authorization appli
 //
 // The refresh is lenient where the exchange is strict, because the caller
 // holds a session it can keep falling back on: a missing or malformed
-// id_token yields a session with a zero Identity and no error (the
-// application layer keeps the identity it had), and a response without a
-// rotated refresh token returns the new access token with an empty
-// RefreshToken — the application layer's merge falls back to the stored
-// refresh token. The session carries exactly the fields the response
-// delivered; nothing is zeroed wholesale, because a fresh access token
-// dropped here would leave the relay sending an empty Bearer with no
-// signal to re-login. No account check runs on refresh — the account was
-// checked at login, and a refresh must not sign the user out.
+// id_token yields a session with a zero Identity and no error, and so does
+// one whose exp has already lapsed — an expired claim cannot speak for the
+// new access token's lifetime, and the identity it carries is as stale as
+// its date (in both cases the application layer's merge keeps the previous
+// id_token, identity and expiry). A response without a rotated refresh
+// token returns the new access token with an empty RefreshToken — the
+// application layer's merge falls back to the stored refresh token. The
+// session carries exactly the fields the response delivered; nothing is
+// zeroed wholesale, because a fresh access token dropped here would leave
+// the relay sending an empty Bearer with no signal to re-login. No account
+// check runs on refresh — the account was checked at login, and a refresh
+// must not sign the user out.
 func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (domain.Session, error) {
 	body, err := json.Marshal(refreshRequest{
 		ClientID:     clientID,
@@ -497,6 +500,14 @@ func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (domain.S
 	identity, idErr := domain.ParseIDToken(payload.IDToken)
 	if idErr != nil {
 		// Lenient by contract: the tokens stand, the identity does not.
+		return session, nil
+	}
+	if expiry, expErr := domain.ParseTokenExpiry(payload.IDToken); expErr == nil && !expiry.IsZero() && !expiry.After(time.Now()) {
+		// An id_token that is already lapsed is treated as not
+		// delivered: its expiry must not stand in for the new access
+		// token's unknown one, and neither must its identity overwrite
+		// a live one. The merge keeps the previous id_token, identity
+		// and expiry instead.
 		return session, nil
 	}
 	session.IDToken = payload.IDToken

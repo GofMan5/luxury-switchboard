@@ -938,6 +938,87 @@ func TestRepeatedAuthFailureDoesNotRecoolTheKey(t *testing.T) {
 	}
 }
 
+// The relay hands the provider's own refusal wording through untouched: the
+// code and the message ride the outcome verbatim, and every question about
+// what those words mean belongs to the credential source reading them.
+func TestAuthErrorDetailReadsTheProvidersOwnVerdict(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		code    string
+		message string
+	}{
+		{"the nested error object wins over a flat pair",
+			`{"error":{"code":"token_revoked","message":"Your token was revoked"},"code":"flat","message":"flat"}`,
+			"token_revoked", "Your token was revoked"},
+		{"a flat pair without nesting is read the same way",
+			`{"code":"invalid_api_key","message":"Incorrect API key provided"}`,
+			"invalid_api_key", "Incorrect API key provided"},
+		{"a refusal that named no code answers none",
+			`{"error":{"message":"bad key"}}`,
+			"", "bad key"},
+		{"a numeric code loses the code, not the message with it",
+			`{"error":{"code":401,"message":"token revoked by administrator"}}`,
+			"", "token revoked by administrator"},
+		{"a body that is not JSON at all answers nothing",
+			`not json`, "", ""},
+		{"an empty body answers nothing",
+			``, "", ""},
+	}
+	for _, testCase := range cases {
+		code, message := authErrorDetail([]byte(testCase.body))
+		if code != testCase.code || message != testCase.message {
+			t.Fatalf("%s: got code=%q message=%q, want %q/%q",
+				testCase.name, code, message, testCase.code, testCase.message)
+		}
+	}
+}
+
+// The provider's own code and message ride the first auth refusal only: a
+// second refusal inside the same request is evidence about the verdict, not
+// another chance to read the body — the rotated keys carry no code, so a
+// revoked-token verdict cannot be re-filed against a session it never saw.
+func TestTheFirstAuthRefusalCarriesTheProvidersCodeToThePool(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":{"code":"token_revoked","message":"Your token was revoked"}}`))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	credentials := &countingCredentialSource{credentialSource: credentialSource{values: []string{"a", "b", "c"}}, keys: 3}
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes:      fixedRoute{route: relayapp.Route{ProviderID: "vendor-hub", BaseURL: parsed, AuthMode: "bearer"}},
+		Credentials: credentials,
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 3},
+	})
+	response, err := server.Dispatch(context.Background(), relayapp.DispatchRequest{
+		Method: http.MethodPost, Path: "/v1/responses", ProviderID: "vendor-hub", UpstreamModel: "gpt-test",
+		Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"model":"gpt-test"}`),
+	})
+	if err != nil || response.Status != http.StatusUnauthorized {
+		t.Fatalf("credential rejection did not surface: status=%d err=%v", response.Status, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected one attempt per key, saw %d", attempts)
+	}
+	if len(credentials.outcomes) != 3 {
+		t.Fatalf("expected one outcome per key, saw %+v", credentials.outcomes)
+	}
+	first := credentials.outcomes[0]
+	if first.Kind != relayapp.AttemptAuthentication ||
+		first.ErrorCode != "token_revoked" ||
+		first.ErrorMessage != "Your token was revoked" {
+		t.Fatalf("the first refusal lost the provider's own verdict: %+v", first)
+	}
+	for _, repeat := range credentials.outcomes[1:] {
+		if repeat.Kind != relayapp.AttemptRequestError || repeat.ErrorCode != "" || repeat.ErrorMessage != "" {
+			t.Fatalf("a repeat refusal re-read the body as a verdict: %+v", repeat)
+		}
+	}
+}
+
 // A shared batch quota is the provider's verdict, not any key's balance: it
 // refills on the provider's schedule and every key answers it identically.
 // The midnight ban this answer used to file per rotated key froze every

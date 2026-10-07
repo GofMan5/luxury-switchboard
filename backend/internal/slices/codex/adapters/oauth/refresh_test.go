@@ -154,6 +154,80 @@ func TestRefreshWithAMalformedIDTokenStaysLenient(t *testing.T) {
 	}
 }
 
+func TestRefreshDropsAnAlreadyExpiredIDToken(t *testing.T) {
+	// The lapsed id_token is the token endpoint's stale answer about who
+	// the user is: the access/refresh pair it delivered is live, but
+	// identity from an expired claim is a fact about the past. Dropping
+	// it here leaves the merge to keep the stored identity untouched
+	// instead of stamping the session with a lapse the UI would count
+	// down to.
+	expired := time.Now().Add(-time.Hour).UTC()
+	idToken := testIDToken(identityClaims("dev@example.com", "acct-2", expired))
+	authorizer := newTestEndpoints(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeJSON(w, http.StatusOK, map[string]string{
+				"access_token":  "at-2",
+				"refresh_token": "rt-2",
+				"id_token":      idToken,
+			})
+		},
+		func(w http.ResponseWriter, r *http.Request) { writeRaw(w, http.StatusOK, "{}") },
+	)
+
+	session, err := authorizer.Refresh(context.Background(), "rt-1")
+	if err != nil {
+		t.Fatalf("Refresh() error = %v, want nil: a lapsed id_token is not a failed refresh", err)
+	}
+	if session.AccessToken != "at-2" || session.RefreshToken != "rt-2" {
+		t.Fatalf("Refresh() session = %+v, want tokens at-2/rt-2", session)
+	}
+	if session.IDToken != "" {
+		t.Fatalf("Refresh() id token = %q, want dropped", session.IDToken)
+	}
+	if session.Identity != (domain.Identity{}) {
+		t.Fatalf("Refresh() identity = %+v, want zero", session.Identity)
+	}
+	if !session.AccessExpiry.IsZero() {
+		t.Fatalf("Refresh() expiry = %v, want zero: no usable id_token, no expiry", session.AccessExpiry)
+	}
+}
+
+func TestRefreshKeepsAnUndatedIDTokenLenient(t *testing.T) {
+	// An id_token without an exp claim says nothing about time at all,
+	// which is not the same as saying the past: the old lenient path
+	// (deliver identity, leave expiry zero) is exactly right for it, and
+	// only a claim that positively lapsed is dropped.
+	claims := identityClaims("dev@example.com", "acct-2", time.Time{})
+	delete(claims, "exp")
+	idToken := testIDToken(claims)
+	authorizer := newTestEndpoints(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeJSON(w, http.StatusOK, map[string]string{
+				"access_token":  "at-2",
+				"refresh_token": "rt-2",
+				"id_token":      idToken,
+			})
+		},
+		func(w http.ResponseWriter, r *http.Request) { writeRaw(w, http.StatusOK, "{}") },
+	)
+
+	session, err := authorizer.Refresh(context.Background(), "rt-1")
+	if err != nil {
+		t.Fatalf("Refresh() error = %v, want nil", err)
+	}
+	if session.IDToken != idToken {
+		t.Fatalf("Refresh() id token = %q, want the refreshed one", session.IDToken)
+	}
+	if session.Identity.Email != "dev@example.com" || session.Identity.AccountID != "acct-2" {
+		t.Fatalf("Refresh() identity = %+v, want the undated identity kept", session.Identity)
+	}
+	if !session.AccessExpiry.IsZero() {
+		t.Fatalf("Refresh() expiry = %v, want zero", session.AccessExpiry)
+	}
+}
+
 func TestRefreshWithoutARotatedRefreshTokenStillDeliversTheAccessToken(t *testing.T) {
 	authorizer := newTestEndpoints(t,
 		func(w http.ResponseWriter, r *http.Request) {

@@ -1633,9 +1633,13 @@ func (service *Service) applyRefresh(previous, refreshed domain.Session) (bool, 
 // mergeRefreshed folds a refresh response into the session it renewed.
 // The token endpoint may omit the refresh token and the id token on a
 // response that only rotates the access token; dropping the previous
-// values then would strand the session, so empties fall back. The access
-// expiry is taken as delivered: a zero expiry reads as "always refresh"
-// in NeedsRefresh, which fails safe, never stale.
+// values then would strand the session, so empties fall back. The
+// access expiry falls back too: a refresh that delivered no id_token
+// delivered no date either, and a zero expiry reads as "always refresh"
+// in NeedsRefresh — which would turn one dateless refresh into a full
+// OAuth round-trip on every request from then on. The kept date
+// describes the previous token, so it errs toward refreshing too early,
+// never toward serving a lapsed token.
 func mergeRefreshed(previous, refreshed domain.Session) domain.Session {
 	merged := refreshed
 	if merged.RefreshToken == "" {
@@ -1647,7 +1651,40 @@ func mergeRefreshed(previous, refreshed domain.Session) domain.Session {
 	if merged.Identity.Email == "" {
 		merged.Identity = previous.Identity
 	}
+	if merged.AccessExpiry.IsZero() {
+		merged.AccessExpiry = previous.AccessExpiry
+	}
 	return merged
+}
+
+// RejectAccessToken moves the connection to reauth_needed because the
+// upstream named the access token itself as revoked: no rotation of the
+// same session can serve another request, and only a fresh login fixes
+// it. The identity stays so the UI can say who needs to sign in again.
+// The rejected token is required for the same staleness reason as
+// markReauthNeeded: a rejection that arrives after a newer login (or a
+// refresh that landed a different access token) describes the old
+// token, not the new one, and must not sign the live account out from
+// under whoever just landed it. The snapshot diff makes a repeated
+// call for the same token a silent no-op. This is deliberately not a
+// reason field on the status: the UI already renders reauth_needed as
+// "sign in again", and two entries for one user question would be a
+// lie about which question was asked.
+func (service *Service) RejectAccessToken(rejectedAccessToken string) {
+	service.mu.Lock()
+	if service.connState == StateSignedOut || service.session.AccessToken != rejectedAccessToken {
+		// Signed out, or a newer session has spoken since this token
+		// was served: the rejection is stale.
+		service.mu.Unlock()
+		return
+	}
+	before := service.snapshotLocked()
+	service.connState = StateReauthNeeded
+	snapshot, listeners, changed := service.diffLocked(before)
+	service.mu.Unlock()
+	if changed {
+		service.fire(listeners, snapshot)
+	}
 }
 
 // markReauthNeeded moves the connection to reauth_needed: the refresh

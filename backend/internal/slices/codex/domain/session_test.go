@@ -90,6 +90,37 @@ func TestIsReauthError(t *testing.T) {
 	}
 }
 
+func TestIsAccessTokenRevocation(t *testing.T) {
+	// The verdict arrives as the provider's own pair: a code that names
+	// the access token's death, and a message that must not be talking
+	// about the refresh token instead. Mixed case, stray padding and
+	// unrelated prose are all normal; the code carries the verdict, the
+	// message can only veto it.
+	cases := []struct {
+		name    string
+		code    string
+		message string
+		want    bool
+	}{
+		{"a revoked code with no message", "token_revoked", "", true},
+		{"a revoked code with an access-token message", "token_revoked", "access token revoked", true},
+		{"mixed case and padding still name the code", "  Token_Revoked  ", "revoked upstream", true},
+		{"token_invalidated is the same verdict", "token_invalidated", "token invalidation event", true},
+		{"a message about the refresh token vetoes", "token_revoked", "refresh token expired, re-login", false},
+		{"an underscored refresh marker vetoes", "token_revoked", "invalid refresh_token for session", false},
+		{"the zh marker for renewing vetoes", "token_revoked", "刷新 token 失败", false},
+		{"the zh marker for a token refresh vetoes", "token_revoked", "请先完成 token 刷新", false},
+		{"an unknown code is not a verdict", "invalid_api_key", "check your key", false},
+		{"an empty code is not a verdict", "", "token revoked", false},
+		{"refresh wording without the code is not a verdict", "refresh_failed", "refresh failed", false},
+	}
+	for _, testCase := range cases {
+		if got := IsAccessTokenRevocation(testCase.code, testCase.message); got != testCase.want {
+			t.Fatalf("IsAccessTokenRevocation(%q, %q) = %t, want %t", testCase.code, testCase.message, got, testCase.want)
+		}
+	}
+}
+
 func TestStorageID(t *testing.T) {
 	// StorageID is a stable fingerprint of the account triple: same
 	// inputs, same id, any single input changed, different id.

@@ -79,6 +79,59 @@ func IsReauthError(message string) bool {
 	return false
 }
 
+// revokedAccessTokenCodes are the codes an upstream names when it has
+// killed the access token itself: the token is dead for good, no retry
+// with the same string can revive it, and only a fresh login (or a
+// successful refresh that lands a different access token) changes the
+// verdict. These are upstream error-body codes, not OAuth messages:
+// IsReauthError reads the token endpoint, this reads the relay path.
+var revokedAccessTokenCodes = []string{
+	"token_revoked",
+	"token_invalidated",
+}
+
+// refreshTokenMessageMarkers mark an upstream error body that talks
+// about the refresh token, not the access token. Those verdicts belong
+// to the refresh path, and a revocation code riding such a message is
+// the provider describing the session's renewal, not the token being
+// served — the two must not be conflated into an access-token
+// revocation.
+var refreshTokenMessageMarkers = []string{
+	"refresh_token",
+	"refresh token",
+	"刷新 token",
+	"token 刷新",
+}
+
+// IsAccessTokenRevocation reports whether an upstream 401/403 body's
+// error code and message name a revoked access token. The code is
+// trimmed and lowercased before matching because providers emit it in
+// mixed case with stray whitespace; the message only ever vetoed by
+// refresh-token markers, never matched, so unrelated prose cannot forge
+// a revocation that the code did not name. An empty code is never a
+// revocation: a body without the provider's own code carries no verdict
+// about the token family.
+func IsAccessTokenRevocation(errorCode, errorMessage string) bool {
+	code := strings.ToLower(strings.TrimSpace(errorCode))
+	revokedCode := false
+	for _, marker := range revokedAccessTokenCodes {
+		if code == marker {
+			revokedCode = true
+			break
+		}
+	}
+	if !revokedCode {
+		return false
+	}
+	lowered := strings.ToLower(errorMessage)
+	for _, marker := range refreshTokenMessageMarkers {
+		if strings.Contains(lowered, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 // StorageID derives the storage key for a Codex account. The digest is
 // a stable identifier, not a security primitive: it exists so the
 // on-disk name does not carry the email, not to resist a determined

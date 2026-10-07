@@ -1550,11 +1550,17 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// inside the same request is evidence about the verdict, not the key:
 			// every key answers the same way, so the key stays usable for other
 			// requests and only this one pays.
+			outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
 			if credentialFailures == 0 {
-				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication})
-			} else {
-				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+				outcome.Kind = relayapp.AttemptAuthentication
+				// The provider's own code and message ride the first refusal
+				// only: interpreting them is the credential source's decision
+				// to make, not the relay's, and the second refusal's outcome
+				// is evidence about the verdict, not another chance to read
+				// the body.
+				outcome.ErrorCode, outcome.ErrorMessage = authErrorDetail(errorBody)
 			}
+			finishLease(lease, outcome)
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
 				// The whole pool refused to authenticate: no key of this
@@ -3296,6 +3302,35 @@ func clientBlocked(body []byte) bool {
 	return strings.Contains(text, "unauthorized client") ||
 		strings.Contains(text, "unauthorized_client") ||
 		strings.Contains(text, "unauthorized client error")
+}
+
+// authErrorDetail reads the provider's own error object out of a 401/403
+// body: the code and the message, verbatim, and nothing else. OpenAI nests
+// the pair under "error" and that nesting wins; reseller edges put the same
+// pair at the top level. Each field decodes on its own, so an edge that
+// emits a numeric code loses the code, not the message with it. The
+// extraction is deliberately interpretation-free — deciding which codes
+// mean the credential itself is dead belongs to the credential source,
+// not the relay — and a body that named no code answers none, which every
+// consumer reads as "no verdict about the token family".
+func authErrorDetail(errorBody []byte) (code, message string) {
+	if len(errorBody) == 0 {
+		return "", ""
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(errorBody, &root) != nil {
+		return "", ""
+	}
+	fields := root
+	if nested, ok := root["error"]; ok {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(nested, &inner) == nil {
+			fields = inner
+		}
+	}
+	json.Unmarshal(fields["code"], &code)
+	json.Unmarshal(fields["message"], &message)
+	return code, message
 }
 
 // errorTextReplacer unpunctuates error prose for the classifiers below. One

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	codexapp "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
@@ -28,6 +29,11 @@ type credentialService interface {
 	Status() codexapp.Status
 	AcquireAccessToken(ctx context.Context) (string, error)
 	InvalidateAccessToken()
+	// RejectAccessToken names the access token the upstream itself
+	// revoked: the session moves to reauth-needed, because a refresh
+	// that mints another token from the same chain only serves the
+	// next doomed request.
+	RejectAccessToken(rejectedAccessToken string)
 }
 
 // TokenSource serves the codex session's OAuth token as the relay credential
@@ -115,14 +121,23 @@ func (lease *tokenLease) Credential() relayapp.Credential {
 	return relayapp.Credential{Value: lease.token}
 }
 
-// Finish reports the attempt outcome. Only an authentication failure
-// invalidates the token, so the next acquire refreshes it; any other
-// outcome (rate limit, server error, plain success) leaves the session
-// alone.
+// Finish reports the attempt outcome. An authentication failure
+// invalidates the token, so the next acquire refreshes it — unless the
+// provider's own error named the access token itself as revoked: that
+// verdict survives a refresh, so the session moves to reauth-needed
+// instead of minting the next request another doomed token. The code and
+// message arrive verbatim from the relay; reading them is this slice's
+// call, the relay stays interpretation-free. Any other outcome (rate
+// limit, server error, plain success) leaves the session alone.
 func (lease *tokenLease) Finish(outcome relayapp.AttemptOutcome) {
-	if outcome.Kind == relayapp.AttemptAuthentication {
-		lease.service.InvalidateAccessToken()
+	if outcome.Kind != relayapp.AttemptAuthentication {
+		return
 	}
+	if domain.IsAccessTokenRevocation(outcome.ErrorCode, outcome.ErrorMessage) {
+		lease.service.RejectAccessToken(lease.token)
+		return
+	}
+	lease.service.InvalidateAccessToken()
 }
 
 // DelegatingSource is the surface the composite needs from the source it

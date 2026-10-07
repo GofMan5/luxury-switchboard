@@ -26,6 +26,7 @@ type fakeService struct {
 	acquireErr   error
 	acquireCalls []context.Context
 	invalidated  int
+	rejected     []string
 }
 
 func (fake *fakeService) Status() codexapp.Status {
@@ -42,6 +43,10 @@ func (fake *fakeService) AcquireAccessToken(ctx context.Context) (string, error)
 
 func (fake *fakeService) InvalidateAccessToken() {
 	fake.invalidated++
+}
+
+func (fake *fakeService) RejectAccessToken(rejectedAccessToken string) {
+	fake.rejected = append(fake.rejected, rejectedAccessToken)
 }
 
 // fakeFallback stands in for the key pool and records every routing decision.
@@ -177,6 +182,8 @@ func (fake *blockingService) AcquireAccessToken(ctx context.Context) (string, er
 
 func (fake *blockingService) InvalidateAccessToken() {}
 
+func (fake *blockingService) RejectAccessToken(rejectedAccessToken string) {}
+
 func TestTryAcquireDoesNotWaitBehindARefresh(t *testing.T) {
 	service := &blockingService{}
 	source := NewTokenSource(service)
@@ -277,6 +284,70 @@ func TestOnlyAuthenticationFailuresInvalidateTheToken(t *testing.T) {
 		if service.invalidated != want {
 			t.Errorf("outcome %q invalidated %d times, want %d", kind, service.invalidated, want)
 		}
+	}
+}
+
+// A revocation verdict arrives only through the pair the relay extracted;
+// without that pair the source behaves exactly as before, so the generic
+// 401 (no code in the body) keeps refreshing instead of signing out.
+func TestARevokedAccessTokenReauthsInsteadOfInvalidating(t *testing.T) {
+	service := signedInService("tok-1")
+	source := NewTokenSource(service)
+	lease, _, err := source.Acquire(context.Background(), codexapp.CodexProviderID, "gpt-5", nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	lease.Finish(relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication, ErrorCode: "token_revoked", ErrorMessage: "access token revoked"})
+
+	if len(service.rejected) != 1 || service.rejected[0] != "tok-1" {
+		t.Errorf("rejected %v, want exactly the leased token [tok-1]", service.rejected)
+	}
+	if service.invalidated != 0 {
+		t.Errorf("invalidated %d times, want 0: a revocation supersedes the plain invalidation, not doubles it", service.invalidated)
+	}
+}
+
+// The verdict's unit is the token the lease served, and the code the
+// provider named is whatever it spelled: token_invalidated is the same
+// verdict worded differently, and the rejected call must carry the
+// leased token, not a guess.
+func TestTokenInvalidatedIsTheSameRevocationVerdict(t *testing.T) {
+	service := signedInService("tok-2")
+	source := NewTokenSource(service)
+	lease, _, err := source.Acquire(context.Background(), codexapp.CodexProviderID, "gpt-5", nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	lease.Finish(relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication, ErrorCode: "token_invalidated"})
+
+	if len(service.rejected) != 1 || service.rejected[0] != "tok-2" {
+		t.Errorf("rejected %v, want [tok-2]", service.rejected)
+	}
+	if service.invalidated != 0 {
+		t.Errorf("invalidated %d times, want 0", service.invalidated)
+	}
+}
+
+// The revocation codes ride the authentication verdict only; on every
+// other outcome the pair is inert, even when the codes sit right there in
+// the struct.
+func TestRevocationCodesAreInertOutsideAuthentication(t *testing.T) {
+	service := signedInService("tok-1")
+	source := NewTokenSource(service)
+	lease, _, err := source.Acquire(context.Background(), codexapp.CodexProviderID, "gpt-5", nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	lease.Finish(relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError, ErrorCode: "token_revoked", ErrorMessage: "revoked"})
+
+	if len(service.rejected) != 0 {
+		t.Errorf("rejected %v, want none", service.rejected)
+	}
+	if service.invalidated != 0 {
+		t.Errorf("invalidated %d times, want 0", service.invalidated)
 	}
 }
 

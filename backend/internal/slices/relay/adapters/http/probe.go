@@ -164,10 +164,17 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 	defer response.Body.Close()
 	report := relayapp.ProbeReport{Status: response.StatusCode}
 	if response.StatusCode >= 400 {
-		finishLease(lease, probeOutcome(response, server.configSnapshot()))
 		// The body of a refused probe is small and carries the reason; read it
-		// bounded, scrub it, file it.
+		// bounded, scrub it, file it. It is read before the lease finishes:
+		// an auth refusal's own code and message ride the outcome, and they
+		// live in this body — filing the verdict first would leave them
+		// unread.
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+		outcome := probeOutcome(response, server.configSnapshot())
+		if outcome.Kind == relayapp.AttemptAuthentication {
+			outcome.ErrorCode, outcome.ErrorMessage = authErrorDetail(detail)
+		}
+		finishLease(lease, outcome)
 		report.ErrorCode = "request_rejected"
 		report.ErrorDetail = truncateErrorDetail(redactRequestEchoes(jsonErrorDetailUnbounded(detail, markers), body))
 		server.activity.Finish(activityID, relayapp.ActivityFinish{

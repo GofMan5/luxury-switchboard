@@ -177,7 +177,10 @@ func (service *panickingStatusService) LoginStatus() application.LoginStatus {
 // so the assertions see the exact bytes the desktop shell would read. One
 // worker keeps the answers in input order; every line of the transcript
 // must parse, because a corrupted frame must fail here rather than in an
-// assertion that never ran.
+// assertion that never ran. Two commands is the ceiling: the one-worker
+// job queue holds two, and a third in-flight frame races the worker for
+// the last slot — the server's "busy" refusal is correct bounded-queue
+// behavior, but it is not the answer a caller meant to assert on.
 func exchange(t *testing.T, service codexService, commands ...string) []map[string]any {
 	t.Helper()
 	var input strings.Builder
@@ -712,20 +715,23 @@ func TestUnexpectedPayloadFieldsAreRefusedNotIgnored(t *testing.T) {
 
 	// None of the codex commands takes fields, so all three payloads are
 	// wrong in different shapes: an unknown field, a non-object, and a
-	// typed field on a command that wants none.
-	results := exchange(t, service,
+	// typed field on a command that wants none. Each runs through its own
+	// one-command exchange: a single outstanding job always fits the
+	// bounded queue, while three frames fired together can overflow it
+	// and draw "busy" instead — correct server behavior, just not what
+	// this test is about.
+	commands := []string{
 		`"method":"codex.login.status","payload":{"phase":"waiting"}`,
 		`"method":"codex.status","payload":[1,2]`,
 		`"method":"codex.login.start","payload":{"provider":"other"}`,
-	)
-
-	for _, frame := range results {
-		failure := failureOf(t, frame)
+	}
+	for _, command := range commands {
+		failure := failureOf(t, exchange(t, service, command)[0])
 		if failure["code"] != "invalid_payload" {
-			t.Fatalf("error code = %#v, want invalid_payload", failure["code"])
+			t.Fatalf("%s: error code = %#v, want invalid_payload", command, failure["code"])
 		}
 		if failure["message"] != "codex command payload is invalid" {
-			t.Fatalf("error message = %#v, want the adapter's refusal text", failure["message"])
+			t.Fatalf("%s: error message = %#v, want the adapter's refusal text", command, failure["message"])
 		}
 	}
 }

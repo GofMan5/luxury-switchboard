@@ -126,8 +126,10 @@ func (source *Source) providerRoute(provider providerdomain.Provider, upstreamMo
 			route.ExtraHeaders["Chatgpt-Account-Id"] = string(provider.AccountID)
 		}
 		// The Responses API of this upstream lives at a fixed path regardless
-		// of how the client spells the dialect (/v1/responses or /responses).
+		// of how the client spells the dialect (/v1/responses or /responses),
+		// and answers only stateless: forced streaming, no server-side state.
 		route.ResponsesPath = "/responses"
+		route.ResponsesStateless = true
 	}
 	return route
 }

@@ -247,6 +247,36 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, "Chat completions compatibility request is invalid")
 		return
 	}
+	// A responses-format route speaks the Responses dialect upstream. Two
+	// client dialects reach it, and both are handled here so the switch
+	// below stays the single place that decides what the wire carries:
+	// a chat client is translated wholesale (the answer is translated back
+	// by the conversion on the response path), and a native Responses
+	// client on a stateless preset gets the codex wire contract shaped
+	// onto its own body, with the SSE answer folded back into the one
+	// JSON object a non-streaming client asked for.
+	clientCanonical := canonicalPath(request.URL.Path)
+	responsesCompat := route.Format == "responses" && chatDialectPath(clientCanonical)
+	statelessJSON := route.ResponsesStateless && responsesDialectPath(clientCanonical) && !streamRequested
+	// Both translations are computed only for the requests that need them:
+	// every other request through the switch below pays neither parse.
+	var responsesBody, statelessBody []byte
+	if responsesCompat {
+		translated, wireErr := chatRequestToResponses(body, route.ResponsesStateless)
+		if wireErr != nil {
+			writeError(writer, http.StatusBadRequest, "Chat completions request is invalid")
+			return
+		}
+		responsesBody = translated
+	}
+	if statelessJSON {
+		shaped, wireErr := shapeStatelessResponsesRequest(body)
+		if wireErr != nil {
+			writeError(writer, http.StatusBadRequest, "Responses request is invalid")
+			return
+		}
+		statelessBody = shaped
+	}
 	// The upstream request always gets its own URL. requestWithRetry rewrites the
 	// path in place when a provider turns out to be chat-only, and everything below
 	// - the terminal stream frame, the heartbeat dialect, the tool-call restoration
@@ -269,6 +299,23 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		targetURL.Path = chatPath
 		targetURL.RawPath = ""
+	case responsesCompat:
+		// The translated body speaks the Responses dialect, so the upstream
+		// path must name it: the preset owns where its Responses API lives
+		// (the default covers a route configured without one), and the
+		// client's own spelling described only the dialect it speaks.
+		body = responsesBody
+		if route.UpstreamModel != "" && route.UpstreamModel != model {
+			body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
+		}
+		if route.ResponsesPath != "" {
+			targetURL.Path = route.ResponsesPath
+		} else {
+			targetURL.Path = "/v1/responses"
+		}
+		targetURL.RawPath = ""
+	case statelessJSON:
+		body = statelessBody
 	case route.UpstreamModel != "" && route.UpstreamModel != model:
 		body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
 	}
@@ -277,8 +324,10 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// provider to report usage: an OpenAI-compatible chat stream carries
 	// tokens ONLY on request. The translated branch asks in
 	// prepareChatCompletions; this is the same ask for the body the client
-	// wrote itself. A client that already asked keeps its own options.
-	if !chatCompat && !imageCompat {
+	// wrote itself. A client that already asked keeps its own options. The
+	// responses translations skip it on purpose: they carry no chat options,
+	// and the stateless contract sets its own usage accounting fields.
+	if !chatCompat && !imageCompat && !responsesCompat && !statelessJSON {
 		body = ensureStreamUsage(body, request.Header.Get("Content-Type"), request.URL.Path)
 	}
 	if route.CacheTTL >= time.Hour {
@@ -322,8 +371,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	flusher, _ := writer.(http.Flusher)
 	var heartbeat func() error
 	clientStream := streamRequested && !imageCompat
-	bufferTerminal := clientStream || imageCompat || chatCompat
+	// A responses translation is always a buffered translation — the answer
+	// arrives in a dialect the client cannot read and must be converted —
+	// and the stateless fold is the same deal one step earlier: the client
+	// asked for one JSON object, so it gets one, whatever the wire carried.
+	bufferTerminal := clientStream || imageCompat || chatCompat || responsesCompat || statelessJSON
 	chatActive := chatCompat
+	responsesActive := responsesCompat
 	// The provider's own words for the terminal failure, filed into history
 	// below. The client body stays neutral; this travels out-of-band.
 	var upstreamDetail string
@@ -350,13 +404,20 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// Live delivery needs the whole answer converted or repaired: the
 		// image bridge rewrites the request and the answer, and declared
 		// tools may need the stream repair — the entry knows both flags,
-		// and the path requestWithRetry sees is already rewritten.
-		liveAllowed := !imageCompat && clientTools.empty()
+		// and the path requestWithRetry sees is already rewritten. The
+		// responses translations are the same contract: the wire answer is
+		// not what the client opened the connection for.
+		liveAllowed := !imageCompat && !responsesCompat && !statelessJSON && clientTools.empty()
+		// The fold and the non-streaming chat conversion deliver one JSON
+		// object, so a backend that answers the forced stream with exactly
+		// that object may be taken at its word — a streaming caller is not
+		// that client and keeps its own ladder.
+		wholeJSONExpected := statelessJSON || (responsesCompat && !clientStream)
 		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, &bufferTerminal, 0, func(credential relayapp.Credential) {
 			// Kept so the answer's headers can be checked against it: a provider that
 			// echoes the key we sent it must not hand that key to the client.
 			secrets = sensitiveCredentialMarkers(credential)
-		}, &chatActive, &upstreamDetail, publicModel, liveAllowed)
+		}, &chatActive, &responsesActive, &upstreamDetail, publicModel, liveAllowed, wholeJSONExpected)
 	}
 	var response *http.Response
 	// serveLiveStream copies one live answer to the client and reports
@@ -433,10 +494,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// chat path — a payload the chat endpoint can only refuse, on a path the
 		// discovery trigger no longer matches. Restoring the entry path lets the
 		// ladder re-derive the translation exactly as the first attempt did.
-		bufferTerminal = clientStream || imageCompat || chatCompat
+		bufferTerminal = clientStream || imageCompat || chatCompat || responsesCompat || statelessJSON
 		upstreamRequest.URL.Path = entryPath
 		upstreamRequest.URL.RawPath = ""
 		chatActive = chatCompat
+		responsesActive = responsesCompat
 		refusedUsage := usage
 		if clientStream {
 			response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
@@ -544,6 +606,80 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				response.Header.Set("Content-Type", "application/json")
 				response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 			}
+			response.Header.Del("Content-Encoding")
+		}
+		// The mirror of the chat conversion above: a responses-format route
+		// answers in the Responses dialect, and a chat client opened this
+		// connection to hear chat. The buffered answer (whole JSON or
+		// response.* events, whichever the wire carried) is converted into
+		// the client's own dialect — finish reasons, refusals and truncated
+		// answers ride as chat semantics, never dropped.
+		if responsesCompat && status < 400 {
+			limit := responseBufferLimit(server.configSnapshot())
+			raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
+			response.Body.Close()
+			if readErr != nil || int64(len(raw)) > limit {
+				status = http.StatusBadGateway
+				errorCode = "responses_compatibility"
+				errorDetail = errorText(readErr, "Responses stream could not be converted")
+				if committed {
+					writeStreamFailure(writer, request.URL.Path, model)
+				} else {
+					writeError(writer, http.StatusBadGateway, "Responses stream could not be converted")
+				}
+				return
+			}
+			converted, convertErr := responsesAnswerToChat(raw, clientStream)
+			if convertErr != nil {
+				status = http.StatusBadGateway
+				errorCode = "responses_compatibility"
+				errorDetail = convertErr.Error()
+				if committed {
+					writeStreamFailure(writer, request.URL.Path, model)
+				} else {
+					writeError(writer, http.StatusBadGateway, "Responses response could not be converted")
+				}
+				return
+			}
+			response.Body = io.NopCloser(bytes.NewReader(converted))
+			response.ContentLength = int64(len(converted))
+			if clientStream {
+				response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+				response.Header.Del("Content-Length")
+			} else {
+				response.Header.Set("Content-Type", "application/json")
+				response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+			}
+			response.Header.Del("Content-Encoding")
+		}
+		// A stateless Responses client asked a non-streaming question and got
+		// a stream on the wire (the backend answers nothing else). The events
+		// fold into the single response object the client's own contract
+		// promised it — the same buffer-and-convert deal the image bridge
+		// runs one floor below.
+		if statelessJSON {
+			limit := responseBufferLimit(server.configSnapshot())
+			raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
+			response.Body.Close()
+			if readErr != nil || int64(len(raw)) > limit {
+				status = http.StatusBadGateway
+				errorCode = "responses_compatibility"
+				errorDetail = errorText(readErr, "Responses answer could not be folded")
+				writeError(writer, http.StatusBadGateway, "Responses answer could not be folded")
+				return
+			}
+			converted, convertErr := responsesSSEToJSON(raw)
+			if convertErr != nil {
+				status = http.StatusBadGateway
+				errorCode = "responses_compatibility"
+				errorDetail = convertErr.Error()
+				writeError(writer, http.StatusBadGateway, "Responses answer could not be folded")
+				return
+			}
+			response.Body = io.NopCloser(bytes.NewReader(converted))
+			response.ContentLength = int64(len(converted))
+			response.Header.Set("Content-Type", "application/json")
+			response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 			response.Header.Del("Content-Encoding")
 		}
 		if imageCompat {
@@ -767,6 +903,30 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if chatErr != nil {
 		return relayapp.DispatchResponse{}, chatErr
 	}
+	// The same two dialect bridges the local path runs, for the same owner:
+	// a public chat caller pinned to a responses-format provider is
+	// translated up, and a stateless Responses caller gets the codex wire
+	// contract shaped on and its stream folded back into the one JSON
+	// object it asked for. The dialect is decided by the caller's path,
+	// which the tunnel never rewrites before it gets here.
+	clientCanonical := canonicalPath(request.Path)
+	responsesCompat := route.Format == "responses" && chatDialectPath(clientCanonical)
+	statelessJSON := route.ResponsesStateless && responsesDialectPath(clientCanonical) && !streamRequested
+	var responsesBody, statelessBody []byte
+	if responsesCompat {
+		translated, wireErr := chatRequestToResponses(body, route.ResponsesStateless)
+		if wireErr != nil {
+			return relayapp.DispatchResponse{}, wireErr
+		}
+		responsesBody = translated
+	}
+	if statelessJSON {
+		shaped, wireErr := shapeStatelessResponsesRequest(body)
+		if wireErr != nil {
+			return relayapp.DispatchResponse{}, wireErr
+		}
+		statelessBody = shaped
+	}
 	if chatCompat {
 		body = chatBody
 		if request.UpstreamModel != "" && request.UpstreamModel != requestModel(request.Body, request.Headers.Get("Content-Type")) {
@@ -774,6 +934,19 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		}
 		targetURL.Path = chatPath
 		targetURL.RawPath = ""
+	} else if responsesCompat {
+		body = responsesBody
+		if request.UpstreamModel != "" && request.UpstreamModel != requestModel(request.Body, request.Headers.Get("Content-Type")) {
+			body = rewriteRequestModel(body, request.Headers.Get("Content-Type"), request.UpstreamModel)
+		}
+		if route.ResponsesPath != "" {
+			targetURL.Path = route.ResponsesPath
+		} else {
+			targetURL.Path = "/v1/responses"
+		}
+		targetURL.RawPath = ""
+	} else if statelessJSON {
+		body = statelessBody
 	} else if !imageCompat {
 		body = rewriteRequestModel(request.Body, request.Headers.Get("Content-Type"), request.UpstreamModel)
 		// Same ask as the local path: a native chat caller's stream has to
@@ -789,8 +962,9 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 			declareBetaFeature(incoming.Header, extendedCacheTTLBeta)
 		}
 	}
-	terminalStream := streamRequested || imageCompat || chatCompat
+	terminalStream := streamRequested || imageCompat || chatCompat || responsesCompat || statelessJSON
 	chatActive := chatCompat
+	responsesActive := responsesCompat
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: request.PublicModel, ProviderID: route.ProviderID,
 		ProviderName: route.ProviderName, Method: request.Method,
@@ -802,9 +976,12 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
 	var upstreamDetail string
+	// Same contract as ServeHTTP's dispatch: one JSON object is an answer
+	// only for the caller that asked for one.
+	wholeJSONExpected := statelessJSON || (responsesCompat && !streamRequested)
 	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
-	}, &chatActive, &upstreamDetail, "", false)
+	}, &chatActive, &responsesActive, &upstreamDetail, "", false, wholeJSONExpected)
 	// The empty public model above is deliberate: Dispatch is pinned routing —
 	// the tunnel and the model test ask for one provider by name, and the
 	// tunnel's privacy markers are computed for exactly that route. A chain
@@ -864,6 +1041,42 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 			response.Header.Set("Content-Type", "application/json")
 			response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
 		}
+		response.Header.Del("Content-Encoding")
+	}
+	// The stateless fold and the chat translation, same rules as the local
+	// path: the public caller gets the dialect it opened the connection in,
+	// and the verdict vocabulary travels instead of being dropped.
+	if responsesActive && response.StatusCode < 400 {
+		responseBody, err = responsesAnswerToChat(responseBody, streamRequested)
+		if err != nil {
+			server.activity.Finish(activityID, relayapp.ActivityFinish{
+				Status: http.StatusBadGateway, ErrorCode: "responses_compatibility",
+				ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+				Usage:       usage, Generation: generation,
+			})
+			return relayapp.DispatchResponse{}, err
+		}
+		if streamRequested {
+			response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+			response.Header.Del("Content-Length")
+		} else {
+			response.Header.Set("Content-Type", "application/json")
+			response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
+		}
+		response.Header.Del("Content-Encoding")
+	}
+	if statelessJSON && response.StatusCode < 400 {
+		responseBody, err = responsesSSEToJSON(responseBody)
+		if err != nil {
+			server.activity.Finish(activityID, relayapp.ActivityFinish{
+				Status: http.StatusBadGateway, ErrorCode: "responses_compatibility",
+				ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+				Usage:       usage, Generation: generation,
+			})
+			return relayapp.DispatchResponse{}, err
+		}
+		response.Header.Set("Content-Type", "application/json")
+		response.Header.Set("Content-Length", strconv.Itoa(len(responseBody)))
 		response.Header.Del("Content-Encoding")
 	}
 	terminal := response.Header.Get("X-Switchboard-Terminal")
@@ -943,7 +1156,7 @@ func (server *Server) noteLearnedShape(providerID string, learned providerAdjust
 	_ = server.repairs.persist(server.memoPath)
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, upstreamDetail *string, publicModel string, liveAllowed bool) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, responsesActive *bool, upstreamDetail *string, publicModel string, liveAllowed bool, wholeJSONExpected bool) (*http.Response, error) {
 	// A retried call starts wordless: the detail below always describes the
 	// attempt this call ended on, never a previous call's verdict.
 	if upstreamDetail != nil {
@@ -1023,6 +1236,13 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		if chatActive != nil {
 			*chatActive = false
 		}
+		// Same for the responses direction: the sibling was not configured
+		// for the translated dialect, and a conversion that runs on an
+		// answer the sibling produces in its own dialect is a silent
+		// mangling, not a compatibility.
+		if responsesActive != nil {
+			*responsesActive = false
+		}
 		server.observeRetry(activityID, attempt, status, 0)
 		return true
 	}
@@ -1100,7 +1320,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if liveAllowed && server.canStreamLive(incoming, body, chatActive, route.ProviderID) {
 					liveAfter = server.liveStreamProbation()
 				}
-				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, liveAfter)
+				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter)
 				if liveBody != nil {
 					// A live generation is still generating: the lease rides
 					// the stream's end, not the handoff, so the key's
@@ -1128,7 +1348,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if errors.Is(bufferErr, errResponseTooLarge) {
 						return nil, bufferErr
 					}
-					if errors.Is(bufferErr, errIncompleteSSE) && responsesDialectPath(fallbackPath) && (chatActive == nil || !*chatActive) {
+					// The stateless backend answers only streams, so the
+					// non-streaming fallback is not a fallback there — it is a
+					// second refusal with extra steps. The codex contract forces
+					// stream:true for exactly this reason.
+					if errors.Is(bufferErr, errIncompleteSSE) && responsesDialectPath(fallbackPath) && (chatActive == nil || !*chatActive) && !route.ResponsesStateless {
 						streamFailures++
 						if streamFailures >= maxStreamFailuresBeforeFallback && canRetry(attempt, attemptLimit) {
 							if fallback, ok := nonStreamingResponsesRequest(body, server.configSnapshot().MaxRequestBytes); ok {
@@ -1184,8 +1408,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				// the chat conversion rewrites them: a chat JSON answer
 				// labelled as an event stream is the one lie the guardrail
 				// layer has been promised never to see, and this branch is
-				// the only place that could have written it.
-				if terminal == "chat.completed" {
+				// the only place that could have written it. A whole-JSON
+				// Responses answer behind a forced stream is the same
+				// promise: the stateless fold will hand the client one
+				// JSON object, and the label must already say so.
+				// bodyLooksLikeEventStream keeps the SSE label for a
+				// provider that really did answer a stream under that
+				// terminal — the terminal alone is not proof of framing.
+				if terminal == "chat.completed" || (terminal == "response.completed" && !bodyLooksLikeEventStream(buffered)) {
 					response.Header.Set("Content-Type", "application/json")
 				} else {
 					response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -1600,7 +1830,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			server.chatOnly.Delete(route.ProviderID)
 			return genericErrorResponse(status), nil
-		case status == http.StatusNotFound && route.Format == "auto" && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && responsesDialectPath(canonicalPath(incoming.URL.Path)):
+		// The responses translation owns its own path rewrite — the request
+		// was translated UP into the Responses dialect at dispatch, and the
+		// 404 ladder here would translate it back down into a dialect the
+		// conversion on the response path no longer expects. A preset that
+		// names its Responses endpoint does not need endpoint discovery.
+		case status == http.StatusNotFound && route.Format == "auto" && (responsesActive == nil || !*responsesActive) && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && responsesDialectPath(canonicalPath(incoming.URL.Path)):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			server.chatOnly.Store(route.ProviderID, struct{}{})
 			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)
@@ -2100,6 +2335,17 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 		}
 		request.Header.Set(name, value)
 	}
+	if route.ResponsesStateless {
+		// The stateless backend requires a session identity per call and
+		// answers nothing but streams. The session is minted here, per
+		// upstream attempt — a retry is a new session upstream, which is
+		// what a stateless contract means — and it never echoes anything
+		// the client named: the client cannot correlate two relay calls
+		// by planting a session id of its own. Accept is forced because
+		// the shaped body already asked for the stream the header names.
+		request.Header.Set("Session_id", freshSessionID())
+		request.Header.Set("Accept", "text/event-stream")
+	}
 	request.Host = route.BaseURL.Host
 	request.Header.Del("Accept-Encoding")
 	return request, nil
@@ -2208,7 +2454,7 @@ type bodyRead struct {
 // provider, so the handoff races nothing. A stream that ends or breaks
 // inside the window never leaves as live, and the flaky-provider repair
 // ladder keeps working exactly as it did before the window existed.
-func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, liveAfter time.Duration) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
+func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, wholeJSONExpected bool, liveAfter time.Duration) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
 	handedLive := false
 	defer func() {
 		if !handedLive {
@@ -2413,6 +2659,21 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				// retry ladder than delivered uninspected.
 				if terminal, usage, complete := chatCompletionBody(buffered); complete && chatDialect {
 					return terminal, buffered, usage, nil, nil
+				}
+				// The same whole-body answer in the other dialect: the
+				// stateless backend was asked for a stream it never opened
+				// and answered with the one JSON object a non-streaming
+				// client asked for. Accepting it here — but only when the
+				// caller will actually hand the client one JSON object, so
+				// the fold (or the chat conversion of that same object)
+				// is what these bytes become. A streaming caller is NOT
+				// that client: its ladder has its own answer, the
+				// responsesJSONToSSE re-framing the fallback performs, and
+				// accepting the JSON here would hand a committed stream a
+				// raw JSON body — the exact lie the chat branch above
+				// refuses.
+				if terminal, _, complete := responsesCompletionBody(buffered); complete && wholeJSONExpected {
+					return terminal, buffered, usageFromJSON(buffered), nil, nil
 				}
 				return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
 			}

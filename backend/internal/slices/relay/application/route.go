@@ -28,6 +28,12 @@ type Route struct {
 	// the client's own URL cannot be trusted to name it. Empty means the
 	// route keeps using the client's path (joined onto the base URL).
 	ResponsesPath string
+	// ResponsesStateless marks an upstream that serves the Responses dialect
+	// only stateless: every request carries the codex wire contract —
+	// forced streaming, nothing stored server-side, a per-request session
+	// id — so the relay buffers the terminal and folds the stream back into
+	// whatever shape the client asked for.
+	ResponsesStateless bool
 }
 
 type RouteSource interface {

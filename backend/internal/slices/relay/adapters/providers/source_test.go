@@ -122,6 +122,9 @@ func TestTheCodexPresetCarriesItsIdentityOnEveryRoute(t *testing.T) {
 	if route.ResponsesPath != "/responses" {
 		t.Fatalf("codex responses path missing: %q", route.ResponsesPath)
 	}
+	if !route.ResponsesStateless {
+		t.Fatalf("the codex route does not ask for the stateless wire contract")
+	}
 }
 
 // A preset account id is optional until login finishes — the route still
@@ -179,5 +182,8 @@ func TestACustomProviderCarriesNoPresetIdentity(t *testing.T) {
 	}
 	if len(route.ExtraHeaders) != 0 || route.ResponsesPath != "" {
 		t.Fatalf("a custom provider inherited preset identity: headers=%v path=%q", route.ExtraHeaders, route.ResponsesPath)
+	}
+	if route.ResponsesStateless {
+		t.Fatalf("a custom provider inherited the stateless wire contract")
 	}
 }

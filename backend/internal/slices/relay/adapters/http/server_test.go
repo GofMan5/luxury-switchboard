@@ -2543,7 +2543,7 @@ func TestResponsesInspectorReadsPastInProgressChunk(t *testing.T) {
 	first := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
 	second := []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"incomplete_details\":null}}\n\n")
 	response := &http.Response{Body: io.NopCloser(io.MultiReader(bytes.NewReader(first), &delayedReader{delay: 25 * time.Millisecond, body: second}))}
-	terminal, body, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024}, false, 0)
+	terminal, body, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/responses", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024 * 1024}, false, false, 0)
 	if err != nil || terminal != "response.completed" || !bytes.Contains(body, []byte("response.in_progress")) || !bytes.Contains(body, []byte("response.completed")) {
 		t.Fatalf("inspector stopped on an in-progress chunk: terminal=%q body=%s err=%v", terminal, body, err)
 	}
@@ -2629,7 +2629,7 @@ func TestTerminalSSEAcceptsIncorrectProviderContentTypeOnlyAfterValidation(t *te
 		Header: http.Header{"Content-Type": []string{"text/plain"}},
 		Body:   io.NopCloser(strings.NewReader("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n")),
 	}
-	terminal, _, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024}, false, 0)
+	terminal, _, _, _, err := bufferTerminalSSE(context.Background(), response, "/v1/chat/completions", Config{StreamIdleTimeout: time.Second, MaxRequestBytes: 1024}, false, false, 0)
 	if err != nil || terminal != "done" {
 		t.Fatalf("valid SSE with a wrong content type was rejected: terminal=%q err=%v", terminal, err)
 	}
@@ -3380,5 +3380,150 @@ func TestDispatchTransportFailureFilesStatusAndDetail(t *testing.T) {
 	}
 	if activity.finish.Status != http.StatusBadGateway || activity.finish.ErrorCode != "transport" || activity.finish.ErrorDetail == "" {
 		t.Fatalf("transport failure filed no terminal report: %+v", activity.finish)
+	}
+}
+
+// The codex route serves a chat client without the CLI: the request leaves
+// in the Responses dialect on the preset's own path with the stateless wire
+// contract (forced stream, nothing stored, a per-request session id), and
+// the streamed answer comes back folded into the client's dialect with its
+// finish reason and usage intact.
+func TestAChatClientTalksToTheCodexBackendDirectly(t *testing.T) {
+	var receivedPath string
+	var receivedSession string
+	var receivedBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		receivedPath = request.URL.Path
+		receivedSession = request.Header.Get("Session_id")
+		body, _ := io.ReadAll(request.Body)
+		receivedBody = string(body)
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n" +
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18}}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL + "/backend-api/codex")
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{
+			ProviderID: "codex", BaseURL: parsed, AuthMode: "bearer", Format: "responses",
+			ResponsesStateless: true, ResponsesPath: "/responses",
+		}},
+		Credentials: &credentialSource{values: []string{"configured-key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	if receivedPath != "/backend-api/codex/responses" {
+		t.Fatalf("upstream path = %q, want the preset responses path", receivedPath)
+	}
+	if len(receivedSession) < 8 {
+		t.Fatalf("no per-request session id on the wire: %q", receivedSession)
+	}
+	translated := translatedBody(t, []byte(receivedBody))
+	if translated["stream"] != true || translated["store"] != false {
+		t.Fatalf("stateless wire contract missing: stream=%v store=%v", translated["stream"], translated["store"])
+	}
+	if translated["model"] != "gpt-5" {
+		t.Fatalf("upstream model lost: %v", translated["model"])
+	}
+	if _, isList := translated["input"].([]any); !isList {
+		t.Fatalf("chat messages were not translated to responses input: %v", translated["input"])
+	}
+	if _, hasStreamOptions := translated["stream_options"]; hasStreamOptions {
+		t.Fatalf("chat stream options leaked into the responses request: %v", translated)
+	}
+	chunks := chatStreamChunks(t, response.Body.Bytes())
+	joined := ""
+	var finish string
+	var finishFound bool
+	var usage *json.Number
+	for _, chunk := range chunks {
+		choices, _ := chunk["choices"].([]any)
+		if len(choices) == 0 {
+			if usageMap, ok := chunk["usage"].(map[string]any); ok {
+				usageValue, _ := usageMap["prompt_tokens"].(json.Number)
+				usage = &usageValue
+			}
+			continue
+		}
+		choice, _ := choices[0].(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+		if content, ok := delta["content"].(string); ok {
+			joined += content
+		}
+		if reason, ok := choice["finish_reason"].(string); ok {
+			finish, finishFound = reason, true
+		}
+	}
+	if joined != "hello" {
+		t.Fatalf("streamed answer = %q, want the terminal text", joined)
+	}
+	if !finishFound || finish != "stop" {
+		t.Fatalf("finish reason = %q (found=%v), want stop", finish, finishFound)
+	}
+	if usage == nil || *usage != json.Number("11") {
+		t.Fatalf("usage was folded away: %v", usage)
+	}
+}
+
+// A responses client that asks for one JSON answer still gets one — the
+// stateless backend streams underneath, the relay folds the terminal back
+// into the single object the client asked for.
+func TestAStatelessResponsesClientGetsOneJSONAnswer(t *testing.T) {
+	var receivedBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		receivedBody = string(body)
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"created_at\":1710000000,\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n"))
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	server := NewServer("127.0.0.1:0", Dependencies{
+		Routes: fixedRoute{route: relayapp.Route{
+			ProviderID: "codex", BaseURL: parsed, AuthMode: "bearer", Format: "responses",
+			ResponsesStateless: true, ResponsesPath: "/responses",
+		}},
+		Credentials: &credentialSource{values: []string{"configured-key"}},
+		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond},
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-5","input":"hi","stream":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	if !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("non-stream client got a stream: content-type=%q", response.Header().Get("Content-Type"))
+	}
+	shaped := translatedBody(t, []byte(receivedBody))
+	if shaped["stream"] != true || shaped["store"] != false {
+		t.Fatalf("stateless wire contract missing: stream=%v store=%v", shaped["stream"], shaped["store"])
+	}
+	answer := translatedBody(t, response.Body.Bytes())
+	if answer["id"] != "resp_2" || answer["status"] != "completed" {
+		t.Fatalf("the folded answer lost its identity: %v", answer)
+	}
+	// The message item is where the text lives; the answer itself only
+	// carries the envelope (same reader as production's fold).
+	outputItems, _ := answer["output"].([]any)
+	if len(outputItems) == 0 {
+		t.Fatalf("the folded answer lost its output: %v", answer)
+	}
+	message, _ := outputItems[0].(map[string]any)
+	if outputText(message) != "hello" {
+		t.Fatalf("the folded answer lost its text: %v", answer)
+	}
+	usage, _ := answer["usage"].(map[string]any)
+	if usage["total_tokens"] != json.Number("8") {
+		t.Fatalf("the folded answer lost its meter: %v", usage)
 	}
 }

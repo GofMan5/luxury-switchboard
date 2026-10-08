@@ -9,9 +9,15 @@ import (
 	updatesapp "github.com/luxuryprivate/switchboard/backend/internal/slices/updates/application"
 )
 
-func Register(server *platform.Server, service *updatesapp.Service) {
+func Register(server *platform.Server, service *updatesapp.Service, refresher *updatesapp.Refresher) {
 	server.Handle("updates.check", func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return service.Check(ctx), nil
+	})
+	// The last completed answer, without a round trip: the refresher keeps
+	// it fresh on its cadence, so the interface reading state joins the
+	// flow of events rather than paying the feed to re-ask.
+	server.Handle("updates.status", func(_ context.Context, _ json.RawMessage) (any, error) {
+		return service.Status(), nil
 	})
 	// The download reports itself as it goes: the operator started a
 	// tens-of-megabytes transfer and a percent is the difference between
@@ -26,6 +32,13 @@ func Register(server *platform.Server, service *updatesapp.Service) {
 			return nil, installError(err)
 		}
 		return result, nil
+	})
+	// A verdict flip is news the shell did not ask for: the refresher found
+	// an update (or lost the feed) between commands, and the pill that says
+	// "update available" turns on the minute it becomes true — not at the
+	// next poll the interface happens to make.
+	refresher.OnChanged(func(result updatesapp.CheckResult) {
+		_ = server.Emit("updates.stateChanged", result)
 	})
 }
 

@@ -77,15 +77,17 @@ import (
 )
 
 type App struct {
-	protocol      *platform.Server
-	relay         *relayapp.Service
-	history       activityapp.History
-	analytics     *analyticssqlite.Facts
-	publishing    editionRuntime
-	logger        *log.Logger
-	healthMonitor *providerapp.HealthMonitor
-	healthCancel  context.CancelFunc
-	codex         *codexapplication.Service
+	protocol         *platform.Server
+	relay            *relayapp.Service
+	history          activityapp.History
+	analytics        *analyticssqlite.Facts
+	publishing       editionRuntime
+	logger           *log.Logger
+	healthMonitor    *providerapp.HealthMonitor
+	healthCancel     context.CancelFunc
+	updatesRefresher *updatesapp.Refresher
+	updatesCancel    context.CancelFunc
+	codex            *codexapplication.Service
 }
 
 func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
@@ -274,8 +276,14 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	// so the frontend sees login and refresh transitions as they happen.
 	codexstdio.Register(protocol, codexService)
 	// The update check asks the project's own release feed, nothing else; a
-	// quiet answer on a machine without network is the correct one.
-	updatesstdio.Register(protocol, updatesapp.NewService(systemstdio.AppVersion, updategithub.NewClient()))
+	// quiet answer on a machine without network is the correct one. The
+	// refresher owns the cadence the settings chose — one minute by default
+	// — and announces verdict changes through the protocol's events, so
+	// "update available" turns up on the minute the feed publishes it.
+	updatesService := updatesapp.NewService(systemstdio.AppVersion, updategithub.NewClient())
+	updatesRefresher := updatesapp.NewRefresher(updatesService)
+	updatesRefresher.SetInterval(updatesapp.IntervalFromSetting(settings.Normalized().UpdateCheckInterval))
+	updatesstdio.Register(protocol, updatesService, updatesRefresher)
 	keystdio.Register(protocol, keyManager, keyprobe.NewProber(catalog))
 	relaystdio.Register(protocol, relay)
 	activitystdio.Register(protocol, activity, history)
@@ -358,6 +366,10 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		}
 		guardrails.SetProviderModes(normalized.GuardrailProviderModes)
 		healthMonitor.SetEnabled(applied.ProviderHealthEnabled)
+		// The update cadence rides the same live-apply path: a save in
+		// Settings re-arms the refresher without a restart, and turning it
+		// back on asks immediately.
+		updatesRefresher.SetInterval(updatesapp.IntervalFromSetting(normalized.UpdateCheckInterval))
 		routeService.SetChainMode(normalized.ChainMode)
 		routes.SetFailoverEnabled(applied.FailoverEnabled)
 		// Everything below used to wait for a restart; it applies in place now.
@@ -417,14 +429,15 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		return nil, err
 	}
 	return &App{
-		protocol:      protocol,
-		relay:         relay,
-		history:       history,
-		analytics:     analyticsFacts,
-		publishing:    publishing,
-		logger:        logger,
-		healthMonitor: healthMonitor,
-		codex:         codexService,
+		protocol:         protocol,
+		relay:            relay,
+		history:          history,
+		analytics:        analyticsFacts,
+		publishing:       publishing,
+		logger:           logger,
+		healthMonitor:    healthMonitor,
+		updatesRefresher: updatesRefresher,
+		codex:            codexService,
 	}, nil
 }
 
@@ -433,6 +446,17 @@ func (app *App) Run(ctx context.Context) error {
 		healthCtx, cancelHealth := context.WithCancel(context.Background())
 		app.healthCancel = cancelHealth
 		go app.healthMonitor.Run(healthCtx, 2*time.Minute)
+	}
+	// The update refresher runs on its own lifetime, not Run's context:
+	// like the health monitor it must keep answering between the relay
+	// stopping and the process ending, and shutdown cancels it explicitly.
+	// A zero interval keeps the goroutine inert — a nil tick channel means
+	// "not asking" — so the loop is unconditional and SetInterval can turn
+	// it on later without a restart.
+	if app.updatesRefresher != nil {
+		updatesCtx, cancelUpdates := context.WithCancel(context.Background())
+		app.updatesCancel = cancelUpdates
+		go app.updatesRefresher.Run(updatesCtx)
 	}
 	if _, err := app.relay.Start(); err != nil {
 		app.logger.Printf("relay start failed")
@@ -456,6 +480,9 @@ func (app *App) Run(ctx context.Context) error {
 	cancelPublishing()
 	if app.healthCancel != nil {
 		app.healthCancel()
+	}
+	if app.updatesCancel != nil {
+		app.updatesCancel()
 	}
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if stopErr := app.relay.Stop(stopCtx); stopErr != nil {

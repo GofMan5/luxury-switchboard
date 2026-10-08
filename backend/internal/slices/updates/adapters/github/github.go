@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/updates/domain"
@@ -41,6 +42,14 @@ type Client struct {
 	// the request's context instead, and the transport still bounds the
 	// handshake.
 	download *http.Client
+	// conditionalMu guards the conditional-request state: the etag of the
+	// last full answer and that answer itself, carried together so a 304
+	// always has a body to mean. Minute cadence stays affordable because
+	// steady-state checks are 304s — the 60-requests-an-hour budget of an
+	// unauthenticated feed is spent on release changes, not on asking.
+	conditionalMu sync.Mutex
+	etag          string
+	answer        domain.Latest
 }
 
 func NewClient() *Client {
@@ -99,14 +108,37 @@ func (client *Client) LatestRelease(ctx context.Context) (domain.Latest, error) 
 	// the feed honest about who asks.
 	request.Header.Set("User-Agent", "luxury-switchboard-update-check")
 	request.Header.Set("Accept", "application/vnd.github+json")
+	client.conditionalMu.Lock()
+	etag := client.etag
+	client.conditionalMu.Unlock()
+	if etag != "" {
+		request.Header.Set("If-None-Match", etag)
+	}
 	response, err := client.http.Do(request)
 	if err != nil {
+		// The etag stays: a failed request learned nothing about the
+		// answer it guards, and dropping it would turn one flaky network
+		// moment into a full re-download of the release metadata.
 		return domain.Latest{}, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotModified {
+		client.conditionalMu.Lock()
+		cached := client.answer
+		client.conditionalMu.Unlock()
+		if cached.Version == "" {
+			// Unreachable in practice: the etag and the answer are stored
+			// together, so a feed that honors the etag served a body first.
+			// Guarded anyway because a 304 with nothing to mean is a lie
+			// the interface must not repeat as a valid answer.
+			return domain.Latest{}, errors.New("release feed answered not-modified without ever answering")
+		}
+		return cached, nil
+	}
 	if response.StatusCode != http.StatusOK {
 		// 404 means no release was ever published: not an error worth surfacing,
-		// just nothing to tell.
+		// just nothing to tell. The etag stays for the same reason as a
+		// transport error — this answer does not invalidate the last one.
 		return domain.Latest{}, fmt.Errorf("release feed answered %d", response.StatusCode)
 	}
 	var payload releasePayload
@@ -123,6 +155,12 @@ func (client *Client) LatestRelease(ctx context.Context) (domain.Latest, error) 
 			latest.Installer = &domain.Asset{Name: asset.Name, URL: asset.URL, Size: asset.Size}
 		}
 	}
+	// An etag-less answer clears the stored one, so the next check is a
+	// plain GET rather than a conditional that could never pay off.
+	client.conditionalMu.Lock()
+	client.etag = response.Header.Get("ETag")
+	client.answer = latest
+	client.conditionalMu.Unlock()
 	return latest, nil
 }
 

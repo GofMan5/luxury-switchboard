@@ -53,6 +53,11 @@ type storedSettings struct {
 	AnimationsEnabled      *bool             `json:"animationsEnabled"`
 	FailoverEnabled        *bool             `json:"failoverEnabled"`
 	ChainMode              string            `json:"chainMode"`
+	// UpdateCheckInterval rides the same document. An absent value (a file
+	// from before update checks existed) restores as empty, which the
+	// domain's Normalized reads as the default cadence — the same policy
+	// ChainMode uses for its own pre-field files.
+	UpdateCheckInterval string `json:"updateCheckInterval"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -112,6 +117,9 @@ func (stored storedSettings) restore() domain.Settings {
 	// ChainMode normalizes empty (a pre-chain file) to the default in the
 	// domain; the switch itself carries the user's explicit choice.
 	settings.ChainMode = stored.ChainMode
+	// The interval takes the same deal: an empty value is a pre-update
+	// file, and the domain's Normalized decides what silence means.
+	settings.UpdateCheckInterval = stored.UpdateCheckInterval
 
 	return settings
 }

@@ -47,6 +47,11 @@ export interface Settings {
   /** How a healthy chain shares requests: 'failover' serves strictly by
    * priority, 'balance' round-robins the healthy entries. */
   readonly chainMode: 'failover' | 'balance'
+  /** How often the background refresher asks GitHub whether a newer release
+   * exists. The backend owns the cadence and applies it the moment settings
+   * save — no restart; 'off' disables the automatic check while the manual
+   * one in Settings keeps working. */
+  readonly updateCheckInterval: 'off' | '1m' | '5m' | '30m' | '1h'
 }
 
 export interface SettingsUpdateResult {
@@ -84,4 +89,5 @@ export const SETTINGS_DEFAULTS: Settings = {
   animationsEnabled: true,
   failoverEnabled: true,
   chainMode: 'balance',
+  updateCheckInterval: '1m',
 }

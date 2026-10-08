@@ -51,37 +51,70 @@ type CheckResult struct {
 	CheckedAt string `json:"checkedAt"`
 }
 
-// cacheTTL keeps one launch from asking more than once and a long session from
-// asking more than twice a day: release feeds answer with rate limits, and the
-// answer is not urgent enough to pay them.
-const cacheTTL = 6 * time.Hour
-
 type Service struct {
 	current  string
 	releases Releases
 	now      func() time.Time
 	mu       sync.Mutex
-	cached   *CheckResult
-	cachedAt time.Time
+	// inFlight is closed when the running check completes: callers that
+	// arrive mid-check join it instead of starting a second round trip —
+	// the refresher's pass and an operator's "Check now" are one request.
+	inFlight chan struct{}
+	result   CheckResult
 	// installMu serializes downloads: two "Update now" clicks are one
 	// download, not a race over the same .part file.
 	installMu sync.Mutex
 }
 
 func NewService(current string, releases Releases) *Service {
-	return &Service{current: current, releases: releases, now: time.Now}
+	// The verdict fields stay zero until a check completes; the running
+	// version is known without asking anyone, and a status reader in the
+	// first seconds deserves that much truth.
+	return &Service{current: current, releases: releases, now: time.Now, result: CheckResult{Current: current}}
 }
 
+// Check performs the round trip and answers it. The refresher owns
+// freshness, so there is no time-window cache to satisfy: a caller asking
+// wants a real answer, and a 304 from the feed makes the ask nearly free.
+// Concurrent callers share one round trip; the late arrivals get the
+// winner's result.
 func (service *Service) Check(ctx context.Context) CheckResult {
 	service.mu.Lock()
-	if service.cached != nil && service.now().Sub(service.cachedAt) < cacheTTL {
-		cached := *service.cached
+	if service.inFlight != nil {
+		join := service.inFlight
 		service.mu.Unlock()
-		return cached
+		select {
+		case <-join:
+		case <-ctx.Done():
+		}
+		// Even a cancelled caller deserves the freshest completed answer.
+		return service.Status()
 	}
+	done := make(chan struct{})
+	service.inFlight = done
 	service.mu.Unlock()
 
-	result := CheckResult{Current: service.current, CheckedAt: service.now().UTC().Format(time.RFC3339)}
+	result := service.fetch(ctx)
+
+	service.mu.Lock()
+	service.result = result
+	service.inFlight = nil
+	service.mu.Unlock()
+	close(done)
+	return result
+}
+
+// Status answers the last completed check without touching the network:
+// the refresher keeps it fresh on its cadence and announces changes, so a
+// reader that wants it fresh asks nothing and listens.
+func (service *Service) Status() CheckResult {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return service.result
+}
+
+func (service *Service) fetch(ctx context.Context) CheckResult {
+	result := CheckResult{Current: service.current}
 	if service.releases != nil {
 		if latest, err := service.releases.LatestRelease(ctx); err == nil && latest.Version != "" {
 			result.Reachable = true
@@ -90,10 +123,9 @@ func (service *Service) Check(ctx context.Context) CheckResult {
 			result.Newer = domain.NewerThan(latest.Version, service.current)
 		}
 	}
-	service.mu.Lock()
-	service.cached = &result
-	service.cachedAt = service.now()
-	service.mu.Unlock()
+	// The timestamp records the asking, not the answer: an unreachable
+	// feed was still checked, and "last checked" must not lie about that.
+	result.CheckedAt = service.now().UTC().Format(time.RFC3339)
 	return result
 }
 
@@ -113,10 +145,11 @@ func (service *Service) Install(ctx context.Context, progress func(InstallProgre
 	service.installMu.Lock()
 	defer service.installMu.Unlock()
 
-	// The cached check is a cheap early refuse, not the verdict: the feed is
-	// re-read below, and the fresh answer is the one acted on.
-	result := service.Check(ctx)
-	if !result.Newer {
+	// The last known answer is a cheap early refuse, not the verdict — but
+	// only once there is one: a service that has never checked has nothing
+	// to refuse with, and the feed is re-read below, where the fresh answer
+	// is the one acted on.
+	if result := service.Status(); result.CheckedAt != "" && !result.Newer {
 		return InstallResult{}, ErrAlreadyCurrent
 	}
 	if service.releases == nil {

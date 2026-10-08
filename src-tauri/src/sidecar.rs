@@ -211,6 +211,7 @@ fn allowed_method(method: &str) -> bool {
             | "system.cancel"
             | "system.shutdown"
             | "updates.check"
+            | "updates.status"
             | "relay.status"
             | "relay.start"
             | "relay.stop"

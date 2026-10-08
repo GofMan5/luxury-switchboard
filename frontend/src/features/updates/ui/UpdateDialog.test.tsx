@@ -37,6 +37,8 @@ const installerPath = 'C:\\Users\\dev\\AppData\\Local\\ProviderSwitchboard\\upda
 function stateAt(overrides: Partial<UpdatesState>): UpdatesState {
   return {
     check: null,
+    checking: false,
+    checkError: '',
     installPhase: 'idle',
     installPercent: 0,
     installerPath: '',

@@ -35,7 +35,7 @@ const provider = { id: 'local', name: 'Local', baseUrl: 'http://127.0.0.1:8799',
 // count, and long enough to fill the column it renders in. A shortened stand-in would
 // hide exactly the layout problem the badge's position is there to avoid.
 const TRUNCATED_DESCRIPTION = 'The answer was larger than the inspection budget, so part of it was forwarded unread'
-const settings: Settings = { listenerPort: 8798, maxRequestMiB: 64, headerTimeoutSeconds: 45, streamIdleSeconds: 60, heartbeatSeconds: 15, retryBaseMilliseconds: 500, retryMaxSeconds: 30, permanentAttempts: 2, maxQueued: 10_000, streamProbationMilliseconds: 250, activityCapacity: 2_000, historyRetentionDays: 30, tunnelRetentionHours: 72, guardrailMode: 'monitor', guardrailProviderModes: {}, guardrailFindings: 500, notificationsEnabled: true, providerHealthEnabled: true, animationsEnabled: true, failoverEnabled: true, chainMode: 'balance' }
+const settings: Settings = { listenerPort: 8798, maxRequestMiB: 64, headerTimeoutSeconds: 45, streamIdleSeconds: 60, heartbeatSeconds: 15, retryBaseMilliseconds: 500, retryMaxSeconds: 30, permanentAttempts: 2, maxQueued: 10_000, streamProbationMilliseconds: 250, activityCapacity: 2_000, historyRetentionDays: 30, tunnelRetentionHours: 72, guardrailMode: 'monitor', guardrailProviderModes: {}, guardrailFindings: 500, notificationsEnabled: true, providerHealthEnabled: true, animationsEnabled: true, failoverEnabled: true, chainMode: 'balance', updateCheckInterval: '1m' }
 
 function fakeSession(relaySnapshot: unknown = { state: 'live', address: 'http://127.0.0.1:8798', port: 8798 }, settingsSnapshot = settings, overrides: Record<string, unknown> = {}): ControlPlaneSession {
   return {

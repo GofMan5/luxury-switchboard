@@ -59,6 +59,13 @@ type Settings struct {
 	// degrades), "balance" round-robins across every healthy entry, which
 	// spreads a provider's shared daily quota across the whole chain.
 	ChainMode string `json:"chainMode"`
+	// UpdateCheckInterval is the cadence of the background update check:
+	// "off", "1m", "5m", "30m" or "1h". The default is "1m" because the
+	// check is a conditional request that usually answers "nothing
+	// changed", so a minute of freshness costs almost nothing against the
+	// release feed's rate limits. Settings persisted before the field
+	// existed carry an empty value, which reads as the default.
+	UpdateCheckInterval string `json:"updateCheckInterval"`
 }
 
 // DefaultGuardrailMode is monitor rather than block. The detection rules match on
@@ -89,6 +96,7 @@ func Defaults() Settings {
 		AnimationsEnabled:      true,
 		FailoverEnabled:        true,
 		ChainMode:              DefaultChainMode,
+		UpdateCheckInterval:    DefaultUpdateCheckInterval,
 	}
 }
 
@@ -97,6 +105,13 @@ func Defaults() Settings {
 // free resellers into twice the daily quota — the reason most operators build
 // one. Strict-priority routing stays one toggle away.
 const DefaultChainMode = "balance"
+
+// DefaultUpdateCheckInterval is every minute: the release feed answers
+// conditional requests with an empty 304 most of the time, so freshness is
+// nearly free, and "is there an update" is the one question the shell asks
+// often enough that a manual button feels like a chore. Operators who
+// disagree pick 5m, 30m, 1h or off in Settings.
+const DefaultUpdateCheckInterval = "1m"
 
 // Equal answers whether two settings are the same value, map included. The
 // struct stopped being comparable when it gained a map field; tests and the
@@ -122,6 +137,9 @@ func (settings Settings) Normalized() Settings {
 	}
 	if settings.ChainMode == "" {
 		settings.ChainMode = DefaultChainMode
+	}
+	if settings.UpdateCheckInterval == "" {
+		settings.UpdateCheckInterval = DefaultUpdateCheckInterval
 	}
 	if settings.GuardrailProviderModes == nil {
 		settings.GuardrailProviderModes = map[string]string{}
@@ -169,6 +187,10 @@ func (settings Settings) Validate() error {
 		return errors.New("guardrail finding capacity is out of range")
 	case settings.ChainMode != "failover" && settings.ChainMode != "balance":
 		return errors.New("chain mode must be failover or balance")
+	case settings.UpdateCheckInterval != "off" && settings.UpdateCheckInterval != "1m" &&
+		settings.UpdateCheckInterval != "5m" && settings.UpdateCheckInterval != "30m" &&
+		settings.UpdateCheckInterval != "1h":
+		return errors.New("update check interval must be off, 1m, 5m, 30m or 1h")
 	case len(settings.GuardrailProviderModes) > GuardrailProviderModeCap:
 		return errors.New("too many guardrail provider overrides")
 	default:

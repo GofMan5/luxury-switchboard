@@ -52,3 +52,24 @@ func TestPreSwitchSettingsLoadWithSwitchesOn(t *testing.T) {
 		t.Fatalf("the user's explicit off was overridden: %+v", loaded)
 	}
 }
+
+// A settings file written before update checks existed must load onto the
+// default cadence, while a saved choice survives the round trip untouched:
+// silence is the previous build's, "off" is the operator's.
+func TestTheUpdateIntervalSurvivesRoundTripAndAbsence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.dpapi")
+	repository := New(path)
+	settings := domain.Defaults()
+	settings.UpdateCheckInterval = "off"
+	if err := repository.Save(context.Background(), settings); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := repository.Load(context.Background())
+	if err != nil || !found || loaded.UpdateCheckInterval != "off" {
+		t.Fatalf("the saved interval did not round trip: %q %v %v", loaded.UpdateCheckInterval, found, err)
+	}
+	preField := storedSettings{GuardrailMode: domain.DefaultGuardrailMode}
+	if restored := preField.restore().Normalized(); restored.UpdateCheckInterval != domain.DefaultUpdateCheckInterval {
+		t.Fatalf("an older settings file lost the default interval: %q", restored.UpdateCheckInterval)
+	}
+}

@@ -293,6 +293,35 @@
 
 .backupOutcome code { color: var(--text-primary); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
 
+/* The standing verdict of the release feed: same silhouette as the backup
+ * outcome, tinted by what it says. The neutral border is the "no verdict yet"
+ * state — nothing has been claimed, so nothing is colored. */
+.updateOutcome {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  margin-top: 14px;
+  padding: 11px 15px;
+  background: var(--bg-surface);
+}
+
+.updateOutcome strong { color: var(--text-secondary); font-size: 12.5px; }
+.updateOutcome p { margin-top: 5px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+
+.updateOutcome[data-state='newer'] {
+  border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 5%, var(--bg-surface));
+}
+
+.updateOutcome[data-state='current'] {
+  border-color: color-mix(in srgb, var(--status-success) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--status-success) 5%, var(--bg-surface));
+}
+
+.updateOutcome[data-state='unreachable'] {
+  border-color: color-mix(in srgb, var(--status-warning) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--status-warning) 5%, var(--bg-surface));
+}
+
 @media (max-width: 959px) {
   .layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .tabRail { flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border-subtle); padding: 10px 16px; }

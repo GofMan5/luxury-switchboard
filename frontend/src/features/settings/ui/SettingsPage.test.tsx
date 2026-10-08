@@ -4,7 +4,9 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ServicesContext, type AppServices } from '../../../app/services'
 import type { Settings } from '../domain/settings'
-import { BackupPanel, SettingsForm } from './SettingsPage'
+import type { UpdateCheck } from '../../updates/domain/update'
+import type { UpdatesState } from '../../updates/application/updates-model'
+import { BackupPanel, SettingsForm, UpdateStatusPanel } from './SettingsPage'
 
 // Auto-cleanup needs vitest globals, which this project does not enable, so each
 // render is torn down explicitly. Without it a later query matches two forms.
@@ -31,6 +33,7 @@ const initial: Settings = {
   animationsEnabled: true,
   failoverEnabled: true,
   chainMode: 'balance',
+  updateCheckInterval: '1m',
 }
 
 describe('SettingsForm', () => {
@@ -133,6 +136,45 @@ describe('SettingsForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /reset stream probation/i }))
     expect((screen.getByLabelText(/^Stream probation$/u) as HTMLInputElement).valueAsNumber).toBe(350)
   })
+
+  it('edits the automatic checking interval like any other setting', () => {
+    render(
+      <SettingsForm
+        initial={{ ...initial, updateCheckInterval: '30m' }}
+        pending={false}
+        error=""
+        onSave={vi.fn(async () => true)}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Updates' }))
+    const interval = screen.getByLabelText(/^Automatic checking$/u) as HTMLSelectElement
+    expect(interval.value).toBe('30m')
+    // The select is the same kind of field as the numbers: an edit marks the
+    // form dirty and lights the save bar.
+    fireEvent.change(interval, { target: { value: 'off' } })
+    expect(interval.value).toBe('off')
+    expect((screen.getByRole('button', { name: 'Save settings' }) as HTMLButtonElement).disabled).toBe(false)
+    // The per-field reset returns the saved interval, not the shipped default,
+    // and a clean form closes its save bar rather than disabling it.
+    fireEvent.click(screen.getByRole('button', { name: /Reset Automatic checking/i }))
+    expect(interval.value).toBe('30m')
+    expect(screen.queryByRole('button', { name: 'Save settings' })).toBeNull()
+    // And the saved value rides through a save the form does not re-read.
+    const onSave = vi.fn(async () => true)
+    cleanup()
+    render(
+      <SettingsForm
+        initial={{ ...initial, updateCheckInterval: '30m' }}
+        pending={false}
+        error=""
+        onSave={onSave}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Updates' }))
+    fireEvent.change(screen.getByLabelText(/^Automatic checking$/u), { target: { value: '1h' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ updateCheckInterval: '1h' }))
+  })
 })
 
 // A store with the backup model's public surface: the panel's contract is that
@@ -200,5 +242,94 @@ describe('BackupPanel', () => {
     render(<BackupPanel />)
     expect(screen.getByText('Plain text, no passphrase')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /export backup/i })).toBeNull()
+  })
+})
+
+// A store with the updates model's public surface: like the backup fake, it
+// carries state changes into the tree through notifications alone, and it
+// settles a manual check only when the test says so — never rejecting, exactly
+// like the real model, whose failures land in checkError instead.
+type FakeUpdatesOutcome = { check?: UpdateCheck; error?: Error }
+
+class FakeUpdatesStore {
+  #listeners = new Set<() => void>()
+  #state: UpdatesState = { check: null, checking: false, checkError: '', installPhase: 'idle', installPercent: 0, installerPath: '', installError: '' }
+  #pending: ((outcome: FakeUpdatesOutcome) => void) | undefined
+  snapshot = (): UpdatesState => this.#state
+  subscribe = (listener: () => void): (() => void) => {
+    this.#listeners.add(listener)
+    return () => this.#listeners.delete(listener)
+  }
+  /** The standing verdict of an automatic pass, before anyone clicks. */
+  seed(check: UpdateCheck | null): void { this.#set({ ...this.#state, check }) }
+  async check(): Promise<void> {
+    this.#set({ ...this.#state, checking: true, checkError: '' })
+    const outcome = await new Promise<FakeUpdatesOutcome>((resolve) => { this.#pending = resolve })
+    this.#set(outcome.error
+      ? { ...this.#state, checking: false, checkError: outcome.error.message }
+      : { ...this.#state, check: outcome.check ?? null, checking: false })
+  }
+  async answer(check: UpdateCheck): Promise<void> {
+    this.#pending?.({ check })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  async failWith(error: Error): Promise<void> {
+    this.#pending?.({ error })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  #set(state: UpdatesState): void {
+    this.#state = state
+    for (const listener of this.#listeners) listener()
+  }
+}
+
+describe('UpdateStatusPanel', () => {
+  it('asks the feed now, and shows the verdict the moment it lands', async () => {
+    const store = new FakeUpdatesStore()
+    render(
+      <ServicesContext.Provider value={{ updates: store } as unknown as AppServices}>
+        <UpdateStatusPanel />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /check now/i }))
+    // In flight, from the store's own notification, not from a prop change:
+    expect((await screen.findByRole('button', { name: /checking…/i }) as HTMLButtonElement).disabled).toBe(true)
+    await store.answer({ current: '1.0.50', latest: '1.0.50', url: '', newer: false, reachable: true, checkedAt: new Date().toISOString() })
+    expect(await screen.findByText(/you are running the latest release/i)).toBeTruthy()
+    expect(screen.getByText(/1\.0\.50 is the newest version/i)).toBeTruthy()
+    expect((screen.getByRole('button', { name: /check now/i }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('names an available release, with the running one beside it', () => {
+    const store = new FakeUpdatesStore()
+    // The standing answer of an automatic pass: the panel has to show it
+    // without anyone pressing anything.
+    store.seed({ current: '1.0.50', latest: '1.0.99', url: 'https://example/releases/1.0.99', newer: true, reachable: true, checkedAt: new Date().toISOString() })
+    render(
+      <ServicesContext.Provider value={{ updates: store } as unknown as AppServices}>
+        <UpdateStatusPanel />
+      </ServicesContext.Provider>,
+    )
+    expect(screen.getByText(/version 1\.0\.99 is available/i)).toBeTruthy()
+    expect(screen.getByText(/you are running 1\.0\.50/i)).toBeTruthy()
+  })
+
+  it('says why a check it was asked for failed, out loud', async () => {
+    const store = new FakeUpdatesStore()
+    render(
+      <ServicesContext.Provider value={{ updates: store } as unknown as AppServices}>
+        <UpdateStatusPanel />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /check now/i }))
+    await store.failWith(new Error('The release feed could not be reached'))
+    expect((await screen.findByRole('alert')).textContent).toMatch(/could not be reached/u)
+    expect((screen.getByRole('button', { name: /check now/i }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('explains itself when the services context is absent', () => {
+    render(<UpdateStatusPanel />)
+    expect(screen.getByText(/checks happen in the backend/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /check now/i })).toBeNull()
   })
 })

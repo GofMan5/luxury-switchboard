@@ -1,13 +1,14 @@
 import { useContext, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type KeyboardEvent as UIKeyboardEvent, type ReactNode } from 'react'
-import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RotateCcw, Save, ShieldCheck } from 'lucide-react'
+import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RefreshCw, RotateCcw, Save, ShieldCheck } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
 import { useMediaQuery } from '../../../shared/ui/useMediaQuery'
 import { ServicesContext } from '../../../app/services'
 import { SETTINGS_DEFAULTS, type Settings } from '../domain/settings'
 import { useSettings } from './useSettings'
+import type { UpdatesState } from '../../updates/application/updates-model'
 import styles from './SettingsPage.module.css'
 
-type SettingsTab = 'relay' | 'reliability' | 'data' | 'routing' | 'interface' | 'backup'
+type SettingsTab = 'relay' | 'reliability' | 'data' | 'routing' | 'interface' | 'updates' | 'backup'
 
 const tabs: readonly { id: SettingsTab; label: string; icon: ReactNode; description: string }[] = [
   { id: 'relay', label: 'Relay', icon: <Gauge size={16} />, description: 'The address your clients call and how much traffic may pile up waiting.' },
@@ -15,6 +16,7 @@ const tabs: readonly { id: SettingsTab; label: string; icon: ReactNode; descript
   { id: 'data', label: 'Data', icon: <Database size={16} />, description: 'How much the app remembers, in memory and on disk.' },
   { id: 'routing', label: 'Routing', icon: <GitBranch size={16} />, description: 'What happens when a provider answers with a verdict no retry could change.' },
   { id: 'interface', label: 'Interface', icon: <Bell size={16} />, description: 'What the shell tells you as it happens, and how it moves.' },
+  { id: 'updates', label: 'Updates', icon: <RefreshCw size={16} />, description: 'How the app learns about a new release — and a button that asks right now.' },
   { id: 'backup', label: 'Backup', icon: <ArchiveRestore size={16} />, description: 'Carry providers, keys, routes and model prices to another machine or another install.' },
 ]
 
@@ -25,6 +27,7 @@ const tabFields: Record<Exclude<SettingsTab, 'backup'>, readonly (keyof Settings
   data: ['activityCapacity', 'historyRetentionDays', 'tunnelRetentionHours', 'guardrailFindings'],
   routing: ['failoverEnabled', 'chainMode'],
   interface: ['notificationsEnabled', 'providerHealthEnabled', 'animationsEnabled'],
+  updates: ['updateCheckInterval'],
 }
 
 export default function SettingsPage() {
@@ -215,21 +218,14 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
                 label="Failover chain" {...field('failoverEnabled')}
                 note="On: a dead provider, an exhausted shared quota, a client-level rejection or a missing model moves the request to the next provider of that model's chain. Off: the refusal reaches your client exactly where it happened."
               />
-              <div className={styles.field} data-dirty={settings.chainMode !== initial.chainMode || undefined}>
-                <span className={styles.fieldHead}>
-                  <span>Chain mode</span>
-                  <span className={styles.fieldControl}>
-                    <FieldReset show={settings.chainMode !== initial.chainMode} label="Chain mode" onReset={() => set('chainMode', initial.chainMode)} />
-                    <span className={styles.inputWrap}>
-                      <select value={settings.chainMode} disabled={pending} onChange={(event) => set('chainMode', event.currentTarget.value as Settings['chainMode'])} aria-label="Chain mode">
-                        <option value="balance">Balance (round-robin)</option>
-                        <option value="failover">Failover (strict order)</option>
-                      </select>
-                    </span>
-                  </span>
-                </span>
-                <em>Balance spreads requests across every healthy provider of a chain: two providers means twice the daily quota, because the quotas resellers run out of are per provider, not per you. Failover sends everything to the head of the chain and only moves on refusal. Default: Balance.</em>
-              </div>
+              <SelectField
+                label="Chain mode" {...field('chainMode')}
+                options={[
+                  { value: 'balance', label: 'Balance (round-robin)' },
+                  { value: 'failover', label: 'Failover (strict order)' },
+                ]}
+                note="Balance spreads requests across every healthy provider of a chain: two providers means twice the daily quota, because the quotas resellers run out of are per provider, not per you. Failover sends everything to the head of the chain and only moves on refusal. Default: Balance."
+              />
               <div className={styles.explainer}>
                 <strong>How a chain works</strong>
                 <p>Publish one model on several providers in Model Routes — for example glm → North Relay first, Vendor Hub second. A request for glm lands on North Relay; when North Relay answers with a final verdict (dead keys, a spent quota, a client ban, a model it does not host), the relay degrades North Relay for five minutes, rewrites the request to the upstream name of the sibling and sends it there. Your client never sees the failure. After five minutes the chain tries North Relay again — in Balance mode it shares the load right away. Configure chains on the Model Routes page; models without a chain keep using the active provider.</p>
@@ -251,6 +247,23 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
                 label="Animations" {...field('animationsEnabled')}
                 note="Motion in the interface. The operating system's reduced-motion setting always wins over this switch."
               />
+            </div>
+          ) : null}
+
+          {tab === 'updates' ? (
+            <div className={styles.fields}>
+              <SelectField
+                label="Automatic checking" {...field('updateCheckInterval')}
+                options={[
+                  { value: 'off', label: 'Off' },
+                  { value: '1m', label: 'Every minute' },
+                  { value: '5m', label: 'Every 5 minutes' },
+                  { value: '30m', label: 'Every 30 minutes' },
+                  { value: '1h', label: 'Every hour' },
+                ]}
+                note="How often the background refresher asks the release feed. A check that finds nothing new is one conditional request the feed answers without a body — it does not cost a rate-limit slot. A feed that fails is asked less and less, never more. Applies the moment you save."
+              />
+              <UpdateStatusPanel />
             </div>
           ) : null}
 
@@ -368,6 +381,84 @@ export function BackupPanel() {
   )
 }
 
+/** The live half of the updates tab: the interval above is a draft the save
+ *  bar owns, while this panel is the model's standing answer — the same
+ *  verdict the header pill reads — plus the manual question. Exported for its
+ *  test, like the form itself. */
+const idleUpdate: UpdatesState = { check: null, checking: false, checkError: '', installPhase: 'idle', installPercent: 0, installerPath: '', installError: '' }
+// Module-level so the hook sees the same function identities on every render
+// while no store exists: rebuilt closures would re-subscribe each time.
+const idleUpdateSubscribe = (): (() => void) => () => {}
+const idleUpdateSnapshot = (): UpdatesState => idleUpdate
+
+export function UpdateStatusPanel() {
+  // The form is also rendered in isolation by its own tests, without the
+  // services context; the panel then shows its explanation and no controls.
+  const services = useContext(ServicesContext)
+  const updates = services?.updates ?? null
+  const state = useSyncExternalStore(updates?.subscribe ?? idleUpdateSubscribe, updates?.snapshot ?? idleUpdateSnapshot)
+  if (!updates) {
+    return (
+      <div className={styles.backupNote}>
+        <strong>Checks happen in the backend</strong>
+        <p>The refresher asks the release feed on the interval above and remembers the verdict; the button here asks the same feed once, right now. Automatic passes that cannot reach it back off quietly — only a check you asked for owes you an error message.</p>
+      </div>
+    )
+  }
+
+  const check = state.check
+  const outcome = check === null
+    ? { state: 'unknown', verdict: 'No verdict yet', detail: 'The backend starts checking on the saved interval as soon as it runs; the answer lands here on its own.' }
+    : check.newer && check.reachable
+      ? {
+          state: 'newer',
+          verdict: `Version ${check.latest} is available`,
+          detail: `You are running ${check.current}. The update pill next to the version in the sidebar downloads the installer and verifies it against the release's own checksum before running it. Checked ${relativeTime(check.checkedAt)}.`,
+        }
+      : check.reachable
+        ? {
+            state: 'current',
+            verdict: 'You are running the latest release',
+            detail: `${check.current} is the newest version the feed offered. Checked ${relativeTime(check.checkedAt)}.`,
+          }
+        : {
+            state: 'unreachable',
+            verdict: 'The last check could not read the feed',
+            detail: `The backend keeps asking on the interval and backs off while the feed fails. ${check.latest ? `The newest version it last saw is ${check.latest}. ` : ''}Last attempt ${relativeTime(check.checkedAt)}.`,
+          }
+
+  return (
+    <>
+      <div className={styles.backupRow}>
+        <Button type="button" disabled={state.checking} onClick={() => void updates.check()}>
+          <RefreshCw size={15} aria-hidden="true" />
+          {state.checking ? 'Checking…' : 'Check now'}
+        </Button>
+      </div>
+      <div className={styles.updateOutcome} role="status" data-state={outcome.state}>
+        <strong>{outcome.verdict}</strong>
+        <p>{outcome.detail}</p>
+      </div>
+      {state.checkError ? <div className={styles.error} role="alert">{state.checkError}</div> : null}
+    </>
+  )
+}
+
+/** Enough honesty for a timestamp: "2 minutes ago", not a wall clock the
+ *  operator has to subtract from. Re-renders arrive with every check, so the
+ *  sentence never goes stale enough to mislead. */
+function relativeTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime()) || value === '') return 'moments ago'
+  const seconds = Math.round((Date.now() - date.getTime()) / 1000)
+  if (seconds < 45) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  return `${Math.round(hours / 24)} day${Math.round(hours / 24) === 1 ? '' : 's'} ago`
+}
+
 function FieldReset({ show, label, onReset }: { show: boolean; label: string; onReset: () => void }) {
   if (!show) return null
   return (
@@ -442,6 +533,38 @@ function NumberField({ label, value, saved, fallback, min, max, step, suffix, no
           <span className={styles.presetDefault} title="The shipped default — the tab's Defaults button restores them all">auto · {fallback.toLocaleString('en-US')}{suffix ? ` ${suffix}` : ''}</span>
         </span>
       ) : null}
+    </div>
+  )
+}
+
+/** A setting chosen from a closed set. It keeps the number field's anatomy —
+ *  label, control, the way back to the saved value, the explanation under —
+ *  so a column of settings reads as one form whatever it edits. The generic
+ *  keeps the option values tied to the setting's own union, not strings. */
+function SelectField<K extends string>({ label, value, saved, note, options, disabled, onChange }: {
+  label: string
+  value: K
+  saved: K
+  note?: string
+  options: readonly { value: K; label: string }[]
+  disabled?: boolean
+  onChange: (value: K) => void
+}) {
+  const dirty = value !== saved
+  return (
+    <div className={styles.field} data-dirty={dirty || undefined}>
+      <span className={styles.fieldHead}>
+        <span className={styles.fieldLabel}>{label}</span>
+        <span className={styles.fieldControl}>
+          <FieldReset show={dirty} label={label} onReset={() => onChange(saved)} />
+          <span className={styles.inputWrap}>
+            <select value={value} aria-label={label} disabled={disabled} onChange={(event) => onChange(event.currentTarget.value as K)}>
+              {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </span>
+        </span>
+      </span>
+      {note ? <em>{note}</em> : null}
     </div>
   )
 }

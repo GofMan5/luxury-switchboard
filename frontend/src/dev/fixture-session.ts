@@ -102,6 +102,19 @@ const settings: Settings = {
   animationsEnabled: true,
   failoverEnabled: true,
   chainMode: 'balance',
+  updateCheckInterval: '1m',
+}
+
+// The standing verdict of the refresher's last automatic pass: old enough that
+// the panel shows an honest "2 minutes ago", fresh enough that the pill is on
+// the moment the dev shell opens.
+const updateFeed = {
+  current: '1.0.40-fixture',
+  latest: '1.0.99',
+  url: 'https://github.com/GofMan5/luxury-switchboard/releases/tag/v1.0.99',
+  newer: true,
+  reachable: true,
+  checkedAt: iso(120_000),
 }
 
 const findings: GuardrailRecord[] = Array.from({ length: 9 }, (_, index) => {
@@ -310,7 +323,17 @@ export class FixtureSession implements ControlPlaneSession {
     const body = (payload ?? {}) as Record<string, never>
     switch (method) {
       case 'relay.status': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
-      case 'updates.check': return { current: '1.0.40-fixture', latest: '1.0.99', url: 'https://github.com/GofMan5/luxury-switchboard/releases/tag/v1.0.99', newer: true, reachable: true, checkedAt: iso(0) }
+      case 'updates.status': return { ...updateFeed }
+      case 'updates.check': return (async () => {
+        // Late enough for the button to show its own in-flight state. A
+        // completed check is announced as an event too — the same channel the
+        // refresher's automatic passes arrive on — so the pill, the dialog and
+        // the Settings panel stay one truth, not three.
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        const answer = { ...updateFeed, checkedAt: new Date().toISOString() }
+        this.#emit('updates.stateChanged', answer)
+        return answer
+      })()
       case 'updates.install': {
         // The fixture reports progress the way the sidecar does, then parks a
         // file that names itself: no real bytes ever move in the dev shell.

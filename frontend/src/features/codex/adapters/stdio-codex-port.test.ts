@@ -63,6 +63,61 @@ describe('StdioCodexPort', () => {
     })
   })
 
+  it('reads the quota report with both windows, and a refusal arrives as a result field, not a rejection', async () => {
+    const port = new StdioCodexPort(sessionWith({
+      'codex.quota': {
+        state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex',
+        quota: {
+          fetchedAt: 1_789_000_000, planType: 'Pro',
+          primary: { present: true, remainingPercent: 78.4, windowMinutes: 300, resetAt: 1_789_003_120 },
+          secondary: { present: true, remainingPercent: 41, windowMinutes: 10_080, resetAt: 1_789_172_800 },
+        },
+      },
+    }))
+    await expect(port.quota()).resolves.toEqual({
+      state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex',
+      quota: {
+        fetchedAt: 1_789_000_000, planType: 'Pro',
+        primary: { present: true, remainingPercent: 78, windowMinutes: 300, resetAt: 1_789_003_120 },
+        secondary: { present: true, remainingPercent: 41, windowMinutes: 10_080, resetAt: 1_789_172_800 },
+      },
+      error: undefined,
+    })
+
+    const refused = new StdioCodexPort(sessionWith({
+      'codex.quota': { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '', error: 'codex is not signed in' },
+    }))
+    await expect(refused.quota()).resolves.toEqual({
+      state: 'signed_out', email: '', plan: '', accountId: '', providerId: '',
+      quota: undefined, error: 'codex is not signed in',
+    })
+  })
+
+  it('fails safe on malformed quota data: a report needs a fetchedAt, a window needs a reported value', async () => {
+    const noReport = new StdioCodexPort(sessionWith({
+      'codex.quota': { state: 'signed_in', quota: { planType: 'Pro' }, error: 410 },
+    }))
+    // A non-text error stays silent rather than guessing what it meant.
+    await expect(noReport.quota()).resolves.toMatchObject({ quota: undefined, error: undefined })
+
+    const clamped = new StdioCodexPort(sessionWith({
+      'codex.quota': {
+        state: 'signed_in',
+        quota: {
+          fetchedAt: 5,
+          primary: { present: true, remainingPercent: 300.6, windowMinutes: 0.5, resetAt: -1 },
+          secondary: { present: 'yes' },
+        },
+      },
+    }))
+    const result = await clamped.quota()
+    expect(result.quota).toEqual({
+      fetchedAt: 5,
+      primary: { present: true, remainingPercent: 100 },
+      secondary: { present: false, remainingPercent: 100 },
+    })
+  })
+
   it('issues cancel and logout as their own commands', async () => {
     const session = sessionWith({ 'codex.login.cancel': {}, 'codex.logout': {} })
     const port = new StdioCodexPort(session)

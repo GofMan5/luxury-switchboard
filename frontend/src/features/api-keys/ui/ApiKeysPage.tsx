@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react'
 import { Activity, ArrowDown, ArrowUp, ClipboardPaste, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
 import { useProviders } from '../../providers/ui/useProviders'
+import { useAppServices } from '../../../app/services'
+import { hasCodexQuota } from '../../codex/application/codex-capability'
+import CodexAccountsPane from '../../codex/ui/CodexAccountsPane'
 import { Button } from '../../../shared/ui/Button'
 import { Pill } from '../../../shared/ui/chrome'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
@@ -12,6 +15,7 @@ import styles from './ApiKeysPage.module.css'
 export default function ApiKeysPage() {
   const { state: providers } = useProviders()
   const { model, state } = useApiKeys()
+  const { capabilities } = useAppServices()
   const [providerID, setProviderID] = useState('')
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; key?: ApiKey } | null>(null)
   const [importing, setImporting] = useState(false)
@@ -22,9 +26,15 @@ export default function ApiKeysPage() {
   const perSecond = providers.catalog.providers.find((provider) => provider.id === selectedProvider)?.rateUnit === 'second'
   const unit = perSecond ? 'second' : 'minute'
 
+  // The codex preset holds one signed-in account instead of a key pool, so its
+  // branch replaces the keys table with the accounts list. A sidecar whose
+  // handshake never promised codex.quota keeps the keys table — the UI offers
+  // only what the running binary can actually answer.
+  const codexAccounts = selectedProvider === 'codex' && hasCodexQuota(capabilities)
+
   useEffect(() => {
-    if (selectedProvider) void model.load(selectedProvider)
-  }, [model, selectedProvider])
+    if (selectedProvider && !codexAccounts) void model.load(selectedProvider)
+  }, [model, selectedProvider, codexAccounts])
 
   const ordered = useMemo(
     () => [...state.keys].sort((left, right) => left.priority - right.priority),
@@ -50,94 +60,106 @@ export default function ApiKeysPage() {
               {providers.catalog.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
             </select>
           </label>
-          <Button disabled={!selectedProvider || state.checkingPool} onClick={() => void model.checkPool()}>
-            <Activity size={16} aria-hidden="true" className={state.checkingPool ? styles.spinning : undefined} />
-            {state.checkingPool ? 'Checking…' : 'Check pool'}
-          </Button>
-          <Button disabled={!selectedProvider} onClick={() => { model.clearError(); setImporting(true) }}>
-            <ClipboardPaste size={16} aria-hidden="true" />Bulk import
-          </Button>
-          <Button variant="primary" disabled={!selectedProvider} onClick={() => { model.clearError(); setEditor({ mode: 'add' }) }}>
-            <Plus size={16} aria-hidden="true" />Add key
-          </Button>
+          {codexAccounts ? null : (
+            <>
+              <Button disabled={!selectedProvider || state.checkingPool} onClick={() => void model.checkPool()}>
+                <Activity size={16} aria-hidden="true" className={state.checkingPool ? styles.spinning : undefined} />
+                {state.checkingPool ? 'Checking…' : 'Check pool'}
+              </Button>
+              <Button disabled={!selectedProvider} onClick={() => { model.clearError(); setImporting(true) }}>
+                <ClipboardPaste size={16} aria-hidden="true" />Bulk import
+              </Button>
+              <Button variant="primary" disabled={!selectedProvider} onClick={() => { model.clearError(); setEditor({ mode: 'add' }) }}>
+                <Plus size={16} aria-hidden="true" />Add key
+              </Button>
+            </>
+          )}
         </div>
       </header>
 
-      {state.poolReport ? (
-        <div className={styles.poolReport} data-rejected={state.poolReport.rejected > 0 || undefined} role="status">
-          <div>
-            <strong>
-              {state.poolReport.reachable
-                ? state.poolReport.rejected === 0
-                  ? `All ${state.poolReport.checked} keys answered`
-                  : `${state.poolReport.rejected} of ${state.poolReport.checked} keys were rejected`
-                : 'The provider did not answer the check'}
-            </strong>
-            <span>
-              {state.poolReport.reachable
-                ? state.poolReport.rejected === 0
-                  ? 'Every credential still authenticates.'
-                  : 'Rejected keys kept answering 401 on their own catalog request. The rows below carry their verdicts.'
-                : 'No verdict about the keys: an unreachable provider says nothing about its credentials.'}
-            </span>
-          </div>
-          {rejectedCount > 0 ? <Button variant="danger" disabled={Boolean(state.pendingId)} onClick={() => void model.removeRejected()}>Remove {rejectedCount} rejected</Button> : null}
+      {codexAccounts ? (
+        <div className={styles.quotaBody}>
+          <CodexAccountsPane />
         </div>
-      ) : null}
+      ) : (
+        <>
+          {state.poolReport ? (
+            <div className={styles.poolReport} data-rejected={state.poolReport.rejected > 0 || undefined} role="status">
+              <div>
+                <strong>
+                  {state.poolReport.reachable
+                    ? state.poolReport.rejected === 0
+                      ? `All ${state.poolReport.checked} keys answered`
+                      : `${state.poolReport.rejected} of ${state.poolReport.checked} keys were rejected`
+                    : 'The provider did not answer the check'}
+                </strong>
+                <span>
+                  {state.poolReport.reachable
+                    ? state.poolReport.rejected === 0
+                      ? 'Every credential still authenticates.'
+                      : 'Rejected keys kept answering 401 on their own catalog request. The rows below carry their verdicts.'
+                    : 'No verdict about the keys: an unreachable provider says nothing about its credentials.'}
+                </span>
+              </div>
+              {rejectedCount > 0 ? <Button variant="danger" disabled={Boolean(state.pendingId)} onClick={() => void model.removeRejected()}>Remove {rejectedCount} rejected</Button> : null}
+            </div>
+          ) : null}
 
-      {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
-      <div className={styles.tableWrap}>
-        <table className={styles.table}>
-          <thead>
-            <tr>
-              <th>Priority</th><th>Label</th><th>Limit</th><th>Actual</th><th>Proxy</th><th>State</th><th>429</th><th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ordered.map((key, index) => {
-              const movablePosition = movablePositions.get(key.id) ?? -1
-              const keyState = stateOfKey(key)
-              return (
-                <tr key={key.id} data-dead={key.authStreak >= 3 || undefined}>
-                  <td className={styles.priority}>{index + 1}</td>
-                  <td>
-                    <span className={styles.keyLabel}>
-                      <KeyRound size={15} aria-hidden="true" />
-                      <span>
-                        <strong>{key.label}</strong>
-                        <small>
-                          {key.authStreak >= 3
-                            ? 'Looks dead — revoke and replace it'
-                            : key.pinned ? 'Managed · direct IP' : 'Encrypted local key'}
-                        </small>
-                      </span>
-                      {key.lastOutcome ? <span className={styles.outcome} data-outcome={key.lastOutcome}>{key.lastOutcome}</span> : null}
-                    </span>
-                  </td>
-                  <td className={styles.num}>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
-                  <td className={styles.num}>{key.startsInWindow} / {perSecond ? 's' : 'min'}</td>
-                  <td>{key.pinned ? 'Direct' : key.proxyConfigured ? 'Configured' : 'Direct'}</td>
-                  <td><Pill tone={keyState.tone}>{keyState.label}</Pill></td>
-                  <td className={styles.num}>{key.retries429}</td>
-                  <td>
-                    <div className={styles.rowActions}>
-                      <IconAction label={`Move ${key.label} up`} disabled={key.pinned || movablePosition === 0 || state.pendingId === key.id} onClick={() => void model.move(key.id, -1)}><ArrowUp /></IconAction>
-                      <IconAction label={`Move ${key.label} down`} disabled={key.pinned || movablePosition === movablePositions.size - 1 || state.pendingId === key.id} onClick={() => void model.move(key.id, 1)}><ArrowDown /></IconAction>
-                      <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => { model.clearError(); setEditor({ mode: 'edit', key }) }}><Pencil /></IconAction>
-                      <IconAction label={`Reset cooldown for ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => void model.reset(key.id)}><RefreshCcw /></IconAction>
-                      <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => { model.clearError(); setRemoveKey(key) }}><Trash2 /></IconAction>
-                    </div>
-                  </td>
+          {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>Priority</th><th>Label</th><th>Limit</th><th>Actual</th><th>Proxy</th><th>State</th><th>429</th><th>Actions</th>
                 </tr>
-              )
-            })}
-            {state.phase !== 'loading' && ordered.length === 0 ? <tr><td colSpan={8} className={styles.empty}>No keys configured for this provider.</td></tr> : null}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {ordered.map((key, index) => {
+                  const movablePosition = movablePositions.get(key.id) ?? -1
+                  const keyState = stateOfKey(key)
+                  return (
+                    <tr key={key.id} data-dead={key.authStreak >= 3 || undefined}>
+                      <td className={styles.priority}>{index + 1}</td>
+                      <td>
+                        <span className={styles.keyLabel}>
+                          <KeyRound size={15} aria-hidden="true" />
+                          <span>
+                            <strong>{key.label}</strong>
+                            <small>
+                              {key.authStreak >= 3
+                                ? 'Looks dead — revoke and replace it'
+                                : key.pinned ? 'Managed · direct IP' : 'Encrypted local key'}
+                            </small>
+                          </span>
+                          {key.lastOutcome ? <span className={styles.outcome} data-outcome={key.lastOutcome}>{key.lastOutcome}</span> : null}
+                        </span>
+                      </td>
+                      <td className={styles.num}>{key.rpm === 0 ? 'Unlimited' : key.rpm}</td>
+                      <td className={styles.num}>{key.startsInWindow} / {perSecond ? 's' : 'min'}</td>
+                      <td>{key.pinned ? 'Direct' : key.proxyConfigured ? 'Configured' : 'Direct'}</td>
+                      <td><Pill tone={keyState.tone}>{keyState.label}</Pill></td>
+                      <td className={styles.num}>{key.retries429}</td>
+                      <td>
+                        <div className={styles.rowActions}>
+                          <IconAction label={`Move ${key.label} up`} disabled={key.pinned || movablePosition === 0 || state.pendingId === key.id} onClick={() => void model.move(key.id, -1)}><ArrowUp /></IconAction>
+                          <IconAction label={`Move ${key.label} down`} disabled={key.pinned || movablePosition === movablePositions.size - 1 || state.pendingId === key.id} onClick={() => void model.move(key.id, 1)}><ArrowDown /></IconAction>
+                          <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => { model.clearError(); setEditor({ mode: 'edit', key }) }}><Pencil /></IconAction>
+                          <IconAction label={`Reset cooldown for ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => void model.reset(key.id)}><RefreshCcw /></IconAction>
+                          <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => { model.clearError(); setRemoveKey(key) }}><Trash2 /></IconAction>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+                {state.phase !== 'loading' && ordered.length === 0 ? <tr><td colSpan={8} className={styles.empty}>No keys configured for this provider.</td></tr> : null}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
       <footer className={styles.footer}>
-        <span>{ordered.length} keys · lower number means higher priority</span>
-        <span>Secrets and proxy credentials are write-only</span>
+        <span>{codexAccounts ? '1 account · usage windows refresh on demand' : `${ordered.length} keys · lower number means higher priority`}</span>
+        <span>{codexAccounts ? 'Sign-in lives on the Providers page' : 'Secrets and proxy credentials are write-only'}</span>
       </footer>
 
       {editor ? (

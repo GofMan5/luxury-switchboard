@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -132,6 +133,17 @@ type fakeAuthorizer struct {
 	deviceBlock     chan struct{}
 	deviceStarts    int
 	deviceExchanges []DeviceAuthorization
+	// usageScript scripts FetchUsage answers, consumed in order; once the
+	// script runs dry, the usage/usageErr pair stands. usageBlock, like
+	// refreshBlock, parks a probe outside mu so a test can hold one
+	// probe in flight while a second caller asks or the first cancels.
+	usageScript []usageAnswer
+	usage       domain.Usage
+	usageErr    error
+	usageBlock  chan struct{}
+	usageCalls  int
+	usageTokens []string
+	usageIDs    []string
 }
 
 func (authorizer *fakeAuthorizer) AuthorizeURL(state, codeChallenge string) string {
@@ -215,6 +227,78 @@ func (authorizer *fakeAuthorizer) recordedChallenges() []string {
 	authorizer.mu.Lock()
 	defer authorizer.mu.Unlock()
 	return append([]string{}, authorizer.challenges...)
+}
+
+// usageAnswer is one scripted usage-probe answer.
+type usageAnswer struct {
+	usage domain.Usage
+	err   error
+}
+
+// FetchUsage records the pair the service probed with and answers from
+// the script, the standing result, or the park. The park honours its
+// ctx, so a caller that cancels mid-probe gets the wrapped cancellation
+// the real adapter would return.
+func (authorizer *fakeAuthorizer) FetchUsage(ctx context.Context, accessToken, accountID string) (domain.Usage, error) {
+	authorizer.mu.Lock()
+	authorizer.usageCalls++
+	authorizer.usageTokens = append(authorizer.usageTokens, accessToken)
+	authorizer.usageIDs = append(authorizer.usageIDs, accountID)
+	if len(authorizer.usageScript) > 0 {
+		answer := authorizer.usageScript[0]
+		authorizer.usageScript = authorizer.usageScript[1:]
+		authorizer.usage, authorizer.usageErr = answer.usage, answer.err
+	}
+	block := authorizer.usageBlock
+	usage := authorizer.usage
+	err := authorizer.usageErr
+	authorizer.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return domain.Usage{}, fmt.Errorf("usage probe: %w", ctx.Err())
+		}
+	}
+	if err != nil {
+		return domain.Usage{}, err
+	}
+	return usage, nil
+}
+
+// setUsageResult swaps the standing FetchUsage answer.
+func (authorizer *fakeAuthorizer) setUsageResult(usage domain.Usage, err error) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.usage, authorizer.usageErr = usage, err
+}
+
+// setUsageScript installs a scripted FetchUsage answer queue.
+func (authorizer *fakeAuthorizer) setUsageScript(script []usageAnswer) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.usageScript = script
+}
+
+// setUsageBlock installs (nil removes) the park a FetchUsage call waits on.
+func (authorizer *fakeAuthorizer) setUsageBlock(block chan struct{}) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	authorizer.usageBlock = block
+}
+
+// usageProbeCount reports how many probes the service has issued.
+func (authorizer *fakeAuthorizer) usageProbeCount() int {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return authorizer.usageCalls
+}
+
+// usageSeen reports the access tokens and account ids the service probed with.
+func (authorizer *fakeAuthorizer) usageSeen() (tokens, ids []string) {
+	authorizer.mu.Lock()
+	defer authorizer.mu.Unlock()
+	return append([]string{}, authorizer.usageTokens...), append([]string{}, authorizer.usageIDs...)
 }
 
 // RequestDeviceUserCode answers the device flow's first hop. The default
@@ -1346,5 +1430,262 @@ func TestAnAcquireSurfacesTheSaveErrorAndServesTheRotationAfter(t *testing.T) {
 	}
 	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
 		t.Fatalf("Refresh called %d times, want 1: the in-memory rotation must be reused", len(refreshes))
+	}
+}
+
+// sampleUsage is one full usage answer: a named plan, both windows
+// present, with numbers chosen to exercise the normalization's clamps
+// and roundings rather than the identity mapping.
+func sampleUsage() domain.Usage {
+	return domain.Usage{
+		PlanType: "plus",
+		Primary: domain.QuotaWindow{
+			Present:          true,
+			RemainingPercent: 40,
+			WindowMinutes:    300,
+			ResetAt:          time.Unix(1_800_000_000, 0).UTC(),
+		},
+		Secondary: domain.QuotaWindow{
+			Present:          true,
+			RemainingPercent: 75,
+			WindowMinutes:    10080,
+			ResetAt:          time.Unix(1_800_060_000, 0).UTC(),
+		},
+	}
+}
+
+// TestRefreshQuotaReportsTheAccountWindows probes the happy path end to
+// end: the probe carries the live access token and the account id, the
+// snapshot gets the fake clock's time, and no OnChanged event fires —
+// the quota card is a pull, and Snapshot listeners are not its audience.
+func TestRefreshQuotaReportsTheAccountWindows(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageResult(sampleUsage(), nil)
+	env.clock.advance(time.Hour)
+	signInEvents := len(env.events.snapshots())
+
+	snapshot := env.service.RefreshQuota(context.Background())
+	if snapshot.Err != "" {
+		t.Fatalf("RefreshQuota() Err = %q, want none", snapshot.Err)
+	}
+	if snapshot.FetchedAt != env.clock.Now().Unix() {
+		t.Fatalf("FetchedAt = %d, want the fake clock's now %d", snapshot.FetchedAt, env.clock.Now().Unix())
+	}
+	want := sampleUsage()
+	if snapshot.Usage != want {
+		t.Fatalf("Usage = %+v, want %+v", snapshot.Usage, want)
+	}
+
+	tokens, ids := env.authorizer.usageSeen()
+	if len(tokens) != 1 || tokens[0] != "access-user@example.com" {
+		t.Fatalf("FetchUsage saw tokens %v, want exactly the live access token", tokens)
+	}
+	if len(ids) != 1 || ids[0] != "account-1" {
+		t.Fatalf("FetchUsage saw account ids %v, want the signed-in account id", ids)
+	}
+	if events := env.events.snapshots(); len(events) != signInEvents {
+		t.Fatalf("OnChanged fired %d more times, want 0: a quota probe is not a session change", len(events)-signInEvents)
+	}
+}
+
+// TestAFailedQuotaProbeKeepsTheLastGoodUsage pins the stale-card
+// contract: a probe that fails reports the failure text and keeps both
+// the previous windows and their fetch time, so the card degrades to
+// "stale" instead of blanking.
+func TestAFailedQuotaProbeKeepsTheLastGoodUsage(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageResult(sampleUsage(), nil)
+	first := env.service.RefreshQuota(context.Background())
+
+	env.authorizer.setUsageResult(domain.Usage{}, errors.New("codex oauth usage probe failed: http 503"))
+	second := env.service.RefreshQuota(context.Background())
+	if second.Err != "codex oauth usage probe failed: http 503" {
+		t.Fatalf("second RefreshQuota() Err = %q, want the probe failure verbatim", second.Err)
+	}
+	if second.Usage != first.Usage {
+		t.Fatalf("second Usage = %+v, want the last good %+v", second.Usage, first.Usage)
+	}
+	if second.FetchedAt != first.FetchedAt {
+		t.Fatalf("second FetchedAt = %d, want the last good %d", second.FetchedAt, first.FetchedAt)
+	}
+}
+
+// TestARejectedQuotaAccessTokenIsRotatedAndProbedOnceMore walks the
+// 401 protocol: the first probe is rejected, the token is rotated
+// through the ordinary refresh path, and the retry succeeds. A probe is
+// on-demand, so it earns exactly one rotation — not the acquire path's
+// full budget.
+func TestARejectedQuotaAccessTokenIsRotatedAndProbedOnceMore(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageScript([]usageAnswer{
+		{err: ErrUsageUnauthorized},
+		{usage: sampleUsage()},
+	})
+	env.authorizer.setRefreshResult(domain.Session{
+		AccessToken:  "rotated-access",
+		RefreshToken: "rotated-refresh",
+		AccessExpiry: time.Now().Add(time.Hour),
+	}, nil)
+
+	snapshot := env.service.RefreshQuota(context.Background())
+	if snapshot.Err != "" {
+		t.Fatalf("RefreshQuota() Err = %q, want none: the rotated probe must settle the card", snapshot.Err)
+	}
+	if snapshot.Usage != sampleUsage() {
+		t.Fatalf("Usage = %+v, want the retried probe's answer", snapshot.Usage)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
+		t.Fatalf("Refresh called %d times, want 1 rotation", len(refreshes))
+	}
+	tokens, _ := env.authorizer.usageSeen()
+	if len(tokens) != 2 {
+		t.Fatalf("FetchUsage saw %d probes, want 2 (reject, retry)", len(tokens))
+	} else if tokens[1] != "rotated-access" {
+		t.Fatalf("retry probed with %q, want the rotated access token", tokens[1])
+	}
+}
+
+// A second rejection after rotation must surface as the reported error
+// rather than a third probe.
+func TestAQuotaProbeRejectedTwiceReportsTheRejection(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageScript([]usageAnswer{
+		{err: ErrUsageUnauthorized},
+		{err: fmt.Errorf("codex oauth usage probe failed: http 401: %w", ErrUsageUnauthorized)},
+	})
+
+	snapshot := env.service.RefreshQuota(context.Background())
+	if !strings.Contains(snapshot.Err, ErrUsageUnauthorized.Error()) {
+		t.Fatalf("RefreshQuota() Err = %q, want the wrapped unauthorized rejection", snapshot.Err)
+	}
+	if count := env.authorizer.usageProbeCount(); count != 2 {
+		t.Fatalf("usage probes = %d, want 2: one rejection, one retry", count)
+	}
+}
+
+// TestRefreshQuotaWithoutASignedInAccountReportsNotSignedIn pins the
+// signed-out copy: no session means no probe at all and the not-signed-in
+// text the card can act on.
+func TestRefreshQuotaWithoutASignedInAccountReportsNotSignedIn(t *testing.T) {
+	env := newTestEnv(t)
+
+	snapshot := env.service.RefreshQuota(context.Background())
+	if snapshot.Err != errNotSignedIn.Error() {
+		t.Fatalf("RefreshQuota() Err = %q, want %q", snapshot.Err, errNotSignedIn.Error())
+	}
+	if count := env.authorizer.usageProbeCount(); count != 0 {
+		t.Fatalf("usage probes = %d, want 0: nothing to probe without a session", count)
+	}
+}
+
+// TestConcurrentQuotaRefreshesShareOneProbe pins the coalescing: two
+// callers racing while one probe is in flight produce exactly one
+// request, and both receive the winner's settled answer.
+func TestConcurrentQuotaRefreshesShareOneProbe(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageResult(sampleUsage(), nil)
+	block := make(chan struct{})
+	env.authorizer.setUsageBlock(block)
+
+	results := make(chan QuotaSnapshot, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- env.service.RefreshQuota(context.Background()) }()
+	}
+	waitFor(t, "the winner's probe to start", func() bool {
+		return env.authorizer.usageProbeCount() == 1
+	})
+	close(block)
+
+	first, second := <-results, <-results
+	for _, snapshot := range []QuotaSnapshot{first, second} {
+		if snapshot.Err != "" {
+			t.Fatalf("concurrent RefreshQuota() Err = %q, want none", snapshot.Err)
+		}
+		if snapshot.Usage != sampleUsage() {
+			t.Fatalf("concurrent RefreshQuota() Usage = %+v, want the shared answer", snapshot.Usage)
+		}
+	}
+	if count := env.authorizer.usageProbeCount(); count != 1 {
+		t.Fatalf("usage probes = %d, want 1: the waiter must share the winner's probe", count)
+	}
+}
+
+// TestACancelledQuotaProbeRecordsNothing pins the cancelled-winner rule:
+// a probe whose caller walked away records neither success, failure nor
+// the counter bump — the next interested caller probes afresh — and
+// nothing leaks into OnChanged.
+func TestACancelledQuotaProbeRecordsNothing(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageResult(sampleUsage(), nil)
+	block := make(chan struct{})
+	env.authorizer.setUsageBlock(block)
+	signInEvents := len(env.events.snapshots())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan QuotaSnapshot, 1)
+	go func() { done <- env.service.RefreshQuota(ctx) }()
+	waitFor(t, "the cancelled probe to start", func() bool {
+		return env.authorizer.usageProbeCount() == 1
+	})
+	cancel()
+	snapshot := <-done
+	if snapshot.FetchedAt != 0 || snapshot.Err != "" {
+		t.Fatalf("cancelled RefreshQuota() = %+v, want the untouched zero snapshot", snapshot)
+	}
+
+	// The counter never moved, so a later caller still probes — with the
+	// park lifted, the fresh caller must be served a real answer.
+	env.authorizer.setUsageBlock(nil)
+	after := env.service.RefreshQuota(context.Background())
+	if after.Err != "" || after.Usage != sampleUsage() {
+		t.Fatalf("RefreshQuota() after a cancelled probe = %+v, want a fresh successful probe", after)
+	}
+	if count := env.authorizer.usageProbeCount(); count != 2 {
+		t.Fatalf("usage probes = %d, want 2: the cancelled winner must not consume the probe", count)
+	}
+	if events := env.events.snapshots(); len(events) != signInEvents {
+		t.Fatalf("OnChanged fired %d more times, want 0", len(events)-signInEvents)
+	}
+}
+
+// TestAQuotaCallerThatStopsWaitingGetsTheLastSettledAnswer pins the
+// waiting-caller rule: a caller whose ctx dies while queued on the gate
+// never takes it, gets the previously settled answer, and does not
+// disturb the winner's probe.
+func TestAQuotaCallerThatStopsWaitingGetsTheLastSettledAnswer(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+	env.authorizer.setUsageResult(sampleUsage(), nil)
+	block := make(chan struct{})
+	env.authorizer.setUsageBlock(block)
+
+	winnerDone := make(chan QuotaSnapshot, 1)
+	go func() { winnerDone <- env.service.RefreshQuota(context.Background()) }()
+	waitFor(t, "the winner's probe to start", func() bool {
+		return env.authorizer.usageProbeCount() == 1
+	})
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waiterDone := make(chan QuotaSnapshot, 1)
+	go func() { waiterDone <- env.service.RefreshQuota(waiterCtx) }()
+	cancelWaiter()
+	waiter := <-waiterDone
+	if waiter.FetchedAt != 0 {
+		t.Fatalf("waiting caller snapshot = %+v, want the previously settled zero snapshot", waiter)
+	}
+
+	close(block)
+	winner := <-winnerDone
+	if winner.Err != "" || winner.Usage != sampleUsage() {
+		t.Fatalf("winner snapshot = %+v, want the successful probe", winner)
+	}
+	if count := env.authorizer.usageProbeCount(); count != 1 {
+		t.Fatalf("usage probes = %d, want 1: the departing waiter must not have probed", count)
 	}
 }

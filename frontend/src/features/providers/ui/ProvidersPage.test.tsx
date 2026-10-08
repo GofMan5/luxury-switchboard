@@ -93,6 +93,9 @@ const signedIn: CodexModelState = {
   deviceVerificationUrl: '',
   importedFrom: '',
   logoutError: '',
+  quota: null,
+  quotaPending: false,
+  quotaError: '',
 }
 
 // A success that nobody pressed Done for: the sticky phase right after a

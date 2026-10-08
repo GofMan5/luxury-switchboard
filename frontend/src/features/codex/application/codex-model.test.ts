@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
-import type { CodexAccount, CodexLoginStatus } from '../domain/codex'
+import type { CodexAccount, CodexLoginStatus, CodexQuotaResult } from '../domain/codex'
 import type { CodexDeviceLoginStart, CodexImportResult, CodexPort } from './codex-port'
 import { CodexModel } from './codex-model'
 
@@ -37,6 +37,13 @@ class FakeCodexPort implements CodexPort {
   importJsonError: Error | null = null
   importFilesError: Error | null = null
   importDelay: Promise<void> | null = null
+
+  // Usage probe: what codex.quota answers, and how it can fail.
+  quotaResult: CodexQuotaResult = { ...signedOut, quota: undefined, error: 'codex is not signed in' }
+  quotaError: Error | null = null
+  quotaCalls = 0
+  /** When set, quota stays pending until the test resolves it. */
+  quotaDelay: Promise<void> | null = null
 
   async loginStart(signal?: AbortSignal): Promise<{ authorizeUrl: string }> {
     this.loginStartCalls += 1
@@ -76,6 +83,13 @@ class FakeCodexPort implements CodexPort {
   async logout(): Promise<void> {
     this.logoutCalls += 1
     if (this.logoutError) throw this.logoutError
+  }
+
+  async quota(): Promise<CodexQuotaResult> {
+    this.quotaCalls += 1
+    await this.quotaDelay
+    if (this.quotaError) throw this.quotaError
+    return this.quotaResult
   }
 
   async openAuthorizeUrl(url: string): Promise<void> {
@@ -818,6 +832,109 @@ describe('CodexModel', () => {
     expect(model.snapshot()).toMatchObject({ loginPhase: 'success', importedFrom: 'auth.json' })
     model.acknowledgeOutcome()
     expect(model.snapshot()).toMatchObject({ loginPhase: 'idle', activeMethod: null, importedFrom: '' })
+    model.dispose()
+  })
+
+  it('settles a successful usage probe, with the pend visible while it flies', async () => {
+    const port = new FakeCodexPort()
+    port.account = signedIn
+    port.quotaResult = {
+      state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex-1',
+      quota: {
+        fetchedAt: 1_789_000_000, planType: 'Pro',
+        primary: { present: true, remainingPercent: 78, windowMinutes: 300, resetAt: 1_789_003_120 },
+        secondary: { present: true, remainingPercent: 41, windowMinutes: 10_080, resetAt: 1_789_172_800 },
+      },
+    }
+    let release!: (value: void) => void
+    port.quotaDelay = new Promise((resolve) => { release = resolve })
+    const model = new CodexModel(port)
+    await model.connect()
+    const probing = model.refreshQuota()
+    expect(model.snapshot().quotaPending).toBe(true)
+    release()
+    await probing
+    expect(model.snapshot()).toMatchObject({
+      quotaPending: false,
+      quotaError: '',
+      quota: { fetchedAt: 1_789_000_000, planType: 'Pro', primary: { remainingPercent: 78, windowMinutes: 300 } },
+    })
+    model.dispose()
+  })
+
+  it('keeps the last good windows beside a failed probe, instead of wiping the card', async () => {
+    const port = new FakeCodexPort()
+    port.account = signedIn
+    port.quotaResult = {
+      state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex-1',
+      quota: { fetchedAt: 100, planType: 'Pro', primary: { present: true, remainingPercent: 60, windowMinutes: 300, resetAt: 400 }, secondary: { present: false, remainingPercent: 100 } },
+    }
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.refreshQuota()
+    port.quotaResult = {
+      state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex-1',
+      error: 'codex oauth usage probe failed: http 503',
+    }
+    await model.refreshQuota()
+    expect(model.snapshot()).toMatchObject({
+      quotaPending: false,
+      quotaError: 'The Codex usage could not be loaded.',
+      quota: { fetchedAt: 100, primary: { remainingPercent: 60 } },
+    })
+    model.dispose()
+  })
+
+  it('maps each backend quota refusal to the sentence the card shows', async () => {
+    const cases: readonly (readonly [string, string])[] = [
+      ['codex is not signed in', 'Codex is no longer signed in. Sign in again from the Providers page.'],
+      ['codex session needs sign-in', 'The Codex session expired. Sign in again from the Providers page.'],
+      ['codex oauth usage probe failed: http 401: codex usage probe was unauthorized', 'The account rejected the usage request. Sign in again from the Providers page.'],
+      ['codex oauth usage probe failed: context deadline exceeded', 'The usage request timed out. Try again.'],
+    ]
+    for (const [message, copy] of cases) {
+      const port = new FakeCodexPort()
+      port.account = signedIn
+      port.quotaResult = { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex-1', error: message }
+      const model = new CodexModel(port)
+      await model.connect()
+      await model.refreshQuota()
+      expect(model.snapshot().quotaError, `copy for ${message}`).toBe(copy)
+      expect(model.snapshot().quota).toBeNull()
+      model.dispose()
+    }
+  })
+
+  it('refuses a second probe while one is already in flight', async () => {
+    const port = new FakeCodexPort()
+    let release!: (value: void) => void
+    port.quotaDelay = new Promise((resolve) => { release = resolve })
+    const model = new CodexModel(port)
+    await model.connect()
+    const probing = model.refreshQuota()
+    await model.refreshQuota()
+    release()
+    await probing
+    expect(port.quotaCalls).toBe(1)
+    expect(model.snapshot().quotaPending).toBe(false)
+    model.dispose()
+  })
+
+  it('an ambient refresh and a logout leave the usage card untouched', async () => {
+    const port = new FakeCodexPort()
+    port.account = signedIn
+    port.quotaResult = {
+      state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex-1',
+      error: 'codex oauth usage probe failed: http 503',
+    }
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.refreshQuota()
+    expect(model.snapshot().quotaError).toBe('The Codex usage could not be loaded.')
+    await model.refresh()
+    port.account = signedOut
+    await model.logout()
+    expect(model.snapshot()).toMatchObject({ quotaError: 'The Codex usage could not be loaded.', quota: null })
     model.dispose()
   })
 

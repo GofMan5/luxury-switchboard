@@ -1,4 +1,4 @@
-import type { CodexAccount, CodexLoginStatus } from '../domain/codex'
+import type { CodexAccount, CodexLoginStatus, CodexQuotaResult } from '../domain/codex'
 
 /** Result of `codex.login.device.start`: what the user must enter, and where. */
 export interface CodexDeviceLoginStart {
@@ -19,6 +19,9 @@ export interface CodexPort {
   importJson(text: string, signal?: AbortSignal): Promise<CodexImportResult>
   importFiles(paths: readonly string[], signal?: AbortSignal): Promise<CodexImportResult>
   status(signal?: AbortSignal): Promise<CodexAccount>
+  /** Probes the account's usage windows; a failed probe is a result field,
+   * not a rejection — the last good windows ride the same answer. */
+  quota(signal?: AbortSignal): Promise<CodexQuotaResult>
   logout(signal?: AbortSignal): Promise<void>
   /** Opens the authorize URL in the default browser after the https check. */
   openAuthorizeUrl(url: string): Promise<void>

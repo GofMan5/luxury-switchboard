@@ -14,6 +14,7 @@ import (
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
 // codexService is the narrow slice of the application service this adapter
@@ -30,6 +31,7 @@ type codexService interface {
 	ImportFiles(ctx context.Context, paths []string) (application.ImportResult, error)
 	Status() application.Status
 	Logout(ctx context.Context) error
+	RefreshQuota(ctx context.Context) application.QuotaSnapshot
 	OnChanged(func(application.Snapshot))
 }
 
@@ -86,6 +88,44 @@ type ImportResult struct {
 	AccountID    string `json:"accountId"`
 	ProviderID   string `json:"providerId"`
 	ImportedFrom string `json:"importedFrom,omitempty"`
+}
+
+// QuotaResult is the answer the keys page renders in place of a key
+// table when the codex preset is selected: the live account labels plus
+// the last settled usage probe. Quota is omitted until some probe has
+// settled, so a first failure reads as "nothing known yet" rather than
+// as empty meters; Error is omitted while empty for the same reason —
+// a probe's outcome is data for the card, not a protocol error, because
+// a failed probe deliberately keeps the last good windows.
+type QuotaResult struct {
+	State      string       `json:"state"`
+	Email      string       `json:"email"`
+	Plan       string       `json:"plan"`
+	AccountID  string       `json:"accountId"`
+	ProviderID string       `json:"providerId"`
+	Quota      *QuotaReport `json:"quota,omitempty"`
+	Error      string       `json:"error,omitempty"`
+}
+
+// QuotaReport is one settled usage probe: when it landed and what it
+// said. PlanType is the plan the usage endpoint itself named, omitted
+// while empty — the account's id-token plan stays the primary label.
+type QuotaReport struct {
+	FetchedAt int64             `json:"fetchedAt"`
+	PlanType  string            `json:"planType,omitempty"`
+	Primary   QuotaWindowResult `json:"primary"`
+	Secondary QuotaWindowResult `json:"secondary"`
+}
+
+// QuotaWindowResult is one meter's numbers on the wire. WindowMinutes
+// and ResetAt are omitted when the endpoint did not report them —
+// absence reads as "unknown", not as a zero — and ResetAt is epoch
+// seconds, the same unit the endpoint speaks.
+type QuotaWindowResult struct {
+	Present          bool  `json:"present"`
+	RemainingPercent int   `json:"remainingPercent"`
+	WindowMinutes    int   `json:"windowMinutes,omitempty"`
+	ResetAt          int64 `json:"resetAt,omitempty"`
 }
 
 // Register wires the codex commands onto the protocol server and
@@ -179,6 +219,18 @@ func Register(server *platform.Server, service codexService) {
 			AccountID:  status.AccountID,
 			ProviderID: status.ProviderID,
 		}, nil
+	})
+	server.Handle("codex.quota", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		if err := decodeCommand(payload); err != nil {
+			return nil, err
+		}
+		// The probe rides the command's context, so a shell that aborts
+		// the frame also aborts the HTTP call it was waiting on. The
+		// answer pushes nowhere: the caller is the only surface that
+		// asked, and if the probe rotated the access token the service's
+		// own change feed — the one subscription below — already pushed
+		// codex.changed for it.
+		return quotaResult(service.Status(), service.RefreshQuota(ctx)), nil
 	})
 	server.Handle("codex.logout", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		if err := decodeCommand(payload); err != nil {
@@ -299,6 +351,47 @@ func importResult(result application.ImportResult) ImportResult {
 		ProviderID:   result.Status.ProviderID,
 		ImportedFrom: result.ImportedFrom,
 	}
+}
+
+// quotaResult lifts the account labels and one settled probe onto the
+// wire. A zero FetchedAt — no probe has settled — keeps the quota block
+// absent, and the probe's failure text travels as a result field the
+// card can act on, never as a protocol error.
+func quotaResult(status application.Status, snapshot application.QuotaSnapshot) QuotaResult {
+	result := QuotaResult{
+		State:      string(status.State),
+		Email:      status.Email,
+		Plan:       status.Plan,
+		AccountID:  status.AccountID,
+		ProviderID: status.ProviderID,
+		Error:      snapshot.Err,
+	}
+	if snapshot.FetchedAt != 0 {
+		result.Quota = &QuotaReport{
+			FetchedAt: snapshot.FetchedAt,
+			PlanType:  snapshot.Usage.PlanType,
+			Primary:   quotaWindowResult(snapshot.Usage.Primary),
+			Secondary: quotaWindowResult(snapshot.Usage.Secondary),
+		}
+	}
+	return result
+}
+
+// quotaWindowResult keeps only what a meter can draw: the presence, the
+// remaining share, and the width and deadline when the endpoint named
+// them. Percentages and epochs carry no secrets, so they cross as-is.
+func quotaWindowResult(window domain.QuotaWindow) QuotaWindowResult {
+	result := QuotaWindowResult{
+		Present:          window.Present,
+		RemainingPercent: window.RemainingPercent,
+	}
+	if window.WindowMinutes > 0 {
+		result.WindowMinutes = window.WindowMinutes
+	}
+	if !window.ResetAt.IsZero() {
+		result.ResetAt = window.ResetAt.Unix()
+	}
+	return result
 }
 
 // changedPayload flattens a snapshot for the codex.changed push. The map

@@ -1,0 +1,64 @@
+/* The accounts list rides the page's scroll area: rows carry their own
+ * padding, hairline separators echo the keys table it replaces, and nothing
+ * here scrolls on its own. */
+
+.pane { display: grid; min-width: 0; }
+
+.account { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 14px 20px; }
+.accountText { display: grid; flex: 1 1 220px; gap: 3px; min-width: 0; }
+.email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.accountText small { color: var(--text-muted); font-size: 11.5px; line-height: 1.4; }
+
+/* A failed probe keeps the last good rows and adds a reason — a red bar, not
+ * a wiped list; the tone is text-level danger like every error in the app. */
+.error { margin: 0; border-bottom: 1px solid color-mix(in srgb, var(--status-danger) 30%, var(--border-subtle)); padding: 11px 20px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 6%, var(--bg-canvas)); font-size: 12.5px; line-height: 1.5; }
+
+.windows { display: grid; margin: 0; padding: 0; list-style: none; }
+
+/* One window per row: its name, the meter, what is left, when it resets. The
+ * meter fills on remaining — a full bar is a healthy window. */
+.window {
+  display: grid;
+  grid-template-columns: 118px minmax(140px, 1fr) 84px auto;
+  grid-template-areas: 'title meter remaining resets';
+  align-items: center;
+  gap: 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 13px 20px;
+}
+.windowTitle { grid-area: title; color: var(--text-primary); font-size: 12.5px; font-weight: 640; }
+
+.meter { grid-area: meter; overflow: hidden; height: 6px; border-radius: 3px; background: var(--bg-raised); }
+.meterFill { height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--status-info) 62%, var(--bg-surface)); transition: width var(--motion-standard) var(--ease-standard); }
+.meterFill[data-tone='warning'] { background: color-mix(in srgb, var(--status-warning) 62%, var(--bg-surface)); }
+.meterFill[data-tone='danger'] { background: color-mix(in srgb, var(--status-danger) 70%, var(--bg-surface)); }
+
+.remaining { grid-area: remaining; color: var(--text-secondary); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
+.remaining[data-tone='warning'] { color: var(--status-warning); }
+.remaining[data-tone='danger'] { color: var(--text-danger); }
+
+/* Absolute local stamps: the day is part of the fact, so a window that
+ * resets on another day names it instead of implying "today". */
+.resets { grid-area: resets; color: var(--text-muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.stamp { margin: 0; padding: 10px 20px; color: var(--text-muted); font-size: 11.5px; }
+.hint { margin: 0; padding: 16px 20px; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+
+/* Compact: the row folds to two lines — name with its numbers, meter across
+ * the full width beneath, reset stamp on its own line under the meter. */
+@media (max-width: 959px) {
+  .window {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'title remaining'
+      'meter meter'
+      'resets resets';
+    row-gap: 7px;
+  }
+}
+
+.spinning { animation: icon-spin 1s linear infinite; }
+[data-animations='off'] .spinning { animation: none; }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+
+@keyframes icon-spin { to { transform: rotate(360deg); } }

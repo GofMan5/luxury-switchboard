@@ -70,6 +70,9 @@ function stateAt(overrides: Partial<CodexModelState>): CodexModelState {
     deviceVerificationUrl: '',
     importedFrom: '',
     logoutError: '',
+    quota: null,
+    quotaPending: false,
+    quotaError: '',
     ...overrides,
   }
 }

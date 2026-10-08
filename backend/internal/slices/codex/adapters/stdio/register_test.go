@@ -10,10 +10,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 	codexstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/adapters/stdio"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
 // codexService mirrors the adapter's consumer interface so the harness can
@@ -28,6 +30,7 @@ type codexService interface {
 	ImportFiles(ctx context.Context, paths []string) (application.ImportResult, error)
 	Status() application.Status
 	Logout(ctx context.Context) error
+	RefreshQuota(ctx context.Context) application.QuotaSnapshot
 	OnChanged(func(application.Snapshot))
 }
 
@@ -50,6 +53,7 @@ type fakeService struct {
 	importFilesErr  error
 	importFilesRes  application.ImportResult
 	importPathsFail bool
+	quotaSnapshot   application.QuotaSnapshot
 
 	mu            sync.Mutex
 	cancelCalls   int
@@ -57,6 +61,8 @@ type fakeService struct {
 	listeners     []func(application.Snapshot)
 	importTexts   []string
 	importPaths   [][]string
+	quotaProbes   int
+	quotaCtxs     []context.Context
 }
 
 func (service *fakeService) LoginStart() (string, error) {
@@ -114,6 +120,17 @@ func (service *fakeService) Logout(_ context.Context) error {
 	return service.logoutErr
 }
 
+// RefreshQuota records the context it was handed — the one assertion the
+// harness can make about cancellation riding the command — and answers
+// with the canned snapshot, exactly as the real service would.
+func (service *fakeService) RefreshQuota(ctx context.Context) application.QuotaSnapshot {
+	service.mu.Lock()
+	service.quotaProbes++
+	service.quotaCtxs = append(service.quotaCtxs, ctx)
+	service.mu.Unlock()
+	return service.quotaSnapshot
+}
+
 func (service *fakeService) OnChanged(listener func(application.Snapshot)) {
 	service.mu.Lock()
 	service.subscriptions++
@@ -131,6 +148,16 @@ func (service *fakeService) subscriptionCount() int {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	return service.subscriptions
+}
+
+// quotaProbeCtxs returns the contexts the quota handler passed down, in
+// command order, so a test can assert the probe rode the command's own
+// context instead of a background one the shell cannot cancel.
+func (service *fakeService) quotaProbeCtxs(t *testing.T) []context.Context {
+	t.Helper()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return append([]context.Context(nil), service.quotaCtxs...)
 }
 
 // importedTexts returns the texts the handlers passed down, in command
@@ -421,6 +448,208 @@ func TestStatusCarriesEveryConnectionField(t *testing.T) {
 		if payload[field] != value {
 			t.Fatalf("status field %s = %#v, want %#v", field, payload[field], value)
 		}
+	}
+}
+
+// quotaWindowOf fetches one meter out of the quota report and keeps the
+// fatality at the field the test named.
+func quotaWindowOf(t *testing.T, report map[string]any, field string) map[string]any {
+	t.Helper()
+	window, ok := report[field].(map[string]any)
+	if !ok {
+		t.Fatalf("quota report field %s is not an object: %+v", field, report)
+	}
+	return window
+}
+
+// assertQuotaWindow pins one meter's exact shape: the fields the endpoint
+// reported, and no invented ones for the fields it did not.
+func assertQuotaWindow(t *testing.T, window map[string]any, present bool, remaining json.Number, extra map[string]json.Number) {
+	t.Helper()
+	if window["present"] != present {
+		t.Fatalf("window present = %#v, want %v", window["present"], present)
+	}
+	if window["remainingPercent"] != remaining {
+		t.Fatalf("window remainingPercent = %#v, want %s", window["remainingPercent"], remaining.String())
+	}
+	if len(window) != 2+len(extra) {
+		t.Fatalf("window answered %d fields, want %d: %+v", len(window), 2+len(extra), window)
+	}
+	for field, value := range extra {
+		if window[field] != value {
+			t.Fatalf("window field %s = %#v, want %s", field, window[field], value.String())
+		}
+	}
+}
+
+func TestQuotaAnswersTheAccountAndBothMeters(t *testing.T) {
+	service := &fakeService{
+		status: application.Status{
+			State:      application.StateSignedIn,
+			Email:      "dev@example.com",
+			Plan:       "pro",
+			AccountID:  "acc_7",
+			ProviderID: "codex",
+		},
+		quotaSnapshot: application.QuotaSnapshot{
+			FetchedAt: 1_800_000_000,
+			Usage: domain.Usage{
+				PlanType: "plus",
+				Primary: domain.QuotaWindow{
+					Present:          true,
+					RemainingPercent: 38,
+					WindowMinutes:    5,
+					ResetAt:          time.Unix(1_800_001_800, 0).UTC(),
+				},
+				Secondary: domain.QuotaWindow{
+					Present:          true,
+					RemainingPercent: 95,
+					WindowMinutes:    10_080,
+					ResetAt:          time.Unix(1_800_086_000, 0).UTC(),
+				},
+			},
+		},
+	}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.quota","payload":{}`)[0])
+
+	want := map[string]any{
+		"state":      "signed_in",
+		"email":      "dev@example.com",
+		"plan":       "pro",
+		"accountId":  "acc_7",
+		"providerId": "codex",
+	}
+	if _, present := payload["error"]; present {
+		t.Fatalf("a settled probe still reported an error: %+v", payload)
+	}
+	report, ok := payload["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("quota command answered without a quota report: %+v", payload)
+	}
+	if len(payload) != len(want)+1 {
+		t.Fatalf("quota answered %d fields, want %d plus the report: %+v", len(payload), len(want), payload)
+	}
+	for field, value := range want {
+		if payload[field] != value {
+			t.Fatalf("quota field %s = %#v, want %#v", field, payload[field], value)
+		}
+	}
+	if report["fetchedAt"] != json.Number("1800000000") {
+		t.Fatalf("quota fetchedAt = %#v, want the probe's epoch", report["fetchedAt"])
+	}
+	if report["planType"] != "plus" {
+		t.Fatalf("quota planType = %#v, want plus", report["planType"])
+	}
+	assertQuotaWindow(t, quotaWindowOf(t, report, "primary"), true, json.Number("38"), map[string]json.Number{
+		"windowMinutes": json.Number("5"),
+		"resetAt":       json.Number("1800001800"),
+	})
+	assertQuotaWindow(t, quotaWindowOf(t, report, "secondary"), true, json.Number("95"), map[string]json.Number{
+		"windowMinutes": json.Number("10080"),
+		"resetAt":       json.Number("1800086000"),
+	})
+	// The probe ran once and rode the command's own context, so a shell
+	// that aborts the frame also aborts the HTTP call behind it.
+	ctxs := service.quotaProbeCtxs(t)
+	if len(ctxs) != 1 {
+		t.Fatalf("quota command probed %d times, want 1", len(ctxs))
+	}
+	if ctxs[0] == context.Background() {
+		t.Fatal("quota probe ran on context.Background, want the command's cancellable context")
+	}
+}
+
+// TestQuotaOmitsTheMeterTheEndpointDidNotReport pins absence over
+// invention: a window the endpoint never named is a meter without width
+// or deadline, never a zero-minute window that resets at the epoch.
+func TestQuotaOmitsTheMeterTheEndpointDidNotReport(t *testing.T) {
+	service := &fakeService{
+		quotaSnapshot: application.QuotaSnapshot{
+			FetchedAt: 1_800_000_000,
+			Usage: domain.Usage{
+				Primary:   domain.QuotaWindow{Present: true, RemainingPercent: 40},
+				Secondary: domain.QuotaWindow{Present: false, RemainingPercent: 100},
+			},
+		},
+	}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.quota"`)[0])
+
+	report, ok := payload["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("quota command answered without a quota report: %+v", payload)
+	}
+	if _, present := report["planType"]; present {
+		t.Fatalf("quota report invented a planType: %+v", report)
+	}
+	assertQuotaWindow(t, quotaWindowOf(t, report, "primary"), true, json.Number("40"), nil)
+	assertQuotaWindow(t, quotaWindowOf(t, report, "secondary"), false, json.Number("100"), nil)
+}
+
+// TestAFailedQuotaProbeKeepsTheLastGoodWindows pins the failure shape:
+// the probe's verdict travels as a result field the card can act on,
+// while the quota block still carries the last settled numbers — the
+// failed command is an answer, not a refusal.
+func TestAFailedQuotaProbeKeepsTheLastGoodWindows(t *testing.T) {
+	service := &fakeService{
+		quotaSnapshot: application.QuotaSnapshot{
+			FetchedAt: 1_800_000_000,
+			Usage: domain.Usage{
+				Primary: domain.QuotaWindow{Present: true, RemainingPercent: 12, WindowMinutes: 5},
+			},
+			Err: "codex oauth usage probe failed: http 503",
+		},
+	}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.quota"`)[0])
+
+	if payload["error"] != "codex oauth usage probe failed: http 503" {
+		t.Fatalf("quota error = %#v, want the probe's own text", payload["error"])
+	}
+	report, ok := payload["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("a failed probe dropped the last good windows: %+v", payload)
+	}
+	assertQuotaWindow(t, quotaWindowOf(t, report, "primary"), true, json.Number("12"), map[string]json.Number{
+		"windowMinutes": json.Number("5"),
+	})
+}
+
+// TestAQuotaCommandBeforeAnyProbeSettled pins the empty state: no quota
+// block at all — the card shows "nothing known yet", not empty meters —
+// while the account fields still tell it why there is nothing to show.
+func TestAQuotaCommandBeforeAnyProbeSettled(t *testing.T) {
+	service := &fakeService{
+		quotaSnapshot: application.QuotaSnapshot{Err: "codex is not signed in"},
+	}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.quota"`)[0])
+
+	if _, present := payload["quota"]; present {
+		t.Fatalf("quota command invented a report before any probe settled: %+v", payload)
+	}
+	if payload["error"] != "codex is not signed in" {
+		t.Fatalf("quota error = %#v, want the not-signed-in verdict", payload["error"])
+	}
+}
+
+// TestAQuotaCommandWithPayloadFieldsIsRefused extends the no-fields rule
+// to the new command: whatever a client puts in the frame gets the
+// standard refusal instead of being silently ignored.
+func TestAQuotaCommandWithPayloadFieldsIsRefused(t *testing.T) {
+	service := &fakeService{}
+
+	failure := failureOf(t, exchange(t, service, `"method":"codex.quota","payload":{"force":true}`)[0])
+
+	if failure["code"] != "invalid_payload" {
+		t.Fatalf("error code = %#v, want invalid_payload", failure["code"])
+	}
+	if failure["message"] != "codex command payload is invalid" {
+		t.Fatalf("error message = %#v, want the adapter's refusal text", failure["message"])
+	}
+	if ctxs := service.quotaProbeCtxs(t); len(ctxs) != 0 {
+		t.Fatalf("refused payload still probed %d times, want 0", len(ctxs))
 	}
 }
 

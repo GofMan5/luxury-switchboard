@@ -1,4 +1,4 @@
-import type { CodexAccount, CodexLoginStatus } from '../domain/codex'
+import type { CodexAccount, CodexLoginStatus, CodexQuotaReport } from '../domain/codex'
 import type { CodexImportResult, CodexPort } from './codex-port'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
@@ -24,6 +24,12 @@ export interface CodexModelState {
   readonly importedFrom: string
   /** Readable text when the last disconnect attempt failed. */
   readonly logoutError: string
+  /** The last settled usage probe; null until one has succeeded. */
+  readonly quota: CodexQuotaReport | null
+  /** True while a usage probe is in flight; disables the card's refresh. */
+  readonly quotaPending: boolean
+  /** Readable text when the last usage probe failed. */
+  readonly quotaError: string
 }
 
 const initialAccount: CodexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }
@@ -38,6 +44,9 @@ const initialState: CodexModelState = {
   deviceVerificationUrl: '',
   importedFrom: '',
   logoutError: '',
+  quota: null,
+  quotaPending: false,
+  quotaError: '',
 }
 
 const TIMEOUT_COPY = 'The control plane did not answer in time. Check that the relay is running, then try again.'
@@ -57,6 +66,11 @@ const REFRESH_TOKEN_REJECTED_COPY = 'The refresh token was rejected.'
 const NO_USABLE_FILES_COPY = 'None of the selected files contained usable Codex credentials.'
 const IMPORT_MULTIPLE_ACCOUNTS_COPY = 'The import contained multiple accounts; only one is supported.'
 const NO_CREDENTIALS_FOUND_COPY = 'No Codex credentials were found in the input.'
+const GENERIC_QUOTA_COPY = 'The Codex usage could not be loaded.'
+const QUOTA_NOT_SIGNED_IN_COPY = 'Codex is no longer signed in. Sign in again from the Providers page.'
+const QUOTA_SESSION_EXPIRED_COPY = 'The Codex session expired. Sign in again from the Providers page.'
+const QUOTA_UNAUTHORIZED_COPY = 'The account rejected the usage request. Sign in again from the Providers page.'
+const QUOTA_TIMED_OUT_COPY = 'The usage request timed out. Try again.'
 /** The exact sentence the backend refuses a disconnect with while Codex is the active route. */
 const ACTIVE_PROVIDER_ERROR = 'Codex is the active provider. Switch the active route away from Codex before disconnecting.'
 
@@ -93,6 +107,23 @@ function mapImportErrorString(value: string): string | null {
   if (value.includes('none of') && value.includes('files')) return NO_USABLE_FILES_COPY
   if (/found \d+ accounts/.test(value)) return IMPORT_MULTIPLE_ACCOUNTS_COPY
   if (value.includes('no codex credentials found')) return NO_CREDENTIALS_FOUND_COPY
+  return null
+}
+
+/**
+ * The quota counterpart: a failed probe is a result field the backend
+ * reports as status text, and each family it can produce is matched before
+ * the generic probe prefix — a deadline or an explicit rejection says more
+ * than "the probe failed", and the not-signed-in refusals are a session
+ * verdict, not a usage problem. Unknown messages return null so the
+ * caller's generic copy — never a raw backend string — is shown.
+ */
+function mapQuotaErrorString(value: string): string | null {
+  if (value === 'codex is not signed in') return QUOTA_NOT_SIGNED_IN_COPY
+  if (value === 'codex session needs sign-in') return QUOTA_SESSION_EXPIRED_COPY
+  if (value.includes('codex usage probe was unauthorized')) return QUOTA_UNAUTHORIZED_COPY
+  if (value.includes('deadline exceeded')) return QUOTA_TIMED_OUT_COPY
+  if (value.startsWith('codex oauth usage probe failed')) return GENERIC_QUOTA_COPY
   return null
 }
 
@@ -389,6 +420,34 @@ export class CodexModel {
     } catch (error) {
       this.#set({ ...this.#state, logoutError: readableError(error, GENERIC_LOGOUT_COPY) })
       return false
+    }
+  }
+
+  /**
+   * Probes the account's usage windows on demand — the quota card's own
+   * fetch, deliberately outside the ambient nudge refetch: pushes refetch
+   * account and login status, while usage is read when the card mounts,
+   * when its button is clicked and when the account state changes.
+   * A failed probe is a result field: the answer carries the last good
+   * windows alongside the error, so a failed refresh is a stale card with
+   * a reason, never a wiped one. Re-entrant calls are refused while one is
+   * in flight; the backend coalesces concurrent probes besides.
+   */
+  async refreshQuota(): Promise<void> {
+    if (this.#state.quotaPending) return
+    this.#set({ ...this.#state, quotaPending: true })
+    try {
+      const result = await this.#port.quota()
+      this.#set({
+        ...this.#state,
+        quotaPending: false,
+        quota: result.quota ?? this.#state.quota,
+        quotaError: result.error !== undefined
+          ? mapQuotaErrorString(result.error) ?? GENERIC_QUOTA_COPY
+          : '',
+      })
+    } catch (error) {
+      this.#set({ ...this.#state, quotaPending: false, quotaError: readableError(error, GENERIC_QUOTA_COPY, mapQuotaErrorString) })
     }
   }
 

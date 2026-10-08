@@ -199,6 +199,13 @@ type Authorizer interface {
 	// refresh token and id token on a response that only rotates the
 	// access token; the caller keeps the previous values.
 	Refresh(ctx context.Context, refreshToken string) (domain.Session, error)
+	// FetchUsage asks the ChatGPT backend's usage endpoint for the
+	// account's quota windows. accessToken is the bearer token;
+	// accountID scopes the answer to the account that owns it. A 401
+	// surfaces as ErrUsageUnauthorized so the caller can rotate the
+	// token and retry; every other failure is an ordinary error whose
+	// text names the status, never the body.
+	FetchUsage(ctx context.Context, accessToken, accountID string) (domain.Usage, error)
 }
 
 // RedirectServer owns the loopback listener (port 1455) the browser
@@ -266,6 +273,10 @@ const (
 	// keeps a poll running against a request the endpoint has already
 	// forgotten.
 	defaultDeviceLoginTimeout = 15 * time.Minute
+	// defaultQuotaTimeout bounds one usage probe. The card is rendered
+	// from the answer, so a hanging endpoint must not hold the caller
+	// hostage for as long as its socket lives.
+	defaultQuotaTimeout = 20 * time.Second
 )
 
 // The device poll's clamp bounds: the endpoint dictates the interval but
@@ -297,6 +308,11 @@ var (
 	// stores one codex session, and two flows racing for it would hand
 	// the UI two truths.
 	errLoginAlreadyInProgress = errors.New("codex login is already in progress")
+	// ErrUsageUnauthorized marks a usage probe the backend answered with
+	// 401: the access token was rejected, and the answer is a rotation
+	// plus one retry, not a new failure report. Public because the OAuth
+	// adapter wraps it with %w.
+	ErrUsageUnauthorized = errors.New("codex usage probe was unauthorized")
 )
 
 // loginFlowKind names which sign-in flow owns the current phase. The
@@ -315,11 +331,12 @@ const (
 // refresh and provider provisioning.
 //
 // mu guards every field it can reach — the login phase and its flow data,
-// the session, the status fields, the invalidation flag, the listener
-// slice and the loop-started flag. Adapter calls (store, authorizer,
-// redirects, provisioner), the login context's cancel func, and listener
-// delivery never happen under mu: a slow adapter must not block status
-// reads, and a listener may query the service right back.
+// the session, the status fields, the invalidation flag, the quota
+// snapshot and its probe counter, the listener slice and the loop-started
+// flag. Adapter calls (store, authorizer, redirects, provisioner), the
+// login context's cancel func, and listener delivery never happen under
+// mu: a slow adapter must not block status reads, and a listener may
+// query the service right back.
 //
 // refreshGate serializes refresh work and is always the outer lock: it is
 // taken around a refresh attempt and mu only inside it, never the other
@@ -329,6 +346,14 @@ const (
 // the gate to the winner instead of blocking a goroutine nobody is
 // waiting on — and the ticker's backoff sleeps run outside it, so a
 // retry cycle does not hold a caller hostage between attempts.
+//
+// quotaGate coalesces usage probes the same way and nests outside
+// refreshGate — a probe holds quotaGate across an acquire that may wait
+// for refreshGate, and nothing inside refreshGate ever asks for
+// quotaGate, so the nesting stays one-directional and cannot cycle. The
+// quota snapshot is deliberately not part of Snapshot: it is transient
+// on-demand state for the quota card, not login or connection state the
+// rest of the UI reacts to.
 type Service struct {
 	store       SessionStore
 	authorizer  Authorizer
@@ -365,6 +390,13 @@ type Service struct {
 	refreshRunning bool
 
 	refreshGate refreshGate
+	quotaGate   refreshGate
+
+	// quota is the last settled usage probe and quotaProbes counts
+	// settled probes; the counter, not a timestamp, is what tells a
+	// waiter that the answer it waited for already arrived.
+	quota       QuotaSnapshot
+	quotaProbes uint64
 
 	// loginTimeout, deviceLoginTimeout, refreshInterval and
 	// refreshBackoffs are the production cadences as overridable fields:
@@ -374,6 +406,7 @@ type Service struct {
 	deviceLoginTimeout time.Duration
 	refreshInterval    time.Duration
 	refreshBackoffs    []time.Duration
+	quotaTimeout       time.Duration
 }
 
 // NewService builds the service. now may be nil, which means time.Now.
@@ -394,6 +427,7 @@ func NewService(store SessionStore, authorizer Authorizer, redirects RedirectSer
 		deviceLoginTimeout: defaultDeviceLoginTimeout,
 		refreshInterval:    defaultRefreshInterval,
 		refreshBackoffs:    defaultRefreshBackoffs,
+		quotaTimeout:       defaultQuotaTimeout,
 	}
 }
 
@@ -1177,6 +1211,118 @@ func (service *Service) InvalidateAccessToken() {
 	service.mu.Unlock()
 }
 
+// QuotaSnapshot is the account's usage windows as the quota card draws
+// them: what the plan is, how full each window's meter is, and when they
+// reset. The probe's failure lives in the result rather than the error
+// return — a failed probe is a stale card with a reason attached, not a
+// broken command, and the previous good usage stays so the owner still
+// sees what the account had. FetchedAt is Unix seconds; zero means no
+// probe has ever succeeded.
+type QuotaSnapshot struct {
+	FetchedAt int64
+	Usage     domain.Usage
+	Err       string
+}
+
+// RefreshQuota probes the account's usage windows and returns the last
+// settled answer. It is on-demand — the card asks on mount and on the
+// Refresh button — so there is no loop, no threshold and no background
+// polling behind it.
+//
+// Probes coalesce on quotaGate: concurrent callers wait for the winner
+// instead of racing duplicate requests against the same account. A
+// caller whose ctx ends while waiting reports the last settled answer
+// without taking the gate. The winner's outcome is recorded under mu
+// before the gate opens, so a waiter waking up sees the fresh counter and
+// shares the winner's snapshot rather than starting a probe of its own.
+// A cancelled winner records nothing — its ctx died, not the probe's
+// subject — and leaves the answer to the next caller still interested.
+//
+// The quota gate nests outside the refresh gate and only that way round:
+// a probe holds quotaGate across AcquireAccessToken's refreshGate wait,
+// and nothing on the refresh path ever asks for quotaGate.
+func (service *Service) RefreshQuota(ctx context.Context) QuotaSnapshot {
+	service.mu.Lock()
+	probes := service.quotaProbes
+	snapshot := service.quota
+	service.mu.Unlock()
+
+	if err := service.quotaGate.acquire(ctx); err != nil {
+		// The caller gave up waiting; the last settled answer is all
+		// this ctx is owed. The gate was not taken and must not be
+		// released.
+		return snapshot
+	}
+	defer service.quotaGate.release()
+
+	service.mu.Lock()
+	if service.quotaProbes != probes {
+		// A probe settled while this caller waited for the gate; its
+		// answer is already the freshest one to report.
+		snapshot := service.quota
+		service.mu.Unlock()
+		return snapshot
+	}
+	service.mu.Unlock()
+
+	usage, err := service.probeUsage(ctx)
+
+	if errors.Is(err, context.Canceled) {
+		// The caller walked away; record nothing and let the next
+		// interested caller probe again.
+		return snapshot
+	}
+
+	service.mu.Lock()
+	service.quotaProbes++
+	if err != nil {
+		snapshot = QuotaSnapshot{
+			FetchedAt: snapshot.FetchedAt,
+			Usage:     snapshot.Usage,
+			Err:       err.Error(),
+		}
+	} else {
+		snapshot = QuotaSnapshot{
+			FetchedAt: service.now().Unix(),
+			Usage:     usage,
+		}
+	}
+	service.quota = snapshot
+	service.mu.Unlock()
+	return snapshot
+}
+
+// probeUsage runs one usage probe with the 401 protocol: acquire a
+// token, ask the account's usage endpoint, and on an explicit rejection
+// rotate the token once and ask again — the same budget the acquire path
+// gives a refresh. Every other failure stands as reported; the caller
+// decides whether the caller's ctx cancels it out.
+func (service *Service) probeUsage(ctx context.Context) (domain.Usage, error) {
+	for attempt := 0; ; attempt++ {
+		accessToken, err := service.AcquireAccessToken(ctx)
+		if err != nil {
+			return domain.Usage{}, err
+		}
+		service.mu.Lock()
+		accountID := service.accountID
+		service.mu.Unlock()
+
+		probeCtx, cancel := context.WithTimeout(ctx, service.quotaTimeout)
+		usage, err := service.authorizer.FetchUsage(probeCtx, accessToken, accountID)
+		cancel()
+		if err == nil {
+			return usage, nil
+		}
+		if !errors.Is(err, ErrUsageUnauthorized) || attempt > 0 {
+			return domain.Usage{}, err
+		}
+		// The access token was rejected: rotate it and try once more.
+		// RefreshQuota is an on-demand card, not a request path, so a
+		// second rejection simply becomes the reported error.
+		service.InvalidateAccessToken()
+	}
+}
+
 // runLogin is the login flow's goroutine. It is bounded by loginCtx; on
 // any landing — cancel, timeout, error or success — it settles the phase
 // exactly once and stops the redirect server while its flow is still the
@@ -1402,8 +1548,8 @@ func (service *Service) stopLoginServer(generation uint64) {
 // up stops waiting and reports its ctx's error without taking the gate,
 // leaving it to whoever is still live. Zero value is ready to use. The
 // gate's own mu is a leaf lock — never held across adapter calls — and
-// the gate is always the outer lock in this package, with Service.mu
-// taken only inside it.
+// only two locks ever wrap it: Service.mu inside it, and the quota gate
+// outside it (never the other way round, so the nesting cannot cycle).
 type refreshGate struct {
 	mu   sync.Mutex
 	held bool

@@ -203,8 +203,9 @@ let catalogCurrency = 'USD'
 
 export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = '1.0.37-fixture'
-  /** The fixture advertises the Codex preset flow, like a current control plane. */
-  readonly capabilities = ['codex.login']
+  /** The fixture advertises the Codex preset flow and its usage probe, like a
+   * current control plane. */
+  readonly capabilities = ['codex.login', 'codex.quota']
   readonly #listeners = new Map<string, Set<EventListener>>()
   readonly #runTimers = new Set<number>()
   #tick = 0
@@ -443,6 +444,24 @@ export class FixtureSession implements ControlPlaneSession {
         return {}
       }
       case 'codex.status': return { ...this.#codexAccount }
+      case 'codex.quota': {
+        // The real sidecar answers with the account it knows; a signed-out
+        // session is a refusal in the result, not a broken command — exactly
+        // like the backend's probe. Usage windows ride a fresh clock so the
+        // reset stamps in the dev UI always read as plausible local times.
+        const account = this.#codexAccount
+        if (account.state !== 'signed_in') return { ...account, error: 'codex is not signed in' }
+        const now = Math.floor(Date.now() / 1000)
+        return {
+          ...account,
+          quota: {
+            fetchedAt: now,
+            planType: account.plan !== '' ? account.plan : 'Pro',
+            primary: { present: true, remainingPercent: 76, windowMinutes: 300, resetAt: now + 3120 },
+            secondary: { present: true, remainingPercent: 41, windowMinutes: 10080, resetAt: now + 172_800 },
+          },
+        }
+      }
       case 'codex.logout': {
         this.#codexCancel()
         this.#codexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }

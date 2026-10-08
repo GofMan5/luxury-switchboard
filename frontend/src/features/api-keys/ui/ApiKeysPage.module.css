@@ -7,6 +7,9 @@
 .providerSelect select:hover { border-color: var(--border-field); background: var(--bg-raised); }
 .error { border-bottom: 1px solid color-mix(in srgb, var(--status-danger) 45%, var(--border-subtle)); padding: 10px 24px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); }
 .tableWrap { min-height: 0; flex: 1; overflow: auto; }
+/* The codex accounts list owns the same scroll slot the keys table owned:
+ * rows scroll, the header above and the footer below stay pinned. */
+.quotaBody { min-height: 0; flex: 1; overflow: auto; }
 .table { width: 100%; min-width: 960px; border-collapse: collapse; table-layout: fixed; }
 .table th, .table td { height: 46px; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; }
 .table th { position: sticky; z-index: 2; top: 0; height: 34px; color: var(--text-muted); background: var(--bg-chrome); font-size: 10.5px; font-weight: 640; letter-spacing: 0.05em; text-transform: uppercase; box-shadow: 0 1px 0 var(--border-subtle); }

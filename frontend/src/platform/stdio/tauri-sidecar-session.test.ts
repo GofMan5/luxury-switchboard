@@ -87,6 +87,29 @@ describe('TauriSidecarSession', () => {
     vi.useRealTimers()
   })
 
+  it('gives the codex quota probe the full backend chain, not the default call guard', async () => {
+    const session = new TauriSidecarSession()
+    await session.start()
+    vi.useFakeTimers()
+    const call = session.call('codex.quota')
+    // The backend worst case is token refresh + 401 retry + two 20s probes.
+    // The default 30s guard would fire here and blame the relay.
+    await vi.advanceTimersByTimeAsync(30_000)
+    let timedOut = false
+    void call.then(
+      () => {},
+      () => { timedOut = true },
+    )
+    expect(timedOut).toBe(false)
+    const rejection = expect(call).rejects.toMatchObject({ code: 'timeout' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    await rejection
+    const command = mocks.writes.find((frame) => frame.method === 'codex.quota')
+    expect(mocks.writes).toContainEqual(expect.objectContaining({ method: 'system.cancel', payload: { id: command?.id } }))
+    await session.stop()
+    vi.useRealTimers()
+  })
+
   it('reconnects after sidecar termination and notifies state models', async () => {
     const session = new TauriSidecarSession()
     await session.start()

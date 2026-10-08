@@ -14,6 +14,12 @@ const CALL_TIMEOUT_MS = 30_000
 const SHUTDOWN_CALL_TIMEOUT_MS = 2_000
 const SHUTDOWN_EXIT_TIMEOUT_MS = 10_000
 const TUNNEL_START_TIMEOUT_MS = 60_000
+// The quota probe is a backend chain, not one request: up to one token
+// refresh (25s) before each attempt and a second full probe after a 401,
+// i.e. 25+20+25+20 = 90s designed worst case. Cutting it earlier would
+// misreport a slow-but-healthy upstream as a dead relay and cancel the
+// still-flying probe.
+const CODEX_QUOTA_TIMEOUT_MS = 90_000
 const MODEL_DISCOVERY_TIMEOUT_MS = 2 * 60_000
 const MODEL_TEST_TIMEOUT_MS = 3 * 60_000
 // The installer download is the longest command the control plane runs: the
@@ -271,6 +277,7 @@ function commandTimeout(method: string): number {
   if (method === 'models.discover') return MODEL_DISCOVERY_TIMEOUT_MS
   if (method === 'models.test') return MODEL_TEST_TIMEOUT_MS
   if (method === 'tunnel.start') return TUNNEL_START_TIMEOUT_MS
+  if (method === 'codex.quota') return CODEX_QUOTA_TIMEOUT_MS
   if (method === 'system.shutdown') return SHUTDOWN_CALL_TIMEOUT_MS
   if (method === 'updates.install') return UPDATE_INSTALL_TIMEOUT_MS
   return CALL_TIMEOUT_MS

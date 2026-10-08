@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
@@ -484,5 +486,225 @@ func TestATwoHundredAnswerThatIsNotTheContractedJSONFails(t *testing.T) {
 	want := "codex oauth exchange failed: token response could not be decoded"
 	if err.Error() != want {
 		t.Fatalf("ExchangeCode() error = %q, want %q", err.Error(), want)
+	}
+}
+
+// newUsageAuthorizer wires an Authorizer against a local usage endpoint.
+// The token and accounts legs point at inert placeholders: the usage
+// probe must never touch them.
+func newUsageAuthorizer(t *testing.T, usageHandler http.HandlerFunc) *Authorizer {
+	t.Helper()
+	usageServer := httptest.NewServer(usageHandler)
+	t.Cleanup(usageServer.Close)
+	return NewAuthorizerWithEndpoints(nil, testAppVersion, Endpoints{
+		AuthorizeURL:              "https://authorize.test/oauth/authorize",
+		TokenURL:                  "https://token.test/oauth/token",
+		AccountsCheckURL:          "https://accounts.test/check",
+		UsageURL:                  usageServer.URL,
+		RedirectURI:               testRedirectURI,
+		DeviceUserCodeURL:         "https://device-usercode.test",
+		DeviceTokenURL:            "https://device-token.test",
+		DeviceVerificationURL:     "https://device-verification.test",
+		DeviceExchangeRedirectURI: "https://device-exchange.test",
+	})
+}
+
+// TestTheUsageProbeCarriesTheAccountAndNormalizesBothWindows pins the
+// happy path: a GET bearing the access token and the account id, and
+// the answer projected onto the domain's two meters — the epoch reset
+// wins on the primary window, the offset reset settles for "now plus"
+// on the secondary, and remaining counts down from a hundred.
+func TestTheUsageProbeCarriesTheAccountAndNormalizesBothWindows(t *testing.T) {
+	usageRequests := make(chan recordedRequest, 1)
+	epochReset := time.Now().Add(3 * time.Hour).Unix()
+	authorizer := newUsageAuthorizer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("usage probe method = %s, want GET", r.Method)
+		}
+		usageRequests <- recordedRequest{header: r.Header.Clone()}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"plan_type": "plus",
+			"rate_limit": map[string]any{
+				"primary_window": map[string]any{
+					"used_percent":         62,
+					"limit_window_seconds": 300,
+					"reset_at":             epochReset,
+				},
+				"secondary_window": map[string]any{
+					"used_percent":         5,
+					"limit_window_seconds": 604_800,
+					"reset_after_seconds":  3600,
+				},
+			},
+		})
+	})
+
+	probeStart := time.Now()
+	usage, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	probeEnd := time.Now()
+	if err != nil {
+		t.Fatalf("FetchUsage() error = %v, want nil", err)
+	}
+
+	request := <-usageRequests
+	if got := request.header.Get("Authorization"); got != "Bearer at-1" {
+		t.Fatalf("usage probe Authorization = %q, want the bearer token", got)
+	}
+	if got := request.header.Get("Accept"); got != "application/json" {
+		t.Fatalf("usage probe Accept = %q, want application/json", got)
+	}
+	if got := request.header.Get("account-id"); got != "acct-1" {
+		t.Fatalf("usage probe account-id = %q, want the account id", got)
+	}
+
+	if usage.PlanType != "plus" {
+		t.Fatalf("PlanType = %q, want plus", usage.PlanType)
+	}
+	if usage.Primary.Present != true {
+		t.Fatalf("primary window Present = %v, want true", usage.Primary.Present)
+	}
+	if usage.Primary.RemainingPercent != 38 {
+		t.Fatalf("primary RemainingPercent = %d, want 38", usage.Primary.RemainingPercent)
+	}
+	if usage.Primary.WindowMinutes != 5 {
+		t.Fatalf("primary WindowMinutes = %d, want 5", usage.Primary.WindowMinutes)
+	}
+	if !usage.Primary.ResetAt.Equal(time.Unix(epochReset, 0).UTC()) {
+		t.Fatalf("primary ResetAt = %v, want the reported epoch exactly", usage.Primary.ResetAt)
+	}
+	if usage.Secondary.Present != true {
+		t.Fatalf("secondary window Present = %v, want true", usage.Secondary.Present)
+	}
+	if usage.Secondary.RemainingPercent != 95 {
+		t.Fatalf("secondary RemainingPercent = %d, want 95", usage.Secondary.RemainingPercent)
+	}
+	if usage.Secondary.WindowMinutes != 10_080 {
+		t.Fatalf("secondary WindowMinutes = %d, want 10080", usage.Secondary.WindowMinutes)
+	}
+	if reset := usage.Secondary.ResetAt; reset.Before(probeStart.Add(59*time.Minute)) || reset.After(probeEnd.Add(61*time.Minute)) {
+		t.Fatalf("secondary ResetAt = %v, want now plus the reported hour", reset)
+	}
+}
+
+// TestAUsageAnswerWithoutALimitBlockStillReportsThePlan pins the
+// graceful shape: an endpoint that names the plan but reports no
+// windows is a successful probe with absent meters — "no limit
+// reported", not "all spent".
+func TestAUsageAnswerWithoutALimitBlockStillReportsThePlan(t *testing.T) {
+	authorizer := newUsageAuthorizer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeRaw(w, http.StatusOK, `{"plan_type":"team"}`)
+	})
+
+	usage, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	if err != nil {
+		t.Fatalf("FetchUsage() error = %v, want nil: the plan name is still worth showing", err)
+	}
+	if usage.PlanType != "team" {
+		t.Fatalf("PlanType = %q, want team", usage.PlanType)
+	}
+	for name, window := range map[string]domain.QuotaWindow{"primary": usage.Primary, "secondary": usage.Secondary} {
+		if window.Present {
+			t.Fatalf("%s window Present = true, want false", name)
+		}
+		if window.RemainingPercent != 100 {
+			t.Fatalf("%s RemainingPercent = %d, want 100: an unreported limit must not read as spent", name, window.RemainingPercent)
+		}
+		if window.WindowMinutes != 0 || !window.ResetAt.IsZero() {
+			t.Fatalf("%s window = %+v, want no invented width or deadline", name, window)
+		}
+	}
+}
+
+// TestARejectedUsageProbeReportsTheUnauthorizedSentinel pins the 401
+// contract: the caller rotates the token and retries, and the body the
+// endpoint offered is echoed nowhere.
+func TestARejectedUsageProbeReportsTheUnauthorizedSentinel(t *testing.T) {
+	authorizer := newUsageAuthorizer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeRaw(w, http.StatusUnauthorized, `{"error":"the token at-1 is revoked"}`)
+	})
+
+	_, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	if !errors.Is(err, application.ErrUsageUnauthorized) {
+		t.Fatalf("FetchUsage() error = %v, want the unauthorized sentinel", err)
+	}
+	if err.Error() != "codex oauth usage probe failed: http 401: codex usage probe was unauthorized" {
+		t.Fatalf("FetchUsage() error = %q, want status text only", err.Error())
+	}
+	if strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("FetchUsage() error = %q echoes the endpoint's body, want none", err.Error())
+	}
+}
+
+// A barred account is an ordinary failed probe, not a rotation signal:
+// the account check treats 403 as a login-ending verdict, but a probe
+// has no login to fail.
+func TestABarredAccountIsAnOrdinaryFailedProbe(t *testing.T) {
+	authorizer := newUsageAuthorizer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeRaw(w, http.StatusForbidden, "forbidden")
+	})
+
+	_, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	if errors.Is(err, application.ErrUsageUnauthorized) {
+		t.Fatalf("FetchUsage() error = %v, want 403 to stay an ordinary failure", err)
+	}
+	if err == nil || err.Error() != "codex oauth usage probe failed: http 403" {
+		t.Fatalf("FetchUsage() error = %v, want status text only", err)
+	}
+}
+
+// Non-2xx answers report the status alone for any code the backend
+// picks: the probe's failure text stays short, fixed and body-free.
+func TestAFailedUsageEndpointReportsTheStatusOnly(t *testing.T) {
+	authorizer := newUsageAuthorizer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeRaw(w, http.StatusBadGateway, "upstream splat")
+	})
+
+	_, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	if err == nil || err.Error() != "codex oauth usage probe failed: http 502" {
+		t.Fatalf("FetchUsage() error = %v, want status text only", err)
+	}
+}
+
+// TestAnUnparseableUsageAnswerIsTheUndecodableSentinel pins the 2xx
+// failure: a body that is not the contracted JSON is the probe's own
+// undecodable verdict, fixed text, nothing echoed.
+func TestAnUnparseableUsageAnswerIsTheUndecodableSentinel(t *testing.T) {
+	authorizer := newUsageAuthorizer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeRaw(w, http.StatusOK, "welcome to nginx")
+	})
+
+	_, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	if !errors.Is(err, errUsageResponseUndecodable) {
+		t.Fatalf("FetchUsage() error = %v, want the undecodable sentinel", err)
+	}
+	if err == nil || err.Error() != "codex oauth usage probe failed: usage response could not be decoded" {
+		t.Fatalf("FetchUsage() error = %v, want the fixed undecodable text", err)
+	}
+}
+
+// A usage endpoint that never answers reports the transport failure
+// under the probe prefix, and is not a rotation signal.
+func TestAnUnreachableUsageEndpointReportsATransportFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	usageURL := server.URL
+	server.Close()
+	authorizer := NewAuthorizerWithEndpoints(nil, testAppVersion, Endpoints{
+		AuthorizeURL:              "https://authorize.test/oauth/authorize",
+		TokenURL:                  "https://token.test/oauth/token",
+		AccountsCheckURL:          "https://accounts.test/check",
+		UsageURL:                  usageURL,
+		RedirectURI:               testRedirectURI,
+		DeviceUserCodeURL:         "https://device-usercode.test",
+		DeviceTokenURL:            "https://device-token.test",
+		DeviceVerificationURL:     "https://device-verification.test",
+		DeviceExchangeRedirectURI: "https://device-exchange.test",
+	})
+
+	_, err := authorizer.FetchUsage(context.Background(), "at-1", "acct-1")
+	if errors.Is(err, application.ErrUsageUnauthorized) {
+		t.Fatalf("FetchUsage() error = %v, want a transport failure, not the rotation signal", err)
+	}
+	if err == nil || !strings.HasPrefix(err.Error(), "codex oauth usage probe failed:") {
+		t.Fatalf("FetchUsage() error = %v, want the probe prefix", err)
 	}
 }

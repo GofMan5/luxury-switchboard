@@ -18,3 +18,33 @@ export interface CodexAccount {
   readonly accountId: string
   readonly providerId: string // the managed provider's id, '' when none
 }
+
+/** One usage window the account's endpoint reported. present=false means the
+ * endpoint said nothing about this window: there is no meter to draw, and
+ * remainingPercent carries the neutral full value so nothing renders broken. */
+export interface CodexQuotaWindow {
+  readonly present: boolean
+  /** How much of the window is LEFT, 0–100 — the meter fills on remaining. */
+  readonly remainingPercent: number
+  /** Length of the window in minutes; undefined when the endpoint did not say. */
+  readonly windowMinutes?: number
+  /** When the window empties again, Unix seconds; undefined when unknown. */
+  readonly resetAt?: number
+}
+
+/** One settled usage probe: when it landed and both windows. planType is the
+ * upstream plan name — a fallback label only, never invented client-side. */
+export interface CodexQuotaReport {
+  readonly fetchedAt: number // Unix seconds; 0 never reaches this type
+  readonly planType?: string
+  readonly primary: CodexQuotaWindow
+  readonly secondary: CodexQuotaWindow
+}
+
+/** Result of `codex.quota`: the account the answer was taken for, plus the
+ * last settled usage probe. quota is absent until some probe has succeeded;
+ * error carries the last probe's failure as status text only. */
+export type CodexQuotaResult = CodexAccount & {
+  readonly quota?: CodexQuotaReport
+  readonly error?: string
+}

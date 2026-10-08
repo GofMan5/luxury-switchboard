@@ -40,12 +40,15 @@ const (
 
 	// productionAuthorizeURL and productionTokenURL are OpenAI's OAuth
 	// endpoints; productionAccountsCheckURL is the ChatGPT backend's
-	// account liveness check that gates a fresh login. The token
-	// endpoint also serves the device flow: the exchange that trades a
-	// granted device code for tokens is a form POST to the same URL.
+	// account liveness check that gates a fresh login, and
+	// productionUsageURL is the same backend's usage endpoint the quota
+	// card probes. The token endpoint also serves the device flow: the
+	// exchange that trades a granted device code for tokens is a form
+	// POST to the same URL.
 	productionAuthorizeURL     = "https://auth.openai.com/oauth/authorize"
 	productionTokenURL         = "https://auth.openai.com/oauth/token"
 	productionAccountsCheckURL = "https://chatgpt.com/backend-api/wham/accounts/check"
+	productionUsageURL         = "https://chatgpt.com/backend-api/wham/usage"
 
 	// productionRedirectURI is the loopback address registered with
 	// OpenAI for this client. Its port must stay in lockstep with the
@@ -93,6 +96,12 @@ const (
 	exchangeErrorPrefix = "codex oauth exchange failed"
 	refreshErrorPrefix  = "codex oauth refresh failed"
 
+	// usageErrorPrefix opens every error the usage probe reports. It is
+	// deliberately not a token-operation prefix: a failed probe must not
+	// read as a failed login or refresh, and the login flow's error
+	// matching never sees probe errors.
+	usageErrorPrefix = "codex oauth usage probe failed"
+
 	// maxResponseBodyBytes bounds how much of an endpoint answer is read
 	// into memory. Real token responses are a few kilobytes; the bound
 	// keeps a broken endpoint from ballooning the process, and an
@@ -117,6 +126,12 @@ var errDeviceUserCodeIncomplete = errors.New("device user code response was inco
 // the body.
 var errDeviceGrantIncomplete = errors.New("device grant response was incomplete")
 
+// errUsageResponseUndecodable marks a 2xx usage answer whose body is not
+// the JSON object the usage endpoint is contracted to send. The fixed
+// text deliberately echoes nothing from the body — the usage answer
+// speaks about the account, and probe errors carry status text only.
+var errUsageResponseUndecodable = errors.New("usage response could not be decoded")
+
 // Endpoints addresses every leg of both login flows. Production takes
 // productionEndpoints; tests point the legs at local servers. The legs
 // travel together because they are registered together with OpenAI: a
@@ -126,6 +141,7 @@ type Endpoints struct {
 	AuthorizeURL              string
 	TokenURL                  string
 	AccountsCheckURL          string
+	UsageURL                  string
 	RedirectURI               string
 	DeviceUserCodeURL         string
 	DeviceTokenURL            string
@@ -139,6 +155,7 @@ func productionEndpoints() Endpoints {
 		AuthorizeURL:              productionAuthorizeURL,
 		TokenURL:                  productionTokenURL,
 		AccountsCheckURL:          productionAccountsCheckURL,
+		UsageURL:                  productionUsageURL,
 		RedirectURI:               productionRedirectURI,
 		DeviceUserCodeURL:         productionDeviceUserCodeURL,
 		DeviceTokenURL:            productionDeviceTokenURL,
@@ -552,6 +569,61 @@ func (a *Authorizer) checkAccounts(ctx context.Context, accessToken, accountID s
 	return nil
 }
 
+// FetchUsage asks the ChatGPT backend's usage endpoint for the account's
+// two quota windows and the plan's name. A 401 wraps
+// application.ErrUsageUnauthorized so the caller can rotate the access
+// token and retry once; every other failure — transport, timeout,
+// non-2xx, a 2xx body that is not the contracted JSON — reports the
+// status text only. The body is read bounded, as everywhere: a probe
+// answer speaks about the account, never about the request, and none of
+// it is echoed. An empty account-id is sent as an empty header — the
+// account check does the same, and the endpoint's own 4xx becomes the
+// reported error rather than a guess here.
+func (a *Authorizer) FetchUsage(ctx context.Context, accessToken, accountID string) (domain.Usage, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.endpoints.UsageURL, nil)
+	if err != nil {
+		// The probe request could not even be built: a local failure
+		// that carries no secret.
+		return domain.Usage{}, fmt.Errorf("%s: %w", usageErrorPrefix, err)
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("account-id", accountID)
+
+	response, err := a.client.Do(request)
+	if err != nil {
+		return domain.Usage{}, fmt.Errorf("%s: %w", usageErrorPrefix, err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes))
+	if err != nil {
+		return domain.Usage{}, fmt.Errorf("%s: %w", usageErrorPrefix, err)
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		// The backend's explicit verdict that the access token is
+		// rejected: the caller rotates the token and probes once more.
+		// 403 is not folded in — the account check treats it as a
+		// login-ending verdict, but a probe has no login to fail, and
+		// a barred account reports as an ordinary failed probe.
+		return domain.Usage{}, fmt.Errorf("%s: http %d: %w", usageErrorPrefix, response.StatusCode, application.ErrUsageUnauthorized)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return domain.Usage{}, fmt.Errorf("%s: http %d", usageErrorPrefix, response.StatusCode)
+	}
+
+	var payload usageResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return domain.Usage{}, fmt.Errorf("%s: %w", usageErrorPrefix, errUsageResponseUndecodable)
+	}
+	now := time.Now()
+	return domain.Usage{
+		PlanType:  payload.PlanType,
+		Primary:   domain.NormalizeQuotaWindow(payload.rateLimit().Primary.fields(), now),
+		Secondary: domain.NormalizeQuotaWindow(payload.rateLimit().Secondary.fields(), now),
+	}, nil
+}
+
 // postToken performs one token endpoint POST and decodes its 2xx body.
 // Transport failures wrap with prefix; a non-2xx answer becomes an error
 // carrying the endpoint's OAuth error code verbatim — domain.IsReauthError
@@ -720,4 +792,61 @@ func devicePollIntervalSeconds(raw json.RawMessage) int {
 		}
 	}
 	return defaultDevicePollIntervalSeconds
+}
+
+// usageResponse is the subset of the usage endpoint's answer this preset
+// reads: the plan's name and the two rate-limit windows the quota card
+// meters. The endpoint also speaks a code-review window; it is
+// deliberately not decoded — the card draws two meters, and a third
+// window would invent a scenario the preset does not run.
+type usageResponse struct {
+	PlanType  string          `json:"plan_type"`
+	RateLimit *usageRateLimit `json:"rate_limit"`
+}
+
+// usageRateLimit holds the two windows the quota card meters: the
+// primary window requests are counted against and the secondary window
+// the plan spends alongside it. A missing rate_limit block leaves both
+// windows absent, which renders empty meters rather than a failed probe
+// — the plan name is still worth showing, and the endpoint did answer.
+type usageRateLimit struct {
+	Primary   *usageWindow `json:"primary_window"`
+	Secondary *usageWindow `json:"secondary_window"`
+}
+
+// rateLimit returns the response's limits, or the zero pair when the
+// endpoint sent none. The indirection keeps FetchUsage's result
+// construction flat and single-branched.
+func (payload *usageResponse) rateLimit() usageRateLimit {
+	if payload.RateLimit == nil {
+		return usageRateLimit{}
+	}
+	return *payload.RateLimit
+}
+
+// usageWindow is one quota window as the usage endpoint reports it.
+// Every number is optional by pointer: a window may be present without
+// its used share, its span or its reset, and the normalization decides
+// what each omission means.
+type usageWindow struct {
+	UsedPercent        *int64 `json:"used_percent"`
+	LimitWindowSeconds *int64 `json:"limit_window_seconds"`
+	ResetAt            *int64 `json:"reset_at"`
+	ResetAfterSeconds  *int64 `json:"reset_after_seconds"`
+}
+
+// fields projects the window onto the domain's normalization input. A
+// nil window projects as unreported; a present one carries its numbers
+// across as-is, absent numbers staying nil.
+func (window *usageWindow) fields() domain.QuotaWindowFields {
+	if window == nil {
+		return domain.QuotaWindowFields{}
+	}
+	return domain.QuotaWindowFields{
+		Reported:           true,
+		UsedPercent:        window.UsedPercent,
+		LimitWindowSeconds: window.LimitWindowSeconds,
+		ResetAt:            window.ResetAt,
+		ResetAfterSeconds:  window.ResetAfterSeconds,
+	}
 }

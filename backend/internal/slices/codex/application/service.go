@@ -982,23 +982,16 @@ func (err *LogoutError) Error() string {
 // logoutReleaseRefusal translates a provider-manager refusal into the
 // typed logout error. It matches sentinel identity on the raw adapter
 // error — before any wrapping — because the wrapped text is for humans,
-// not for matching. Any other error is not a refusal: nil.
+// not for matching. The disable path refuses while Codex is the active
+// route; the delete path never does (deleting the active provider
+// switches the route to a deterministic builtin instead), so the
+// active-route refusal is the only one left. Any other error is not a
+// refusal: nil.
 func logoutReleaseRefusal(err error) *LogoutError {
-	switch {
-	case errors.Is(err, providerapp.ErrActiveProvider):
+	if errors.Is(err, providerapp.ErrActiveProvider) {
 		return &LogoutError{
 			Code:    "codex_active_route",
 			Message: "Codex is the active provider. Switch the active route away from Codex before disconnecting.",
-		}
-	case errors.Is(err, providerapp.ErrProviderHasRoutes):
-		return &LogoutError{
-			Code:    "codex_provider_has_routes",
-			Message: "The Codex provider still has model routes. Remove its routes before disconnecting.",
-		}
-	case errors.Is(err, providerapp.ErrProviderHasKeys):
-		return &LogoutError{
-			Code:    "codex_provider_has_keys",
-			Message: "The Codex provider still has API keys. Remove its keys before disconnecting.",
 		}
 	}
 	return nil
@@ -1010,7 +1003,10 @@ func logoutReleaseRefusal(err error) *LogoutError {
 // re-sign-in) retires the entry — it stays, marked and disabled, so the
 // providers row keeps its preset identity and a later sign-in relinks to
 // it; with no live session there is nothing to retire and the leftover
-// preset entries are removed instead.
+// preset entries are removed instead. removeEntry overrides that choice
+// for the delete path: the Codex provider entry is removed outright, live
+// session or not, because the user asked for it to be gone from the
+// Providers page rather than to be parked for a re-sign-in.
 //
 // A release refusal — the provider is the active route, or a leftover
 // entry still holds routes or keys — aborts the logout before anything
@@ -1020,7 +1016,7 @@ func logoutReleaseRefusal(err error) *LogoutError {
 // error must not keep dead tokens on disk, and a clear error must not
 // leave a released provider registered. errors.Join carries all failures
 // to the caller.
-func (service *Service) Logout(ctx context.Context) error {
+func (service *Service) Logout(ctx context.Context, removeEntry bool) error {
 	// The user asked to disconnect: any in-flight login is torn down
 	// first, even when the logout below refuses — a flow the user is
 	// abandoning must not land as a sign-in behind a refusal.
@@ -1031,7 +1027,14 @@ func (service *Service) Logout(ctx context.Context) error {
 	service.mu.Unlock()
 
 	var failures []error
-	if liveAccount {
+	if removeEntry {
+		if err := service.provisioner.RemoveCodexProvider(ctx); err != nil {
+			if refusal := logoutReleaseRefusal(err); refusal != nil {
+				return refusal
+			}
+			failures = append(failures, fmt.Errorf("codex provider could not be removed: %v", err))
+		}
+	} else if liveAccount {
 		if err := service.provisioner.RetireCodexProvider(ctx); err != nil {
 			if refusal := logoutReleaseRefusal(err); refusal != nil {
 				// The entry is still depended on: abort before the store is

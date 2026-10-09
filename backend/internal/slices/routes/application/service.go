@@ -286,22 +286,6 @@ func (service *Service) isDegradedLocked(providerID string, now time.Time) bool 
 	return degraded && now.Before(until)
 }
 
-func (service *Service) referencesProvider(providerID string) bool {
-	service.mu.RLock()
-	defer service.mu.RUnlock()
-	if service.loadErr != nil {
-		return true
-	}
-	return slices.ContainsFunc(service.assignments, func(assignment domain.Assignment) bool {
-		return assignment.ProviderID == providerID
-	})
-}
-
-func (service *Service) LockProvider(providerID string) (bool, func()) {
-	service.opMu.Lock()
-	return service.referencesProvider(providerID), service.opMu.Unlock
-}
-
 func (service *Service) Upsert(ctx context.Context, assignment domain.Assignment) error {
 	if err := assignment.Validate(); err != nil {
 		return err
@@ -397,6 +381,41 @@ func (service *Service) Delete(ctx context.Context, target domain.Target, public
 	return service.persist(ctx, kept, target)
 }
 
+// RemoveProvider is the cascade behind deleting a provider: every assignment
+// that names it, relay and tunnel alike, goes with the provider in one save,
+// and the listeners hear about each target that actually lost a row. Delete
+// stays the operator's single-model tool; this is the hand-off the providers
+// manager calls while the provider entry still exists.
+func (service *Service) RemoveProvider(ctx context.Context, providerID string) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return err
+	}
+	service.mu.RLock()
+	candidate := slices.Clone(service.assignments)
+	service.mu.RUnlock()
+	kept := make([]domain.Assignment, 0, len(candidate))
+	affected := map[domain.Target]struct{}{}
+	for _, item := range candidate {
+		if item.ProviderID == providerID {
+			affected[item.Target] = struct{}{}
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	targets := make([]domain.Target, 0, len(affected))
+	for _, target := range []domain.Target{domain.TargetRelay, domain.TargetTunnel} {
+		if _, hit := affected[target]; hit {
+			targets = append(targets, target)
+		}
+	}
+	return service.persistTargets(ctx, kept, targets)
+}
+
 func assignmentKey(assignment domain.Assignment) string {
 	// The relay target is a chain: one public model may sit on several
 	// providers, so a row is identified by the provider too. The tunnel target
@@ -448,6 +467,10 @@ func (service *Service) OnChanged(listener func(domain.Target)) {
 }
 
 func (service *Service) persist(ctx context.Context, candidate []domain.Assignment, target domain.Target) error {
+	return service.persistTargets(ctx, candidate, []domain.Target{target})
+}
+
+func (service *Service) persistTargets(ctx context.Context, candidate []domain.Assignment, targets []domain.Target) error {
 	if err := service.repository.Save(ctx, candidate); err != nil {
 		return fmt.Errorf("routes could not be saved: %w", err)
 	}
@@ -456,7 +479,9 @@ func (service *Service) persist(ctx context.Context, candidate []domain.Assignme
 	listeners := append([]func(domain.Target){}, service.listeners...)
 	service.mu.Unlock()
 	for _, listener := range listeners {
-		listener(target)
+		for _, target := range targets {
+			listener(target)
+		}
 	}
 	return nil
 }

@@ -35,11 +35,8 @@ func (repository *memoryProviderRepository) Save(_ context.Context, state SavedS
 type fakeKeyPool struct {
 	rates map[string]int
 	count map[string]int
+	drops map[string]int
 }
-
-type fakeRouteUsage map[string]bool
-
-func (usage fakeRouteUsage) LockProvider(id string) (bool, func()) { return usage[id], func() {} }
 
 func (keys *fakeKeyPool) Count(id string) int { return keys.count[id] }
 func (keys *fakeKeyPool) EnsureProvider(id string, rpm int, _ time.Duration) error {
@@ -50,10 +47,26 @@ func (keys *fakeKeyPool) EnsureProvider(id string, rpm int, _ time.Duration) err
 	return nil
 }
 func (keys *fakeKeyPool) RemoveProvider(id string) error {
-	if keys.count[id] > 0 {
-		return ErrProviderHasKeys
-	}
 	delete(keys.rates, id)
+	return nil
+}
+func (keys *fakeKeyPool) DropProvider(_ context.Context, id string) error {
+	if keys.drops == nil {
+		keys.drops = make(map[string]int)
+	}
+	keys.drops[id]++
+	delete(keys.rates, id)
+	delete(keys.count, id)
+	return nil
+}
+
+// fakeRouteCascade records the route removals the manager asked for: the
+// delete contract under test is who owns the cascade, not what the routes
+// slice does with it (that slice tests its own removal).
+type fakeRouteCascade map[string]int
+
+func (cascade fakeRouteCascade) RemoveProvider(_ context.Context, id string) error {
+	cascade[id]++
 	return nil
 }
 
@@ -95,8 +108,11 @@ func TestManagerPersistsAddUpdateAndActivation(t *testing.T) {
 	if repository.state.ActiveID != added.ID {
 		t.Fatal("active provider was not persisted")
 	}
-	if err := manager.Delete(context.Background(), added.ID); !errors.Is(err, ErrActiveProvider) {
-		t.Fatalf("active provider deletion was not blocked: %v", err)
+	if err := manager.Delete(context.Background(), added.ID); err != nil {
+		t.Fatalf("active provider deletion was refused: %v", err)
+	}
+	if repository.state.ActiveID != "local" {
+		t.Fatalf("active route did not fall back to the builtin: %q", repository.state.ActiveID)
 	}
 }
 
@@ -236,11 +252,16 @@ func TestManagerRollsBackRateWhenPersistenceFails(t *testing.T) {
 	}
 }
 
-func TestDeleteReservesKeyPoolBeforePersistenceAndRollsBack(t *testing.T) {
+// A failed entry save is not a failed delete: the cascade already
+// happened, and rolling it back would mean resurrecting key material
+// this manager never held. The provider stays listed, empty of keys and
+// routes — a consistent state — and the retry finishes the job.
+func TestFailedDeletePersistenceLeavesTheCascadeDoneAndTheEntryRetriable(t *testing.T) {
 	local := providerFixture(t, "local", true)
 	custom := providerFixture(t, "custom", false)
 	catalog, _ := NewCatalog([]domain.Provider{local, custom}, local.ID)
-	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: make(map[string]int)}
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: map[string]int{"custom": 2}}
+	routes := fakeRouteCascade{}
 	repository := &memoryProviderRepository{saveFail: true}
 	repository.beforeSave = func() {
 		if _, exists := keys.rates["custom"]; exists {
@@ -248,26 +269,126 @@ func TestDeleteReservesKeyPoolBeforePersistenceAndRollsBack(t *testing.T) {
 		}
 	}
 	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
 	if err := manager.Delete(context.Background(), "custom"); err == nil {
 		t.Fatal("injected persistence failure was ignored")
 	}
-	if keys.rates["custom"] != 0 {
-		t.Fatalf("failed delete did not restore provider admission: %+v", keys.rates)
+	if routes["custom"] != 1 || keys.drops["custom"] != 1 || keys.rates["custom"] != 0 {
+		t.Fatalf("failed save rolled the cascade back: routes=%v drops=%v rates=%v", routes, keys.drops, keys.rates)
+	}
+	if _, exists := catalog.Lookup("custom"); !exists {
+		t.Fatal("failed save removed the entry from the runtime catalog anyway")
+	}
+	repository.saveFail = false
+	if err := manager.Delete(context.Background(), "custom"); err != nil {
+		t.Fatalf("retry after a failed save was refused: %v", err)
+	}
+	if _, exists := catalog.Lookup("custom"); exists {
+		t.Fatal("the retried delete left the provider in the catalog")
 	}
 }
 
-func TestDeleteRejectsProviderReferencedByModelRoutes(t *testing.T) {
+// Deleting a provider is one deliberate action, not a scavenger hunt: the
+// routes and keys that name it leave with it, in the same delete, before
+// the entry itself goes. The old guards made the user pre-clean routes and
+// keys by hand precisely so a delete could refuse — the user already
+// decided, and the manager now finishes the job.
+func TestDeleteCascadesRoutesAndKeysBeforeRemovingTheEntry(t *testing.T) {
 	local := providerFixture(t, "local", true)
 	custom := providerFixture(t, "custom", false)
 	catalog, _ := NewCatalog([]domain.Provider{local, custom}, local.ID)
-	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: make(map[string]int)}
-	manager, _ := NewManager(catalog, &memoryProviderRepository{}, keys)
-	manager.SetRouteUsage(fakeRouteUsage{"custom": true})
-	if err := manager.Delete(context.Background(), "custom"); !errors.Is(err, ErrProviderHasRoutes) {
-		t.Fatalf("routed provider deletion was accepted: %v", err)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: map[string]int{"custom": 2}}
+	routes := fakeRouteCascade{}
+	repository := &memoryProviderRepository{}
+	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Delete(context.Background(), "custom"); err != nil {
+		t.Fatalf("delete with keys and routes was refused: %v", err)
 	}
-	if keys.rates["custom"] != 77 {
-		t.Fatal("blocked deletion changed key admission")
+	if routes["custom"] != 1 {
+		t.Fatalf("routes were not cascaded: %v", routes)
+	}
+	if keys.drops["custom"] != 1 {
+		t.Fatalf("keys were not cascaded: %v", keys.drops)
+	}
+	if keys.rates["custom"] != 0 {
+		t.Fatalf("key admission survived the cascade: %v", keys.rates)
+	}
+	if _, exists := catalog.Lookup("custom"); exists {
+		t.Fatal("deleted provider stayed in the catalog")
+	}
+	if len(repository.state.Providers) != 1 || repository.state.Providers[0].ID != "local" {
+		t.Fatalf("entry was not removed from the store: %+v", repository.state.Providers)
+	}
+	if repository.state.ActiveID != "local" {
+		t.Fatalf("an untouched active provider moved: %q", repository.state.ActiveID)
+	}
+}
+
+// Deleting the provider the active route points at is not refused: the
+// delete is the user's decision, so the route moves with it — to a
+// deterministic builtin, never to a dangling id. catalog.Active() must
+// always resolve; the refusal belongs to the case with nowhere to move.
+func TestDeletingTheActiveProviderFallsBackToABuiltin(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	echo := providerFixture(t, "echo", true)
+	custom := providerFixture(t, "custom", false)
+	catalog, _ := NewCatalog([]domain.Provider{local, echo, custom}, custom.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: make(map[string]int)}
+	routes := fakeRouteCascade{}
+	repository := &memoryProviderRepository{}
+	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Delete(context.Background(), "custom"); err != nil {
+		t.Fatalf("deleting the active provider was refused: %v", err)
+	}
+	if _, exists := catalog.Lookup("custom"); exists {
+		t.Fatal("the active provider was not removed from the catalog")
+	}
+	active, err := catalog.Active()
+	if err != nil {
+		t.Fatalf("the catalog has no active provider after the delete: %v", err)
+	}
+	if active.ID != "local" {
+		t.Fatalf("active route fell back to %q, want the first enabled builtin", active.ID)
+	}
+	if repository.state.ActiveID != "local" {
+		t.Fatalf("persisted active id is %q, want local", repository.state.ActiveID)
+	}
+}
+
+// The one refusal left: the active provider is the last enabled one.
+// Moving the route to nothing would leave every future request without
+// a provider, so the delete is rejected before anything is cascaded.
+func TestDeletingTheLastEnabledProviderIsRefusedBeforeTheCascade(t *testing.T) {
+	local, err := domain.New(domain.Params{
+		ID: "local", Name: "local", BaseURL: "http://127.0.0.1:8798",
+		AuthMode: domain.AuthPassthrough, Builtin: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo, err := domain.New(domain.Params{
+		ID: "echo", Name: "echo", BaseURL: "http://127.0.0.1:8798",
+		AuthMode: domain.AuthPassthrough, Builtin: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom := providerFixture(t, "custom", false)
+	catalog, _ := NewCatalog([]domain.Provider{local, echo, custom}, custom.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"custom": 77}, count: map[string]int{"custom": 2}}
+	routes := fakeRouteCascade{}
+	manager, _ := NewManager(catalog, &memoryProviderRepository{}, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Delete(context.Background(), "custom"); err == nil {
+		t.Fatal("deleting the last enabled provider was accepted")
+	}
+	if routes["custom"] != 0 || keys.drops["custom"] != 0 || keys.rates["custom"] != 77 {
+		t.Fatalf("refused delete still cascaded: routes=%v drops=%v rates=%v", routes, keys.drops, keys.rates)
+	}
+	if _, exists := catalog.Lookup("custom"); !exists {
+		t.Fatal("refused delete removed the entry anyway")
 	}
 }
 

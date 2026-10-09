@@ -134,7 +134,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if routeLoadErr != nil {
 		logger.Printf("encrypted model routes could not be loaded; using active provider")
 	}
-	providerManager.SetRouteUsage(routeService)
+	providerManager.SetRouteCascade(routeService)
 	routeResolver := relayroutes.NewResolver(routeService)
 	routes := relayproviders.NewSource(catalog, routeResolver, routeResolver)
 	// The codex route must carry the identity headers the reference client

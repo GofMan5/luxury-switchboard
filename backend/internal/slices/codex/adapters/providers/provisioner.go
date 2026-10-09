@@ -169,10 +169,13 @@ func (provisioner *Provisioner) RetireCodexProvider(ctx context.Context) error {
 }
 
 // RemoveCodexProvider deletes the leftover preset entries when there is no
-// live account. It must refuse an entry that is builtin or still holds keys
-// or routes — the manager's refusals travel verbatim — and must never touch
-// an entry the preset did not provision: a hand-configured provider
-// squatting on a candidate id survives untouched.
+// live account. The delete is a deliberate cascade — the manager deletes the
+// entry's keys and the routes that use it in the same save, and only a
+// builtin target or a store failure refuses (an active entry is not a
+// refusal: the active route falls back to a builtin) — and the refusals
+// travel verbatim. It must never touch an entry the preset did not
+// provision: a hand-configured provider squatting on a candidate id
+// survives untouched.
 func (provisioner *Provisioner) RemoveCodexProvider(ctx context.Context) error {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()

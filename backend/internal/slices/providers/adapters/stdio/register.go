@@ -199,11 +199,7 @@ func managementError(err error) platform.MethodError {
 	case errors.Is(err, application.ErrBuiltinProvider):
 		return platform.MethodError{Code: "provider_builtin", Message: "Built-in provider cannot be deleted"}
 	case errors.Is(err, application.ErrActiveProvider):
-		return platform.MethodError{Code: "provider_active", Message: "Active provider cannot be disabled or deleted"}
-	case errors.Is(err, application.ErrProviderHasKeys):
-		return platform.MethodError{Code: "provider_has_keys", Message: "Remove provider keys first"}
-	case errors.Is(err, application.ErrProviderHasRoutes):
-		return platform.MethodError{Code: "provider_has_routes", Message: "Reassign or delete provider model routes first"}
+		return platform.MethodError{Code: "provider_active", Message: "Active provider cannot be disabled: switch the active route first"}
 	default:
 		return platform.MethodError{Code: "provider_update_failed", Message: "Provider settings could not be saved"}
 	}

@@ -53,6 +53,8 @@ const TIMEOUT_COPY = 'The control plane did not answer in time. Check that the r
 const NOT_CONNECTED_COPY = 'The control plane is not connected. Wait for the relay, then try again.'
 const GENERIC_LOGIN_COPY = 'Codex sign-in could not be started.'
 const GENERIC_LOGOUT_COPY = 'Codex could not be disconnected.'
+/** A removal is a heavier verb than a disconnect: its generic copy names the fallback, not just the failure. */
+const GENERIC_REMOVE_COPY = 'Codex could not be removed. Try again, or disconnect it instead.'
 const PORT_IN_USE_COPY = 'The local sign-in port is already in use. Close the other sign-in attempt, then try again.'
 const LOGIN_TIMED_OUT_COPY = 'The sign-in timed out before the browser answered. Try again.'
 const LOGIN_CANCELLED_COPY = 'The sign-in was cancelled or denied before it completed.'
@@ -411,14 +413,17 @@ export class CodexModel {
     }
   }
 
-  async logout(): Promise<boolean> {
+  /** `remove: false` (default) disconnects the account; `remove: true` also
+   * deletes the provisioned provider entry and its routes via the backend
+   * cascade. Both clear the session and refresh on success. */
+  async logout(remove = false): Promise<boolean> {
     this.#set({ ...this.#state, logoutError: '' })
     try {
-      await this.#port.logout()
+      await this.#port.logout(remove)
       await this.refresh()
       return true
     } catch (error) {
-      this.#set({ ...this.#state, logoutError: readableError(error, GENERIC_LOGOUT_COPY) })
+      this.#set({ ...this.#state, logoutError: readableError(error, remove ? GENERIC_REMOVE_COPY : GENERIC_LOGOUT_COPY) })
       return false
     }
   }

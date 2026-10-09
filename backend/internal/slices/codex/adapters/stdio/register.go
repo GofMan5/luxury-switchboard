@@ -30,7 +30,7 @@ type codexService interface {
 	ImportJSON(ctx context.Context, text string) (application.ImportResult, error)
 	ImportFiles(ctx context.Context, paths []string) (application.ImportResult, error)
 	Status() application.Status
-	Logout(ctx context.Context) error
+	Logout(ctx context.Context, removeEntry bool) error
 	RefreshQuota(ctx context.Context) application.QuotaSnapshot
 	OnChanged(func(application.Snapshot))
 }
@@ -233,12 +233,19 @@ func Register(server *platform.Server, service codexService) {
 		return quotaResult(service.Status(), service.RefreshQuota(ctx)), nil
 	})
 	server.Handle("codex.logout", func(ctx context.Context, payload json.RawMessage) (any, error) {
-		if err := decodeCommand(payload); err != nil {
-			return nil, err
+		var command struct {
+			// remove is the delete path: the Codex provider entry is
+			// removed from the registry, not parked for a re-sign-in.
+			// It stays optional — an empty payload disconnects, the same
+			// command it has always been.
+			Remove bool `json:"remove,omitempty"`
+		}
+		if err := platform.DecodePayload(payload, &command); err != nil {
+			return nil, invalidPayload()
 		}
 		// Cancellation rides the request's context, so a shell that aborts
 		// the command also aborts the store clear it was waiting on.
-		if err := service.Logout(ctx); err != nil {
+		if err := service.Logout(ctx, command.Remove); err != nil {
 			return nil, platform.MethodError{Code: "codex_logout_failed", Message: err.Error()}
 		}
 		return struct{}{}, nil
@@ -251,10 +258,11 @@ func Register(server *platform.Server, service codexService) {
 	})
 }
 
-// decodeCommand accepts only an empty payload object: no codex command
-// takes fields, so whatever a client puts there is unexpected by
-// definition and gets the standard invalid_payload refusal instead of
-// being silently ignored.
+// decodeCommand accepts only an empty payload object: every codex
+// command except logout takes no fields, so whatever a client puts there
+// is unexpected by definition and gets the standard invalid_payload
+// refusal instead of being silently ignored. logout decodes its own
+// payload — it carries the optional remove flag.
 func decodeCommand(payload json.RawMessage) error {
 	var command struct{}
 	if err := platform.DecodePayload(payload, &command); err != nil {

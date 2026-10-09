@@ -105,8 +105,10 @@ export class StdioCodexPort implements CodexPort {
     })
   }
 
-  async logout(signal?: AbortSignal): Promise<void> {
-    await this.#session.call('codex.logout', undefined, signal)
+  async logout(remove: boolean, signal?: AbortSignal): Promise<void> {
+    // The empty payload is the disconnect the backend already knows; the
+    // remove flag is the one optional field codex.logout accepts.
+    await this.#session.call('codex.logout', remove ? { remove: true } : undefined, signal)
   }
 
   async openAuthorizeUrl(url: string): Promise<void> {

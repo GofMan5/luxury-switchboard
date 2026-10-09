@@ -22,8 +22,8 @@ export default function DisconnectCodexDialog({ email, pending, error, onCancel,
           <div>
             <h2>Disconnect Codex?</h2>
             <p>
-              The managed Codex provider is removed{email !== '' ? <> and <span className={styles.email} title={email}>{email}</span> is signed out</> : null}.
-              Model routes that used it must be reassigned. You can connect again at any time.
+              {email !== '' ? <span className={styles.email} title={email}>{email}</span> : 'The account'} is signed out.
+              The provider stays in the list, disabled, and model routes that used it must be reassigned. Connect again at any time.
             </p>
           </div>
         </header>

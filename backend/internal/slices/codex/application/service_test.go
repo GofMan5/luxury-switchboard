@@ -763,7 +763,7 @@ func TestConcurrentAcquiresInvalidationsAndStatusQueriesStayConsistent(t *testin
 func TestLogoutRetiresALiveSessionButRemovesLeftovers(t *testing.T) {
 	env := newTestEnv(t)
 
-	if err := env.service.Logout(context.Background()); err != nil {
+	if err := env.service.Logout(context.Background(), false); err != nil {
 		t.Fatalf("Logout() with no live account error = %v, want nil", err)
 	}
 	if retired := env.provisioner.retireCount(); retired != 0 {
@@ -774,7 +774,7 @@ func TestLogoutRetiresALiveSessionButRemovesLeftovers(t *testing.T) {
 	}
 
 	env.signIn(t)
-	if err := env.service.Logout(context.Background()); err != nil {
+	if err := env.service.Logout(context.Background(), false); err != nil {
 		t.Fatalf("Logout() with a live account error = %v, want nil", err)
 	}
 	if retired := env.provisioner.retireCount(); retired != 1 {

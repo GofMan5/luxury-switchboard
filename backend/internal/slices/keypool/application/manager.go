@@ -215,6 +215,35 @@ func (manager *Manager) RemoveProvider(providerID string) error {
 	return nil
 }
 
+// DropProvider is the deliberate cascade behind deleting a provider: every
+// user key it owns is removed in one save, then the rate budget and the
+// scheduler queues are retired. RemoveProvider stays the careful twin — it
+// refuses while keys remain, for callers that only retire a budget. A
+// provider without keys skips the save and simply retires what is left.
+func (manager *Manager) DropProvider(ctx context.Context, providerID string) error {
+	manager.opMu.Lock()
+	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return ErrStoreUnavailable
+	}
+	manager.mu.RLock()
+	candidate := slices.DeleteFunc(slices.Clone(manager.userKeys), func(key domain.Key) bool {
+		return key.ProviderID == providerID
+	})
+	dropped := len(manager.userKeys) - len(candidate)
+	manager.mu.RUnlock()
+	if dropped > 0 {
+		if err := manager.persistAndApply(ctx, candidate); err != nil {
+			return err
+		}
+	}
+	manager.mu.Lock()
+	delete(manager.providerRates, providerID)
+	manager.mu.Unlock()
+	manager.scheduler.RemoveProvider(providerID)
+	return nil
+}
+
 func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.PublicKey, error) {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()

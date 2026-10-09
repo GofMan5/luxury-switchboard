@@ -251,3 +251,48 @@ func TestAddManyRejectsAnOversizedBatch(t *testing.T) {
 		t.Fatalf("oversized batch was accepted: %v", err)
 	}
 }
+
+// Deleting a provider is a deliberate user action, and the keys it owns go
+// with it: the pool drops every user key under the provider id in one save,
+// retires the provider's rate budget, and leaves neighbouring providers
+// untouched. That is the whole hand-off the providers manager needs — one
+// call instead of a refusal that made the user delete each key by hand
+// before the provider itself would disappear.
+func TestDropProviderDeletesEveryKeyAndTheRateEntry(t *testing.T) {
+	repository := &memoryRepository{}
+	manager, err := NewManager(NewScheduler(10), repository, map[string]Rate{"echo": {Limit: 120}, "spare": {}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.persistAndApply(context.Background(), []domain.Key{
+		testKey(t, "echo", "One", "one-secret", 0, 0),
+		testKey(t, "echo", "Two", "two-secret", 1, 0),
+		testKey(t, "spare", "Spare", "spare-secret", 0, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.DropProvider(context.Background(), "echo"); err != nil {
+		t.Fatal(err)
+	}
+	if keys := manager.List("echo"); len(keys) != 0 {
+		t.Fatalf("echo keys survived the drop: %+v", keys)
+	}
+	if keys := manager.List("spare"); len(keys) != 1 {
+		t.Fatalf("a neighbouring provider lost keys it owns: %+v", keys)
+	}
+	if _, err := manager.Add(context.Background(), domain.Params{
+		ProviderID: "echo", Label: "Back", Secret: "back-secret",
+	}); !errors.Is(err, ErrUnknownProvider) {
+		t.Fatalf("the dropped provider still accepts keys: %v", err)
+	}
+	restarted, err := NewManager(NewScheduler(10), repository, map[string]Rate{"spare": {}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if keys := restarted.List("spare"); len(keys) != 1 || keys[0].Label != "Spare" {
+		t.Fatalf("restart did not restore the surviving provider: %+v", keys)
+	}
+}

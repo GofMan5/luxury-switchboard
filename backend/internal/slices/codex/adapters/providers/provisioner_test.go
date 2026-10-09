@@ -488,20 +488,21 @@ func TestRemoveRefusesOnABuiltinCodexEntry(t *testing.T) {
 	}
 }
 
-func TestRemoveRefusesWhenTheEntryStillHoldsKeys(t *testing.T) {
+func TestRemoveCarriesARegistryFailureThroughAndKeepsTheEntry(t *testing.T) {
 	registry := newFakeRegistry()
 	provisioner := NewProvisioner(registry)
 	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef")); err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	registry.deleteErr = providerapp.ErrProviderHasKeys
+	storeFailure := errors.New("secure storage is unavailable")
+	registry.deleteErr = storeFailure
 
 	err := provisioner.RemoveCodexProvider(context.Background())
-	if !errors.Is(err, providerapp.ErrProviderHasKeys) {
-		t.Fatalf("err = %v, want ErrProviderHasKeys", err)
+	if !errors.Is(err, storeFailure) {
+		t.Fatalf("err = %v, want the registry failure carried through", err)
 	}
 	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
-		t.Fatal("the key-carrying entry was deleted anyway")
+		t.Fatal("the entry was deleted anyway despite the failed delete")
 	}
 }
 

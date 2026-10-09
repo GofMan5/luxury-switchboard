@@ -45,6 +45,9 @@ export default function ProvidersPage() {
   const [addProvider, setAddProvider] = useState<'choose' | 'codex' | null>(null)
   const [disconnectCodex, setDisconnectCodex] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
+  // The codex preset delete rides the same logout command with remove; its
+  // pending flag is tracked separately from a provider save/switch.
+  const [removingCodex, setRemovingCodex] = useState(false)
   const codexRow = state.catalog.providers.find(isCodex) ?? null
   // Codex provisioning writes through the provider registry without a
   // providers.changed push, so a sign-in that exits any way other than Done
@@ -174,10 +177,24 @@ export default function ProvidersPage() {
       {removeProvider ? (
         <ConfirmDelete
           provider={removeProvider}
-          pending={Boolean(state.pendingId)}
-          error={state.error}
+          active={removeProvider.id === state.catalog.activeId}
+          pending={isCodex(removeProvider) ? removingCodex : Boolean(state.pendingId)}
+          error={isCodex(removeProvider) ? logoutErrorCopy(codexState.logoutError) : state.error}
           onCancel={() => setRemoveProvider(null)}
           onConfirm={async () => {
+            if (isCodex(removeProvider)) {
+              // The preset delete is the account sign-out that also removes
+              // the entry, so it rides the codex logout with remove instead
+              // of the generic providers.delete, which refuses presets.
+              setRemovingCodex(true)
+              const ok = await codexModel.logout(true)
+              setRemovingCodex(false)
+              if (!ok) return
+              setSelectedID('')
+              setRemoveProvider(null)
+              void model.refresh()
+              return
+            }
             if (await model.delete(removeProvider.id)) {
               setSelectedID('')
               setRemoveProvider(null)
@@ -264,17 +281,16 @@ function ProviderInspector({ provider, active, pending, codexAccount, onActivate
           <Button variant="secondary" onClick={onCodexSignIn}><LogIn size={14} />Sign in again</Button>
         ) : null}
         {/* The codex preset is managed by the account sign-in, so like the
-            Delete below it gets no manual path; builtin providers are
-            editable configs and keep the button. */}
+            manual wiring fields it gets no editor; builtin providers are
+            curated configs and keep the button. */}
         {!isCodex(provider) ? (
           <Button variant="secondary" onClick={onEdit}><Pencil size={14} />Edit</Button>
         ) : null}
-        {!provider.builtin && !isCodex(provider) ? (
-          <span className={styles.deleteCell}>
-            <Button variant="danger" disabled={active || provider.keyCount > 0} onClick={onDelete}><Trash2 size={14} />Delete</Button>
-            {provider.keyCount > 0 ? <small className={styles.deleteHint}>{provider.keyCount} {provider.keyCount === 1 ? 'key' : 'keys'} — remove them in API Keys first</small> : null}
-            {active && provider.keyCount === 0 ? <small className={styles.deleteHint}>The active provider cannot be deleted</small> : null}
-          </span>
+        {/* Every non-builtin provider is deletable: the cascade deletes its
+            keys and routes with it, so neither state parks behind a gate
+            here. The codex delete routes through the account sign-in. */}
+        {!provider.builtin ? (
+          <Button variant="danger" onClick={onDelete}><Trash2 size={14} />Delete</Button>
         ) : null}
       </div>
       <div className={styles.inspectorScroll}>
@@ -398,7 +414,13 @@ function ProviderEditor({ mode, provider, pending, operationError, active, onClo
   )
 }
 
-function ConfirmDelete({ provider, pending, error, onCancel, onConfirm }: { provider: Provider; pending: boolean; error: string; onCancel: () => void; onConfirm: () => Promise<void> }) {
+function ConfirmDelete({ provider, active, pending, error, onCancel, onConfirm }: { provider: Provider; active: boolean; pending: boolean; error: string; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const dialogRef = useModalFocus<HTMLElement>(onCancel, pending)
-  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>The provider must have no API keys or model routes. Reassign those first so active workflows cannot break.</p></div></header>{error ? <p className={styles.confirmError} role="alert">{error}</p> : null}<footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
+  // The delete is a cascade: the provider's keys and the routes that use it
+  // go with it, and an active route moves to a built-in in the same save, so
+  // the dialog names exactly what disappears instead of demanding cleanup.
+  const body = isCodex(provider)
+    ? `The account is signed out and the preset entry is deleted along with its model routes.${active ? ' The active route moves to an enabled built-in provider.' : ''} You can connect again at any time.`
+    : `${provider.keyCount > 0 ? `Its ${provider.keyCount} API ${provider.keyCount === 1 ? 'key' : 'keys'} and ` : ''}the model routes that use this provider are deleted with it${active ? '. The active route moves to an enabled built-in provider.' : '.'}`
+  return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>{body}</p></div></header>{error ? <p className={styles.confirmError} role="alert">{error}</p> : null}<footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
 }

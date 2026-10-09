@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CodexModelState } from '../../codex/application/codex-model'
 import type { ProvidersModelState } from '../application/providers-model'
@@ -118,27 +118,105 @@ beforeEach(() => {
 })
 
 describe('ProvidersPage inspector', () => {
-  it('keeps the generic delete off a codex preset row while a custom provider keeps it', () => {
-    show({
-      phase: 'ready',
-      catalog: { activeId: 'lab', providers: [codexPreset, customProvider] },
-      pendingId: '',
-      error: '',
-      health: new Map(),
-    })
-
-    // The wide layout defaults the inspector to the active provider, which
-    // here is the custom one: its delete affordance is untouched by the fix.
-    const custom = screen.getByRole('complementary', { name: 'Lab relay provider details' })
-    expect(within(custom).getByRole('button', { name: 'Delete' })).toBeTruthy()
+  it('routes the codex preset delete through the account sign-in', async () => {
+    const logout = vi.fn(async () => true)
+    const refresh = vi.fn()
+    show(
+      {
+        phase: 'ready',
+        catalog: { activeId: 'lab', providers: [codexPreset, customProvider] },
+        pendingId: '',
+        error: '',
+        health: new Map(),
+      },
+      signedIn,
+      { clearError: vi.fn(), refresh },
+      { logout },
+    )
 
     fireEvent.click(screen.getByText('Codex — dev@example.com').closest('button') as HTMLElement)
     const preset = screen.getByRole('complementary', { name: 'Codex — dev@example.com provider details' })
-    // A preset entry is removed by disconnecting the account sign-in, so the
-    // generic delete must not offer a second, refused path.
-    expect(within(preset).queryByRole('button', { name: 'Delete' })).toBeNull()
-    expect(within(preset).getByRole('button', { name: 'Disconnect' })).toBeTruthy()
+    // The preset keeps the manual editor off (the sign-in owns its config),
+    // but Delete is a deliberate cascade: it goes through the account with
+    // remove, not through the generic providers.delete, which refuses presets.
     expect(within(preset).queryByRole('button', { name: 'Edit' })).toBeNull()
+    fireEvent.click(within(preset).getByRole('button', { name: 'Delete' }))
+
+    // The confirm names what the cascade removes before anything fires.
+    const dialog = screen.getByRole('dialog', { name: 'Delete provider' })
+    expect(within(dialog).getByText(/is signed out and the preset entry is deleted along with its model routes/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete provider' }))
+
+    await waitFor(() => {
+      expect(logout).toHaveBeenCalledWith(true)
+    })
+    await waitFor(() => {
+      expect(refresh).toHaveBeenCalled()
+    })
+  })
+
+  it('deletes a custom provider together with its keys and routes', async () => {
+    const del = vi.fn(async () => true)
+    show(
+      {
+        phase: 'ready',
+        catalog: { activeId: 'lab', providers: [{ ...customProvider, keyCount: 2 }, builtinProvider] },
+        pendingId: '',
+        error: '',
+        health: new Map(),
+      },
+      signedIn,
+      { clearError: vi.fn(), delete: del },
+    )
+
+    // The wide layout defaults the inspector to the active provider, which
+    // here is the keyed custom one.
+    const custom = screen.getByRole('complementary', { name: 'Lab relay provider details' })
+    const deleteButton = within(custom).getByRole('button', { name: 'Delete' })
+    // Keys ride the cascade, so the delete no longer parks behind a
+    // "remove keys first" gate.
+    expect(deleteButton.hasAttribute('disabled')).toBe(false)
+    expect(within(custom).queryByText(/remove them in API Keys first/)).toBeNull()
+
+    fireEvent.click(deleteButton)
+    const dialog = screen.getByRole('dialog', { name: 'Delete provider' })
+    expect(within(dialog).getByText(/2 API keys and the model routes that use this provider are deleted with it/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete provider' }))
+
+    await waitFor(() => {
+      expect(del).toHaveBeenCalledWith('lab')
+    })
+  })
+
+  it('lets the active provider be deleted and says where the route moves', async () => {
+    const del = vi.fn(async () => true)
+    show(
+      {
+        phase: 'ready',
+        catalog: { activeId: 'lab', providers: [customProvider, builtinProvider] },
+        pendingId: '',
+        error: '',
+        health: new Map(),
+      },
+      signedIn,
+      { clearError: vi.fn(), delete: del },
+    )
+
+    // The active provider keeps its delete: the cascade moves the route to
+    // an enabled built-in in the same save, so nothing is left dangling.
+    const custom = screen.getByRole('complementary', { name: 'Lab relay provider details' })
+    const deleteButton = within(custom).getByRole('button', { name: 'Delete' })
+    expect(deleteButton.hasAttribute('disabled')).toBe(false)
+    expect(within(custom).queryByText('The active provider cannot be deleted')).toBeNull()
+
+    fireEvent.click(deleteButton)
+    const dialog = screen.getByRole('dialog', { name: 'Delete provider' })
+    expect(within(dialog).getByText(/The active route moves to an enabled built-in provider/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete provider' }))
+
+    await waitFor(() => {
+      expect(del).toHaveBeenCalledWith('lab')
+    })
   })
 
   it('keeps the generic edit off a codex preset row while custom and builtin providers keep it', () => {
@@ -248,6 +326,26 @@ describe('ProvidersPage codex disconnect', () => {
     // The refusal is a backend sentence written for the owner, so it
     // travels verbatim instead of a generic failure.
     expect(screen.getByRole('alert').textContent).toBe(refusal)
+  })
+
+  it('describes a disconnect as keeping the disabled entry', () => {
+    show({
+      phase: 'ready',
+      catalog: { activeId: 'codex', providers: [codexPreset] },
+      pendingId: '',
+      error: '',
+      health: new Map(),
+    }, signedIn)
+
+    const preset = screen.getByRole('complementary', { name: 'Codex — dev@example.com provider details' })
+    fireEvent.click(within(preset).getByRole('button', { name: 'Disconnect' }))
+
+    // A disconnect is the sign-out that keeps the entry: the dialog must
+    // not promise the removal only the delete cascade performs.
+    const dialog = screen.getByRole('dialog', { name: 'Disconnect Codex' })
+    expect(within(dialog).getByText(/is signed out/)).toBeTruthy()
+    expect(within(dialog).getByText(/The provider stays in the list, disabled/)).toBeTruthy()
+    expect(within(dialog).queryByText(/provider is removed/)).toBeNull()
   })
 
   it('cuts an oversized logout error dump at a word boundary in the disconnect dialog', () => {

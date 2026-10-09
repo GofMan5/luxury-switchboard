@@ -360,3 +360,53 @@ func TestTunnelTargetRejectsASecondRowPerModel(t *testing.T) {
 		t.Fatalf("the replaced row must load: %v", err)
 	}
 }
+
+// Deleting a provider is a deliberate cascade: every assignment that names
+// it, relay and tunnel alike, goes with the provider, because a failover
+// chain that keeps a hole the operator did not ask for is a route that
+// silently behaves differently from the one configured. Delete stays the
+// operator's single-model tool; this is the hand-off the providers manager
+// calls while the provider entry still exists.
+func TestRemoveProviderDeletesEveryAssignmentThatNamesIt(t *testing.T) {
+	repository := &memoryRepository{values: []domain.Assignment{
+		{Target: domain.TargetRelay, PublicModel: "model-a", UpstreamModel: "up-a", ProviderID: "echo", Enabled: true},
+		{Target: domain.TargetRelay, PublicModel: "model-b", UpstreamModel: "up-b", ProviderID: "echo", Enabled: true},
+		{Target: domain.TargetRelay, PublicModel: "model-b", UpstreamModel: "up-b", ProviderID: "agent", Enabled: true},
+		{Target: domain.TargetTunnel, PublicModel: "public-b", UpstreamModel: "up-b", ProviderID: "echo", ContextLimitKiB: 128 * 1024, Enabled: true},
+	}}
+	service, _ := NewService(repository, providers{"echo": true, "agent": true})
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var notified []domain.Target
+	service.OnChanged(func(target domain.Target) { notified = append(notified, target) })
+
+	if err := service.RemoveProvider(context.Background(), "echo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.Resolve(domain.TargetRelay, "model-a"); ok {
+		t.Fatal("a relay route of the removed provider still resolves")
+	}
+	if got, ok := service.Resolve(domain.TargetRelay, "model-b"); !ok || got.ProviderID != "agent" {
+		t.Fatalf("the failover chain lost its surviving provider: %+v", got)
+	}
+	if _, ok := service.Resolve(domain.TargetTunnel, "public-b"); ok {
+		t.Fatal("a tunnel route of the removed provider still resolves")
+	}
+	for _, assignment := range repository.values {
+		if assignment.ProviderID == "echo" {
+			t.Fatalf("an assignment of the removed provider was persisted: %+v", assignment)
+		}
+	}
+	if len(repository.values) != 1 {
+		t.Fatalf("the surviving assignment must be the only one persisted: %+v", repository.values)
+	}
+	relay, tunnel := false, false
+	for _, target := range notified {
+		relay = relay || target == domain.TargetRelay
+		tunnel = tunnel || target == domain.TargetTunnel
+	}
+	if !relay || !tunnel {
+		t.Fatalf("listeners were not told about both affected targets: %v", notified)
+	}
+}

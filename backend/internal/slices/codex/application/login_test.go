@@ -344,7 +344,7 @@ func TestALogoutDuringLoginNeverResurrectsTheSession(t *testing.T) {
 	if _, err := env.service.LoginStart(); err != nil {
 		t.Fatalf("LoginStart() error = %v, want nil", err)
 	}
-	if err := env.service.Logout(context.Background()); err != nil {
+	if err := env.service.Logout(context.Background(), false); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 	if conn := env.service.Status(); conn.State != StateSignedOut {

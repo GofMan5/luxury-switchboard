@@ -41,7 +41,7 @@ func TestALoginSavedDuringLogoutDoesNotResurrectTheSession(t *testing.T) {
 	}
 
 	// The disconnect lands while the save is still in flight.
-	if err := env.service.Logout(context.Background()); err != nil {
+	if err := env.service.Logout(context.Background(), false); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 	close(release)
@@ -94,7 +94,7 @@ func TestALogoutFromReauthNeededRetires(t *testing.T) {
 		t.Fatalf("State = %q, want %q before the logout", state, StateReauthNeeded)
 	}
 
-	if err := env.service.Logout(context.Background()); err != nil {
+	if err := env.service.Logout(context.Background(), false); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 	if retires := env.provisioner.retireCount(); retires != 1 {
@@ -122,7 +122,7 @@ func TestALogoutRefusedWhileCodexIsTheActiveProviderKeepsTheSession(t *testing.T
 	env.signIn(t)
 	env.provisioner.retireErr = providerapp.ErrActiveProvider
 
-	err := env.service.Logout(context.Background())
+	err := env.service.Logout(context.Background(), false)
 	var refusal *LogoutError
 	if !errors.As(err, &refusal) {
 		t.Fatalf("Logout() error = %v, want a *LogoutError refusal", err)
@@ -172,7 +172,7 @@ func TestALogoutStillCleansUpWhenRetirementFailsForAnotherReason(t *testing.T) {
 	env.signIn(t)
 	env.provisioner.retireErr = errors.New("registry lockfile is stuck")
 
-	err := env.service.Logout(context.Background())
+	err := env.service.Logout(context.Background(), false)
 	if err == nil {
 		t.Fatal("Logout() = nil error, want the retirement failure reported")
 	}
@@ -195,71 +195,71 @@ func TestALogoutStillCleansUpWhenRetirementFailsForAnotherReason(t *testing.T) {
 	}
 }
 
-// The leftover-entry refusals: a signed-out disconnect whose provider
-// entry still holds routes, keys, or the active route aborts with the
-// typed error naming the dependency, leaving the stored session exactly
-// as it was.
-func TestALogoutFromLeftoversNamesTheDependencyThatRefused(t *testing.T) {
-	cases := []struct {
-		name        string
-		removeErr   error
-		wantCode    string
-		wantMessage string
-	}{
-		{
-			name:        "routes",
-			removeErr:   providerapp.ErrProviderHasRoutes,
-			wantCode:    "codex_provider_has_routes",
-			wantMessage: "The Codex provider still has model routes. Remove its routes before disconnecting.",
-		},
-		{
-			name:        "keys",
-			removeErr:   providerapp.ErrProviderHasKeys,
-			wantCode:    "codex_provider_has_keys",
-			wantMessage: "The Codex provider still has API keys. Remove its keys before disconnecting.",
-		},
-		{
-			name:        "active route",
-			removeErr:   providerapp.ErrActiveProvider,
-			wantCode:    "codex_active_route",
-			wantMessage: "Codex is the active provider. Switch the active route away from Codex before disconnecting.",
-		},
+// The remove flag is the delete-the-provider path: a live account signs
+// out AND its provider entry is removed from the registry, not retired.
+// Retire exists so a later sign-in relinks to the preset identity — the
+// remove flag exists for the user who wants the Codex provider gone
+// from the Providers page, live session or not.
+func TestALogoutWithRemoveDeletesTheProviderEntryEvenWhileSignedIn(t *testing.T) {
+	env := newTestEnv(t)
+	env.signIn(t)
+
+	if err := env.service.Logout(context.Background(), true); err != nil {
+		t.Fatalf("Logout(remove) error = %v, want nil", err)
 	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			env := newTestEnv(t)
-			// A leftover disk session with no live state: the remove
-			// branch is the one that talks to the provider manager.
-			env.store.mu.Lock()
-			env.store.session = staleSession()
-			env.store.present = true
-			env.store.mu.Unlock()
-			env.provisioner.removeErr = testCase.removeErr
+	if removes := env.provisioner.removeCount(); removes != 1 {
+		t.Fatalf("RemoveCodexProvider called %d times, want 1", removes)
+	}
+	if retires := env.provisioner.retireCount(); retires != 0 {
+		t.Fatalf("RetireCodexProvider called %d times, want 0: remove means delete, not retire", retires)
+	}
+	if !env.store.wasCleared() {
+		t.Fatal("the stored session was not cleared")
+	}
+	if state := env.service.Status().State; state != StateSignedOut {
+		t.Fatalf("State = %q, want %q", state, StateSignedOut)
+	}
+}
 
-			err := env.service.Logout(context.Background())
-			var refusal *LogoutError
-			if !errors.As(err, &refusal) {
-				t.Fatalf("Logout() error = %v, want a *LogoutError refusal", err)
-			}
-			if refusal.Code != testCase.wantCode {
-				t.Fatalf("refusal.Code = %q, want %q", refusal.Code, testCase.wantCode)
-			}
-			if refusal.Message != testCase.wantMessage {
-				t.Fatalf("refusal.Message = %q, want %q", refusal.Message, testCase.wantMessage)
-			}
+// The active-route refusal on the leftover path: a signed-out disconnect
+// whose provider entry is still the active route aborts with the typed
+// error, leaving the stored session exactly as it was. (The routes/keys
+// refusal codes are gone with the delete cascade: dropping the provider
+// drops its routes and keys with it, so the manager never refuses for
+// them anymore.)
+func TestALogoutFromLeftoversNamesTheDependencyThatRefused(t *testing.T) {
+	env := newTestEnv(t)
+	// A leftover disk session with no live state: the remove
+	// branch is the one that talks to the provider manager.
+	env.store.mu.Lock()
+	env.store.session = staleSession()
+	env.store.present = true
+	env.store.mu.Unlock()
+	env.provisioner.removeErr = providerapp.ErrActiveProvider
 
-			if removes := env.provisioner.removeCount(); removes != 1 {
-				t.Fatalf("RemoveCodexProvider called %d times, want 1", removes)
-			}
-			if clears := env.store.clearCount(); clears != 0 {
-				t.Fatalf("store cleared %d times, want 0: the refusal aborts before the clear", clears)
-			}
-			if env.store.wasCleared() {
-				t.Fatal("the leftover stored session was cleared despite the refusal")
-			}
-			if state := env.service.Status().State; state != StateSignedOut {
-				t.Fatalf("State = %q, want %q", state, StateSignedOut)
-			}
-		})
+	err := env.service.Logout(context.Background(), false)
+	var refusal *LogoutError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("Logout() error = %v, want a *LogoutError refusal", err)
+	}
+	if refusal.Code != "codex_active_route" {
+		t.Fatalf("refusal.Code = %q, want codex_active_route", refusal.Code)
+	}
+	wantMessage := "Codex is the active provider. Switch the active route away from Codex before disconnecting."
+	if refusal.Message != wantMessage {
+		t.Fatalf("refusal.Message = %q, want %q", refusal.Message, wantMessage)
+	}
+
+	if removes := env.provisioner.removeCount(); removes != 1 {
+		t.Fatalf("RemoveCodexProvider called %d times, want 1", removes)
+	}
+	if clears := env.store.clearCount(); clears != 0 {
+		t.Fatalf("store cleared %d times, want 0: the refusal aborts before the clear", clears)
+	}
+	if env.store.wasCleared() {
+		t.Fatal("the leftover stored session was cleared despite the refusal")
+	}
+	if state := env.service.Status().State; state != StateSignedOut {
+		t.Fatalf("State = %q, want %q", state, StateSignedOut)
 	}
 }

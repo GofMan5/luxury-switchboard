@@ -22,7 +22,9 @@ export interface CodexPort {
   /** Probes the account's usage windows; a failed probe is a result field,
    * not a rejection — the last good windows ride the same answer. */
   quota(signal?: AbortSignal): Promise<CodexQuotaResult>
-  logout(signal?: AbortSignal): Promise<void>
+  /** A disconnect clears the session; `remove: true` also deletes the
+   * provisioned provider entry and its routes via the backend cascade. */
+  logout(remove: boolean, signal?: AbortSignal): Promise<void>
   /** Opens the authorize URL in the default browser after the https check. */
   openAuthorizeUrl(url: string): Promise<void>
   /** codex.changed push; a nudge only — the model refetches on every event. */

@@ -123,9 +123,23 @@ describe('StdioCodexPort', () => {
     const port = new StdioCodexPort(session)
 
     await port.loginCancel()
-    await port.logout()
+    await port.logout(false)
     expect(session.call).toHaveBeenNthCalledWith(1, 'codex.login.cancel', undefined, undefined)
     expect(session.call).toHaveBeenNthCalledWith(2, 'codex.logout', undefined, undefined)
+  })
+
+  it('asks the logout to remove the provider only when told to', async () => {
+    const session = sessionWith({ 'codex.logout': {} })
+    const port = new StdioCodexPort(session)
+
+    // A disconnect sends the empty payload the backend already knows; the
+    // delete is the one optional field codex.logout accepts, so the frame
+    // grows exactly that flag and nothing else.
+    await port.logout(false)
+    expect(session.call).toHaveBeenNthCalledWith(1, 'codex.logout', undefined, undefined)
+
+    await port.logout(true)
+    expect(session.call).toHaveBeenNthCalledWith(2, 'codex.logout', { remove: true }, undefined)
   })
 
   it('opens the authorize URL through the injected opener only when it is HTTPS', async () => {

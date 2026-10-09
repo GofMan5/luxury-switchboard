@@ -16,13 +16,13 @@ import (
 
 var (
 	ErrBuiltinProvider = errors.New("builtin provider cannot be deleted")
-	// ErrActiveProvider refuses to disable or delete the provider the active
-	// route depends on: switch the active route first, then retire the
-	// provider. One sentinel covers both refusals because the stdio surface
-	// and the UI match it by identity, not by text.
-	ErrActiveProvider    = errors.New("active provider cannot be disabled or deleted: switch the active route first")
-	ErrProviderHasKeys   = errors.New("provider still has keys")
-	ErrProviderHasRoutes = errors.New("provider still has model routes")
+	// ErrActiveProvider refuses to disable the provider the active route
+	// depends on: switch the active route first, then retire the provider.
+	// Deleting the active provider is NOT refused — it switches the active
+	// route to a deterministic builtin instead — so the sentinel's text
+	// names the disable path alone; the stdio surface and the UI match it
+	// by identity, not by text.
+	ErrActiveProvider = errors.New("active provider cannot be disabled: switch the active route first")
 	// ErrProviderIDExists names a refused Add: the id the caller asked for is
 	// already taken. The entry is never merged or overwritten, so the caller
 	// decides between a fresh id and refusing the request.
@@ -34,10 +34,20 @@ type KeyPool interface {
 	// window it is counted over.
 	EnsureProvider(providerID string, rpm int, window time.Duration) error
 	RemoveProvider(string) error
+	// DropProvider is the delete-side companion of EnsureProvider: it
+	// deletes every key that belongs to the provider, then its budget.
+	// A failed delete rolls nothing back — the cascade is the user's
+	// decision, already made.
+	DropProvider(ctx context.Context, providerID string) error
 }
 
-type RouteUsage interface {
-	LockProvider(string) (bool, func())
+// RouteCascade removes every route assignment that names a provider, so
+// deleting the provider is one action instead of a scavenger hunt through
+// Model Routes. Wired after construction because the routes slice reads
+// the provider catalog, and the provider manager reads the routes
+// service: the cycle breaks here, at a typed port, not at an import.
+type RouteCascade interface {
+	RemoveProvider(ctx context.Context, providerID string) error
 }
 
 type Manager struct {
@@ -45,12 +55,12 @@ type Manager struct {
 	catalog    *Catalog
 	repository Repository
 	keys       KeyPool
-	routes     RouteUsage
+	routes     RouteCascade
 	loadMu     sync.RWMutex
 	loadErr    error
 }
 
-func (manager *Manager) SetRouteUsage(routes RouteUsage) {
+func (manager *Manager) SetRouteCascade(routes RouteCascade) {
 	manager.opMu.Lock()
 	manager.routes = routes
 	manager.opMu.Unlock()
@@ -272,26 +282,63 @@ func (manager *Manager) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	// Deleting the provider the active route points at moves the route
+	// rather than refusing the delete: the decision is already made. The
+	// one refusal is having nowhere to move — checked before anything is
+	// cascaded, so a refused delete changes nothing.
+	nextActive := active.ID
 	if active.ID == id {
-		return ErrActiveProvider
+		fallback, found := fallbackActiveProvider(providers, id)
+		if !found {
+			return errors.New("no enabled provider remains: enable another provider before deleting the active one")
+		}
+		nextActive = fallback.ID
 	}
+	// The cascade runs before the entry leaves the store. Delete is one
+	// deliberate action: the routes and keys that name the provider go
+	// with it, not ahead of it by hand. Ordering matters for failure too —
+	// a failed entry save leaves the provider still listed but empty of
+	// keys and routes, which is consistent and retryable. Rolling the
+	// cascade back would mean re-adding keys this manager never held.
 	if manager.routes != nil {
-		referenced, unlock := manager.routes.LockProvider(id)
-		defer unlock()
-		if referenced {
-			return ErrProviderHasRoutes
+		if err := manager.routes.RemoveProvider(ctx, id); err != nil {
+			return fmt.Errorf("provider model routes could not be deleted: %w", err)
 		}
 	}
-	removed := providers[index]
-	if err := manager.keys.RemoveProvider(id); err != nil {
-		return ErrProviderHasKeys
+	if err := manager.keys.DropProvider(ctx, id); err != nil {
+		return fmt.Errorf("provider keys could not be deleted: %w", err)
 	}
 	providers = append(providers[:index], providers[index+1:]...)
-	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
-		_ = manager.keys.EnsureProvider(id, removed.RPM, removed.RateWindow())
+	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: nextActive}); err != nil {
 		return fmt.Errorf("provider settings could not be saved: %w", err)
 	}
-	return manager.catalog.Replace(providers, active.ID)
+	return manager.catalog.Replace(providers, nextActive)
+}
+
+// fallbackActiveProvider picks where the active route lands when its
+// provider is deleted: the first enabled builtin in catalog order — a
+// builtin always answers, even with no keys — then any other enabled
+// provider. Deterministic on purpose: two identical deletes must pick
+// the same target, or the second one would behave differently than the
+// first for no visible reason.
+func fallbackActiveProvider(providers []domain.Provider, deletedID string) (domain.Provider, bool) {
+	for _, provider := range providers {
+		if provider.ID == deletedID {
+			continue
+		}
+		if provider.Enabled && provider.Builtin {
+			return provider, true
+		}
+	}
+	for _, provider := range providers {
+		if provider.ID == deletedID {
+			continue
+		}
+		if provider.Enabled {
+			return provider, true
+		}
+	}
+	return domain.Provider{}, false
 }
 
 func (manager *Manager) Activate(ctx context.Context, id string) (domain.Provider, error) {

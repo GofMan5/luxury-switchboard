@@ -29,7 +29,7 @@ type codexService interface {
 	ImportJSON(ctx context.Context, text string) (application.ImportResult, error)
 	ImportFiles(ctx context.Context, paths []string) (application.ImportResult, error)
 	Status() application.Status
-	Logout(ctx context.Context) error
+	Logout(ctx context.Context, removeEntry bool) error
 	RefreshQuota(ctx context.Context) application.QuotaSnapshot
 	OnChanged(func(application.Snapshot))
 }
@@ -61,6 +61,7 @@ type fakeService struct {
 	listeners     []func(application.Snapshot)
 	importTexts   []string
 	importPaths   [][]string
+	logoutRemoves []bool
 	quotaProbes   int
 	quotaCtxs     []context.Context
 }
@@ -116,7 +117,10 @@ func (service *fakeService) Status() application.Status {
 	return service.status
 }
 
-func (service *fakeService) Logout(_ context.Context) error {
+func (service *fakeService) Logout(_ context.Context, removeEntry bool) error {
+	service.mu.Lock()
+	service.logoutRemoves = append(service.logoutRemoves, removeEntry)
+	service.mu.Unlock()
 	return service.logoutErr
 }
 
@@ -158,6 +162,15 @@ func (service *fakeService) quotaProbeCtxs(t *testing.T) []context.Context {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	return append([]context.Context(nil), service.quotaCtxs...)
+}
+
+// logoutRemoveFlags returns the remove flags the handlers passed down,
+// in command order, so a test can assert the wire payload's delete bit.
+func (service *fakeService) logoutRemoveFlags(t *testing.T) []bool {
+	t.Helper()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return append([]bool(nil), service.logoutRemoves...)
 }
 
 // importedTexts returns the texts the handlers passed down, in command
@@ -660,6 +673,31 @@ func TestLogoutAnswersAnEmptyObject(t *testing.T) {
 
 	if len(payload) != 0 {
 		t.Fatalf("logout answered more than an empty object: %+v", payload)
+	}
+	// An empty payload is the plain disconnect the command has always
+	// been: the flag must default to false, not to delete.
+	if removes := service.logoutRemoveFlags(t); len(removes) != 1 || removes[0] {
+		t.Fatalf("logout remove flags = %v, want a single false", removes)
+	}
+}
+
+// The remove flag is the delete path on the wire: an explicit
+// {"remove": true} reaches the service, and an unknown field next to it
+// is still refused — the payload stays a closed contract.
+func TestLogoutRemovePassesTheFlagThrough(t *testing.T) {
+	service := &fakeService{}
+
+	exchange(t, service, `"method":"codex.logout","payload":{"remove":true}`)
+
+	removes := service.logoutRemoveFlags(t)
+	if len(removes) != 1 || !removes[0] {
+		t.Fatalf("logout remove flags = %v, want a single true", removes)
+	}
+
+	unrecognised := &fakeService{}
+	failureOf(t, exchange(t, unrecognised, `"method":"codex.logout","payload":{"remove":true,"purge":true}`)[0])
+	if removes := unrecognised.logoutRemoveFlags(t); len(removes) != 0 {
+		t.Fatalf("a refused payload still reached the service: %v", removes)
 	}
 }
 

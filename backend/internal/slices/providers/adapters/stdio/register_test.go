@@ -66,6 +66,13 @@ func (pool *memoryKeyPool) RemoveProvider(providerID string) error {
 	return nil
 }
 
+func (pool *memoryKeyPool) DropProvider(_ context.Context, providerID string) error {
+	pool.mu.Lock()
+	pool.removed = append(pool.removed, providerID)
+	pool.mu.Unlock()
+	return nil
+}
+
 func (pool *memoryKeyPool) removals() []string {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()

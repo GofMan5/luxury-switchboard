@@ -14,6 +14,7 @@ class FakeCodexPort implements CodexPort {
   loginStartCalls = 0
   loginCancelCalls = 0
   logoutCalls = 0
+  logoutRemoveFlags: boolean[] = []
   openUrls: readonly string[] = []
   openAuthorizeUrlError: Error | null = null
   loginStartError: Error | null = null
@@ -80,8 +81,9 @@ class FakeCodexPort implements CodexPort {
     if (this.importFilesError) throw this.importFilesError
     return this.importFilesResult ?? { ...signedIn, importedFrom: 'auth.json' }
   }
-  async logout(): Promise<void> {
+  async logout(remove = false): Promise<void> {
     this.logoutCalls += 1
+    this.logoutRemoveFlags.push(remove)
     if (this.logoutError) throw this.logoutError
   }
 
@@ -482,6 +484,33 @@ describe('CodexModel', () => {
     expect(port.logoutCalls).toBe(1)
     expect(model.snapshot().account).toMatchObject({ state: 'signed_out' })
     expect(model.snapshot().logoutError).toBe('')
+    model.dispose()
+  })
+
+  it('removes the provider entry when the logout is asked to', async () => {
+    const port = new FakeCodexPort()
+    port.account = signedIn
+    const model = new CodexModel(port)
+    await model.connect()
+    port.account = signedOut
+    const ok = await model.logout(true)
+    expect(ok).toBe(true)
+    // The delete and the disconnect are the same command with one optional
+    // flag; the model must forward which of the two the user chose.
+    expect(port.logoutRemoveFlags).toEqual([true])
+    expect(model.snapshot().account).toMatchObject({ state: 'signed_out' })
+    expect(model.snapshot().logoutError).toBe('')
+    model.dispose()
+  })
+
+  it('reports a failed removal with its own readable copy', async () => {
+    const port = new FakeCodexPort()
+    port.logoutError = new ControlPlaneError('command_failed', 'codex provider could not be removed: secure storage is unavailable')
+    const model = new CodexModel(port)
+    await model.connect()
+    const ok = await model.logout(true)
+    expect(ok).toBe(false)
+    expect(model.snapshot().logoutError).toBe('Codex could not be removed. Try again, or disconnect it instead.')
     model.dispose()
   })
 

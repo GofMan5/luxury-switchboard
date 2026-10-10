@@ -4,6 +4,7 @@ import { useProviders } from '../../providers/ui/useProviders'
 import { useAppServices } from '../../../app/services'
 import { hasCodexQuota } from '../../codex/application/codex-capability'
 import CodexAccountsPane from '../../codex/ui/CodexAccountsPane'
+import { useCodex } from '../../codex/ui/useCodex'
 import { Button } from '../../../shared/ui/Button'
 import { Pill } from '../../../shared/ui/chrome'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
@@ -26,11 +27,16 @@ export default function ApiKeysPage() {
   const perSecond = providers.catalog.providers.find((provider) => provider.id === selectedProvider)?.rateUnit === 'second'
   const unit = perSecond ? 'second' : 'minute'
 
-  // The codex preset holds one signed-in account instead of a key pool, so its
+  // The codex preset holds signed-in accounts instead of a key pool, so its
   // branch replaces the keys table with the accounts list. A sidecar whose
   // handshake never promised codex.quota keeps the keys table — the UI offers
   // only what the running binary can actually answer.
   const codexAccounts = selectedProvider === 'codex' && hasCodexQuota(capabilities)
+  // The footer caption counts accounts, not keys, and it reads the live count
+  // so a disconnect or a second sign-in is reflected on the next render.
+  const { state: codexState } = useCodex()
+  const codexCount = codexState.accounts.length
+  const accountCaption = `${codexCount} account${codexCount === 1 ? '' : 's'} · usage windows refresh on demand`
 
   useEffect(() => {
     if (selectedProvider && !codexAccounts) void model.load(selectedProvider)
@@ -158,7 +164,7 @@ export default function ApiKeysPage() {
         </>
       )}
       <footer className={styles.footer}>
-        <span>{codexAccounts ? '1 account · usage windows refresh on demand' : `${ordered.length} keys · lower number means higher priority`}</span>
+        <span>{codexAccounts ? accountCaption : `${ordered.length} keys · lower number means higher priority`}</span>
         <span>{codexAccounts ? 'Sign-in lives on the Providers page' : 'Secrets and proxy credentials are write-only'}</span>
       </footer>
 

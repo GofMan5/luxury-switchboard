@@ -30,8 +30,8 @@ type codexService interface {
 	ImportJSON(ctx context.Context, text string) (application.ImportResult, error)
 	ImportFiles(ctx context.Context, paths []string) (application.ImportResult, error)
 	Status() application.Status
-	Logout(ctx context.Context, removeEntry bool) error
-	RefreshQuota(ctx context.Context) application.QuotaSnapshot
+	Logout(ctx context.Context, accountID string, removeEntry bool) error
+	RefreshQuota(ctx context.Context, accountID string) application.QuotaSnapshot
 	OnChanged(func(application.Snapshot))
 }
 
@@ -66,45 +66,54 @@ type DeviceLoginStartResult struct {
 	PollIntervalSeconds int    `json:"pollIntervalSeconds"`
 }
 
-// StatusResult is the connection as the provider list renders it. The
-// fields are account labels from the id token — not secrets — and the
-// access token the session also carries never crosses this boundary.
+// StatusResult is the connection as the accounts pane renders it. State
+// is the aggregate the service computes; Accounts carries one row per
+// stored account, signed in or not, in the service's stable order. The
+// rows are account labels from the id tokens — not secrets — and the
+// access tokens the sessions carry never cross this boundary.
 type StatusResult struct {
-	State      string `json:"state"`
+	State    string          `json:"state"`
+	Accounts []AccountResult `json:"accounts"`
+}
+
+// AccountResult is one codex account as the accounts pane renders it:
+// that account's id-token labels plus its own connection state.
+// ProviderID names the Providers-page entry the account serves, so a
+// pane row and a provider row can be told apart even when the entry
+// exists while the account sits signed out.
+type AccountResult struct {
+	AccountID  string `json:"accountId"`
 	Email      string `json:"email"`
 	Plan       string `json:"plan"`
-	AccountID  string `json:"accountId"`
+	State      string `json:"state"`
 	ProviderID string `json:"providerId"`
 }
 
 // ImportResult reports an import that landed: the live account status —
-// the same labels StatusResult carries — plus where the session came
-// from, a file base name. ImportedFrom is omitted while empty so a
-// pasted-JSON import reads as JSON, not as a file with no name.
+// the same state and rows StatusResult carries — plus where the
+// session came from, a file base name. ImportedFrom is omitted while
+// empty so a pasted-JSON import reads as JSON, not as a file with no
+// name.
 type ImportResult struct {
-	State        string `json:"state"`
-	Email        string `json:"email"`
-	Plan         string `json:"plan"`
-	AccountID    string `json:"accountId"`
-	ProviderID   string `json:"providerId"`
-	ImportedFrom string `json:"importedFrom,omitempty"`
+	State        string          `json:"state"`
+	Accounts     []AccountResult `json:"accounts"`
+	ImportedFrom string          `json:"importedFrom,omitempty"`
 }
 
-// QuotaResult is the answer the keys page renders in place of a key
-// table when the codex preset is selected: the live account labels plus
-// the last settled usage probe. Quota is omitted until some probe has
-// settled, so a first failure reads as "nothing known yet" rather than
-// as empty meters; Error is omitted while empty for the same reason —
-// a probe's outcome is data for the card, not a protocol error, because
-// a failed probe deliberately keeps the last good windows.
+// QuotaResult is one account's quota card on the wire: which account
+// was probed plus the last settled usage probe for it. The card's
+// labels — email, plan, the row itself — come from the status rows the
+// account already travels in; this answer carries only what a probe
+// itself learned, so it stays one card, not a second copy of the
+// account list. Quota is omitted until some probe has settled, so a
+// first failure reads as "nothing known yet" rather than as empty
+// meters; Error is omitted while empty for the same reason — a probe's
+// outcome is data for the card, not a protocol error, because a failed
+// probe deliberately keeps the last good windows.
 type QuotaResult struct {
-	State      string       `json:"state"`
-	Email      string       `json:"email"`
-	Plan       string       `json:"plan"`
-	AccountID  string       `json:"accountId"`
-	ProviderID string       `json:"providerId"`
-	Quota      *QuotaReport `json:"quota,omitempty"`
-	Error      string       `json:"error,omitempty"`
+	AccountID string       `json:"accountId"`
+	Quota     *QuotaReport `json:"quota,omitempty"`
+	Error     string       `json:"error,omitempty"`
 }
 
 // QuotaReport is one settled usage probe: when it landed and what it
@@ -211,18 +220,19 @@ func Register(server *platform.Server, service codexService) {
 		if err := decodeCommand(payload); err != nil {
 			return nil, err
 		}
-		status := service.Status()
-		return StatusResult{
-			State:      string(status.State),
-			Email:      status.Email,
-			Plan:       status.Plan,
-			AccountID:  status.AccountID,
-			ProviderID: status.ProviderID,
-		}, nil
+		return statusResult(service.Status()), nil
 	})
 	server.Handle("codex.quota", func(ctx context.Context, payload json.RawMessage) (any, error) {
-		if err := decodeCommand(payload); err != nil {
-			return nil, err
+		var command struct {
+			// accountId names the account whose usage is probed. Every
+			// quota card owns one account, so the probe is per-account by
+			// construction; the field is optional only because a shell
+			// that predates accounts still sends an empty payload, which
+			// the service answers with its not-signed-in verdict.
+			AccountID string `json:"accountId,omitempty"`
+		}
+		if err := platform.DecodePayload(payload, &command); err != nil {
+			return nil, invalidPayload()
 		}
 		// The probe rides the command's context, so a shell that aborts
 		// the frame also aborts the HTTP call it was waiting on. The
@@ -230,7 +240,7 @@ func Register(server *platform.Server, service codexService) {
 		// asked, and if the probe rotated the access token the service's
 		// own change feed — the one subscription below — already pushed
 		// codex.changed for it.
-		return quotaResult(service.Status(), service.RefreshQuota(ctx)), nil
+		return quotaResult(command.AccountID, service.RefreshQuota(ctx, command.AccountID)), nil
 	})
 	server.Handle("codex.logout", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
@@ -239,13 +249,17 @@ func Register(server *platform.Server, service codexService) {
 			// It stays optional — an empty payload disconnects, the same
 			// command it has always been.
 			Remove bool `json:"remove,omitempty"`
+			// accountId targets one account's session; absent means
+			// every account — the disconnect-all the command has always
+			// been. The service treats an unknown id as a no-op.
+			AccountID string `json:"accountId,omitempty"`
 		}
 		if err := platform.DecodePayload(payload, &command); err != nil {
 			return nil, invalidPayload()
 		}
 		// Cancellation rides the request's context, so a shell that aborts
 		// the command also aborts the store clear it was waiting on.
-		if err := service.Logout(ctx, command.Remove); err != nil {
+		if err := service.Logout(ctx, command.AccountID, command.Remove); err != nil {
 			return nil, platform.MethodError{Code: "codex_logout_failed", Message: err.Error()}
 		}
 		return struct{}{}, nil
@@ -259,10 +273,11 @@ func Register(server *platform.Server, service codexService) {
 }
 
 // decodeCommand accepts only an empty payload object: every codex
-// command except logout takes no fields, so whatever a client puts there
-// is unexpected by definition and gets the standard invalid_payload
-// refusal instead of being silently ignored. logout decodes its own
-// payload — it carries the optional remove flag.
+// command except logout and quota takes no fields, so whatever a client
+// puts there is unexpected by definition and gets the standard
+// invalid_payload refusal instead of being silently ignored. logout and
+// quota decode their own payloads — logout carries the optional remove
+// flag and account id, quota the account it probes.
 func decodeCommand(payload json.RawMessage) error {
 	var command struct{}
 	if err := platform.DecodePayload(payload, &command); err != nil {
@@ -353,26 +368,46 @@ func importError(err error) platform.MethodError {
 func importResult(result application.ImportResult) ImportResult {
 	return ImportResult{
 		State:        string(result.Status.State),
-		Email:        result.Status.Email,
-		Plan:         result.Status.Plan,
-		AccountID:    result.Status.AccountID,
-		ProviderID:   result.Status.ProviderID,
+		Accounts:     accountResults(result.Status.Accounts),
 		ImportedFrom: result.ImportedFrom,
 	}
 }
 
-// quotaResult lifts the account labels and one settled probe onto the
-// wire. A zero FetchedAt — no probe has settled — keeps the quota block
-// absent, and the probe's failure text travels as a result field the
-// card can act on, never as a protocol error.
-func quotaResult(status application.Status, snapshot application.QuotaSnapshot) QuotaResult {
+// statusResult lifts the connection status onto the wire: the aggregate
+// state plus one row per account, in the service's order.
+func statusResult(status application.Status) StatusResult {
+	return StatusResult{
+		State:    string(status.State),
+		Accounts: accountResults(status.Accounts),
+	}
+}
+
+// accountResults lifts every account row onto the wire. The slice is
+// always allocated, so JSON carries an empty array rather than null —
+// a status before any sign-in reads as "no accounts", not as a field
+// the pane cannot tell apart from a missing one.
+func accountResults(accounts []application.AccountStatus) []AccountResult {
+	rows := make([]AccountResult, 0, len(accounts))
+	for _, account := range accounts {
+		rows = append(rows, AccountResult{
+			AccountID:  account.AccountID,
+			Email:      account.Email,
+			Plan:       account.Plan,
+			State:      string(account.State),
+			ProviderID: account.ProviderID,
+		})
+	}
+	return rows
+}
+
+// quotaResult lifts one account's settled probe onto the wire. A zero
+// FetchedAt — no probe has settled — keeps the quota block absent, and
+// the probe's failure text travels as a result field the card can act
+// on, never as a protocol error.
+func quotaResult(accountID string, snapshot application.QuotaSnapshot) QuotaResult {
 	result := QuotaResult{
-		State:      string(status.State),
-		Email:      status.Email,
-		Plan:       status.Plan,
-		AccountID:  status.AccountID,
-		ProviderID: status.ProviderID,
-		Error:      snapshot.Err,
+		AccountID: accountID,
+		Error:     snapshot.Err,
 	}
 	if snapshot.FetchedAt != 0 {
 		result.Quota = &QuotaReport{
@@ -402,18 +437,15 @@ func quotaWindowResult(window domain.QuotaWindow) QuotaWindowResult {
 	return result
 }
 
-// changedPayload flattens a snapshot for the codex.changed push. The map
-// stays dumb — seven plain values, no nesting — because listeners do
-// nothing beyond refetching; the values are phase text and account
-// labels, never session tokens.
+// changedPayload flattens a snapshot for the codex.changed push. The
+// map stays dumb — the login phase, the aggregate state and the account
+// rows — because listeners do nothing beyond refetching; the values are
+// phase text and account labels, never session tokens.
 func changedPayload(snapshot application.Snapshot) map[string]any {
 	payload := map[string]any{
 		"loginPhase": string(snapshot.Login.Phase),
 		"state":      string(snapshot.Conn.State),
-		"email":      snapshot.Conn.Email,
-		"plan":       snapshot.Conn.Plan,
-		"accountId":  snapshot.Conn.AccountID,
-		"providerId": snapshot.Conn.ProviderID,
+		"accounts":   accountResults(snapshot.Conn.Accounts),
 	}
 	if snapshot.Login.Err != "" {
 		payload["loginError"] = snapshot.Login.Err

@@ -43,7 +43,9 @@ export default function ProvidersPage() {
   // With the Codex preset available, Add provider starts from a chooser; an
   // older control plane never learns about it and keeps the direct route.
   const [addProvider, setAddProvider] = useState<'choose' | 'codex' | null>(null)
-  const [disconnectCodex, setDisconnectCodex] = useState(false)
+  // A disconnect targets one account, so the dialog holds the account it is
+  // about to sign out plus how many signed-in accounts survive it.
+  const [disconnectCodex, setDisconnectCodex] = useState<{ accountId: string; email: string; otherSignedIn: number } | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
   // The codex preset delete rides the same logout command with remove; its
   // pending flag is tracked separately from a provider save/switch.
@@ -79,7 +81,10 @@ export default function ProvidersPage() {
     setEditor({ mode: 'add' })
   }
   const selectCodexRow = () => {
-    const id = codexState.account.providerId !== '' ? codexState.account.providerId : codexRow?.id
+    // Every account of the preset resolves to the same provider entry, so
+    // any account that carries a provider id selects it; before the first
+    // sign-in the list row is the only id there is.
+    const id = codexState.accounts.find((account) => account.providerId !== '')?.providerId ?? codexRow?.id
     setAddProvider(null)
     if (!id) return
     // The first sign-in creates the preset row, so the catalog may need a
@@ -92,6 +97,20 @@ export default function ProvidersPage() {
     setAddProvider('codex')
     void codexModel.startLogin()
   }
+  // A disconnect targets one account: the dialog names it and says how many
+  // signed-in accounts survive, so the owner knows what stays working.
+  const beginCodexDisconnect = (accountId: string) => {
+    const account = codexState.accounts.find((entry) => entry.accountId === accountId)
+    if (!account) return
+    const otherSignedIn = codexState.accounts.filter((entry) => entry.accountId !== accountId && entry.state === 'signed_in').length
+    setDisconnectCodex({ accountId, email: account.email, otherSignedIn })
+  }
+  // The list row stands for every account: it leads with the first
+  // signed-in email and folds the rest into a count.
+  const codexSignedInEmails = codexState.accounts.filter((account) => account.state === 'signed_in').map((account) => account.email)
+  const codexCaption = codexSignedInEmails.length === 0 ? 'Codex preset'
+    : codexSignedInEmails.length === 1 ? `Codex preset · ${codexSignedInEmails[0]}`
+    : `Codex preset · ${codexSignedInEmails[0]} +${codexSignedInEmails.length - 1}`
 
   return (
     <section className={styles.page}>
@@ -111,17 +130,19 @@ export default function ProvidersPage() {
             {state.catalog.providers.map((provider) => {
               const active = provider.id === state.catalog.activeId
               const health = state.health.get(provider.id)
-              // Codex rows carry the account, not key counts. Their state
-              // column reports the sign-in first: a preset without an
-              // account routes nothing, so that is the state that matters.
-              const codexNeedsSignIn = isCodex(provider) && provider.enabled && codexState.account.state !== 'signed_in'
+              // Codex rows carry the accounts, not key counts. Their state
+              // column reports the sign-in first: a preset without a
+              // signed-in account routes nothing, so that is the state that
+              // matters. The aggregate mirrors the model's: any live
+              // account keeps the preset live.
+              const codexNeedsSignIn = isCodex(provider) && provider.enabled && codexState.state !== 'signed_in'
               return (
                 <button key={provider.id} type="button" className={styles.providerRow} data-selected={provider.id === effectiveID} onClick={() => openProvider(provider.id)}>
-                  <span className={styles.providerName}><strong>{provider.name}</strong><small>{isCodex(provider) ? (codexState.account.state === 'signed_in' && codexState.account.email !== '' ? `Codex preset · ${codexState.account.email}` : 'Codex preset') : provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
+                  <span className={styles.providerName}><strong>{provider.name}</strong><small>{isCodex(provider) ? codexCaption : provider.builtin ? 'Built-in provider' : provider.keyCount > 0 ? `${provider.keyCount} configured keys` : 'Custom provider'}</small></span>
                   {codexNeedsSignIn ? (
-                    <span className={styles.health} title={codexState.account.state === 'reauth_needed' ? 'The Codex session expired. Sign in again from the provider details.' : undefined}>
-                      <StatusDot state={codexState.account.state === 'reauth_needed' ? 'degraded' : 'stopped'} />
-                      {codexState.account.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'}
+                    <span className={styles.health} title={codexState.state === 'reauth_needed' ? 'The Codex session expired. Sign in again from the provider details.' : undefined}>
+                      <StatusDot state={codexState.state === 'reauth_needed' ? 'degraded' : 'stopped'} />
+                      {codexState.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'}
                     </span>
                   ) : (
                     <span className={styles.health} title={health && !health.up ? health.reason : undefined}>
@@ -143,12 +164,12 @@ export default function ProvidersPage() {
             provider={selected}
             active={selected.id === state.catalog.activeId}
             pending={state.pendingId === selected.id}
-            codexAccount={isCodex(selected) ? codexState.account : null}
+            codexAccounts={isCodex(selected) ? codexState.accounts : []}
             onActivate={() => void model.activate(selected.id)}
             onEdit={() => { model.clearError(); setEditor({ mode: 'edit', provider: selected }) }}
             onDelete={() => { model.clearError(); setRemoveProvider(selected) }}
             onCodexSignIn={signInCodexAgain}
-            onCodexDisconnect={() => setDisconnectCodex(true)}
+            onCodexDisconnect={beginCodexDisconnect}
             onClose={() => { setOpened(false); setSelectedID('') }}
           />
         ) : narrow ? null : (
@@ -180,14 +201,16 @@ export default function ProvidersPage() {
           active={removeProvider.id === state.catalog.activeId}
           pending={isCodex(removeProvider) ? removingCodex : Boolean(state.pendingId)}
           error={isCodex(removeProvider) ? logoutErrorCopy(codexState.logoutError) : state.error}
+          codexAccountCount={isCodex(removeProvider) ? codexState.accounts.length : 0}
           onCancel={() => setRemoveProvider(null)}
           onConfirm={async () => {
             if (isCodex(removeProvider)) {
-              // The preset delete is the account sign-out that also removes
-              // the entry, so it rides the codex logout with remove instead
-              // of the generic providers.delete, which refuses presets.
+              // The preset delete is the sign-out that also removes the
+              // entry, so it rides the codex logout with remove for every
+              // account at once instead of the generic providers.delete,
+              // which refuses presets.
               setRemovingCodex(true)
-              const ok = await codexModel.logout(true)
+              const ok = await codexModel.logout(null, true)
               setRemovingCodex(false)
               if (!ok) return
               setSelectedID('')
@@ -211,22 +234,25 @@ export default function ProvidersPage() {
           onChoosePreset={() => setAddProvider('codex')}
           onCustom={openCustomEditor}
           onSelectCodexProvider={selectCodexRow}
-          onDisconnect={() => setDisconnectCodex(true)}
+          onDisconnect={beginCodexDisconnect}
         />
       ) : null}
-      {disconnectCodex ? (
+      {disconnectCodex !== null ? (
         <DisconnectCodexDialog
-          email={codexState.account.email}
+          email={disconnectCodex.email}
+          otherSignedIn={disconnectCodex.otherSignedIn}
           pending={disconnecting}
           error={logoutErrorCopy(codexState.logoutError)}
-          onCancel={() => setDisconnectCodex(false)}
+          onCancel={() => setDisconnectCodex(null)}
           onConfirm={async () => {
             setDisconnecting(true)
-            const ok = await codexModel.logout()
+            const ok = await codexModel.logout(disconnectCodex.accountId)
             setDisconnecting(false)
             if (!ok) return
-            setDisconnectCodex(false)
-            setAddProvider(null)
+            setDisconnectCodex(null)
+            // With several accounts the add flow stays open: another
+            // account can be added or disconnected right away. The catalog
+            // refresh picks up any preset-level change.
             void model.refresh()
           }}
         />
@@ -235,11 +261,11 @@ export default function ProvidersPage() {
   )
 }
 
-function ProviderInspector({ provider, active, pending, codexAccount, onActivate, onEdit, onDelete, onCodexSignIn, onCodexDisconnect, onClose }: {
+function ProviderInspector({ provider, active, pending, codexAccounts, onActivate, onEdit, onDelete, onCodexSignIn, onCodexDisconnect, onClose }: {
   provider: Provider; active: boolean; pending: boolean
-  codexAccount: CodexAccount | null
+  codexAccounts: readonly CodexAccount[]
   onActivate: () => void; onEdit: () => void; onDelete: () => void
-  onCodexSignIn: () => void; onCodexDisconnect: () => void; onClose: () => void
+  onCodexSignIn: () => void; onCodexDisconnect: (accountId: string) => void; onClose: () => void
 }) {
   // Not a modal: no focus trap, no autofocus — Escape and the X simply close it.
   const panelRef = useRef<HTMLElement>(null)
@@ -255,14 +281,18 @@ function ProviderInspector({ provider, active, pending, codexAccount, onActivate
     panel.addEventListener('keydown', keydown)
     return () => panel.removeEventListener('keydown', keydown)
   }, [onClose])
-  // A Codex preset without an account is the state worth acting on: the
-  // header and the action row lead with it instead of the wiring details.
-  const codexNeedsSignIn = codexAccount !== null && provider.enabled && codexAccount.state !== 'signed_in'
-  const codexStateDot = codexNeedsSignIn && codexAccount !== null
-    ? codexAccount.state === 'reauth_needed' ? 'degraded' : 'stopped'
+  // A Codex preset without a signed-in account is the state worth acting
+  // on: the header and the action row lead with it instead of the wiring
+  // details. The aggregate mirrors the model's: any live account keeps the
+  // preset live.
+  const codexSignedIn = codexAccounts.some((account) => account.state === 'signed_in')
+  const codexNeedsSignIn = isCodex(provider) && provider.enabled && !codexSignedIn
+  const codexAggregate = codexSignedIn ? 'signed_in' : codexAccounts.some((account) => account.state === 'reauth_needed') ? 'reauth_needed' : 'signed_out'
+  const codexStateDot = codexNeedsSignIn
+    ? codexAggregate === 'reauth_needed' ? 'degraded' : 'stopped'
     : provider.enabled ? 'healthy' : 'stopped'
-  const codexStateLabel = codexNeedsSignIn && codexAccount !== null
-    ? codexAccount.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'
+  const codexStateLabel = codexNeedsSignIn
+    ? codexAggregate === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'
     : provider.enabled ? 'Configured' : 'Disabled'
   return (
     <aside ref={panelRef} className={styles.inspector} aria-label={`${provider.name} provider details`}>
@@ -294,22 +324,35 @@ function ProviderInspector({ provider, active, pending, codexAccount, onActivate
         ) : null}
       </div>
       <div className={styles.inspectorScroll}>
-        <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd>{codexAccount !== null ? <><dt>Preset</dt><dd>Codex — managed by account sign-in</dd></> : null}<dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
+        <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd>{isCodex(provider) ? <><dt>Preset</dt><dd>Codex — managed by account sign-in</dd></> : null}<dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
         <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Request limit</dt><dd>{rateLabel(provider)}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
         <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>{provider.authMode === 'passthrough' ? 'Keys added in API Keys are used only for model discovery and tests.' : 'Secret material is never returned to the UI.'}</span></div></div></section>
-        {codexAccount !== null ? (
+        {isCodex(provider) ? (
           <section className={styles.section}>
-            <h3>Codex account</h3>
-            <dl>
-              <dt>Email</dt>
-              <dd className={styles.accountEmail} title={codexAccount.email !== '' ? codexAccount.email : undefined}>{codexAccount.email !== '' ? codexAccount.email : '—'}</dd>
-              {codexAccount.plan !== '' ? <><dt>Plan</dt><dd>{codexAccount.plan}</dd></> : null}
-              <dt>State</dt>
-              <dd><span className={styles.accountState}><StatusDot state={codexAccount.state === 'signed_in' ? 'healthy' : codexAccount.state === 'reauth_needed' ? 'degraded' : 'stopped'} />{codexAccount.state === 'signed_in' ? 'Signed in' : codexAccount.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'}</span></dd>
-            </dl>
-            <div className={styles.accountActions}>
-              {codexAccount.state !== 'signed_out' ? <Button variant="danger" onClick={onCodexDisconnect}>Disconnect</Button> : null}
-            </div>
+            <h3>Codex accounts</h3>
+            {codexAccounts.length === 0 ? (
+              <p className={styles.accountEmpty}>No accounts are connected. Sign in to add one.</p>
+            ) : (
+              <div className={styles.accountList}>
+                {codexAccounts.map((account) => (
+                  <div key={account.accountId} className={styles.accountRow}>
+                    <dl>
+                      <dt>Email</dt>
+                      <dd className={styles.accountEmail} title={account.email !== '' ? account.email : undefined}>{account.email !== '' ? account.email : '—'}</dd>
+                      {account.plan !== '' ? <><dt>Plan</dt><dd>{account.plan}</dd></> : null}
+                      <dt>State</dt>
+                      <dd><span className={styles.accountState}><StatusDot state={account.state === 'signed_in' ? 'healthy' : account.state === 'reauth_needed' ? 'degraded' : 'stopped'} />{account.state === 'signed_in' ? 'Signed in' : account.state === 'reauth_needed' ? 'Sign-in needed' : 'Signed out'}</span></dd>
+                    </dl>
+                    {/* With one account the plain label says enough; several
+                        accounts need the email in the accessible name to
+                        tell the disconnect buttons apart. */}
+                    {account.state !== 'signed_out' ? (
+                      <Button variant="danger" aria-label={codexAccounts.length > 1 ? `Disconnect ${account.email}` : undefined} onClick={() => onCodexDisconnect(account.accountId)}>Disconnect</Button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         ) : null}
       </div>
@@ -414,13 +457,15 @@ function ProviderEditor({ mode, provider, pending, operationError, active, onClo
   )
 }
 
-function ConfirmDelete({ provider, active, pending, error, onCancel, onConfirm }: { provider: Provider; active: boolean; pending: boolean; error: string; onCancel: () => void; onConfirm: () => Promise<void> }) {
+function ConfirmDelete({ provider, active, pending, error, codexAccountCount = 0, onCancel, onConfirm }: { provider: Provider; active: boolean; pending: boolean; error: string; codexAccountCount?: number; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const dialogRef = useModalFocus<HTMLElement>(onCancel, pending)
   // The delete is a cascade: the provider's keys and the routes that use it
   // go with it, and an active route moves to a built-in in the same save, so
   // the dialog names exactly what disappears instead of demanding cleanup.
+  // The codex variant signs out every account, and with several of them the
+  // scope deserves saying.
   const body = isCodex(provider)
-    ? `The account is signed out and the preset entry is deleted along with its model routes.${active ? ' The active route moves to an enabled built-in provider.' : ''} You can connect again at any time.`
+    ? `${codexAccountCount > 1 ? `All ${codexAccountCount} accounts are` : 'The account is'} signed out and the preset entry is deleted along with its model routes.${active ? ' The active route moves to an enabled built-in provider.' : ''} You can connect again at any time.`
     : `${provider.keyCount > 0 ? `Its ${provider.keyCount} API ${provider.keyCount === 1 ? 'key' : 'keys'} and ` : ''}the model routes that use this provider are deleted with it${active ? '. The active route moves to an enabled built-in provider.' : '.'}`
   return <div className="ui-scrim"><section ref={dialogRef} className={`ui-modal ${styles.confirm}`} role="dialog" aria-modal="true" aria-label="Delete provider"><header><div><h2>Delete “{provider.name}”?</h2><p>{body}</p></div></header>{error ? <p className={styles.confirmError} role="alert">{error}</p> : null}<footer><Button disabled={pending} onClick={onCancel}>Cancel</Button><Button variant="danger" disabled={pending} onClick={() => void onConfirm()}>{pending ? 'Deleting…' : 'Delete provider'}</Button></footer></section></div>
 }

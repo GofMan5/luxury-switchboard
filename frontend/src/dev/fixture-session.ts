@@ -224,11 +224,13 @@ export class FixtureSession implements ControlPlaneSession {
   #tick = 0
   #seq = 0
   #timer: ReturnType<typeof setInterval> | undefined
-  // The preset account starts signed out; a dev sign-in walks the real
+  // The preset starts with no accounts; a dev sign-in walks the real
   // waiting → exchanging → success curve on timers, like a browser OAuth hop.
+  // The second sign-in grants a second account, so the dev shell has a
+  // multi-account list to show.
   #codexPhase: 'idle' | 'waiting' | 'exchanging' | 'success' | 'error' = 'idle'
   #codexError = ''
-  #codexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }
+  #codexAccounts: { state: 'signed_out' | 'signed_in' | 'reauth_needed'; email: string; plan: string; accountId: string; providerId: string }[] = []
   #codexTimers = new Set<number>()
 
   start(): Promise<void> {
@@ -293,9 +295,39 @@ export class FixtureSession implements ControlPlaneSession {
     }, 4_000))
     this.#codexTimers.add(window.setTimeout(() => {
       this.#codexPhase = 'success'
-      this.#codexAccount = { state: 'signed_in', email: 'alex@example.com', plan: 'Plus', accountId: 'acct_fixture_codex', providerId: 'codex' }
+      // The first sign-in connects alex; the next one adds sam, so the
+      // dev shell walks the same multi-account path real usage does.
+      if (!this.#codexAccounts.some((account) => account.accountId === 'acct_fixture_codex')) {
+        this.#codexGrant('alex@example.com', 'Plus', 'acct_fixture_codex')
+      } else {
+        this.#codexGrant('sam@example.com', 'Pro', 'acct_fixture_codex_2')
+      }
       this.#emit('codex.changed', {})
     }, 6_500))
+  }
+
+  #codexGrant(email: string, plan: string, accountId: string): void {
+    const existing = this.#codexAccounts.find((account) => account.accountId === accountId)
+    if (existing !== undefined) {
+      existing.state = 'signed_in'
+      existing.email = email
+      existing.plan = plan
+      existing.providerId = 'codex'
+      return
+    }
+    this.#codexAccounts.push({ state: 'signed_in', email, plan, accountId, providerId: 'codex' })
+  }
+
+  // The status answer is the aggregate over rows, exactly like the backend:
+  // signed in once any account is, reauth when every signed-in one broke,
+  // signed out otherwise.
+  #codexStatus(): { state: 'signed_out' | 'signed_in' | 'reauth_needed'; accounts: unknown[] } {
+    const state = this.#codexAccounts.some((account) => account.state === 'signed_in')
+      ? 'signed_in'
+      : this.#codexAccounts.some((account) => account.state === 'reauth_needed')
+        ? 'reauth_needed'
+        : 'signed_out'
+    return { state, accounts: this.#codexAccounts.map((account) => ({ ...account })) }
   }
 
   #codexCancel(): void {
@@ -314,9 +346,9 @@ export class FixtureSession implements ControlPlaneSession {
   // its connecting → exchanging → success curve around the promise, so the
   // dev shell shows the same phases the real sidecar produces.
   #codexImportResult(plan: string) {
-    this.#codexAccount = { state: 'signed_in', email: 'alex@example.com', plan, accountId: 'acct_fixture_codex', providerId: 'codex' }
+    this.#codexGrant('alex@example.com', plan, 'acct_fixture_codex')
     this.#emit('codex.changed', {})
-    return { ...this.#codexAccount }
+    return this.#codexStatus()
   }
 
   #answer(method: string, payload?: unknown): unknown {
@@ -466,28 +498,38 @@ export class FixtureSession implements ControlPlaneSession {
         this.#codexCancel()
         return {}
       }
-      case 'codex.status': return { ...this.#codexAccount }
+      case 'codex.status': return this.#codexStatus()
       case 'codex.quota': {
-        // The real sidecar answers with the account it knows; a signed-out
-        // session is a refusal in the result, not a broken command — exactly
-        // like the backend's probe. Usage windows ride a fresh clock so the
-        // reset stamps in the dev UI always read as plausible local times.
-        const account = this.#codexAccount
-        if (account.state !== 'signed_in') return { ...account, error: 'codex is not signed in' }
+        // The real sidecar answers with the account it was asked about; a
+        // signed-out session is a refusal in the result, not a broken
+        // command — exactly like the backend's probe. Usage windows ride a
+        // fresh clock so the reset stamps in the dev UI always read as
+        // plausible local times.
+        const accountId = typeof body.accountId === 'string' ? body.accountId : ''
+        const account = this.#codexAccounts.find((entry) => entry.accountId === accountId)
+        if (account === undefined || account.state !== 'signed_in') return { accountId, error: 'codex is not signed in' }
         const now = Math.floor(Date.now() / 1000)
+        // Two live meters keep the rows distinguishable at a glance.
+        const primary = account.accountId === 'acct_fixture_codex_2' ? 23 : 76
+        const secondary = account.accountId === 'acct_fixture_codex_2' ? 68 : 41
         return {
-          ...account,
+          accountId,
           quota: {
             fetchedAt: now,
             planType: account.plan !== '' ? account.plan : 'Pro',
-            primary: { present: true, remainingPercent: 76, windowMinutes: 300, resetAt: now + 3120 },
-            secondary: { present: true, remainingPercent: 41, windowMinutes: 10080, resetAt: now + 172_800 },
+            primary: { present: true, remainingPercent: primary, windowMinutes: 300, resetAt: now + 3120 },
+            secondary: { present: true, remainingPercent: secondary, windowMinutes: 10080, resetAt: now + 172_800 },
           },
         }
       }
       case 'codex.logout': {
+        // A named account drops only itself; the cascade — or an empty
+        // payload, which the backend reads the same way — clears every
+        // account at once.
         this.#codexCancel()
-        this.#codexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }
+        const accountId = typeof body.accountId === 'string' ? body.accountId : ''
+        if (accountId === '') this.#codexAccounts = []
+        else this.#codexAccounts = this.#codexAccounts.filter((entry) => entry.accountId !== accountId)
         this.#emit('codex.changed', {})
         return {}
       }

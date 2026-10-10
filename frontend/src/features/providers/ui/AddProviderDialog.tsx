@@ -29,7 +29,7 @@ export default function AddProviderDialog({
   readonly onChoosePreset: () => void
   readonly onCustom: () => void
   readonly onSelectCodexProvider: () => void
-  readonly onDisconnect: () => void
+  readonly onDisconnect: (accountId: string) => void
 }) {
   const { model, state } = useCodex()
   const { loginPhase } = state

@@ -62,20 +62,25 @@ function accountAt(overrides: Partial<CodexAccount>): CodexAccount {
 function stateAt(overrides: Partial<CodexModelState>): CodexModelState {
   return {
     loginPhase: 'idle',
-    loginError: '',
-    account: accountAt({}),
-    authorizeUrl: '',
     activeMethod: null,
+    state: 'signed_out',
+    accounts: [],
+    freshAccount: null,
+    loginError: '',
+    authorizeUrl: '',
     deviceUserCode: '',
     deviceVerificationUrl: '',
     importedFrom: '',
+    quotas: {},
     logoutError: '',
-    quota: null,
-    quotaPending: false,
-    quotaError: '',
     ...overrides,
   }
 }
+
+const devAccount = accountAt({ state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' })
+const samAccount = accountAt({ state: 'signed_in', email: 'sam@example.com', plan: 'Plus', accountId: 'acct-2', providerId: 'codex' })
+const reauthAccount = accountAt({ state: 'reauth_needed', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' })
+const samReauthAccount = accountAt({ state: 'reauth_needed', email: 'sam@example.com', plan: 'Plus', accountId: 'acct-2', providerId: 'codex' })
 
 function renderPane(state: CodexModelState, providerExists = false) {
   mocks.state = state
@@ -114,7 +119,9 @@ describe('CodexConnectPane', () => {
     // The default pick is the browser flow, so its body shows a start button.
     expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'View in list' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Disconnect dev@example.com' })).toBeNull()
+    // The add-account section belongs to the manage card only.
+    expect(screen.queryByText('Add account')).toBeNull()
   })
 
   it('starts the browser login when Sign in with ChatGPT is clicked', () => {
@@ -167,29 +174,41 @@ describe('CodexConnectPane', () => {
     expect(document.activeElement?.textContent).toContain('Import from file')
   })
 
-  it('shows the linked account on the manage card with email and plan', () => {
-    renderPane(
-      stateAt({ account: accountAt({ state: 'signed_in', email: 'dev@example.com', plan: 'Pro' }) }),
-      true,
-    )
+  it('shows the linked account on the manage card with email, plan and its own disconnect action', () => {
+    renderPane(stateAt({ state: 'signed_in', accounts: [devAccount] }), true)
 
-    expect(screen.getByText('Signed in')).toBeTruthy()
-    expect(screen.getByText('Email')).toBeTruthy()
     expect(screen.getByText('dev@example.com')).toBeTruthy()
-    expect(screen.getByText('Plan')).toBeTruthy()
     expect(screen.getByText('Pro')).toBeTruthy()
+    expect(screen.getByText('Signed in')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'View in list' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeTruthy()
-    // A linked, signed-in account is not a sign-in affordance: no method picker.
-    expect(screen.queryByRole('radiogroup')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Disconnect dev@example.com' })).toBeTruthy()
+    // Linked accounts sit beside the add-account section, not instead of it.
+    expect(screen.getByText('Add account')).toBeTruthy()
+    expect(screen.getAllByRole('radio')).toHaveLength(4)
+    expect(radio(/Official sign-in/).getAttribute('aria-checked')).toBe('true')
     expect(screen.queryByText('Signed out')).toBeNull()
   })
 
+  it('lists every linked account with its own state pill and disconnect action', () => {
+    renderPane(stateAt({ state: 'signed_in', accounts: [devAccount, samReauthAccount] }), true)
+
+    expect(screen.getByText('dev@example.com')).toBeTruthy()
+    expect(screen.getByText('sam@example.com')).toBeTruthy()
+    expect(screen.getByText('Pro')).toBeTruthy()
+    expect(screen.getByText('Plus')).toBeTruthy()
+    // Each row reports its own state, so one broken account does not drag the
+    // working one into the warning.
+    expect(screen.getByText('Signed in')).toBeTruthy()
+    expect(screen.getByText('Sign-in needed')).toBeTruthy()
+    // The expiry note follows the aggregate, and one working account keeps it away.
+    expect(screen.queryByText('The session expired. Sign in again to keep the provider working.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Disconnect dev@example.com' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Disconnect sam@example.com' })).toBeTruthy()
+    expect(screen.getByText('Add account')).toBeTruthy()
+  })
+
   it('keeps offering sign-in when the linked session fell out', () => {
-    renderPane(
-      stateAt({ account: accountAt({ state: 'reauth_needed', email: 'dev@example.com' }) }),
-      true,
-    )
+    renderPane(stateAt({ state: 'reauth_needed', accounts: [reauthAccount] }), true)
 
     expect(screen.getByText('Sign-in needed')).toBeTruthy()
     expect(screen.getByText('The session expired. Sign in again to keep the provider working.')).toBeTruthy()
@@ -379,7 +398,9 @@ describe('CodexConnectPane', () => {
       stateAt({
         loginPhase: 'success',
         activeMethod: 'browser',
-        account: accountAt({ state: 'signed_in', email: 'dev@example.com', plan: 'Pro' }),
+        state: 'signed_in',
+        accounts: [devAccount],
+        freshAccount: devAccount,
       }),
       false,
     )
@@ -389,12 +410,33 @@ describe('CodexConnectPane', () => {
     expect(screen.getByText('The Codex provider was added to the list and is enabled.')).toBeTruthy()
   })
 
+  it('answers a second successful sign-in with that account on the success line', () => {
+    renderPane(
+      stateAt({
+        loginPhase: 'success',
+        activeMethod: 'browser',
+        state: 'signed_in',
+        accounts: [devAccount, samAccount],
+        freshAccount: samAccount,
+      }),
+      true,
+    )
+
+    // The success line names the account this flow just added, not the first
+    // one that was already there.
+    expect(successLine('sam@example.com')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Disconnect dev@example.com' })).toBeTruthy()
+    expect(screen.queryByText('The Codex provider was added to the list and is enabled.')).toBeNull()
+  })
+
   it('says where an imported sign-in came from', () => {
     renderPane(
       stateAt({
         loginPhase: 'success',
         activeMethod: 'importFile',
-        account: accountAt({ state: 'signed_in', email: 'dev@example.com', plan: 'Plus' }),
+        state: 'signed_in',
+        accounts: [devAccount],
+        freshAccount: devAccount,
         importedFrom: 'auth.json',
       }),
       false,
@@ -410,14 +452,16 @@ describe('CodexConnectPane', () => {
       stateAt({
         loginPhase: 'success',
         activeMethod: 'browser',
-        account: accountAt({ state: 'signed_in', email: 'dev@example.com' }),
+        state: 'signed_in',
+        accounts: [devAccount],
+        freshAccount: devAccount,
       }),
       true,
     )
 
     expect(successLine('dev@example.com')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'View in list' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Disconnect dev@example.com' })).toBeTruthy()
     // The row already existed; "was added" would be a lie here.
     expect(screen.queryByText('The Codex provider was added to the list and is enabled.')).toBeNull()
   })
@@ -453,18 +497,20 @@ describe('CodexConnectPane', () => {
     expect(screen.getByLabelText('Codex credentials')).toBeTruthy()
   })
 
-  it('delegates viewing the row and disconnecting to the page', () => {
+  it('delegates viewing the row and each account disconnect to the page', () => {
     const onSelectCodexRow = vi.fn()
     const onDisconnect = vi.fn()
-    mocks.state = stateAt({ account: accountAt({ state: 'signed_in', email: 'dev@example.com' }) })
+    mocks.state = stateAt({ state: 'signed_in', accounts: [devAccount, samAccount] })
     render(
       <CodexConnectPane providerExists onDisconnect={onDisconnect} onSelectCodexRow={onSelectCodexRow} />,
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'View in list' }))
     expect(onSelectCodexRow).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
-    expect(onDisconnect).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect dev@example.com' }))
+    expect(onDisconnect).toHaveBeenCalledWith('acct-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect sam@example.com' }))
+    expect(onDisconnect).toHaveBeenCalledWith('acct-2')
   })
 
   it('keeps the connect card a fresh login started from, even after the row appears mid-wait', () => {
@@ -478,14 +524,15 @@ describe('CodexConnectPane', () => {
 
     expect(screen.getByRole('status').textContent).toContain('Waiting for sign-in…')
     expect(screen.queryByRole('button', { name: 'View in list' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Disconnect dev@example.com' })).toBeNull()
   })
 
   it('keeps the manage card for a still-linked account even if the provider row disappears', () => {
     mocks.state = stateAt({
       loginPhase: 'waiting',
       activeMethod: 'browser',
-      account: accountAt({ state: 'signed_in', email: 'dev@example.com' }),
+      state: 'signed_in',
+      accounts: [devAccount],
     })
     const view = render(
       <CodexConnectPane providerExists onDisconnect={vi.fn()} onSelectCodexRow={vi.fn()} />,
@@ -493,7 +540,7 @@ describe('CodexConnectPane', () => {
     view.rerender(<CodexConnectPane providerExists={false} onDisconnect={vi.fn()} onSelectCodexRow={vi.fn()} />)
 
     expect(screen.getByRole('button', { name: 'View in list' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Disconnect dev@example.com' })).toBeTruthy()
     expect(screen.getByText('dev@example.com')).toBeTruthy()
   })
 })

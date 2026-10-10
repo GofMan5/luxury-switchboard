@@ -218,10 +218,17 @@
 .authRow span { display: block; margin-top: 4px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 
 /* Codex account section: the email can outgrow the dd column, and the state
- * row pairs the dot with its label the same way the list column does. */
+ * row pairs the dot with its label the same way the list column does. Each
+ * account is its own row — the preset-level dl grid applies through the
+ * .section descendant rule — with the disconnect aligned to the row's
+ * centre edge; a row of accounts gets a subtle divider between them. */
 .accountEmail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .accountState { display: inline-flex; align-items: center; gap: 6px; }
-.accountActions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.accountEmpty { margin: 0; color: var(--text-muted); font-size: 12.5px; }
+.accountList { display: grid; gap: 14px; }
+.accountRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.accountRow + .accountRow { padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+.accountRow dl { flex: 1 1 auto; min-width: 0; }
 
 .providerModal { --dialog-width: 580px; }
 

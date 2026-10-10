@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { RefreshCcw } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
 import { Pill } from '../../../shared/ui/chrome'
-import type { CodexAccountState, CodexQuotaWindow } from '../domain/codex'
+import type { CodexAccount, CodexAccountState, CodexQuotaWindow } from '../domain/codex'
+import type { CodexModel, CodexQuotaCard } from '../application/codex-model'
 import { useCodex } from './useCodex'
 import styles from './CodexAccountsPane.module.css'
 
@@ -48,10 +49,10 @@ function meterTone(remaining: number): 'ok' | 'warning' | 'danger' {
 }
 
 /**
- * One usage window row of the accounts list. The meter fills on what is LEFT
- * (a full bar is a healthy account), and a window the endpoint did not report
- * never renders a row at all — a neutral bar would read as a healthy quota
- * that nothing actually vouches for.
+ * One usage window row of an account. The meter fills on what is LEFT (a full
+ * bar is a healthy account), and a window the endpoint did not report never
+ * renders a row at all — a neutral bar would read as a healthy quota that
+ * nothing actually vouches for.
  */
 function WindowRow({ title, usage }: { readonly title: string; readonly usage: CodexQuotaWindow }) {
   const tone = meterTone(usage.remainingPercent)
@@ -76,25 +77,21 @@ function WindowRow({ title, usage }: { readonly title: string; readonly usage: C
 }
 
 /**
- * The codex provider's answer to the keys list: the account it answers for,
- * plus its usage windows as list rows. The backend holds exactly one signed-in
- * Codex account, so the list is one account row — the shape stays a list, and
- * a second account would render as a second row, not a redesign. Probes are
- * on demand (mount, account-state change, this pane's button); nothing polls.
+ * One account: its own header (email, plan, state, refresh), its own usage
+ * rows, its own failure text. A probe belongs to the row it answers for — a
+ * second account's refresh never touches this one, and a row that is not
+ * signed in keeps its button locked because there is nothing to ask.
  */
-export default function CodexAccountsPane() {
-  const { model, state } = useCodex()
-  const { account, quota, quotaPending, quotaError } = state
+function AccountRow({ account, card, model }: {
+  readonly account: CodexAccount
+  readonly card: CodexQuotaCard | undefined
+  readonly model: Pick<CodexModel, 'refreshQuota'>
+}) {
   const signedIn = account.state === 'signed_in'
-
-  // Mount and every account-state change: one probe per live session. Sign-in
-  // flips the state and lands here with the fresh account already in place.
-  useEffect(() => {
-    if (signedIn) void model.refreshQuota()
-  }, [model, signedIn])
-
   const pill = accountPill(account.state)
+  const quota = card?.quota ?? null
   const plan = account.plan !== '' ? account.plan : quota?.planType
+  const pending = card?.pending ?? false
   // The slot a window falls into is known by its length; a window the probe
   // did not report never renders a row, so the titles below never lie.
   const rows: readonly { id: 'primary' | 'secondary'; title: string; usage: CodexQuotaWindow | undefined }[] = [
@@ -104,21 +101,25 @@ export default function CodexAccountsPane() {
   const windows = rows.filter((row): row is { id: 'primary' | 'secondary'; title: string; usage: CodexQuotaWindow } => row.usage !== undefined && row.usage.present)
 
   return (
-    <section className={styles.pane} aria-label="Codex account and usage">
-      <div className={styles.account}>
+    <article className={styles.account}>
+      <header className={styles.accountHead}>
         <div className={styles.accountText}>
           <span className={styles.email} title={account.email}>{account.email !== '' ? account.email : 'No Codex account'}</span>
           <small>ChatGPT account this provider answers for</small>
         </div>
         {plan ? <Pill tone="info">{plan}</Pill> : null}
         <Pill tone={pill.tone}>{pill.label}</Pill>
-        <Button onClick={() => void model.refreshQuota()} disabled={!signedIn || quotaPending}>
-          <RefreshCcw size={16} aria-hidden="true" className={quotaPending ? styles.spinning : undefined} />
-          {quotaPending ? 'Checking…' : 'Refresh usage'}
+        <Button
+          aria-label={`Refresh usage for ${account.email}`}
+          onClick={() => void model.refreshQuota(account.accountId)}
+          disabled={!signedIn || pending}
+        >
+          <RefreshCcw size={16} aria-hidden="true" className={pending ? styles.spinning : undefined} />
+          {pending ? 'Checking…' : 'Refresh usage'}
         </Button>
-      </div>
+      </header>
 
-      {signedIn && quotaError !== '' ? <p className={styles.error} role="alert">{quotaError}</p> : null}
+      {signedIn && card !== undefined && card.error !== '' ? <p className={styles.error} role="alert">{card.error}</p> : null}
 
       {signedIn ? (
         quota ? (
@@ -132,7 +133,7 @@ export default function CodexAccountsPane() {
             )}
             <p className={styles.stamp}>Updated {stamp(quota.fetchedAt)}</p>
           </>
-        ) : quotaPending ? (
+        ) : pending ? (
           <p className={styles.hint}>Checking usage…</p>
         ) : (
           <p className={styles.hint}>No usage loaded yet. Use Refresh usage.</p>
@@ -141,9 +142,56 @@ export default function CodexAccountsPane() {
         <p className={styles.hint}>
           {account.state === 'reauth_needed'
             ? 'The session expired. Sign in again from the Providers page and the usage windows return.'
-            : 'Codex is not signed in. Sign in from the Providers page and the usage windows appear here.'}
+            : 'This account is signed out. Sign in again from the Providers page.'}
         </p>
       )}
+    </article>
+  )
+}
+
+/**
+ * The codex provider's answer to the keys list: every account the backend
+ * holds, each as its own row with its usage windows. Probes are on demand —
+ * the pane probes each signed-in account once when it appears (and retries a
+ * failed row only when the signed-in set changes, never in a loop); after
+ * that the row's own button is the only trigger. Nothing polls.
+ */
+export default function CodexAccountsPane() {
+  const { model, state } = useCodex()
+  // The probe trigger is the signed-in membership itself, as a string: a
+  // reorder or a re-render must not re-probe, a new account must. Cards are
+  // read through the latest render rather than the deps, so a probe already
+  // in flight or one that settled with usage is never asked again — and a
+  // failed row is retried only when the membership changes, never in a loop.
+  const latest = useRef(state)
+  latest.current = state
+  const signedInKey = state.accounts
+    .filter((account) => account.state === 'signed_in')
+    .map((account) => account.accountId)
+    .join('\n')
+
+  useEffect(() => {
+    for (const account of latest.current.accounts) {
+      if (account.state !== 'signed_in') continue
+      const card = latest.current.quotas[account.accountId]
+      if (card !== undefined && (card.pending || card.error === '')) continue
+      void model.refreshQuota(account.accountId)
+    }
+  }, [model, signedInKey])
+
+  if (state.accounts.length === 0) {
+    return (
+      <section className={styles.pane} aria-label="Codex accounts and usage">
+        <p className={styles.hint}>Codex is not signed in. Sign in from the Providers page and the usage windows appear here.</p>
+      </section>
+    )
+  }
+
+  return (
+    <section className={styles.pane} aria-label="Codex accounts and usage">
+      {state.accounts.map((account) => (
+        <AccountRow key={`${account.accountId}:${account.state}`} account={account} card={state.quotas[account.accountId]} model={model} />
+      ))}
     </section>
   )
 }

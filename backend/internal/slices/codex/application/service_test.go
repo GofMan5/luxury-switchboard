@@ -12,15 +12,19 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
-// fakeStore records every session it was asked to persist. saves appends
-// only on success so tests can assert exactly which sessions landed.
+// fakeStore records every session it was asked to persist, keyed by the
+// account the session itself names — plural accounts are the contract it
+// stands in for. saves appends only on success so tests can assert
+// exactly which sessions landed; clearCount counts Clear and ClearAll
+// together so logout arithmetic stays comparable.
 type fakeStore struct {
-	mu       sync.Mutex
-	session  domain.Session
-	present  bool
-	loadErr  error
-	saveErr  error
-	clearErr error
+	mu          sync.Mutex
+	accounts    map[string]domain.Session
+	order       []string
+	loadErr     error
+	saveErr     error
+	clearErr    error
+	clearAllErr error
 	// saveHook runs before a save records, parked without holding mu, so a
 	// test can hold one save in flight while Logout's Clear and other
 	// store traffic keep working.
@@ -29,13 +33,17 @@ type fakeStore struct {
 	clears   int
 }
 
-func (store *fakeStore) Load(ctx context.Context) (domain.Session, bool, error) {
+func (store *fakeStore) Load(ctx context.Context) ([]domain.Session, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.loadErr != nil {
-		return domain.Session{}, false, store.loadErr
+		return nil, store.loadErr
 	}
-	return store.session, store.present, nil
+	sessions := make([]domain.Session, 0, len(store.order))
+	for _, key := range store.order {
+		sessions = append(sessions, store.accounts[key])
+	}
+	return sessions, nil
 }
 
 func (store *fakeStore) Save(ctx context.Context, session domain.Session) error {
@@ -52,22 +60,59 @@ func (store *fakeStore) Save(ctx context.Context, session domain.Session) error 
 	if store.saveErr != nil {
 		return store.saveErr
 	}
-	store.session = session
-	store.present = true
+	store.insertLocked(session)
 	store.saves = append(store.saves, session)
 	return nil
 }
 
-func (store *fakeStore) Clear(ctx context.Context) error {
+func (store *fakeStore) Clear(ctx context.Context, session domain.Session) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.clearErr != nil {
 		return store.clearErr
 	}
-	store.session = domain.Session{}
-	store.present = false
+	key := session.Identity.AccountID
+	delete(store.accounts, key)
+	for i, existing := range store.order {
+		if existing == key {
+			store.order = append(store.order[:i], store.order[i+1:]...)
+			break
+		}
+	}
 	store.clears++
 	return nil
+}
+
+func (store *fakeStore) ClearAll(ctx context.Context) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.clearAllErr != nil {
+		return store.clearAllErr
+	}
+	store.accounts = nil
+	store.order = nil
+	store.clears++
+	return nil
+}
+
+// insertLocked places or replaces one account; callers hold mu.
+func (store *fakeStore) insertLocked(session domain.Session) {
+	if store.accounts == nil {
+		store.accounts = map[string]domain.Session{}
+	}
+	key := session.Identity.AccountID
+	if _, ok := store.accounts[key]; !ok {
+		store.order = append(store.order, key)
+	}
+	store.accounts[key] = session
+}
+
+// seed lands a stored account without going through Save: tests use it
+// to place pre-existing sessions the service must Restore from.
+func (store *fakeStore) seed(session domain.Session) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.insertLocked(session)
 }
 
 // setSaveHook installs (nil removes) the pre-record save hook.
@@ -84,14 +129,21 @@ func (store *fakeStore) savedSessions() []domain.Session {
 	return append([]domain.Session{}, store.saves...)
 }
 
+// storedSessions snapshots the store's current contents, in Load order.
+func (store *fakeStore) storedSessions() []domain.Session {
+	sessions, _ := store.Load(context.Background())
+	return sessions
+}
+
 func (store *fakeStore) wasCleared() bool {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return !store.present
+	return len(store.accounts) == 0
 }
 
-// clearCount reports how many successful clears the store served, so a
-// test can tell the logout's clear from a compensation clear apart.
+// clearCount reports how many successful clears the store served — Clear
+// or ClearAll alike — so a test can tell the logout's clear from a
+// compensation clear apart.
 func (store *fakeStore) clearCount() int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -445,16 +497,24 @@ func (redirects *fakeRedirects) stopCount() int {
 	return redirects.stops
 }
 
-// fakeProvisioner records every identity the service registered and which
-// release mode Logout picked.
+// fakeProvisioner records every identity the service registered and
+// which release mode Logout picked. Successful Ensure calls mint
+// distinct provider ids the way the real provisioner does — codex,
+// codex2, codex3… — so multi-account logins land on separate slots,
+// unless the test scripted an explicit providerIDs queue.
 type fakeProvisioner struct {
-	mu        sync.Mutex
-	ensureErr error
-	retireErr error
-	removeErr error
-	ensured   []domain.Identity
-	retired   int
-	removed   int
+	mu          sync.Mutex
+	ensureErr   error
+	retireErr   error
+	removeErr   error
+	providerIDs []string
+	nextMint    int
+	ensured     []domain.Identity
+	ensuredIDs  []string
+	retiredIDs  []string
+	removedIDs  []string
+	retired     int
+	removed     int
 }
 
 func (provisioner *fakeProvisioner) EnsureCodexProvider(ctx context.Context, identity domain.Identity) (string, error) {
@@ -464,20 +524,35 @@ func (provisioner *fakeProvisioner) EnsureCodexProvider(ctx context.Context, ide
 	if provisioner.ensureErr != nil {
 		return "", provisioner.ensureErr
 	}
-	return CodexProviderID, nil
+	var providerID string
+	if len(provisioner.providerIDs) > 0 {
+		providerID = provisioner.providerIDs[0]
+		provisioner.providerIDs = provisioner.providerIDs[1:]
+	} else {
+		provisioner.nextMint++
+		if provisioner.nextMint == 1 {
+			providerID = CodexProviderID
+		} else {
+			providerID = fmt.Sprintf("%s%d", CodexProviderID, provisioner.nextMint)
+		}
+	}
+	provisioner.ensuredIDs = append(provisioner.ensuredIDs, providerID)
+	return providerID, nil
 }
 
-func (provisioner *fakeProvisioner) RetireCodexProvider(ctx context.Context) error {
+func (provisioner *fakeProvisioner) RetireCodexProvider(ctx context.Context, accountID string) error {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	provisioner.retired++
+	provisioner.retiredIDs = append(provisioner.retiredIDs, accountID)
 	return provisioner.retireErr
 }
 
-func (provisioner *fakeProvisioner) RemoveCodexProvider(ctx context.Context) error {
+func (provisioner *fakeProvisioner) RemoveCodexProvider(ctx context.Context, accountID string) error {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	provisioner.removed++
+	provisioner.removedIDs = append(provisioner.removedIDs, accountID)
 	return provisioner.removeErr
 }
 
@@ -485,6 +560,28 @@ func (provisioner *fakeProvisioner) ensuredIdentities() []domain.Identity {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	return append([]domain.Identity{}, provisioner.ensured...)
+}
+
+// ensuredProviderIDs snapshots the ids successful Ensure calls returned,
+// in order — one row per sign-in, codex then codex2.
+func (provisioner *fakeProvisioner) ensuredProviderIDs() []string {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	return append([]string{}, provisioner.ensuredIDs...)
+}
+
+// retiredAccountIDs snapshots the account ids Logout asked to retire.
+func (provisioner *fakeProvisioner) retiredAccountIDs() []string {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	return append([]string{}, provisioner.retiredIDs...)
+}
+
+// removedAccountIDs snapshots the account ids Logout asked to remove.
+func (provisioner *fakeProvisioner) removedAccountIDs() []string {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+	return append([]string{}, provisioner.removedIDs...)
 }
 
 func (provisioner *fakeProvisioner) retireCount() int {
@@ -651,6 +748,19 @@ func staleSession() domain.Session {
 	return session
 }
 
+// accountStatus finds one account's row in a Status: multi-account tests
+// address their rows by account id, never by position.
+func accountStatus(t *testing.T, status Status, accountID string) AccountStatus {
+	t.Helper()
+	for _, account := range status.Accounts {
+		if account.AccountID == accountID {
+			return account
+		}
+	}
+	t.Fatalf("Status().Accounts has no %q: %+v", accountID, status.Accounts)
+	return AccountStatus{}
+}
+
 // waitFor polls a condition with a deadline instead of sleeping blindly:
 // a deadlock surfaces as this timeout, and happy paths finish in the
 // first few polls.
@@ -722,10 +832,7 @@ func TestConcurrentAcquiresInvalidationsAndStatusQueriesStayConsistent(t *testin
 	env := newTestEnv(t)
 	// A stale session with a live refresh token: every acquire races the
 	// others into the single-flight refresh.
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.service.refreshInterval = 5 * time.Millisecond
 	env.restore(t)
 
@@ -737,8 +844,8 @@ func TestConcurrentAcquiresInvalidationsAndStatusQueriesStayConsistent(t *testin
 		go func() {
 			defer wg.Done()
 			for j := 0; j < rounds; j++ {
-				_, _ = env.service.AcquireAccessToken(context.Background())
-				env.service.InvalidateAccessToken()
+				_, _ = env.service.AcquireAccessToken(context.Background(), "account-1")
+				env.service.InvalidateAccessToken("access-user@example.com")
 				env.service.Status()
 				env.service.LoginStatus()
 			}
@@ -763,7 +870,7 @@ func TestConcurrentAcquiresInvalidationsAndStatusQueriesStayConsistent(t *testin
 func TestLogoutRetiresALiveSessionButRemovesLeftovers(t *testing.T) {
 	env := newTestEnv(t)
 
-	if err := env.service.Logout(context.Background(), false); err != nil {
+	if err := env.service.Logout(context.Background(), "", false); err != nil {
 		t.Fatalf("Logout() with no live account error = %v, want nil", err)
 	}
 	if retired := env.provisioner.retireCount(); retired != 0 {
@@ -774,7 +881,7 @@ func TestLogoutRetiresALiveSessionButRemovesLeftovers(t *testing.T) {
 	}
 
 	env.signIn(t)
-	if err := env.service.Logout(context.Background(), false); err != nil {
+	if err := env.service.Logout(context.Background(), "", false); err != nil {
 		t.Fatalf("Logout() with a live account error = %v, want nil", err)
 	}
 	if retired := env.provisioner.retireCount(); retired != 1 {
@@ -801,13 +908,10 @@ func TestAnAccessOnlyRotationKeepsTheStoredRefreshTokenAndIdentity(t *testing.T)
 		IDToken:      "",
 		AccessExpiry: time.Now().Add(time.Hour),
 	}, nil)
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
-	token, err := env.service.AcquireAccessToken(context.Background())
+	token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -817,15 +921,19 @@ func TestAnAccessOnlyRotationKeepsTheStoredRefreshTokenAndIdentity(t *testing.T)
 
 	// The rotation answered no identity of its own: the account stays the
 	// one the stored id token described.
-	if conn := env.service.Status(); conn.State != StateSignedIn || conn.Email != "user@example.com" {
-		t.Fatalf("Status() = %+v, want signed in as user@example.com", conn)
+	conn := env.service.Status()
+	if conn.State != StateSignedIn {
+		t.Fatalf("Status().State = %q, want %q", conn.State, StateSignedIn)
+	}
+	if account := accountStatus(t, conn, "account-1"); account.Email != "user@example.com" {
+		t.Fatalf("account email = %q, want the one the stored id token described", account.Email)
 	}
 
 	// Force the next acquire through the refresh path again: it must still
 	// present the stored refresh token, because the access-only rotation
 	// must not have blanked it.
-	env.service.InvalidateAccessToken()
-	second, err := env.service.AcquireAccessToken(context.Background())
+	env.service.InvalidateAccessToken("rotated-access")
+	second, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("second AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -856,16 +964,13 @@ func TestADatelessRotationKeepsThePreviousExpiry(t *testing.T) {
 		AccessToken:  "rotated-access",
 		RefreshToken: "rotated-refresh",
 	}, nil)
-	env.store.mu.Lock()
-	env.store.session = validSession("user@example.com")
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(validSession("user@example.com"))
 	env.restore(t)
 
 	// The invalidate is what sends the first acquire to the token
 	// endpoint; the rotation that answers it has no expiry of its own.
-	env.service.InvalidateAccessToken()
-	first, err := env.service.AcquireAccessToken(context.Background())
+	env.service.InvalidateAccessToken("access-user@example.com")
+	first, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -873,7 +978,7 @@ func TestADatelessRotationKeepsThePreviousExpiry(t *testing.T) {
 		t.Fatalf("AcquireAccessToken() = %q, want %q", first, "rotated-access")
 	}
 
-	second, err := env.service.AcquireAccessToken(context.Background())
+	second, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("second AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -903,13 +1008,10 @@ func TestARevokedAccessTokenStopsServingUntilASignIn(t *testing.T) {
 		RefreshToken: "rotated-refresh",
 		AccessExpiry: time.Now().Add(time.Hour),
 	}, nil)
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
-	token, err := env.service.AcquireAccessToken(context.Background())
+	token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -923,14 +1025,14 @@ func TestARevokedAccessTokenStopsServingUntilASignIn(t *testing.T) {
 	if conn.State != StateReauthNeeded {
 		t.Fatalf("Status().State = %q, want %q", conn.State, StateReauthNeeded)
 	}
-	if conn.Email != "user@example.com" {
-		t.Fatalf("Status().Email = %q, want the identity kept for the re-sign-in dialog", conn.Email)
+	if account := accountStatus(t, conn, "account-1"); account.Email != "user@example.com" {
+		t.Fatalf("account email = %q, want the identity kept for the re-sign-in dialog", account.Email)
 	}
 
 	// The failure loop from before the fix — acquire, refresh, serve the
 	// doomed token, 401, repeat — must not start: the acquire refuses
 	// outright and no second refresh is minted.
-	if _, err := env.service.AcquireAccessToken(context.Background()); !errors.Is(err, errNotSignedIn) {
+	if _, err := env.service.AcquireAccessToken(context.Background(), "account-1"); !errors.Is(err, errNotSignedIn) {
 		t.Fatalf("AcquireAccessToken() error = %v, want errNotSignedIn", err)
 	}
 	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 {
@@ -943,7 +1045,7 @@ func TestARevokedAccessTokenStopsServingUntilASignIn(t *testing.T) {
 	if conn := env.service.Status(); conn.State != StateSignedIn {
 		t.Fatalf("after a re-login Status().State = %q, want %q", conn.State, StateSignedIn)
 	}
-	served, err := env.service.AcquireAccessToken(context.Background())
+	served, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() after re-login error = %v, want nil", err)
 	}
@@ -962,13 +1064,10 @@ func TestAStaleRevocationCannotSignOutANewerSession(t *testing.T) {
 		RefreshToken: "rotated-refresh",
 		AccessExpiry: time.Now().Add(time.Hour),
 	}, nil)
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
-	token, err := env.service.AcquireAccessToken(context.Background())
+	token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -982,7 +1081,7 @@ func TestAStaleRevocationCannotSignOutANewerSession(t *testing.T) {
 	if conn := env.service.Status(); conn.State != StateSignedIn {
 		t.Fatalf("Status().State = %q, want %q: a stale revocation must not clobber the rotation", conn.State, StateSignedIn)
 	}
-	served, err := env.service.AcquireAccessToken(context.Background())
+	served, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() after a stale revocation error = %v, want nil", err)
 	}
@@ -1006,10 +1105,7 @@ func TestAStaleRevocationCannotSignOutANewerSession(t *testing.T) {
 // session it did not describe, and no further token is served from it.
 func TestARevocationThatLandsMidRotationLeavesTheNewSessionUnserved(t *testing.T) {
 	env := newTestEnv(t)
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
 	block := make(chan struct{})
@@ -1019,7 +1115,7 @@ func TestARevocationThatLandsMidRotationLeavesTheNewSessionUnserved(t *testing.T
 		err   error
 	}, 1)
 	go func() {
-		token, err := env.service.AcquireAccessToken(context.Background())
+		token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 		acquireDone <- struct {
 			token string
 			err   error
@@ -1059,7 +1155,7 @@ func TestARevocationThatLandsMidRotationLeavesTheNewSessionUnserved(t *testing.T
 	if conn := env.service.Status(); conn.State != StateReauthNeeded {
 		t.Fatalf("Status().State = %q, want %q: a landed rotation must not undo the verdict", conn.State, StateReauthNeeded)
 	}
-	if _, err := env.service.AcquireAccessToken(context.Background()); !errors.Is(err, errNotSignedIn) {
+	if _, err := env.service.AcquireAccessToken(context.Background(), "account-1"); !errors.Is(err, errNotSignedIn) {
 		t.Fatalf("AcquireAccessToken() error = %v, want errNotSignedIn: the rotated session stays unserved", err)
 	}
 }
@@ -1068,10 +1164,7 @@ func TestTheTickerMarksAStaleSessionForReSignIn(t *testing.T) {
 	env := newTestEnv(t)
 	env.service.refreshInterval = 5 * time.Millisecond
 	env.authorizer.setRefreshResult(domain.Session{}, errors.New("invalid_grant"))
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
 	waitFor(t, "the ticker to mark the session for re-sign-in", func() bool {
@@ -1080,14 +1173,15 @@ func TestTheTickerMarksAStaleSessionForReSignIn(t *testing.T) {
 
 	// The identity survives the flip: the dialog must still be able to
 	// say who needs to sign in again.
-	if conn := env.service.Status(); conn.Email != "user@example.com" {
-		t.Fatalf("Status().Email = %q, want user@example.com after the flip", conn.Email)
+	conn := env.service.Status()
+	if account := accountStatus(t, conn, "account-1"); account.Email != "user@example.com" {
+		t.Fatalf("account-1 email = %q, want user@example.com after the flip", account.Email)
 	}
 	seen := false
 	for _, snapshot := range env.events.snapshots() {
 		if snapshot.Conn.State == StateReauthNeeded {
 			seen = true
-			if snapshot.Conn.Email != "user@example.com" {
+			if accountStatus(t, snapshot.Conn, "account-1").Email != "user@example.com" {
 				t.Fatalf("reauth_needed snapshot = %+v, want the identity intact", snapshot.Conn)
 			}
 		}
@@ -1108,13 +1202,10 @@ func TestAnUnrefreshableRestoredSessionAsksForSignIn(t *testing.T) {
 	session := validSession("user@example.com")
 	session.RefreshToken = ""
 	session.AccessExpiry = time.Now().Add(-10 * time.Minute)
-	env.store.mu.Lock()
-	env.store.session = session
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(session)
 	env.restore(t)
 
-	_, err := env.service.AcquireAccessToken(context.Background())
+	_, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if !errors.Is(err, errNeedsSignIn) {
 		t.Fatalf("AcquireAccessToken() error = %v, want errNeedsSignIn", err)
 	}
@@ -1134,10 +1225,7 @@ func TestAStaleRefreshFailureDoesNotClobberAFreshLogin(t *testing.T) {
 	env := newTestEnv(t)
 	stale := staleSession()
 	stale.RefreshToken = "old-refresh"
-	env.store.mu.Lock()
-	env.store.session = stale
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(stale)
 	env.restore(t)
 
 	block := make(chan struct{})
@@ -1145,7 +1233,7 @@ func TestAStaleRefreshFailureDoesNotClobberAFreshLogin(t *testing.T) {
 
 	acquireDone := make(chan error, 1)
 	go func() {
-		_, err := env.service.AcquireAccessToken(context.Background())
+		_, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 		acquireDone <- err
 	}()
 	waitFor(t, "the stale refresh to start", func() bool {
@@ -1173,8 +1261,11 @@ func TestAStaleRefreshFailureDoesNotClobberAFreshLogin(t *testing.T) {
 
 	// The dead verdict belonged to the old token: the fresh login's
 	// session is still the live one.
-	if conn := env.service.Status(); conn.State != StateSignedIn || conn.Email != "user@example.com" {
-		t.Fatalf("Status() = %+v, want still signed in as user@example.com", conn)
+	if conn := env.service.Status(); conn.State != StateSignedIn {
+		t.Fatalf("Status().State = %q, want still signed in", conn.State)
+	}
+	if account := accountStatus(t, env.service.Status(), "account-1"); account.Email != "user@example.com" {
+		t.Fatalf("account-1 email = %q, want the fresh login's identity", account.Email)
 	}
 	for _, snapshot := range env.events.snapshots() {
 		if snapshot.Conn.State == StateReauthNeeded {
@@ -1190,10 +1281,7 @@ func TestARefreshSupersededByALoginServesTheLoginSession(t *testing.T) {
 	env := newTestEnv(t)
 	stale := staleSession()
 	stale.RefreshToken = "old-refresh"
-	env.store.mu.Lock()
-	env.store.session = stale
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(stale)
 	env.restore(t)
 
 	block := make(chan struct{})
@@ -1205,7 +1293,7 @@ func TestARefreshSupersededByALoginServesTheLoginSession(t *testing.T) {
 	}
 	acquireDone := make(chan acquireResult, 1)
 	go func() {
-		token, err := env.service.AcquireAccessToken(context.Background())
+		token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 		acquireDone <- acquireResult{token: token, err: err}
 	}()
 	waitFor(t, "the superseded refresh to start", func() bool {
@@ -1259,10 +1347,7 @@ func TestARefreshSupersededByALoginServesTheLoginSession(t *testing.T) {
 func TestAnAcquireWaitingOnTheRefreshGateHonoursItsOwnCancellation(t *testing.T) {
 	env := newTestEnv(t)
 	env.service.refreshInterval = 5 * time.Millisecond
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
 	// Hold the gate from the ticker's side: its refresh parks mid-call.
@@ -1274,7 +1359,7 @@ func TestAnAcquireWaitingOnTheRefreshGateHonoursItsOwnCancellation(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	token, err := env.service.AcquireAccessToken(ctx)
+	token, err := env.service.AcquireAccessToken(ctx, "account-1")
 	if !errors.Is(err, context.Canceled) || token != "" {
 		t.Fatalf("cancelled AcquireAccessToken() = (%q, %v), want (\"\", context.Canceled)", token, err)
 	}
@@ -1287,14 +1372,14 @@ func TestAnAcquireWaitingOnTheRefreshGateHonoursItsOwnCancellation(t *testing.T)
 		// store's save is the observable landing.
 		return len(env.store.savedSessions()) >= 1
 	})
-	env.service.InvalidateAccessToken()
+	env.service.InvalidateAccessToken("access-user@example.com")
 
 	acquireDone := make(chan struct {
 		token string
 		err   error
 	}, 1)
 	go func() {
-		token, err := env.service.AcquireAccessToken(context.Background())
+		token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 		acquireDone <- struct {
 			token string
 			err   error
@@ -1321,10 +1406,7 @@ func TestTheGateOpensBetweenRefreshRetries(t *testing.T) {
 	env.service.refreshInterval = 5 * time.Millisecond
 	env.service.refreshBackoffs = []time.Duration{400 * time.Millisecond, 400 * time.Millisecond}
 	env.authorizer.setRefreshResult(domain.Session{}, errors.New("transient blip"))
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.restore(t)
 
 	// The ticker's cycle is now in flight: attempt 1 failed and the
@@ -1336,7 +1418,7 @@ func TestTheGateOpensBetweenRefreshRetries(t *testing.T) {
 	started := time.Now()
 	acquireDone := make(chan error, 1)
 	go func() {
-		_, err := env.service.AcquireAccessToken(context.Background())
+		_, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 		acquireDone <- err
 	}()
 	select {
@@ -1363,11 +1445,8 @@ func TestTheGateOpensBetweenRefreshRetries(t *testing.T) {
 func TestTheTickerAppliesARotationTheStoreCouldNotPersist(t *testing.T) {
 	env := newTestEnv(t)
 	env.service.refreshInterval = 5 * time.Millisecond
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
 	env.store.saveErr = errors.New("disk full")
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.authorizer.setRefreshResult(domain.Session{
 		AccessToken:  "rotated-access",
 		RefreshToken: "rotated-refresh",
@@ -1386,7 +1465,7 @@ func TestTheTickerAppliesARotationTheStoreCouldNotPersist(t *testing.T) {
 	}
 
 	// The acquire path serves the rotated token the disk refused to keep.
-	token, err := env.service.AcquireAccessToken(context.Background())
+	token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() error = %v, want nil: the rotation is served from memory", err)
 	}
@@ -1401,11 +1480,8 @@ func TestTheTickerAppliesARotationTheStoreCouldNotPersist(t *testing.T) {
 // without paying for another refresh.
 func TestAnAcquireSurfacesTheSaveErrorAndServesTheRotationAfter(t *testing.T) {
 	env := newTestEnv(t)
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
 	env.store.saveErr = errors.New("disk full")
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.authorizer.setRefreshResult(domain.Session{
 		AccessToken:  "rotated-access",
 		RefreshToken: "rotated-refresh",
@@ -1413,7 +1489,7 @@ func TestAnAcquireSurfacesTheSaveErrorAndServesTheRotationAfter(t *testing.T) {
 	}, nil)
 	env.restore(t)
 
-	_, err := env.service.AcquireAccessToken(context.Background())
+	_, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err == nil {
 		t.Fatal("AcquireAccessToken() = nil error, want the save failure surfaced")
 	}
@@ -1421,7 +1497,7 @@ func TestAnAcquireSurfacesTheSaveErrorAndServesTheRotationAfter(t *testing.T) {
 		t.Fatalf("AcquireAccessToken() error = %q, want the store failure wrapped", err.Error())
 	}
 
-	token, err := env.service.AcquireAccessToken(context.Background())
+	token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("second AcquireAccessToken() error = %v, want nil", err)
 	}
@@ -1465,7 +1541,7 @@ func TestRefreshQuotaReportsTheAccountWindows(t *testing.T) {
 	env.clock.advance(time.Hour)
 	signInEvents := len(env.events.snapshots())
 
-	snapshot := env.service.RefreshQuota(context.Background())
+	snapshot := env.service.RefreshQuota(context.Background(), "account-1")
 	if snapshot.Err != "" {
 		t.Fatalf("RefreshQuota() Err = %q, want none", snapshot.Err)
 	}
@@ -1497,10 +1573,10 @@ func TestAFailedQuotaProbeKeepsTheLastGoodUsage(t *testing.T) {
 	env := newTestEnv(t)
 	env.signIn(t)
 	env.authorizer.setUsageResult(sampleUsage(), nil)
-	first := env.service.RefreshQuota(context.Background())
+	first := env.service.RefreshQuota(context.Background(), "account-1")
 
 	env.authorizer.setUsageResult(domain.Usage{}, errors.New("codex oauth usage probe failed: http 503"))
-	second := env.service.RefreshQuota(context.Background())
+	second := env.service.RefreshQuota(context.Background(), "account-1")
 	if second.Err != "codex oauth usage probe failed: http 503" {
 		t.Fatalf("second RefreshQuota() Err = %q, want the probe failure verbatim", second.Err)
 	}
@@ -1530,7 +1606,7 @@ func TestARejectedQuotaAccessTokenIsRotatedAndProbedOnceMore(t *testing.T) {
 		AccessExpiry: time.Now().Add(time.Hour),
 	}, nil)
 
-	snapshot := env.service.RefreshQuota(context.Background())
+	snapshot := env.service.RefreshQuota(context.Background(), "account-1")
 	if snapshot.Err != "" {
 		t.Fatalf("RefreshQuota() Err = %q, want none: the rotated probe must settle the card", snapshot.Err)
 	}
@@ -1558,7 +1634,7 @@ func TestAQuotaProbeRejectedTwiceReportsTheRejection(t *testing.T) {
 		{err: fmt.Errorf("codex oauth usage probe failed: http 401: %w", ErrUsageUnauthorized)},
 	})
 
-	snapshot := env.service.RefreshQuota(context.Background())
+	snapshot := env.service.RefreshQuota(context.Background(), "account-1")
 	if !strings.Contains(snapshot.Err, ErrUsageUnauthorized.Error()) {
 		t.Fatalf("RefreshQuota() Err = %q, want the wrapped unauthorized rejection", snapshot.Err)
 	}
@@ -1573,7 +1649,7 @@ func TestAQuotaProbeRejectedTwiceReportsTheRejection(t *testing.T) {
 func TestRefreshQuotaWithoutASignedInAccountReportsNotSignedIn(t *testing.T) {
 	env := newTestEnv(t)
 
-	snapshot := env.service.RefreshQuota(context.Background())
+	snapshot := env.service.RefreshQuota(context.Background(), "account-1")
 	if snapshot.Err != errNotSignedIn.Error() {
 		t.Fatalf("RefreshQuota() Err = %q, want %q", snapshot.Err, errNotSignedIn.Error())
 	}
@@ -1594,7 +1670,7 @@ func TestConcurrentQuotaRefreshesShareOneProbe(t *testing.T) {
 
 	results := make(chan QuotaSnapshot, 2)
 	for i := 0; i < 2; i++ {
-		go func() { results <- env.service.RefreshQuota(context.Background()) }()
+		go func() { results <- env.service.RefreshQuota(context.Background(), "account-1") }()
 	}
 	waitFor(t, "the winner's probe to start", func() bool {
 		return env.authorizer.usageProbeCount() == 1
@@ -1629,7 +1705,7 @@ func TestACancelledQuotaProbeRecordsNothing(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan QuotaSnapshot, 1)
-	go func() { done <- env.service.RefreshQuota(ctx) }()
+	go func() { done <- env.service.RefreshQuota(ctx, "account-1") }()
 	waitFor(t, "the cancelled probe to start", func() bool {
 		return env.authorizer.usageProbeCount() == 1
 	})
@@ -1642,7 +1718,7 @@ func TestACancelledQuotaProbeRecordsNothing(t *testing.T) {
 	// The counter never moved, so a later caller still probes — with the
 	// park lifted, the fresh caller must be served a real answer.
 	env.authorizer.setUsageBlock(nil)
-	after := env.service.RefreshQuota(context.Background())
+	after := env.service.RefreshQuota(context.Background(), "account-1")
 	if after.Err != "" || after.Usage != sampleUsage() {
 		t.Fatalf("RefreshQuota() after a cancelled probe = %+v, want a fresh successful probe", after)
 	}
@@ -1666,14 +1742,14 @@ func TestAQuotaCallerThatStopsWaitingGetsTheLastSettledAnswer(t *testing.T) {
 	env.authorizer.setUsageBlock(block)
 
 	winnerDone := make(chan QuotaSnapshot, 1)
-	go func() { winnerDone <- env.service.RefreshQuota(context.Background()) }()
+	go func() { winnerDone <- env.service.RefreshQuota(context.Background(), "account-1") }()
 	waitFor(t, "the winner's probe to start", func() bool {
 		return env.authorizer.usageProbeCount() == 1
 	})
 
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
 	waiterDone := make(chan QuotaSnapshot, 1)
-	go func() { waiterDone <- env.service.RefreshQuota(waiterCtx) }()
+	go func() { waiterDone <- env.service.RefreshQuota(waiterCtx, "account-1") }()
 	cancelWaiter()
 	waiter := <-waiterDone
 	if waiter.FetchedAt != 0 {

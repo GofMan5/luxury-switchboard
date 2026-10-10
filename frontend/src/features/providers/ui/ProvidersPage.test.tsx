@@ -85,17 +85,17 @@ const builtinProvider: Provider = {
 
 const signedIn: CodexModelState = {
   loginPhase: 'idle',
-  loginError: '',
-  account: { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' },
-  authorizeUrl: '',
   activeMethod: null,
+  state: 'signed_in',
+  accounts: [{ state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' }],
+  freshAccount: null,
+  loginError: '',
+  authorizeUrl: '',
   deviceUserCode: '',
   deviceVerificationUrl: '',
   importedFrom: '',
+  quotas: {},
   logoutError: '',
-  quota: null,
-  quotaPending: false,
-  quotaError: '',
 }
 
 // A success that nobody pressed Done for: the sticky phase right after a
@@ -148,7 +148,9 @@ describe('ProvidersPage inspector', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete provider' }))
 
     await waitFor(() => {
-      expect(logout).toHaveBeenCalledWith(true)
+      // The preset delete is a deliberate cascade: every Codex account is
+      // removed, which the multi-account logout spells out as (null, true).
+      expect(logout).toHaveBeenCalledWith(null, true)
     })
     await waitFor(() => {
       expect(refresh).toHaveBeenCalled()

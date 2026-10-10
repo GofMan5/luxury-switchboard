@@ -25,7 +25,8 @@ type fakeService struct {
 	token        string
 	acquireErr   error
 	acquireCalls []context.Context
-	invalidated  int
+	acquiredIDs  []string
+	invalidated  []string
 	rejected     []string
 }
 
@@ -33,16 +34,17 @@ func (fake *fakeService) Status() codexapp.Status {
 	return fake.status
 }
 
-func (fake *fakeService) AcquireAccessToken(ctx context.Context) (string, error) {
+func (fake *fakeService) AcquireAccessToken(ctx context.Context, accountID string) (string, error) {
 	fake.acquireCalls = append(fake.acquireCalls, ctx)
+	fake.acquiredIDs = append(fake.acquiredIDs, accountID)
 	if fake.acquireErr != nil {
 		return "", fake.acquireErr
 	}
 	return fake.token, nil
 }
 
-func (fake *fakeService) InvalidateAccessToken() {
-	fake.invalidated++
+func (fake *fakeService) InvalidateAccessToken(accessToken string) {
+	fake.invalidated = append(fake.invalidated, accessToken)
 }
 
 func (fake *fakeService) RejectAccessToken(rejectedAccessToken string) {
@@ -82,8 +84,20 @@ func (fallbackLease) Credential() relayapp.Credential {
 
 func (fallbackLease) Finish(outcome relayapp.AttemptOutcome) {}
 
+// accountRow is one signed-in account's routing row: the provider entry
+// its provisioner registered, and the account the entry serves.
+func accountRow(providerID, accountID string, state codexapp.ConnState) codexapp.AccountStatus {
+	return codexapp.AccountStatus{AccountID: accountID, ProviderID: providerID, State: state}
+}
+
 func signedInService(token string) *fakeService {
-	return &fakeService{status: codexapp.Status{State: codexapp.StateSignedIn}, token: token}
+	return &fakeService{
+		status: codexapp.Status{
+			State:    codexapp.StateSignedIn,
+			Accounts: []codexapp.AccountStatus{accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn)},
+		},
+		token: token,
+	}
 }
 
 func TestAcquirePassesTheRequestContextThrough(t *testing.T) {
@@ -171,16 +185,19 @@ type blockingService struct {
 }
 
 func (fake *blockingService) Status() codexapp.Status {
-	return codexapp.Status{State: codexapp.StateSignedIn}
+	return codexapp.Status{
+		State:    codexapp.StateSignedIn,
+		Accounts: []codexapp.AccountStatus{accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn)},
+	}
 }
 
-func (fake *blockingService) AcquireAccessToken(ctx context.Context) (string, error) {
+func (fake *blockingService) AcquireAccessToken(ctx context.Context, accountID string) (string, error) {
 	fake.acquireCalls = append(fake.acquireCalls, ctx)
 	<-ctx.Done()
 	return "", ctx.Err()
 }
 
-func (fake *blockingService) InvalidateAccessToken() {}
+func (fake *blockingService) InvalidateAccessToken(accessToken string) {}
 
 func (fake *blockingService) RejectAccessToken(rejectedAccessToken string) {}
 
@@ -238,7 +255,7 @@ func TestOtherProvidersAreRefusedByTheTokenSource(t *testing.T) {
 	}
 }
 
-func TestCountReflectsTheSessionState(t *testing.T) {
+func TestCountReflectsThatAccountState(t *testing.T) {
 	cases := []struct {
 		providerID string
 		state      codexapp.ConnState
@@ -247,14 +264,71 @@ func TestCountReflectsTheSessionState(t *testing.T) {
 		{codexapp.CodexProviderID, codexapp.StateSignedIn, 2},
 		{codexapp.CodexProviderID, codexapp.StateSignedOut, 0},
 		{codexapp.CodexProviderID, codexapp.StateReauthNeeded, 0},
-		{"acme", codexapp.StateSignedIn, 0},
 	}
 	for _, testCase := range cases {
-		service := &fakeService{status: codexapp.Status{State: testCase.state}, token: "tok-1"}
+		service := &fakeService{
+			status: codexapp.Status{State: testCase.state, Accounts: []codexapp.AccountStatus{accountRow(testCase.providerID, "account-1", testCase.state)}},
+			token:  "tok-1",
+		}
 		source := NewTokenSource(service)
 		if count := source.Count(testCase.providerID); count != testCase.want {
 			t.Errorf("Count(%q, %q) = %d, want %d", testCase.providerID, testCase.state, count, testCase.want)
 		}
+	}
+}
+
+// Every account is its own route: acquiring through the second account's
+// provider entry asks the session for the second account's token, and the
+// count follows that entry alone, so one broken account cannot starve or
+// inflate another's rotation budget.
+func TestEachAccountServesItsOwnProviderEntry(t *testing.T) {
+	service := &fakeService{
+		status: codexapp.Status{
+			State: codexapp.StateSignedIn,
+			Accounts: []codexapp.AccountStatus{
+				accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn),
+				accountRow(codexapp.CodexProviderID+"2", "account-2", codexapp.StateSignedIn),
+			},
+		},
+		token: "tok-1",
+	}
+	source := NewTokenSource(service)
+
+	for _, providerID := range []string{codexapp.CodexProviderID + "2", codexapp.CodexProviderID} {
+		if _, _, err := source.Acquire(context.Background(), providerID, "gpt-5", nil); err != nil {
+			t.Fatalf("Acquire(%q): %v", providerID, err)
+		}
+	}
+	if ids := service.acquiredIDs; len(ids) != 2 || ids[0] != "account-2" || ids[1] != "account-1" {
+		t.Errorf("acquired account ids = %v, want the entry's own account each time", ids)
+	}
+
+	if count := source.Count(codexapp.CodexProviderID + "2"); count != 2 {
+		t.Errorf("Count(codex2) = %d, want 2", count)
+	}
+	if count := source.Count(codexapp.CodexProviderID); count != 2 {
+		t.Errorf("Count(codex) = %d, want 2", count)
+	}
+}
+
+// The routing is the account rows, not a remembered provider name: a
+// codex catalog entry nobody serves is refused outright, without the
+// session ever being asked for a token.
+func TestAProviderEntryNobodyServesIsRefused(t *testing.T) {
+	service := &fakeService{status: codexapp.Status{State: codexapp.StateSignedOut}, token: "tok-1"}
+	source := NewTokenSource(service)
+
+	if _, _, err := source.Acquire(context.Background(), codexapp.CodexProviderID, "gpt-5", nil); !errors.Is(err, errNotCodex) {
+		t.Errorf("Acquire err = %v, want errNotCodex", err)
+	}
+	if lease, ok := source.TryAcquire(codexapp.CodexProviderID, "gpt-5"); lease != nil || ok {
+		t.Errorf("TryAcquire = (%v, %v), want (nil, false)", lease, ok)
+	}
+	if count := source.Count(codexapp.CodexProviderID); count != 0 {
+		t.Errorf("Count = %d, want 0", count)
+	}
+	if len(service.acquireCalls) != 0 {
+		t.Errorf("the session saw %d acquire calls, want 0", len(service.acquireCalls))
 	}
 }
 
@@ -281,8 +355,8 @@ func TestOnlyAuthenticationFailuresInvalidateTheToken(t *testing.T) {
 		if kind == relayapp.AttemptAuthentication {
 			want = 1
 		}
-		if service.invalidated != want {
-			t.Errorf("outcome %q invalidated %d times, want %d", kind, service.invalidated, want)
+		if len(service.invalidated) != want {
+			t.Errorf("outcome %q invalidated %d times, want %d", kind, len(service.invalidated), want)
 		}
 	}
 }
@@ -303,8 +377,8 @@ func TestARevokedAccessTokenReauthsInsteadOfInvalidating(t *testing.T) {
 	if len(service.rejected) != 1 || service.rejected[0] != "tok-1" {
 		t.Errorf("rejected %v, want exactly the leased token [tok-1]", service.rejected)
 	}
-	if service.invalidated != 0 {
-		t.Errorf("invalidated %d times, want 0: a revocation supersedes the plain invalidation, not doubles it", service.invalidated)
+	if len(service.invalidated) != 0 {
+		t.Errorf("invalidated %d times, want 0: a revocation supersedes the plain invalidation, not doubles it", len(service.invalidated))
 	}
 }
 
@@ -325,8 +399,8 @@ func TestTokenInvalidatedIsTheSameRevocationVerdict(t *testing.T) {
 	if len(service.rejected) != 1 || service.rejected[0] != "tok-2" {
 		t.Errorf("rejected %v, want [tok-2]", service.rejected)
 	}
-	if service.invalidated != 0 {
-		t.Errorf("invalidated %d times, want 0", service.invalidated)
+	if len(service.invalidated) != 0 {
+		t.Errorf("invalidated %d times, want 0", len(service.invalidated))
 	}
 }
 
@@ -346,8 +420,8 @@ func TestRevocationCodesAreInertOutsideAuthentication(t *testing.T) {
 	if len(service.rejected) != 0 {
 		t.Errorf("rejected %v, want none", service.rejected)
 	}
-	if service.invalidated != 0 {
-		t.Errorf("invalidated %d times, want 0", service.invalidated)
+	if len(service.invalidated) != 0 {
+		t.Errorf("invalidated %d times, want 0", len(service.invalidated))
 	}
 }
 

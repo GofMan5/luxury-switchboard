@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"time"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
@@ -147,7 +146,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	// client on purpose — every call it makes is bounded by a context the
 	// application layer already holds — and the loopback redirect server
 	// opens its listener only while a login is actually in flight.
-	codexPath, codexPathErr, err := defaultCodexStore()
+	codexDir, codexLegacyPath, codexPathErr, err := defaultCodexStore()
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +154,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		logger.Printf("codex account storage could not be located; sign-ins will not persist")
 	}
 	codexService := codexapplication.NewService(
-		codexstore.NewRepository(codexPath),
+		codexstore.NewRepository(codexDir, codexLegacyPath),
 		codexoauth.NewAuthorizer(nil, systemstdio.AppVersion),
 		codexloopback.NewRedirectServer(),
 		codexproviders.NewProvisioner(providerManager),
@@ -175,23 +174,18 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	notifications := notificationsapp.NewService()
 	// A session that slid into reauth-needed is the codex provider's dead-key
 	// event: the pool cannot rotate around it, so the operator is the one who
-	// has to act. The notification fires on the transition only, because
-	// OnChanged reports every observable change — login phases included —
-	// and the listener may be invoked from whichever goroutine moved the
-	// session, so the edge it watches is its own lock.
-	var codexStateMu sync.Mutex
-	codexState := codexapplication.StateSignedOut
+	// has to act. Accounts are plural, so the edge is per account — one
+	// expiring session must warn even while its siblings stay signed in. The
+	// notification fires on the transition only; the watcher owns that edge.
+	// The text stays generic on purpose: the notification feed carries no
+	// account identifiers.
+	codexReauths := newCodexReauthWatcher()
 	codexService.OnChanged(func(snapshot codexapplication.Snapshot) {
-		state := snapshot.Conn.State
-		codexStateMu.Lock()
-		transition := state == codexapplication.StateReauthNeeded && codexState != codexapplication.StateReauthNeeded
-		codexState = state
-		codexStateMu.Unlock()
-		if transition {
+		if len(codexReauths.observe(snapshot.Conn.Accounts)) > 0 {
 			_ = notifications.Raise(
 				notificationsdomain.KindCodexAuth, notificationsdomain.SeverityWarning,
 				"Codex sign-in is needed",
-				"The ChatGPT session expired. Sign in again from the Providers tab to keep the Codex provider working.",
+				"A ChatGPT session expired. Sign in again from the Codex accounts to keep the provider working.",
 			)
 		}
 	})
@@ -592,19 +586,25 @@ func defaultProviderManager(catalog *providerapp.Catalog, keys *keyapp.Manager) 
 	return manager, repository, loadErr, nil
 }
 
-// defaultCodexStore locates the DPAPI file the codex session persists to,
-// on the settings-store convention: an explicit path must be absolute and
-// is a hard startup error otherwise, while a machine where the default
-// location cannot be resolved still boots — sign-ins just stop persisting.
-func defaultCodexStore() (string, error, error) {
+// defaultCodexStore locates the directory Codex accounts persist to and
+// the pre-accounts single-session file that migrates into it, on the
+// settings-store convention: an explicit path must be absolute and is a
+// hard startup error otherwise, while a machine where the default
+// location cannot be resolved still boots — sign-ins then refuse to
+// persist instead of writing into the working directory. The explicit
+// path names the legacy file, because that is what the variable has
+// always named; the account directory is its sibling, so a redirected
+// tree stays self-contained.
+func defaultCodexStore() (string, string, error, error) {
 	path := os.Getenv("SWITCHBOARD_CODEX_PATH")
-	var pathErr error
 	if path == "" {
-		path, pathErr = codexstore.DefaultPath()
-	} else if !filepath.IsAbs(path) {
-		return "", nil, errors.New("codex account path must be absolute")
+		dir, legacyPath, pathErr := codexstore.DefaultPaths()
+		return dir, legacyPath, pathErr, nil
 	}
-	return path, pathErr, nil
+	if !filepath.IsAbs(path) {
+		return "", "", nil, errors.New("codex account path must be absolute")
+	}
+	return filepath.Join(filepath.Dir(path), "codex-accounts"), path, nil, nil
 }
 
 func defaultSettingsService() (*settingsapp.Service, error, error) {

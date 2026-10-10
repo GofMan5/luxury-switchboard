@@ -1,13 +1,15 @@
 // Package providers adapts the codex login flow to the providers catalog.
-// It owns exactly one managed entry: the "codex" preset provider the relay
-// routes OAuth traffic through — created on sign-in, disabled and unbound
-// while the account is signed out, and removed when the entry is left over
-// with no live account behind it.
+// It owns the managed codex preset entries — exactly one per signed-in
+// account, created on sign-in, disabled and renamed while the account is
+// signed out with the binding kept so a returning login relinks the same
+// row, and deleted when the account leaves the switchboard.
 package providers
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"sync"
 
 	codexapp "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
@@ -18,8 +20,10 @@ import (
 
 // ErrProviderIdTaken reports that the "codex" catalog slot is occupied by a
 // provider the preset does not own — a hand-configured one found on the
-// literal id, or any id that raced in after the read probe missed — so the
-// managed preset entry cannot be created there.
+// literal id, or one that raced in after the read probe missed — so the
+// managed preset entry cannot be created there. Derived ids (codex2,
+// codex3…) are never reserved: a squatter there only moves the next entry
+// one slot further.
 var ErrProviderIdTaken = errors.New("codex provider id is already used by a custom provider")
 
 const (
@@ -35,37 +39,37 @@ const (
 	// retireName is the neutral label the retired entry keeps while its
 	// account is signed out; the account email comes back on the next login.
 	retireName = "Codex"
+	// maxSlots bounds how far the provisioner walks the codex, codex2,
+	// codex3… namespace before refusing: it keeps a runaway catalog from
+	// being probed forever.
+	maxSlots = 100
 )
 
 // ProviderRegistry is the narrow slice of the providers manager the
-// provisioner needs. Get answers existence, not admission: a disabled entry
-// is still found, so the probe can tell a retired (disabled) entry from a
-// missing one. Update preserves the stored builtin flag, preset and account
-// id whatever the params carry — SetPreset is how the preset marker and the
-// account binding change — and Add creates the entry under params.ID: the
-// manager honors a requested id verbatim and reports ErrProviderIDExists
-// when that id is taken. Delete removes the entry and refuses when the
-// manager cannot delete it (builtin, active, or holding keys or routes).
+// provisioner needs. List answers existence, not admission: disabled
+// entries are included, so a retired row is told apart from a missing one.
+// Update preserves the stored builtin flag, preset and account id whatever
+// the params carry — SetPreset is how the preset marker and the account
+// binding change — and Add creates the entry under params.ID: the manager
+// honors a requested id verbatim and reports ErrProviderIDExists when that
+// id is taken. Delete removes the entry and refuses when the manager
+// cannot delete it (builtin, active, or holding keys or routes).
 type ProviderRegistry interface {
-	Get(ctx context.Context, id string) (providerdomain.Provider, bool)
+	List(ctx context.Context) []providerdomain.Provider
 	Add(ctx context.Context, params providerdomain.Params) (providerdomain.Provider, error)
 	Update(ctx context.Context, id string, params providerdomain.Params) (providerdomain.Provider, error)
 	SetPreset(ctx context.Context, id string, preset providerdomain.Preset, accountID providerdomain.AccountID) (providerdomain.Provider, error)
 	Delete(ctx context.Context, id string) error
 }
 
-// Provisioner keeps the catalog's codex entry in sync with the codex session.
-// It implements the application port so login registers the provider the
-// relay routes through, logout retires the entry while keeping the row, and
-// the leftover-entry cleanup removes it. It is safe for concurrent use.
+// Provisioner keeps the catalog's codex entries in sync with the codex
+// sessions. It implements the application port so login registers the
+// provider the relay routes through, logout retires the account's entry
+// while keeping the row, and the leftover-entry cleanup removes it. It is
+// safe for concurrent use.
 type Provisioner struct {
 	mu       sync.Mutex
 	registry ProviderRegistry
-
-	// lastID is the id the codex entry actually lives under. Registries may
-	// mint their own ids on Add, so the entry is not always found under
-	// "codex"; the id is remembered so later logins land on the same entry.
-	lastID string
 }
 
 // NewProvisioner wires the provisioner to the providers manager.
@@ -75,145 +79,174 @@ func NewProvisioner(registry ProviderRegistry) *Provisioner {
 
 var _ codexapp.ProviderProvisioner = (*Provisioner)(nil)
 
-// EnsureCodexProvider makes the managed codex entry exist for identity and
-// returns the provider id the entry actually lives under. A missing entry is
-// created, a retired (disabled) one is re-enabled, and the account binding is
-// refreshed, so a login that switched accounts repoints the entry. The probe
-// reads before it writes: only an entry the preset already owns is rewritten.
+// EnsureCodexProvider makes the managed codex entry for identity's account
+// exist and returns the provider id the entry actually lives under. The row
+// bound to the account is relinked — re-enabled, renamed for the account,
+// binding refreshed — so a returning login lands on the same row rather
+// than creating a second one, even after the registry minted its own id.
+// The first unbound preset row is claimed for a new account: that is the
+// shape an earlier, single-account release left behind. Otherwise a fresh
+// entry is minted in the codex, codex2, codex3… namespace.
 func (provisioner *Provisioner) EnsureCodexProvider(ctx context.Context, identity codexdomain.Identity) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 
+	entries := provisioner.registry.List(ctx)
 	accountID := providerdomain.AccountID(identity.AccountID)
+
+	// relink the row this account already owns, retired or not
+	for _, entry := range entries {
+		if entry.Preset == providerdomain.PresetCodex && entry.AccountID == accountID {
+			return provisioner.relink(ctx, entry.ID, identity.Email, accountID)
+		}
+	}
+	// claim the first unbound preset row for the new account
+	for _, entry := range entries {
+		if entry.Preset == providerdomain.PresetCodex && entry.AccountID == "" {
+			return provisioner.relink(ctx, entry.ID, identity.Email, accountID)
+		}
+	}
+
+	// mint a fresh row; the occupied map tells which slots are free without
+	// another registry round-trip per probe
+	held := make(map[string]providerdomain.Provider, len(entries))
+	for _, entry := range entries {
+		held[entry.ID] = entry
+	}
 	params := canonicalParams(providerName(identity.Email))
-	for _, id := range provisioner.targets() {
-		if err := ctx.Err(); err != nil {
-			return "", err
+	for slot := 1; slot <= maxSlots; slot++ {
+		id := codexapp.CodexProviderID
+		if slot > 1 {
+			id += strconv.Itoa(slot)
 		}
-		current, ok := provisioner.registry.Get(ctx, id)
-		if !ok {
-			continue
-		}
-		if current.Preset != providerdomain.PresetCodex {
-			// an unmarked entry is a stranger: one squatting on the literal
-			// id blocks the managed entry outright; on any other id it is
-			// simply not ours to touch, and the probe moves on
-			if id == codexapp.CodexProviderID {
+		if occupied, exists := held[id]; exists {
+			if id == codexapp.CodexProviderID && occupied.Preset != providerdomain.PresetCodex {
+				// the literal id is reserved for the managed entry: a
+				// stranger squatting on it blocks the account outright.
+				// A preset holder on it is bound to another account — the
+				// unbound ones were claimed above — so the probe moves on.
 				return "", ErrProviderIdTaken
 			}
 			continue
 		}
-		if _, err := provisioner.registry.Update(ctx, id, params); err != nil {
+		params.ID = id
+		params.Preset = providerdomain.PresetCodex
+		params.AccountID = accountID
+		added, err := provisioner.registry.Add(ctx, params)
+		if err != nil {
+			if errors.Is(err, providerapp.ErrProviderIDExists) {
+				if id == codexapp.CodexProviderID {
+					// the slot was free when List read it and is not now;
+					// the literal id is occupied exactly like a stranger
+					// on it occupies it
+					return "", ErrProviderIdTaken
+				}
+				continue
+			}
 			return "", err
 		}
-		if _, err := provisioner.registry.SetPreset(ctx, id, providerdomain.PresetCodex, accountID); err != nil {
-			return "", err
+		if added.Preset != providerdomain.PresetCodex || added.AccountID != accountID {
+			// Defensive: a registry that loses the preset on the way in
+			// would leave the entry unrecognizable as codex-owned.
+			// SetPreset restores it, keyed by the id the registry minted.
+			if _, err := provisioner.registry.SetPreset(ctx, added.ID, providerdomain.PresetCodex, accountID); err != nil {
+				return "", err
+			}
 		}
-		provisioner.lastID = id
-		return id, nil
+		return added.ID, nil
 	}
+	return "", fmt.Errorf("no free codex slot within %d probes: %w", maxSlots, ErrProviderIdTaken)
+}
 
-	params.Preset = providerdomain.PresetCodex
-	params.AccountID = accountID
-	added, err := provisioner.registry.Add(ctx, params)
-	if errors.Is(err, providerapp.ErrProviderIDExists) {
-		// the id was free when the probe read it and is not now; the slot is
-		// occupied exactly like a stranger on the literal id occupies it
-		return "", ErrProviderIdTaken
+// RetireCodexProvider signs a live account out while keeping its row: the
+// preset marker and the account binding survive — SetPreset is never
+// called here — so the providers row keeps its identity and a later login
+// of the same account relinks it, but the row is disabled so nothing
+// routes traffic to a dead credential. The disabled shape lands via
+// Update first, so a refusal — the entry is active and cannot be switched
+// off — leaves the row byte-identical.
+func (provisioner *Provisioner) RetireCodexProvider(ctx context.Context, accountID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if err != nil {
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+
+	params := retireParams()
+	for _, entry := range provisioner.registry.List(ctx) {
+		if entry.Preset != providerdomain.PresetCodex || entry.AccountID != providerdomain.AccountID(accountID) {
+			continue
+		}
+		if _, err := provisioner.registry.Update(ctx, entry.ID, params); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemoveCodexProvider deletes the preset entries an account leaves behind:
+// its own bound row when accountID names the account, and every preset row
+// when accountID is empty — the full teardown the leftover cleanup performs
+// when no live account is left at all. The delete is a deliberate cascade —
+// the manager deletes the entry's keys and the routes that use it in the
+// same save, and only a builtin target or a store failure refuses — and
+// the refusals travel verbatim. It never touches an entry the preset did
+// not provision: a hand-configured provider squatting on a candidate id
+// survives untouched.
+func (provisioner *Provisioner) RemoveCodexProvider(ctx context.Context, accountID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	provisioner.mu.Lock()
+	defer provisioner.mu.Unlock()
+
+	for _, entry := range provisioner.registry.List(ctx) {
+		if entry.Preset != providerdomain.PresetCodex {
+			continue
+		}
+		if accountID != "" && entry.AccountID != providerdomain.AccountID(accountID) {
+			continue
+		}
+		if err := provisioner.registry.Delete(ctx, entry.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// relink refreshes a preset row under the held lock: the canonical shape —
+// enabled, named for the account — lands via Update, which preserves the
+// stored builtin flag, and the binding is (re)written with SetPreset, the
+// only writer of the preset marker and the account id.
+func (provisioner *Provisioner) relink(ctx context.Context, id, email string, accountID providerdomain.AccountID) (string, error) {
+	params := canonicalParams(providerName(email))
+	if _, err := provisioner.registry.Update(ctx, id, params); err != nil {
 		return "", err
 	}
-	provisioner.lastID = added.ID
-	if added.Preset != providerdomain.PresetCodex || added.AccountID != accountID {
-		// Defensive: a registry that loses the preset on the way in would
-		// leave the entry unrecognizable as codex-owned. SetPreset restores it.
-		if _, err := provisioner.registry.SetPreset(ctx, added.ID, providerdomain.PresetCodex, accountID); err != nil {
-			return "", err
-		}
+	if _, err := provisioner.registry.SetPreset(ctx, id, providerdomain.PresetCodex, accountID); err != nil {
+		return "", err
 	}
-	return added.ID, nil
+	return id, nil
 }
 
-// RetireCodexProvider signs a live account out while keeping the entry: the
-// preset marker survives so the providers row keeps its identity, the
-// account binding is cleared and the entry is disabled so nothing routes
-// traffic to a dead credential. A later login relinks the same entry rather
-// than creating a second one.
-func (provisioner *Provisioner) RetireCodexProvider(ctx context.Context) error {
-	provisioner.mu.Lock()
-	defer provisioner.mu.Unlock()
-
+// retireParams is the neutral shape a signed-out row keeps: disabled and
+// named "Codex" until its account comes back.
+func retireParams() providerdomain.Params {
 	params := canonicalParams(retireName)
 	params.Enabled = false
-	for _, id := range provisioner.targets() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		current, ok := provisioner.registry.Get(ctx, id)
-		if !ok || current.Preset != providerdomain.PresetCodex {
-			continue
-		}
-		// the disabled shape lands first, so a refusal — the entry is active
-		// and cannot be switched off — leaves the entry byte-identical: the
-		// account binding is only cleared once the row is already disabled.
-		if _, err := provisioner.registry.Update(ctx, id, params); err != nil {
-			return err
-		}
-		if _, err := provisioner.registry.SetPreset(ctx, id, providerdomain.PresetCodex, ""); err != nil {
-			return err
-		}
-	}
-	provisioner.lastID = ""
-	return nil
+	return params
 }
 
-// RemoveCodexProvider deletes the leftover preset entries when there is no
-// live account. The delete is a deliberate cascade — the manager deletes the
-// entry's keys and the routes that use it in the same save, and only a
-// builtin target or a store failure refuses (an active entry is not a
-// refusal: the active route falls back to a builtin) — and the refusals
-// travel verbatim. It must never touch an entry the preset did not
-// provision: a hand-configured provider squatting on a candidate id
-// survives untouched.
-func (provisioner *Provisioner) RemoveCodexProvider(ctx context.Context) error {
-	provisioner.mu.Lock()
-	defer provisioner.mu.Unlock()
-
-	for _, id := range provisioner.targets() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		current, ok := provisioner.registry.Get(ctx, id)
-		if !ok || current.Preset != providerdomain.PresetCodex {
-			continue
-		}
-		if err := provisioner.registry.Delete(ctx, id); err != nil {
-			return err
-		}
-	}
-	provisioner.lastID = ""
-	return nil
-}
-
-// targets lists the catalog ids the codex entry may live under, most recent
-// first. The remembered id comes first because a registry that mints ids on
-// Add will not have the entry under "codex"; the literal id comes last
-// because that is where a registry honoring params.ID puts it.
-func (provisioner *Provisioner) targets() []string {
-	if provisioner.lastID != "" && provisioner.lastID != codexapp.CodexProviderID {
-		return []string{provisioner.lastID, codexapp.CodexProviderID}
-	}
-	return []string{codexapp.CodexProviderID}
-}
-
-// canonicalParams is the full shape of the managed codex entry: a bearer
-// OAuth provider on the ChatGPT backend. The ID names the entry the slice
-// routes by — the registry honors a requested id verbatim and refuses a
-// taken one, so this is the id the entry lands under. RPM stays zero
-// because codex traffic is dispatched through the relay's token source, not
-// the key pool's per-key queues; ChatPath, the rate unit and the cache TTL
-// keep their domain defaults.
+// canonicalParams is the full shape of a managed codex entry: a bearer
+// OAuth provider on the ChatGPT backend. ID names the slot the entry is
+// minted into — the registry honors a requested id verbatim and refuses a
+// taken one, and one that mints its own id gets corrected after Add. RPM
+// stays zero because codex traffic is dispatched through the relay's token
+// source, not the key pool's per-key queues; ChatPath, the rate unit and
+// the cache TTL keep their domain defaults.
 func canonicalParams(name string) providerdomain.Params {
 	return providerdomain.Params{
 		ID:         codexapp.CodexProviderID,

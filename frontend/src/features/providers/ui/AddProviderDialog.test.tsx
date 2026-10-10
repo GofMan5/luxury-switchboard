@@ -42,16 +42,16 @@ function stateAt(overrides: Partial<CodexModelState>): CodexModelState {
   return {
     loginPhase: 'idle',
     loginError: '',
-    account: { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' },
+    state: 'signed_out',
+    accounts: [],
+    freshAccount: null,
+    quotas: {},
     authorizeUrl: '',
     activeMethod: null,
     deviceUserCode: '',
     deviceVerificationUrl: '',
     importedFrom: '',
     logoutError: '',
-    quota: null,
-    quotaPending: false,
-    quotaError: '',
     ...overrides,
   }
 }
@@ -197,7 +197,9 @@ describe('AddProviderDialog', () => {
   it('offers Done only after a successful sign-in, and Done selects the new provider', () => {
     const { handlers } = renderDialog('codex', stateAt({
       loginPhase: 'success',
-      account: { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' },
+      state: 'signed_in',
+      accounts: [{ state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' }],
+      freshAccount: { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex' },
     }))
 
     // The status line the pane owns proves the success phase reached the user;

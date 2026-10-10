@@ -2,6 +2,7 @@ import { CheckCircle2, ClipboardPaste, FileUp, Globe, LogIn, MonitorSmartphone, 
 import type { LucideIcon } from 'lucide-react'
 import { useRef, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent } from 'react'
+import type { CodexAccount } from '../domain/codex'
 import { pickAuthFiles } from '../../../platform/lifecycle/pick-auth-files'
 import { Button } from '../../../shared/ui/Button'
 import { Pill } from '../../../shared/ui/chrome'
@@ -24,6 +25,25 @@ const METHODS: readonly MethodEntry[] = [
   { id: 'importFile', label: 'Import from file', description: 'Pick an exported sign-in file.', Icon: FileUp },
 ]
 
+/** A linked account row: identity and plan, its own health, its own disconnect. */
+function AccountRow({ account, onDisconnect }: {
+  readonly account: CodexAccount
+  readonly onDisconnect: (accountId: string) => void
+}) {
+  return (
+    <div className={styles.accountRow}>
+      <div className={styles.accountText}>
+        <span className={styles.email} title={account.email}>{account.email}</span>
+        {account.plan !== '' ? <span className={styles.plan}>{account.plan}</span> : null}
+        {account.state === 'signed_in' ? <Pill tone="success">Signed in</Pill>
+          : account.state === 'reauth_needed' ? <Pill tone="warning">Sign-in needed</Pill>
+            : <Pill>Signed out</Pill>}
+      </div>
+      <Button variant="danger" onClick={() => onDisconnect(account.accountId)}>Disconnect {account.email}</Button>
+    </div>
+  )
+}
+
 /**
  * The Codex step of Add provider: one card that stays mounted while the
  * login flows — the phase region inside the card narrates the hand-off to
@@ -31,15 +51,17 @@ const METHODS: readonly MethodEntry[] = [
  * for the whole flow: a login that started with no provider keeps the
  * connect card until its outcome is acknowledged, and a still-linked account
  * keeps the manage card even if its provider row disappeared from the list
- * meanwhile.
+ * meanwhile. The manage card lists every linked account with its own health
+ * and disconnect, so one expired session never hides the working ones.
  */
 export default function CodexConnectPane({ providerExists, onDisconnect, onSelectCodexRow }: {
   readonly providerExists: boolean
-  readonly onDisconnect: () => void
+  /** The page owns the confirm dialog; the pane only names the account. */
+  readonly onDisconnect: (accountId: string) => void
   readonly onSelectCodexRow: () => void
 }) {
   const { model, state } = useCodex()
-  const { loginPhase, loginError, account, authorizeUrl, activeMethod, deviceUserCode, deviceVerificationUrl, importedFrom } = state
+  const { loginPhase, loginError, authorizeUrl, activeMethod, deviceUserCode, deviceVerificationUrl, importedFrom, state: linkState, accounts, freshAccount } = state
 
   // The pane-local method pick; the running flow pins its own method via
   // state.activeMethod, so the radios keep showing what is actually running.
@@ -55,8 +77,7 @@ export default function CodexConnectPane({ providerExists, onDisconnect, onSelec
   const providerBeforeLogin = useRef(providerExists)
   if (loginPhase === 'idle' || loginPhase === 'error') providerBeforeLogin.current = providerExists
   const flowLive = loginPhase === 'connecting' || loginPhase === 'waiting' || loginPhase === 'exchanging' || loginPhase === 'success'
-  const manageCard = !(flowLive && !providerBeforeLogin.current) && (providerExists || account.state !== 'signed_out')
-  const signedOut = account.state !== 'signed_in'
+  const manageCard = !(flowLive && !providerBeforeLogin.current) && (providerExists || linkState !== 'signed_out')
 
   // While a flow is live the pinned method decides which radio reads as
   // checked and which body the phase region narrates; the pane-local pick
@@ -148,167 +169,161 @@ export default function CodexConnectPane({ providerExists, onDisconnect, onSelec
             <small>Uses the ChatGPT account you sign in with. Endpoint, dialect and limits come from the preset.</small>
           )}
         </div>
-        {manageCard ? (
-          account.state === 'signed_in' ? <Pill tone="success">Signed in</Pill>
-            : account.state === 'reauth_needed' ? <Pill tone="warning">Sign-in needed</Pill>
-              : <Pill>Signed out</Pill>
-        ) : null}
       </div>
-      {manageCard && account.state === 'reauth_needed' ? (
+      {manageCard && linkState === 'reauth_needed' ? (
         <p className={styles.reauthNote}>The session expired. Sign in again to keep the provider working.</p>
       ) : null}
-      {manageCard && (account.email !== '' || account.plan !== '') ? (
-        <dl className={styles.rows}>
-          {account.email !== '' ? <><dt>Email</dt><dd className={styles.email} title={account.email}>{account.email}</dd></> : null}
-          {account.plan !== '' ? <><dt>Plan</dt><dd className={styles.email} title={account.plan}>{account.plan}</dd></> : null}
-        </dl>
+      {manageCard && accounts.length > 0 ? (
+        <div className={styles.accountList}>
+          {accounts.map((account) => (
+            <AccountRow key={account.accountId} account={account} onDisconnect={onDisconnect} />
+          ))}
+        </div>
       ) : null}
       {manageCard ? (
         <div className={styles.cardActions}>
           <Button variant="secondary" onClick={onSelectCodexRow}>View in list</Button>
-          <Button variant="danger" onClick={onDisconnect}>Disconnect</Button>
         </div>
       ) : null}
-      {loginPhase !== 'idle' || !manageCard || signedOut ? (
-        <div className={styles.phase}>
-          {loginPhase === 'idle' || loginPhase === 'error' ? (
-            <>
-              {loginPhase === 'error' ? <p className={styles.error} role="alert">{loginError}</p> : null}
-              <div className={styles.methods} role="radiogroup" aria-label="Codex sign-in method" onKeyDown={onMethodsKeyDown}>
-                {METHODS.map((entry, index) => {
-                  const selected = entry.id === effectiveMethod
-                  return (
-                    <button
-                      key={entry.id}
-                      ref={(node) => { cardRefs.current[index] = node }}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      tabIndex={selected ? 0 : -1}
-                      className={styles.methodCard}
-                      data-checked={selected ? 'true' : undefined}
-                      disabled={flowLive}
-                      onClick={() => selectMethod(entry.id)}
-                    >
-                      <entry.Icon size={18} strokeWidth={1.6} aria-hidden="true" />
-                      <span className={styles.methodText}>
-                        <strong>{entry.label}</strong>
-                        <small>{entry.description}</small>
-                      </span>
-                    </button>
-                  )
-                })}
+      <div className={styles.phase}>
+        {loginPhase === 'idle' || loginPhase === 'error' ? (
+          <>
+            {loginPhase === 'error' ? <p className={styles.error} role="alert">{loginError}</p> : null}
+            {manageCard && linkState === 'signed_in' ? <p className={styles.sectionLabel}>Add account</p> : null}
+            <div className={styles.methods} role="radiogroup" aria-label="Codex sign-in method" onKeyDown={onMethodsKeyDown}>
+              {METHODS.map((entry, index) => {
+                const selected = entry.id === effectiveMethod
+                return (
+                  <button
+                    key={entry.id}
+                    ref={(node) => { cardRefs.current[index] = node }}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    tabIndex={selected ? 0 : -1}
+                    className={styles.methodCard}
+                    data-checked={selected ? 'true' : undefined}
+                    disabled={flowLive}
+                    onClick={() => selectMethod(entry.id)}
+                  >
+                    <entry.Icon size={18} strokeWidth={1.6} aria-hidden="true" />
+                    <span className={styles.methodText}>
+                      <strong>{entry.label}</strong>
+                      <small>{entry.description}</small>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            {effectiveMethod === 'browser' ? (
+              <>
+                <Button variant="primary" onClick={() => void model.startLogin()}>
+                  <LogIn size={15} aria-hidden="true" />Sign in with ChatGPT
+                </Button>
+                <small className={styles.hint}>Opens your default browser. Nothing is sent until you approve the sign-in.</small>
+              </>
+            ) : null}
+            {effectiveMethod === 'device' ? (
+              <>
+                <Button variant="primary" onClick={() => void model.startDeviceLogin()}>
+                  <MonitorSmartphone size={15} aria-hidden="true" />Get a device code
+                </Button>
+                <small className={styles.hint}>You get a short code to enter on the ChatGPT device page. Nothing is sent until you approve the sign-in there.</small>
+              </>
+            ) : null}
+            {effectiveMethod === 'importJson' ? (
+              <>
+                <textarea
+                  className={styles.importTextarea}
+                  rows={4}
+                  value={importText}
+                  onChange={(event) => setImportText(event.target.value)}
+                  placeholder="Paste an auth.json, an accounts export or a token…"
+                  aria-label="Codex credentials"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <Button variant="primary" disabled={importText.trim() === ''} onClick={() => void model.importFromJson(importText)}>
+                  <ClipboardPaste size={15} aria-hidden="true" />Import credentials
+                </Button>
+                <small className={styles.hint}>Accepts an auth.json, an accounts export, or bare tokens.</small>
+              </>
+            ) : null}
+            {effectiveMethod === 'importFile' ? (
+              <>
+                <Button variant="primary" onClick={() => void pickImportFile()}>
+                  <FileUp size={15} aria-hidden="true" />Choose file…
+                </Button>
+                <small className={styles.hint}>Accepts exported Codex sign-in files (.json, .txt, .auth).</small>
+                {importFileError !== '' ? <p className={styles.error} role="alert">{importFileError}</p> : null}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,.txt,.auth"
+                  className={styles.hiddenFileInput}
+                  onChange={(event) => void onFallbackFileChosen(event)}
+                />
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {loginPhase === 'connecting' ? (
+          <Button variant="primary" disabled>
+            <ConnectingIcon size={15} className={styles.spinning} aria-hidden="true" />{connectingLabel}
+          </Button>
+        ) : null}
+        {loginPhase === 'waiting' && effectiveMethod === 'browser' ? (
+          <>
+            <p className={styles.statusRow} role="status">
+              <RefreshCw size={16} className={styles.spinning} aria-hidden="true" />Waiting for sign-in…
+            </p>
+            <small className={styles.hint}>Approve the sign-in in the browser window that opened, then return here.</small>
+            {authorizeUrl !== '' ? (
+              <Button variant="secondary" onClick={() => void model.reopenAuthorizeUrl()}>Open the sign-in page again</Button>
+            ) : null}
+          </>
+        ) : null}
+        {loginPhase === 'waiting' && effectiveMethod === 'device' ? (
+          <>
+            <p className={styles.statusRow} role="status">
+              <RefreshCw size={16} className={styles.spinning} aria-hidden="true" />Waiting for approval…
+            </p>
+            {deviceUserCode !== '' ? (
+              <div className={styles.deviceCode}>
+                <code className={styles.userCode} title={deviceUserCode}>{deviceUserCode}</code>
+                <Button variant="secondary" onClick={() => void copyDeviceCode()}>{copied ? 'Copied' : 'Copy code'}</Button>
               </div>
-              {effectiveMethod === 'browser' ? (
-                <>
-                  <Button variant="primary" onClick={() => void model.startLogin()}>
-                    <LogIn size={15} aria-hidden="true" />Sign in with ChatGPT
-                  </Button>
-                  <small className={styles.hint}>Opens your default browser. Nothing is sent until you approve the sign-in.</small>
-                </>
-              ) : null}
-              {effectiveMethod === 'device' ? (
-                <>
-                  <Button variant="primary" onClick={() => void model.startDeviceLogin()}>
-                    <MonitorSmartphone size={15} aria-hidden="true" />Get a device code
-                  </Button>
-                  <small className={styles.hint}>You get a short code to enter on the ChatGPT device page. Nothing is sent until you approve the sign-in there.</small>
-                </>
-              ) : null}
-              {effectiveMethod === 'importJson' ? (
-                <>
-                  <textarea
-                    className={styles.importTextarea}
-                    rows={4}
-                    value={importText}
-                    onChange={(event) => setImportText(event.target.value)}
-                    placeholder="Paste an auth.json, an accounts export or a token…"
-                    aria-label="Codex credentials"
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                  <Button variant="primary" disabled={importText.trim() === ''} onClick={() => void model.importFromJson(importText)}>
-                    <ClipboardPaste size={15} aria-hidden="true" />Import credentials
-                  </Button>
-                  <small className={styles.hint}>Accepts an auth.json, an accounts export, or bare tokens.</small>
-                </>
-              ) : null}
-              {effectiveMethod === 'importFile' ? (
-                <>
-                  <Button variant="primary" onClick={() => void pickImportFile()}>
-                    <FileUp size={15} aria-hidden="true" />Choose file…
-                  </Button>
-                  <small className={styles.hint}>Accepts exported Codex sign-in files (.json, .txt, .auth).</small>
-                  {importFileError !== '' ? <p className={styles.error} role="alert">{importFileError}</p> : null}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".json,.txt,.auth"
-                    className={styles.hiddenFileInput}
-                    onChange={(event) => void onFallbackFileChosen(event)}
-                  />
-                </>
-              ) : null}
-            </>
-          ) : null}
-          {loginPhase === 'connecting' ? (
-            <Button variant="primary" disabled>
-              <ConnectingIcon size={15} className={styles.spinning} aria-hidden="true" />{connectingLabel}
-            </Button>
-          ) : null}
-          {loginPhase === 'waiting' && effectiveMethod === 'browser' ? (
-            <>
-              <p className={styles.statusRow} role="status">
-                <RefreshCw size={16} className={styles.spinning} aria-hidden="true" />Waiting for sign-in…
-              </p>
-              <small className={styles.hint}>Approve the sign-in in the browser window that opened, then return here.</small>
-              {authorizeUrl !== '' ? (
-                <Button variant="secondary" onClick={() => void model.reopenAuthorizeUrl()}>Open the sign-in page again</Button>
-              ) : null}
-            </>
-          ) : null}
-          {loginPhase === 'waiting' && effectiveMethod === 'device' ? (
-            <>
-              <p className={styles.statusRow} role="status">
-                <RefreshCw size={16} className={styles.spinning} aria-hidden="true" />Waiting for approval…
-              </p>
-              {deviceUserCode !== '' ? (
-                <div className={styles.deviceCode}>
-                  <code className={styles.userCode} title={deviceUserCode}>{deviceUserCode}</code>
-                  <Button variant="secondary" onClick={() => void copyDeviceCode()}>{copied ? 'Copied' : 'Copy code'}</Button>
-                </div>
-              ) : null}
-              {deviceVerificationUrl !== '' ? (
-                <Button variant="secondary" onClick={() => void model.openVerificationUrl()}>Open the verification page</Button>
-              ) : null}
-              <small className={styles.hint}>Enter the code on the ChatGPT device page and approve the sign-in. This dialog keeps watching until it finishes.</small>
-            </>
-          ) : null}
-          {loginPhase === 'exchanging' ? (
-            <>
-              <p className={styles.statusRow} role="status">
-                <RefreshCw size={16} className={styles.spinning} aria-hidden="true" />Finishing sign-in…
-              </p>
-              <small className={styles.hint}>The account is being linked and the provider is being created.</small>
-            </>
-          ) : null}
-          {loginPhase === 'success' ? (
-            <>
-              <p className={styles.statusRow}>
-                <CheckCircle2 size={16} className={styles.successIcon} aria-hidden="true" />
-                <span>Signed in as <span className={styles.email} title={account.email}>{account.email}</span></span>
-                {account.plan !== '' ? <Pill tone="info">{account.plan}</Pill> : null}
-              </p>
-              {importedFrom !== '' ? (
-                <small className={styles.hint}>Imported from {importedFrom}.</small>
-              ) : null}
-              {!providerBeforeLogin.current ? (
-                <small className={styles.hint}>The Codex provider was added to the list and is enabled.</small>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      ) : null}
+            ) : null}
+            {deviceVerificationUrl !== '' ? (
+              <Button variant="secondary" onClick={() => void model.openVerificationUrl()}>Open the verification page</Button>
+            ) : null}
+            <small className={styles.hint}>Enter the code on the ChatGPT device page and approve the sign-in. This dialog keeps watching until it finishes.</small>
+          </>
+        ) : null}
+        {loginPhase === 'exchanging' ? (
+          <>
+            <p className={styles.statusRow} role="status">
+              <RefreshCw size={16} className={styles.spinning} aria-hidden="true" />Finishing sign-in…
+            </p>
+            <small className={styles.hint}>The account is being linked and the provider is being created.</small>
+          </>
+        ) : null}
+        {loginPhase === 'success' && freshAccount !== null ? (
+          <>
+            <p className={styles.statusRow}>
+              <CheckCircle2 size={16} className={styles.successIcon} aria-hidden="true" />
+              <span>Signed in as <span className={styles.email} title={freshAccount.email}>{freshAccount.email}</span></span>
+              {freshAccount.plan !== '' ? <Pill tone="info">{freshAccount.plan}</Pill> : null}
+            </p>
+            {importedFrom !== '' ? (
+              <small className={styles.hint}>Imported from {importedFrom}.</small>
+            ) : null}
+            {!providerBeforeLogin.current ? (
+              <small className={styles.hint}>The Codex provider was added to the list and is enabled.</small>
+            ) : null}
+          </>
+        ) : null}
+      </div>
     </div>
   )
 }

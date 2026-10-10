@@ -15,6 +15,24 @@
 .rows dd { margin: 0; color: var(--text-secondary); }
 .email { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; vertical-align: bottom; }
 
+/* One row per linked account: each carries its own health and its own
+ * disconnect, so one expired session never drags the working ones down. */
+.accountList { display: grid; gap: 8px; }
+.accountRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+}
+.accountText { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; flex: 1 1 auto; }
+.accountText .email { flex: 0 1 auto; min-width: 0; }
+.plan { color: var(--text-muted); font-size: 12px; }
+.sectionLabel { margin: 0; color: var(--text-muted); font-size: 10.5px; font-weight: 640; letter-spacing: 0.05em; text-transform: uppercase; }
+
 .cardActions { display: flex; justify-content: space-between; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
 
 /* The phase region lives inside the card, under everything the card shows

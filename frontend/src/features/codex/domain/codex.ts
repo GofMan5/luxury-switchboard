@@ -41,10 +41,21 @@ export interface CodexQuotaReport {
   readonly secondary: CodexQuotaWindow
 }
 
-/** Result of `codex.quota`: the account the answer was taken for, plus the
- * last settled usage probe. quota is absent until some probe has succeeded;
- * error carries the last probe's failure as status text only. */
-export type CodexQuotaResult = CodexAccount & {
+/** Result of `codex.quota`: the account the answer was taken for, plus its
+ * last settled usage probe. The card labels (email, plan, state) live in the
+ * status rows — a quota answer carries usage only, never identity. quota is
+ * absent until some probe has succeeded; error carries the last probe's
+ * failure as status text only. */
+export interface CodexQuotaResult {
+  readonly accountId: string
   readonly quota?: CodexQuotaReport
   readonly error?: string
+}
+
+/** Result of `codex.status`: every account row the backend reports plus the
+ * aggregate state over those rows. accounts is always a list — even signed
+ * out, the answer is "no rows", never a missing field. */
+export interface CodexStatus {
+  readonly state: CodexAccountState
+  readonly accounts: readonly CodexAccount[]
 }

@@ -1,19 +1,15 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import { openExternal } from '../../../platform/lifecycle/open-external'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
-import type { CodexAccount, CodexAccountState, CodexLoginPhase, CodexLoginStatus, CodexQuotaReport, CodexQuotaResult, CodexQuotaWindow } from '../domain/codex'
+import type { CodexAccount, CodexAccountState, CodexLoginPhase, CodexLoginStatus, CodexQuotaReport, CodexQuotaResult, CodexQuotaWindow, CodexStatus } from '../domain/codex'
 import type { CodexDeviceLoginStart, CodexImportResult, CodexPort } from '../application/codex-port'
 
 const LOGIN_PHASES: readonly CodexLoginPhase[] = ['idle', 'waiting', 'exchanging', 'success', 'error']
 const ACCOUNT_STATES: readonly CodexAccountState[] = ['signed_out', 'signed_in', 'reauth_needed']
 
-const signedOutAccount: CodexAccount = { state: 'signed_out', email: '', plan: '', accountId: '', providerId: '' }
-
-type ImportPayload = { state?: string; email?: unknown; plan?: unknown; accountId?: unknown; providerId?: unknown; importedFrom?: unknown }
-type QuotaPayload = {
-  state?: string; email?: unknown; plan?: unknown; accountId?: unknown; providerId?: unknown
-  quota?: unknown; error?: unknown
-}
+type AccountRow = { state?: string; email?: unknown; plan?: unknown; accountId?: unknown; providerId?: unknown }
+type StatusPayload = { state?: string; accounts?: unknown; importedFrom?: unknown }
+type QuotaPayload = { accountId?: unknown; quota?: unknown; error?: unknown }
 type QuotaReportPayload = { fetchedAt?: unknown; planType?: unknown; primary?: unknown; secondary?: unknown }
 type QuotaWindowPayload = { present?: unknown; remainingPercent?: unknown; windowMinutes?: unknown; resetAt?: unknown }
 
@@ -63,52 +59,48 @@ export class StdioCodexPort implements CodexPort {
   }
 
   importJson(text: string, signal?: AbortSignal): Promise<CodexImportResult> {
-    const result = this.#session.call<ImportPayload>('codex.import.json', { text }, signal)
+    const result = this.#session.call<StatusPayload>('codex.import.json', { text }, signal)
     return result.then(coerceImportResult)
   }
 
   importFiles(paths: readonly string[], signal?: AbortSignal): Promise<CodexImportResult> {
-    const result = this.#session.call<ImportPayload>('codex.import.files', { paths: [...paths] }, signal)
+    const result = this.#session.call<StatusPayload>('codex.import.files', { paths: [...paths] }, signal)
     return result.then(coerceImportResult)
   }
 
-  status(signal?: AbortSignal): Promise<CodexAccount> {
-    const result = this.#session.call<{ state?: string; email?: unknown; plan?: unknown; accountId?: unknown; providerId?: unknown }>('codex.status', undefined, signal)
+  status(signal?: AbortSignal): Promise<CodexStatus> {
+    const result = this.#session.call<StatusPayload>('codex.status', undefined, signal)
     return result.then((value) => {
-      const state = ACCOUNT_STATES.find((candidate) => candidate === value.state)
-      if (!state) return signedOutAccount
-      return {
-        state,
-        email: typeof value.email === 'string' ? value.email : '',
-        plan: typeof value.plan === 'string' ? value.plan : '',
-        accountId: typeof value.accountId === 'string' ? value.accountId : '',
-        providerId: typeof value.providerId === 'string' ? value.providerId : '',
-      }
+      if (!Array.isArray(value.accounts)) return { state: 'signed_out', accounts: [] }
+      const accounts = coerceAccountRows(value.accounts)
+      // The aggregate state is a function of the rows: a payload whose state
+      // field is broken still reports real rows, so the state is recomputed
+      // from them rather than wiping the accounts away.
+      const stated = ACCOUNT_STATES.find((candidate) => candidate === value.state)
+      return { state: stated ?? aggregateState(accounts), accounts }
     })
   }
 
-  quota(signal?: AbortSignal): Promise<CodexQuotaResult> {
-    const result = this.#session.call<QuotaPayload>('codex.quota', undefined, signal)
-    return result.then((value) => {
-      const state = ACCOUNT_STATES.find((candidate) => candidate === value.state)
-      return {
-        state: state ?? 'signed_out',
-        email: typeof value.email === 'string' ? value.email : '',
-        plan: typeof value.plan === 'string' ? value.plan : '',
-        accountId: typeof value.accountId === 'string' ? value.accountId : '',
-        providerId: typeof value.providerId === 'string' ? value.providerId : '',
-        quota: coerceQuotaReport(value.quota),
-        // A probe failure is a result field, never a transport rejection;
-        // anything but text has nothing to say and stays silent.
-        error: typeof value.error === 'string' && value.error.trim() !== '' ? value.error : undefined,
-      }
-    })
+  quota(accountId: string, signal?: AbortSignal): Promise<CodexQuotaResult> {
+    const result = this.#session.call<QuotaPayload>('codex.quota', { accountId }, signal)
+    return result.then((value) => ({
+      accountId: typeof value.accountId === 'string' ? value.accountId : '',
+      quota: coerceQuotaReport(value.quota),
+      // A probe failure is a result field, never a transport rejection;
+      // anything but text has nothing to say and stays silent.
+      error: typeof value.error === 'string' && value.error.trim() !== '' ? value.error : undefined,
+    }))
   }
 
-  async logout(remove: boolean, signal?: AbortSignal): Promise<void> {
-    // The empty payload is the disconnect the backend already knows; the
-    // remove flag is the one optional field codex.logout accepts.
-    await this.#session.call('codex.logout', remove ? { remove: true } : undefined, signal)
+  async logout(accountId: string | null, remove: boolean, signal?: AbortSignal): Promise<void> {
+    // The frame carries only what this logout asks for: a target account
+    // when one is named, the remove flag when the cascade is wanted. An
+    // all-accounts disconnect stays the empty payload the backend already
+    // understood.
+    const payload: { accountId?: string; remove?: boolean } = {}
+    if (accountId !== null) payload.accountId = accountId
+    if (remove) payload.remove = true
+    await this.#session.call('codex.logout', Object.keys(payload).length > 0 ? payload : undefined, signal)
   }
 
   async openAuthorizeUrl(url: string): Promise<void> {
@@ -127,18 +119,42 @@ export class StdioCodexPort implements CodexPort {
   }
 }
 
-/** An import answer is the codex.status shape; a malformed one degrades to the
- * signed-out account, which the model reads as a failed import. */
-function coerceImportResult(value: ImportPayload): CodexImportResult {
-  const state = ACCOUNT_STATES.find((candidate) => candidate === value.state)
+/** An import answer is the codex.status shape; a malformed one degrades to
+ * signed-out with no rows, which the model reads as a failed import. */
+function coerceImportResult(value: StatusPayload): CodexImportResult {
+  if (!Array.isArray(value.accounts)) return { state: 'signed_out', accounts: [] }
+  const accounts = coerceAccountRows(value.accounts)
+  const stated = ACCOUNT_STATES.find((candidate) => candidate === value.state)
   return {
-    state: state ?? 'signed_out',
-    email: typeof value.email === 'string' ? value.email : '',
-    plan: typeof value.plan === 'string' ? value.plan : '',
-    accountId: typeof value.accountId === 'string' ? value.accountId : '',
-    providerId: typeof value.providerId === 'string' ? value.providerId : '',
-    importedFrom: typeof value.importedFrom === 'string' ? value.importedFrom : '',
+    state: stated ?? aggregateState(accounts),
+    accounts,
+    importedFrom: typeof value.importedFrom === 'string' && value.importedFrom !== '' ? value.importedFrom : undefined,
   }
+}
+
+/** Rows survive with broken fields emptied out; an entry that is not an
+ * object is not an account and is dropped, never coerced into a phantom. */
+function coerceAccountRows(entries: readonly unknown[]): readonly CodexAccount[] {
+  return entries.flatMap((entry): CodexAccount[] => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const row = entry as AccountRow
+    const state = ACCOUNT_STATES.find((candidate) => candidate === row.state)
+    return [{
+      state: state ?? 'signed_out',
+      email: typeof row.email === 'string' ? row.email : '',
+      plan: typeof row.plan === 'string' ? row.plan : '',
+      accountId: typeof row.accountId === 'string' ? row.accountId : '',
+      providerId: typeof row.providerId === 'string' ? row.providerId : '',
+    }]
+  })
+}
+
+/** The backend aggregate over rows: signed in once any account is, reauth
+ * only when every signed-in one broke, signed out otherwise. */
+function aggregateState(accounts: readonly CodexAccount[]): CodexAccountState {
+  if (accounts.some((account) => account.state === 'signed_in')) return 'signed_in'
+  if (accounts.some((account) => account.state === 'reauth_needed')) return 'reauth_needed'
+  return 'signed_out'
 }
 
 /** A quota block only exists once a probe succeeded (fetchedAt is set); a

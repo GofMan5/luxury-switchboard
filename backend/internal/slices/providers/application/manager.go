@@ -172,6 +172,17 @@ func (manager *Manager) Get(ctx context.Context, id string) (domain.Provider, bo
 	return manager.catalog.Lookup(id)
 }
 
+// List reads every provider entry — enabled and disabled alike — in
+// catalog order, as a copy. Read paths that provision and relink preset
+// rows (the codex slice deciding whether a parked entry can be
+// re-pointed at a new account) must see retired entries too, and the
+// in-memory catalog answers even when the store could not be loaded;
+// ctx is accepted for port symmetry with the write methods and is not
+// otherwise consulted.
+func (manager *Manager) List(_ context.Context) []domain.Provider {
+	return manager.catalog.List()
+}
+
 func (manager *Manager) Update(ctx context.Context, id string, params domain.Params) (domain.Provider, error) {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()

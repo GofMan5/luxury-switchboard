@@ -406,6 +406,34 @@ func TestLoadValidatesCatalogBeforeMutatingKeyPool(t *testing.T) {
 	}
 }
 
+// List is the provisioner's read surface: it must see every entry — a
+// retired, disabled preset included — or relinking a parked codex row
+// would mint a duplicate instead of reclaiming it. The answer is the
+// catalog's order as a copy: mutating it must not leak back in.
+func TestListSeesEveryEntryIncludingDisabledOnes(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	codex, err := domain.New(domain.Params{
+		ID: "codex", Name: "Codex", BaseURL: "https://chatgpt.com/backend-api/codex",
+		AuthMode: domain.AuthBearer, Enabled: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, _ := NewCatalog([]domain.Provider{local, codex}, local.ID)
+	manager, _ := NewManager(catalog, &memoryProviderRepository{}, &fakeKeyPool{})
+	entries := manager.List(context.Background())
+	if len(entries) != 2 || entries[0].ID != "local" || entries[1].ID != "codex" {
+		t.Fatalf("list did not report every entry in catalog order: %+v", entries)
+	}
+	if entries[1].Enabled {
+		t.Fatal("a disabled entry was not reported as itself")
+	}
+	entries[1].Name = "mutated"
+	if fresh := manager.List(context.Background()); fresh[1].Name != "Codex" {
+		t.Fatal("mutating the returned slice leaked into the catalog")
+	}
+}
+
 func providerFixture(t *testing.T, id string, builtin bool) domain.Provider {
 	t.Helper()
 	provider, err := domain.New(domain.Params{

@@ -138,14 +138,18 @@ func TestASuccessfulLoginExchangesTheRedirectCodeWithTheStoredVerifierAndSignsIn
 	if status.State != StateSignedIn {
 		t.Fatalf("Status().State = %q, want %q", status.State, StateSignedIn)
 	}
-	if status.Email != "user@example.com" {
-		t.Fatalf("Status().Email = %q, want user@example.com", status.Email)
+	signedIn := accountStatus(t, status, "account-1")
+	if signedIn.State != StateSignedIn {
+		t.Fatalf("account state = %q, want %q", signedIn.State, StateSignedIn)
 	}
-	if status.Plan != "plus" {
-		t.Fatalf("Status().Plan = %q, want plus", status.Plan)
+	if signedIn.Email != "user@example.com" {
+		t.Fatalf("account email = %q, want user@example.com", signedIn.Email)
 	}
-	if status.ProviderID != CodexProviderID {
-		t.Fatalf("Status().ProviderID = %q, want %q", status.ProviderID, CodexProviderID)
+	if signedIn.Plan != "plus" {
+		t.Fatalf("account plan = %q, want plus", signedIn.Plan)
+	}
+	if signedIn.ProviderID != CodexProviderID {
+		t.Fatalf("account provider id = %q, want %q", signedIn.ProviderID, CodexProviderID)
 	}
 
 	// The sign-in arrives as its own snapshots: waiting, exchanging, then
@@ -163,8 +167,9 @@ func TestASuccessfulLoginExchangesTheRedirectCodeWithTheStoredVerifierAndSignsIn
 	if last.Conn.State != StateSignedIn {
 		t.Fatalf("last event conn state = %q, want %q", last.Conn.State, StateSignedIn)
 	}
-	if last.Conn.ProviderID != CodexProviderID {
-		t.Fatalf("last event provider id = %q, want %q", last.Conn.ProviderID, CodexProviderID)
+	lastAccount := accountStatus(t, last.Conn, "account-1")
+	if lastAccount.ProviderID != CodexProviderID {
+		t.Fatalf("last event provider id = %q, want %q", lastAccount.ProviderID, CodexProviderID)
 	}
 }
 
@@ -313,14 +318,18 @@ func TestALoginWhoseProviderCannotBeProvisionedKeepsTheStoredSession(t *testing.
 	}
 	// ...but the session is kept: the tokens are durable and usable, and
 	// only the provider entry is missing.
-	if conn := env.service.Status(); conn.State != StateSignedIn {
+	// ...but the account row is kept: the tokens are durable and usable,
+	// and only the provider entry is missing.
+	conn := env.service.Status()
+	if conn.State != StateSignedIn {
 		t.Fatalf("Status().State = %q, want %q", conn.State, StateSignedIn)
 	}
-	if conn := env.service.Status(); conn.Email != "user@example.com" {
-		t.Fatalf("Status().Email = %q, want user@example.com", conn.Email)
+	kept := accountStatus(t, conn, "account-1")
+	if kept.Email != "user@example.com" {
+		t.Fatalf("account email = %q, want user@example.com", kept.Email)
 	}
-	if conn := env.service.Status(); conn.ProviderID != "" {
-		t.Fatalf("Status().ProviderID = %q, want empty until provisioning succeeds", conn.ProviderID)
+	if kept.ProviderID != "" {
+		t.Fatalf("account provider id = %q, want empty until provisioning succeeds", kept.ProviderID)
 	}
 	if saves := env.store.savedSessions(); len(saves) != 1 {
 		t.Fatalf("store.Save called %d times, want 1", len(saves))
@@ -344,7 +353,7 @@ func TestALogoutDuringLoginNeverResurrectsTheSession(t *testing.T) {
 	if _, err := env.service.LoginStart(); err != nil {
 		t.Fatalf("LoginStart() error = %v, want nil", err)
 	}
-	if err := env.service.Logout(context.Background(), false); err != nil {
+	if err := env.service.Logout(context.Background(), "", false); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 	if conn := env.service.Status(); conn.State != StateSignedOut {

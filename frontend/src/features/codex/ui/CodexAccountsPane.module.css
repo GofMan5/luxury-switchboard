@@ -1,10 +1,14 @@
 /* The accounts list rides the page's scroll area: rows carry their own
  * padding, hairline separators echo the keys table it replaces, and nothing
- * here scrolls on its own. */
+ * here scrolls on its own. One account is one block — header, then its
+ * usage rows — and the block's own bottom line separates accounts. */
 
 .pane { display: grid; min-width: 0; }
 
-.account { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 14px 20px; }
+.account { display: grid; border-bottom: 1px solid var(--border-subtle); }
+.account:last-child { border-bottom: none; }
+
+.accountHead { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 14px 20px; }
 .accountText { display: grid; flex: 1 1 220px; gap: 3px; min-width: 0; }
 .email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
 .accountText small { color: var(--text-muted); font-size: 11.5px; line-height: 1.4; }
@@ -26,6 +30,7 @@
   border-bottom: 1px solid var(--border-subtle);
   padding: 13px 20px;
 }
+.window:last-child { border-bottom: none; }
 .windowTitle { grid-area: title; color: var(--text-primary); font-size: 12.5px; font-weight: 640; }
 
 .meter { grid-area: meter; overflow: hidden; height: 6px; border-radius: 3px; background: var(--bg-raised); }

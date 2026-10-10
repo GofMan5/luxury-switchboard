@@ -41,7 +41,7 @@ func TestALoginSavedDuringLogoutDoesNotResurrectTheSession(t *testing.T) {
 	}
 
 	// The disconnect lands while the save is still in flight.
-	if err := env.service.Logout(context.Background(), false); err != nil {
+	if err := env.service.Logout(context.Background(), "", false); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 	close(release)
@@ -81,20 +81,17 @@ func TestALogoutFromReauthNeededRetires(t *testing.T) {
 	session := validSession("user@example.com")
 	session.RefreshToken = ""
 	session.AccessExpiry = time.Now().Add(-10 * time.Minute)
-	env.store.mu.Lock()
-	env.store.session = session
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(session)
 	env.restore(t)
 
-	if _, err := env.service.AcquireAccessToken(context.Background()); !errors.Is(err, errNeedsSignIn) {
+	if _, err := env.service.AcquireAccessToken(context.Background(), "account-1"); !errors.Is(err, errNeedsSignIn) {
 		t.Fatalf("AcquireAccessToken() error = %v, want errNeedsSignIn", err)
 	}
 	if state := env.service.Status().State; state != StateReauthNeeded {
 		t.Fatalf("State = %q, want %q before the logout", state, StateReauthNeeded)
 	}
 
-	if err := env.service.Logout(context.Background(), false); err != nil {
+	if err := env.service.Logout(context.Background(), "", false); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 	if retires := env.provisioner.retireCount(); retires != 1 {
@@ -122,7 +119,7 @@ func TestALogoutRefusedWhileCodexIsTheActiveProviderKeepsTheSession(t *testing.T
 	env.signIn(t)
 	env.provisioner.retireErr = providerapp.ErrActiveProvider
 
-	err := env.service.Logout(context.Background(), false)
+	err := env.service.Logout(context.Background(), "", false)
 	var refusal *LogoutError
 	if !errors.As(err, &refusal) {
 		t.Fatalf("Logout() error = %v, want a *LogoutError refusal", err)
@@ -155,7 +152,7 @@ func TestALogoutRefusedWhileCodexIsTheActiveProviderKeepsTheSession(t *testing.T
 	}
 
 	// The refusal kept the tokens: the next acquire still serves them.
-	token, err := env.service.AcquireAccessToken(context.Background())
+	token, err := env.service.AcquireAccessToken(context.Background(), "account-1")
 	if err != nil {
 		t.Fatalf("AcquireAccessToken() error = %v, want nil: the refusal kept the tokens", err)
 	}
@@ -172,7 +169,7 @@ func TestALogoutStillCleansUpWhenRetirementFailsForAnotherReason(t *testing.T) {
 	env.signIn(t)
 	env.provisioner.retireErr = errors.New("registry lockfile is stuck")
 
-	err := env.service.Logout(context.Background(), false)
+	err := env.service.Logout(context.Background(), "", false)
 	if err == nil {
 		t.Fatal("Logout() = nil error, want the retirement failure reported")
 	}
@@ -204,7 +201,7 @@ func TestALogoutWithRemoveDeletesTheProviderEntryEvenWhileSignedIn(t *testing.T)
 	env := newTestEnv(t)
 	env.signIn(t)
 
-	if err := env.service.Logout(context.Background(), true); err != nil {
+	if err := env.service.Logout(context.Background(), "", true); err != nil {
 		t.Fatalf("Logout(remove) error = %v, want nil", err)
 	}
 	if removes := env.provisioner.removeCount(); removes != 1 {
@@ -231,13 +228,10 @@ func TestALogoutFromLeftoversNamesTheDependencyThatRefused(t *testing.T) {
 	env := newTestEnv(t)
 	// A leftover disk session with no live state: the remove
 	// branch is the one that talks to the provider manager.
-	env.store.mu.Lock()
-	env.store.session = staleSession()
-	env.store.present = true
-	env.store.mu.Unlock()
+	env.store.seed(staleSession())
 	env.provisioner.removeErr = providerapp.ErrActiveProvider
 
-	err := env.service.Logout(context.Background(), false)
+	err := env.service.Logout(context.Background(), "", false)
 	var refusal *LogoutError
 	if !errors.As(err, &refusal) {
 		t.Fatalf("Logout() error = %v, want a *LogoutError refusal", err)

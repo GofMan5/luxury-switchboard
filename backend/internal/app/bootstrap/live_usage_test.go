@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -225,6 +226,213 @@ func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 	}
 	if row.TotalTokens != 140 {
 		t.Errorf("total tokens were not counted: %d", row.TotalTokens)
+	}
+	if row.Status != http.StatusOK {
+		t.Errorf("the recorded status was %d, not 200", row.Status)
+	}
+}
+
+// The whole stack, driven the way the user drives it, against the failure
+// the field kept reporting: a provider that accepts the request, flushes its
+// SSE headers, and then silently drops the connection before its first
+// answer byte. Six times in a row. The client — a real streaming client on
+// a real loopback port — must see nothing but headers and keep-alives until
+// the seventh attempt delivers the whole answer; the turn ends in success,
+// not in the dialect's failure event. The relay's live budget is the
+// ladder's, and this proves it through the real control plane, not the
+// in-process server struct.
+func TestLiveRelayOutlastsPreContentBreaksEndToEnd(t *testing.T) {
+	requireSecureStorage(t)
+	const breaks = 6
+	var attempts int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&attempts, 1) <= breaks {
+			writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			writer.(http.Flusher).Flush()
+			time.Sleep(600 * time.Millisecond)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	root := t.TempDir()
+	t.Setenv("SWITCHBOARD_PORT", "0")
+	for name, file := range map[string]string{
+		"SWITCHBOARD_SETTINGS_PATH":       "settings.dpapi",
+		"SWITCHBOARD_PROVIDERS_PATH":      "providers.dpapi",
+		"SWITCHBOARD_KEYS_PATH":           "keys.dpapi",
+		"SWITCHBOARD_CODEX_PATH":          "codex.dpapi",
+		"SWITCHBOARD_ROUTES_PATH":         "routes.dpapi",
+		"SWITCHBOARD_TUNNEL_PATH":         "tunnel.dpapi",
+		"SWITCHBOARD_HISTORY_PATH":        "history.db",
+		"SWITCHBOARD_TUNNEL_HISTORY_PATH": "tunnel-history.db",
+	} {
+		t.Setenv(name, filepath.Join(root, file))
+	}
+
+	requests, toApp := io.Pipe()
+	fromApp, responses := io.Pipe()
+	app, err := New(requests, responses, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appContext, stopApp := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- app.Run(appContext) }()
+
+	type answer struct {
+		ID      string          `json:"id"`
+		Type    string          `json:"type"`
+		OK      bool            `json:"ok"`
+		Payload json.RawMessage `json:"payload"`
+		Error   struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	answers := make(chan answer, 256)
+	go func() {
+		defer close(answers)
+		reader := bufio.NewReader(fromApp)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				var one answer
+				if json.Unmarshal(line, &one) == nil && one.Type == "result" {
+					answers <- one
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		stopApp()
+		_ = toApp.Close()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("the control plane did not stop")
+		}
+		_ = responses.Close()
+	}()
+
+	sequence := 0
+	command := func(method string, payload any) answer {
+		t.Helper()
+		sequence++
+		id := fmt.Sprintf("cmd%d", sequence)
+		frame, err := json.Marshal(map[string]any{"v": 1, "id": id, "type": "command", "method": method, "payload": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := toApp.Write(append(frame, '\n')); err != nil {
+			t.Fatalf("%s could not be sent: %v", method, err)
+		}
+		deadline := time.After(60 * time.Second)
+		for {
+			select {
+			case one, open := <-answers:
+				if !open {
+					t.Fatalf("the control plane closed before answering %s", method)
+				}
+				if one.ID == id {
+					if !one.OK {
+						t.Fatalf("%s failed: %s %s", method, one.Error.Code, one.Error.Message)
+					}
+					return one
+				}
+			case <-deadline:
+				t.Fatalf("%s was never answered", method)
+			}
+		}
+	}
+
+	added := command("providers.add", map[string]any{
+		"name": "Flaky Relay", "baseUrl": upstream.URL, "authMode": "bearer",
+		"dialect": "openai", "format": "chat", "rpm": 600, "enabled": true,
+	})
+	var provider struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(added.Payload, &provider); err != nil || provider.ID == "" {
+		t.Fatalf("providers.add answered unreadably: %s", added.Payload)
+	}
+	command("keys.add", map[string]any{"providerId": provider.ID, "label": "primary", "secret": "sk-live"})
+	command("routes.upsert", map[string]any{
+		"target": "relay", "publicModel": "glm-5.3", "upstreamModel": "glm-5.3",
+		"providerId": provider.ID, "enabled": true, "priority": 0,
+	})
+	command("relay.start", nil)
+	status := command("relay.status", nil)
+	var snapshot struct {
+		State   string `json:"state"`
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(status.Payload, &snapshot); err != nil || snapshot.State != "live" || snapshot.Address == "" {
+		t.Fatalf("the relay did not start: %s", status.Payload)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	request, err := http.NewRequest(http.MethodPost, snapshot.Address+"/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("the request through the live relay failed: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("the live request did not succeed: status=%d body=%s", response.StatusCode, body)
+	}
+	if got := atomic.LoadInt32(&attempts); got != breaks+1 {
+		t.Fatalf("the silent breaks did not get the ladder's budget through the real stack: attempts=%d want=%d body=%s", got, breaks+1, body)
+	}
+	if !strings.Contains(string(body), "Hello") || !strings.Contains(string(body), "[DONE]") {
+		t.Fatalf("the retried answer did not reach the client whole: %s", body)
+	}
+	if strings.Contains(string(body), "upstream_unavailable") {
+		t.Fatalf("an invisible break surfaced as a failure event: %s", body)
+	}
+
+	// The activity row settles asynchronously; poll for the terminal state.
+	deadline := time.Now().Add(10 * time.Second)
+	var row struct {
+		State     string `json:"state"`
+		ErrorCode string `json:"errorCode"`
+		Status    int    `json:"status"`
+	}
+	for {
+		listed := command("activity.list", map[string]any{"limit": 10})
+		var activity struct {
+			Requests []json.RawMessage `json:"requests"`
+		}
+		if err := json.Unmarshal(listed.Payload, &activity); err != nil || len(activity.Requests) == 0 {
+			t.Fatalf("activity.list answered unreadably: %s", listed.Payload)
+		}
+		if err := json.Unmarshal(activity.Requests[0], &row); err != nil {
+			t.Fatalf("the activity row is unreadable: %s", activity.Requests[0])
+		}
+		if row.State != "active" && row.State != "retrying" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the activity row never settled: %s", activity.Requests[0])
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if row.ErrorCode != "" {
+		t.Errorf("the seamless retries were filed as a failure: %+v", row)
 	}
 	if row.Status != http.StatusOK {
 		t.Errorf("the recorded status was %d, not 200", row.Status)

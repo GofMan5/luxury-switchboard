@@ -463,7 +463,6 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			}
 		}
 	}
-	liveStreamRetries := 0
 	// A refused answer is a wasted attempt, not a dead request. The rules match shell
 	// and network idiom an honest assistant produces all day, so in Block mode one
 	// unlucky answer would otherwise end a run the caller cannot restart from here —
@@ -766,12 +765,18 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			// A break before any content, with budget left, is invisible:
 			// re-request. The failure event is deliberately NOT written —
 			// the next attempt is about to replace what would have ended the
-			// stream. The retry waits nothing on top of the RPM queue: the
-			// client is already waiting, the key's own budget paces the
-			// re-request, and half a second of artificial backoff on every
-			// invisible break was half a second of pure TTFT.
-			if live.delivered == 0 && liveStreamRetries < maxStreamFailuresBeforeFallback && errorCode != "client_disconnected" && !cancelled {
-				liveStreamRetries++
+			// stream. The budget is the ladder's own ceiling, not a smaller
+			// private one: the phase that noticed the break must not decide
+			// how often the request may re-ask — the client has seen the
+			// same bytes (headers and keep-alives) whether the connection
+			// died in the probation or in the live body — so a flaky provider
+			// gets the same run of attempts a loud failure would, and a
+			// provider that is simply gone still ends the request at the cap.
+			// The retry waits nothing on top of the RPM queue: the client is
+			// already waiting, the key's own budget paces the re-request,
+			// and half a second of artificial backoff on every invisible
+			// break was half a second of pure TTFT.
+			if live.delivered == 0 && canRetry(attempt, 0) && errorCode != "client_disconnected" && !cancelled {
 				_ = live.Close()
 				server.observeRetry(activityID, attempt, http.StatusOK, 0)
 				continue

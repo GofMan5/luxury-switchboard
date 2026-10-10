@@ -287,6 +287,104 @@ func TestABreakBeforeContentIsRetriedInvisibly(t *testing.T) {
 	}
 }
 
+// A break before content is a transport failure like any other, so its
+// budget is the ladder's, not a smaller private one. The phase that
+// noticed the break must not decide how often the request may re-ask:
+// the client has seen the same bytes — headers and keep-alives — whether
+// the connection died in the probation or in the live body, so a flaky
+// provider that silently drops the connection N times deserves the same
+// run of attempts a provider failing out loud would get. The old live
+// budget borrowed the fallback threshold (three), so a provider that
+// broke four times before content ended a turn the client experienced
+// as pure silence.
+func TestAPreContentLiveBreakSharesTheLaddersBudget(t *testing.T) {
+	const breaks = 6
+	var attempts int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&attempts, 1) <= breaks {
+			// Headers, then a silence past the probation, then the
+			// connection dies without a byte of answer and without [DONE].
+			writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			writer.(http.Flusher).Flush()
+			time.Sleep(120 * time.Millisecond)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 40 * time.Millisecond
+	server.config.RetryBase = time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if got := atomic.LoadInt32(&attempts); got != breaks+1 {
+		t.Fatalf("the silent breaks did not get the ladder's budget: attempts=%d want=%d body=%q", got, breaks+1, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "usage") || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("the retried answer did not reach the client whole: %q", body)
+	}
+	if strings.Contains(body, "upstream_unavailable") {
+		t.Fatalf("an invisible break surfaced as a failure event: %q", body)
+	}
+	if sink.finish.ErrorCode != "" || sink.finish.Status != http.StatusOK {
+		t.Fatalf("the seamless retries were filed as a failure: %+v", sink.finish)
+	}
+	if len(sink.retries) != breaks {
+		t.Fatalf("the retries were not each observed: %+v", sink.retries)
+	}
+}
+
+// Sharing the ladder's budget means sharing its ceiling too: a provider
+// that always breaks before content is re-asked up to the attempt cap and
+// then told why — never forever, whatever the mode of failure.
+func TestAPreContentLiveBreakStaysBoundedByTheAttemptCap(t *testing.T) {
+	var attempts int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		// Headers, then a silence past the probation, then the connection
+		// dies without a byte of answer — every time.
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		writer.(http.Flusher).Flush()
+		time.Sleep(60 * time.Millisecond)
+	}))
+	defer upstream.Close()
+	sink := &recordingActivity{}
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, sink)
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 15 * time.Millisecond
+	server.config.RetryBase = time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if got := atomic.LoadInt32(&attempts); got != maxRelayAttempts {
+		t.Fatalf("the live budget was not the ladder's ceiling: attempts=%d want=%d", got, maxRelayAttempts)
+	}
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "upstream_unavailable") {
+		t.Fatalf("the exhausted stream ended without the dialect's failure event: status=%d body=%q", response.Code, body)
+	}
+	if sink.finish.ErrorCode != "stream_incomplete" {
+		t.Fatalf("the exhausted stream was not filed: %+v", sink.finish)
+	}
+}
+
 // The same break AFTER content is final: the client already read bytes no
 // re-request can unsend, and the stream ends in the dialect's failure event.
 func TestABreakAfterContentIsFinal(t *testing.T) {

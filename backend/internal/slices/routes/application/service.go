@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -402,6 +403,61 @@ func (service *Service) RemoveProvider(ctx context.Context, providerID string) e
 			affected[item.Target] = struct{}{}
 			continue
 		}
+		kept = append(kept, item)
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	targets := make([]domain.Target, 0, len(affected))
+	for _, target := range []domain.Target{domain.TargetRelay, domain.TargetTunnel} {
+		if _, hit := affected[target]; hit {
+			targets = append(targets, target)
+		}
+	}
+	return service.persistTargets(ctx, kept, targets)
+}
+
+// ReassignProvider is the fold behind merging one provider entry into
+// another: every assignment that names the folded provider now names the
+// survivor, so routes an operator configured keep serving traffic when the
+// product stops creating the folded entry. A rewritten relay row whose
+// (model, survivor) pair already exists is dropped instead — the chain
+// already had that link, and the duplicate would only make failover try
+// the same provider twice. The first row in stored order wins, which on a
+// chain means the link the operator ordered first. Nothing is saved when
+// the folded provider is not named anywhere.
+func (service *Service) ReassignProvider(ctx context.Context, providerID, replacementID string) error {
+	if providerID == "" || providerID != strings.TrimSpace(providerID) ||
+		replacementID == "" || replacementID != strings.TrimSpace(replacementID) {
+		return errors.New("route reassignment needs both provider ids")
+	}
+	if providerID == replacementID {
+		return errors.New("route reassignment needs two different provider ids")
+	}
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return err
+	}
+	service.mu.RLock()
+	candidate := slices.Clone(service.assignments)
+	service.mu.RUnlock()
+	kept := make([]domain.Assignment, 0, len(candidate))
+	seen := make(map[string]struct{}, len(candidate))
+	affected := map[domain.Target]struct{}{}
+	for _, item := range candidate {
+		if item.ProviderID == providerID {
+			affected[item.Target] = struct{}{}
+			item.ProviderID = replacementID
+		}
+		key := assignmentKey(item)
+		if _, hit := seen[key]; hit {
+			// Only a rewritten row can duplicate a kept one: the stored set
+			// is duplicate-free by construction, and the rewrite changes
+			// nothing but the provider id.
+			continue
+		}
+		seen[key] = struct{}{}
 		kept = append(kept, item)
 	}
 	if len(affected) == 0 {

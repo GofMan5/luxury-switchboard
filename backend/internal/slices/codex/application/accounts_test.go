@@ -46,7 +46,7 @@ func importableIDToken(email, accountID string) string {
 
 // A login of a second account is an addition, not a replacement: the
 // first account keeps its row and its tokens, the new account gets its
-// own, and every account lands its own provider entry.
+// own — and both land the same single fleet provider row.
 func TestALoginOfAnotherAccountAddsARow(t *testing.T) {
 	env := newTestEnv(t)
 	env.signIn(t)
@@ -76,8 +76,8 @@ func TestALoginOfAnotherAccountAddsARow(t *testing.T) {
 	}
 
 	ensured := env.provisioner.ensuredProviderIDs()
-	if len(ensured) != 2 || ensured[0] != CodexProviderID || ensured[1] != CodexProviderID+"2" {
-		t.Fatalf("ensured provider ids = %v, want one per sign-in", ensured)
+	if len(ensured) != 2 || ensured[0] != CodexProviderID || ensured[1] != CodexProviderID {
+		t.Fatalf("ensured provider ids = %v, want the one fleet id for every sign-in", ensured)
 	}
 
 	stored := env.store.storedSessions()
@@ -123,9 +123,9 @@ func TestALoginOfTheSameAccountReplacesTheRow(t *testing.T) {
 }
 
 // Logout aimed at one account disconnects exactly that account: its row
-// disappears, its provider entry is retired, its record is cleared from
-// the store — and the other account keeps serving tokens as if nothing
-// happened.
+// disappears and its record is cleared from the store — while the other
+// account keeps serving tokens through the same fleet row, which stays
+// enabled because a live account still routes through it.
 func TestPerAccountLogoutDisconnectsOnlyThatAccount(t *testing.T) {
 	env := newTestEnv(t)
 	env.signIn(t)
@@ -144,11 +144,14 @@ func TestPerAccountLogoutDisconnectsOnlyThatAccount(t *testing.T) {
 		t.Fatalf("account-2 row = %+v, want still signed in", status.Accounts[0])
 	}
 
-	if retired := env.provisioner.retiredAccountIDs(); len(retired) != 1 || retired[0] != "account-1" {
-		t.Fatalf("retired account ids = %v, want only account-1", retired)
+	// account-2 is still live on the fleet row, so the row is neither
+	// retired nor removed — a one-account disconnect must not park the
+	// provider another account is actively using.
+	if count := env.provisioner.retireCount(); count != 0 {
+		t.Fatalf("RetireCodexProvider called %d times, want 0: account-2 is still live", count)
 	}
-	if removed := env.provisioner.removedAccountIDs(); len(removed) != 0 {
-		t.Fatalf("removed account ids = %v, want none", removed)
+	if count := env.provisioner.removeCount(); count != 0 {
+		t.Fatalf("RemoveCodexProvider called %d times, want 0", count)
 	}
 	if count := env.store.clearCount(); count != 1 {
 		t.Fatalf("store clears = %d, want 1", count)
@@ -164,9 +167,10 @@ func TestPerAccountLogoutDisconnectsOnlyThatAccount(t *testing.T) {
 	}
 }
 
-// Logout without an account id is the all-accounts disconnect: every
-// live account is retired, the whole store is cleared, and the preset
-// returns to the signed-out aggregate with no rows left.
+// Logout without an account id is the all-accounts disconnect: the
+// whole store is cleared, the preset returns to the signed-out
+// aggregate with no rows left, and the single fleet row is parked once
+// — not once per account.
 func TestLogoutWithoutAnAccountIDRetiresEveryAccount(t *testing.T) {
 	env := newTestEnv(t)
 	env.signIn(t)
@@ -185,9 +189,8 @@ func TestLogoutWithoutAnAccountIDRetiresEveryAccount(t *testing.T) {
 		t.Fatalf("aggregate state = %q, want %q", status.State, StateSignedOut)
 	}
 
-	retired := env.provisioner.retiredAccountIDs()
-	if len(retired) != 2 || retired[0] != "account-1" || retired[1] != "account-2" {
-		t.Fatalf("retired account ids = %v, want both accounts", retired)
+	if count := env.provisioner.retireCount(); count != 1 {
+		t.Fatalf("RetireCodexProvider called %d times, want 1: the fleet row parks once for the whole fleet", count)
 	}
 	if count := env.store.clearCount(); count != 1 {
 		t.Fatalf("store clears = %d, want 1 ClearAll", count)
@@ -273,8 +276,8 @@ func TestMultiAccountImportLandsEveryCandidate(t *testing.T) {
 	}
 
 	ensured := env.provisioner.ensuredProviderIDs()
-	if len(ensured) != 2 {
-		t.Fatalf("ensured provider ids = %v, want one per imported account", ensured)
+	if len(ensured) != 2 || ensured[0] != CodexProviderID || ensured[1] != CodexProviderID {
+		t.Fatalf("ensured provider ids = %v, want the one fleet id for every imported account", ensured)
 	}
 
 	stored := env.store.storedSessions()
@@ -448,8 +451,9 @@ func TestRejectingOneAccessTokenMarksOnlyThatAccount(t *testing.T) {
 	}
 }
 
-// Restore signs in every stored account: each record gets its row, its
-// provider entry and the signed-in state, in the store's order.
+// Restore signs in every stored account: each record gets its row and
+// the signed-in state, in the store's order — and they all share the
+// one fleet provider row.
 func TestRestoreSignsInEveryStoredAccount(t *testing.T) {
 	env := newTestEnv(t)
 	env.store.seed(validSession("user@example.com"))
@@ -466,12 +470,12 @@ func TestRestoreSignsInEveryStoredAccount(t *testing.T) {
 		t.Fatalf("account-1 row = %+v, want signed in with the codex provider", first)
 	}
 	second := accountStatus(t, status, "account-2")
-	if second.State != StateSignedIn || second.Email != "second@example.com" || second.ProviderID != CodexProviderID+"2" {
-		t.Fatalf("account-2 row = %+v, want signed in with its own provider", second)
+	if second.State != StateSignedIn || second.Email != "second@example.com" || second.ProviderID != CodexProviderID {
+		t.Fatalf("account-2 row = %+v, want signed in on the same fleet provider", second)
 	}
 
-	ensured := env.provisioner.ensuredIdentities()
-	if len(ensured) != 2 {
-		t.Fatalf("restored %d provider entries, want 2", len(ensured))
+	ensured := env.provisioner.ensuredProviderIDs()
+	if len(ensured) != 2 || ensured[0] != CodexProviderID || ensured[1] != CodexProviderID {
+		t.Fatalf("ensured provider ids = %v, want the fleet id for every restored account", ensured)
 	}
 }

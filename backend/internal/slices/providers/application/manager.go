@@ -41,13 +41,17 @@ type KeyPool interface {
 	DropProvider(ctx context.Context, providerID string) error
 }
 
-// RouteCascade removes every route assignment that names a provider, so
-// deleting the provider is one action instead of a scavenger hunt through
-// Model Routes. Wired after construction because the routes slice reads
-// the provider catalog, and the provider manager reads the routes
-// service: the cycle breaks here, at a typed port, not at an import.
+// RouteCascade retargets and removes the route assignments that name a
+// provider, so merging or deleting a provider is one action instead of a
+// scavenger hunt through Model Routes. Wired after construction because
+// the routes slice reads the provider catalog, and the provider manager
+// reads the routes service: the cycle breaks here, at a typed port, not
+// at an import.
 type RouteCascade interface {
 	RemoveProvider(ctx context.Context, providerID string) error
+	// ReassignProvider moves every assignment that names one provider onto
+	// another, preserving the routes rather than deleting them.
+	ReassignProvider(ctx context.Context, providerID, replacementID string) error
 }
 
 type Manager struct {
@@ -350,6 +354,69 @@ func fallbackActiveProvider(providers []domain.Provider, deletedID string) (doma
 		}
 	}
 	return domain.Provider{}, false
+}
+
+// Fold merges one provider entry into another without deleting what the
+// entry carried: every route that names the folded provider is retargeted
+// at the survivor, and the folded entry leaves the catalog. It is the
+// data-preserving migration Delete refuses to be — a preset the product
+// stopped creating must not take the operator's routes down with it.
+//
+// If the folded provider was the active one, the active route moves to the
+// survivor (or the same deterministic fallback Delete uses, when the
+// survivor is disabled). The order mirrors Delete's cascade: routes first,
+// then keys, then the entry list — each step is a separate save that
+// leaves consistent, retryable state behind, and the whole fold is
+// idempotent, so a caller that failed partway runs it again next chance.
+func (manager *Manager) Fold(ctx context.Context, fromID, toID string) error {
+	manager.opMu.Lock()
+	defer manager.opMu.Unlock()
+	if err := manager.Availability(); err != nil {
+		return ErrStoreUnavailable
+	}
+	providers := manager.catalog.List()
+	index := slices.IndexFunc(providers, func(provider domain.Provider) bool { return provider.ID == fromID })
+	if index < 0 {
+		return ErrProviderUnavailable
+	}
+	if providers[index].Builtin {
+		return ErrBuiltinProvider
+	}
+	if fromID == toID {
+		return errors.New("a provider cannot be folded into itself")
+	}
+	if _, exists := manager.catalog.Lookup(toID); !exists {
+		return errors.New("fold target provider does not exist")
+	}
+	active, err := manager.catalog.Active()
+	if err != nil {
+		return err
+	}
+	nextActive := active.ID
+	if active.ID == fromID {
+		if survivor, exists := manager.catalog.Lookup(toID); exists && survivor.Enabled {
+			nextActive = toID
+		} else {
+			fallback, found := fallbackActiveProvider(providers, fromID)
+			if !found {
+				return errors.New("no enabled provider remains to take the active route")
+			}
+			nextActive = fallback.ID
+		}
+	}
+	if manager.routes != nil {
+		if err := manager.routes.ReassignProvider(ctx, fromID, toID); err != nil {
+			return fmt.Errorf("provider model routes could not be folded: %w", err)
+		}
+	}
+	if err := manager.keys.DropProvider(ctx, fromID); err != nil {
+		return fmt.Errorf("provider keys could not be deleted: %w", err)
+	}
+	providers = append(providers[:index], providers[index+1:]...)
+	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: nextActive}); err != nil {
+		return fmt.Errorf("provider settings could not be saved: %w", err)
+	}
+	return manager.catalog.Replace(providers, nextActive)
 }
 
 func (manager *Manager) Activate(ctx context.Context, id string) (domain.Provider, error) {

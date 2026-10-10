@@ -208,24 +208,26 @@ type RedirectServer interface {
 	Stop()
 }
 
-// ProviderProvisioner owns the "codex" provider entries so the relay can
-// route to them. Logout picks the release mode from the account state.
+// ProviderProvisioner owns the "codex" provider entry so the relay can
+// route to it. There is exactly one entry for the whole fleet of accounts;
+// the relay's token source decides which account answers each request.
 type ProviderProvisioner interface {
-	// EnsureCodexProvider makes the provider entry exist for this identity
-	// and returns its id.
-	EnsureCodexProvider(ctx context.Context, identity domain.Identity) (providerID string, err error)
-	// RetireCodexProvider signs the account out while keeping its entry:
-	// the preset marker and the account binding survive so the providers
-	// row keeps its identity for a later sign-in of the same account, and
-	// the entry is disabled so nothing routes traffic to a dead credential.
-	RetireCodexProvider(ctx context.Context, accountID string) error
-	// RemoveCodexProvider deletes the preset entries the named account
-	// leaves behind — its own bound entry when accountID names the account,
-	// and every preset entry when accountID is empty, the leftover cleanup
-	// performed when there is no live account to name. It must refuse an
-	// entry that is builtin or still holds keys or routes, and must never
-	// touch an entry the preset did not provision.
-	RemoveCodexProvider(ctx context.Context, accountID string) error
+	// EnsureCodexProvider makes the fleet entry exist and returns its id.
+	// It is idempotent and tolerant of per-session failure: a caller whose
+	// ensure failed leaves the session without a provider id and the next
+	// login or restore heals it.
+	EnsureCodexProvider(ctx context.Context) (providerID string, err error)
+	// RetireCodexProvider parks the fleet entry while its last live
+	// account is signed out: the preset marker survives so a returning
+	// login relinks the same row, and the entry is disabled so nothing
+	// routes traffic to credentials the accounts slice no longer holds.
+	RetireCodexProvider(ctx context.Context) error
+	// RemoveCodexProvider deletes the preset entries the codex slice
+	// leaves behind — the fleet row plus any legacy per-account rows — the
+	// full teardown performed when nothing live is left to serve. It must
+	// refuse an entry that is builtin or still holds keys or routes, and
+	// must never touch an entry the preset did not provision.
+	RemoveCodexProvider(ctx context.Context) error
 }
 
 // Timeouts and cadences are OAuth protocol invariants, not user settings:
@@ -979,7 +981,7 @@ func (service *Service) commitImport(session domain.Session, importedFrom string
 	}
 
 	ensureCtx, cancelEnsure := context.WithTimeout(context.Background(), exchangeTimeout)
-	providerID, ensureErr := service.provisioner.EnsureCodexProvider(ensureCtx, session.Identity)
+	providerID, ensureErr := service.provisioner.EnsureCodexProvider(ensureCtx)
 	cancelEnsure()
 
 	service.mu.Lock()
@@ -1037,18 +1039,21 @@ func logoutReleaseRefusal(err error) *LogoutError {
 	return nil
 }
 
-// Logout signs accounts out: it aborts an in-flight login, retires or
-// removes the provisioned providers, clears the stored sessions and
-// resets the state. An empty accountID means every account; a specific
-// one means only that account, and an unknown id is a no-op. A live
-// account (signed in, or signed in but needing a re-sign-in) retires
-// its entry — it stays, marked and disabled, so the providers row keeps
-// its preset identity and a later sign-in relinks to it; an account
-// with no live session has nothing to retire. removeEntry overrides
-// that choice for the delete path: the provider entry is removed
-// outright, live session or not, because the user asked for it to be
-// gone from the Providers page rather than to be parked for a
-// re-sign-in.
+// Logout signs accounts out: it aborts an in-flight login, parks or
+// removes the fleet provider, clears the stored sessions and resets the
+// state. An empty accountID means every account; a specific one means
+// only that account, and an unknown id is a no-op. The provider entry is
+// fleet-wide — one row for every account — so the release decision is a
+// fleet decision: when the last live account (signed in, or signed in
+// but needing a re-sign-in) is leaving, the row is parked — it stays,
+// marked and disabled, so the providers row keeps its preset identity and
+// a later sign-in relinks to it; while another live account remains, the
+// row stays enabled because that account still serves traffic through
+// it. An account with no live session behind it has nothing to release.
+// removeEntry overrides that choice for the delete path: the provider
+// entry is removed outright, live session or not, because the user asked
+// for it to be gone from the Providers page rather than to be parked for
+// a re-sign-in.
 //
 // A release refusal — the provider is the active route, or a leftover
 // entry still holds routes or keys — aborts the logout before anything
@@ -1067,8 +1072,10 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 	service.cancelActiveLogin()
 
 	// Targets are copied by value under the lock; entry fields are never
-	// read outside mu. live is read once, here, and drives the
-	// retire-vs-remove decision for the rest of the call.
+	// read outside mu. The same pass answers the fleet question — whether
+	// any live account survives this logout — because that can only be
+	// decided atomically with selecting the targets: an account skipped
+	// by the filter is the account that keeps the fleet row enabled.
 	type logoutTarget struct {
 		id      string
 		session domain.Session
@@ -1076,33 +1083,42 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 	}
 	service.mu.Lock()
 	targets := make([]logoutTarget, 0, len(service.accounts))
+	remainingLive := false
+	liveTargets := false
 	for _, id := range accountIDsLocked(service.accounts) {
+		entry := service.accounts[id]
+		live := entry.connState == StateSignedIn || entry.connState == StateReauthNeeded
 		if accountID != "" && id != accountID {
+			if live {
+				remainingLive = true
+			}
 			continue
 		}
-		entry := service.accounts[id]
 		targets = append(targets, logoutTarget{
 			id:      id,
 			session: entry.session,
-			live:    entry.connState == StateSignedIn || entry.connState == StateReauthNeeded,
+			live:    live,
 		})
+		if live {
+			liveTargets = true
+		}
 	}
 	service.mu.Unlock()
 
 	var failures []error
 	if removeEntry {
-		if err := service.provisioner.RemoveCodexProvider(ctx, accountID); err != nil {
+		if err := service.provisioner.RemoveCodexProvider(ctx); err != nil {
 			if refusal := logoutReleaseRefusal(err); refusal != nil {
 				return refusal
 			}
 			failures = append(failures, fmt.Errorf("codex provider could not be removed: %v", err))
 		}
 	} else {
-		for _, target := range targets {
-			if !target.live {
-				continue
-			}
-			if err := service.provisioner.RetireCodexProvider(ctx, target.id); err != nil {
+		if liveTargets && !remainingLive {
+			// The last live account is leaving, so nothing behind the fleet
+			// row can answer a request: park it — disabled, preset marker
+			// intact — while the row itself survives for the next sign-in.
+			if err := service.provisioner.RetireCodexProvider(ctx); err != nil {
 				if refusal := logoutReleaseRefusal(err); refusal != nil {
 					// The entry is still depended on: abort before the store is
 					// cleared, while the session is still signed in and its
@@ -1117,7 +1133,7 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 			// No account is signed in, so the leftover preset entries are
 			// the only thing to clean up — for every account at once. A
 			// specific unknown id must not reach this teardown.
-			if err := service.provisioner.RemoveCodexProvider(ctx, ""); err != nil {
+			if err := service.provisioner.RemoveCodexProvider(ctx); err != nil {
 				if refusal := logoutReleaseRefusal(err); refusal != nil {
 					// Same refusal on the leftover-entry path: the stored sessions
 					// stay exactly as they are until the dependency is resolved.
@@ -1194,7 +1210,7 @@ func (service *Service) Restore(ctx context.Context) error {
 			service.fire(listeners, snapshot)
 		}
 
-		providerID, err := service.provisioner.EnsureCodexProvider(ctx, session.Identity)
+		providerID, err := service.provisioner.EnsureCodexProvider(ctx)
 		if err != nil {
 			// A deleted or conflicting provider entry must not destroy the
 			// tokens: the session stays signed in and usable, Status shows the
@@ -1545,7 +1561,7 @@ func (service *Service) settleExchange(loginCtx context.Context, session domain.
 	}
 
 	ensureCtx, cancelEnsure := context.WithTimeout(context.Background(), exchangeTimeout)
-	providerID, ensureErr := service.provisioner.EnsureCodexProvider(ensureCtx, session.Identity)
+	providerID, ensureErr := service.provisioner.EnsureCodexProvider(ensureCtx)
 	cancelEnsure()
 
 	service.completeLogin(loginCtx, session, providerID, ensureErr)
@@ -1556,9 +1572,9 @@ func (service *Service) settleExchange(loginCtx context.Context, session domain.
 // state — signed in with no provider — rather than rolling back a
 // session the user just fought a browser for. The next login or restore
 // re-attempts provisioning and heals it. The providerID the provisioner
-// returned ("" on failure) is committed with the account, so a re-login
-// of an existing account replaces its row rather than adding a second
-// one.
+// returned ("" on failure) is committed with the account; the row it
+// names is the one fleet entry, so a re-login of an existing account
+// relinks to the row the fleet already shares.
 func (service *Service) completeLogin(loginCtx context.Context, session domain.Session, providerID string, providerErr error) {
 	service.mu.Lock()
 	if service.cancelRequested || loginCtx.Err() == context.Canceled {

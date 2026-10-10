@@ -64,9 +64,9 @@ func TestALoginSavedDuringLogoutDoesNotResurrectTheSession(t *testing.T) {
 		t.Fatalf("store cleared %d times, want 2: the logout's clear plus the login's compensation", clears)
 	}
 	// The login never reached provisioning: it was dead before its save
-	// came back, so no provider entry was created for it.
-	if identities := env.provisioner.ensuredIdentities(); len(identities) != 0 {
-		t.Fatalf("EnsureCodexProvider called for %d identities, want 0", len(identities))
+	// came back, so no provider row was ensured for it.
+	if ensured := env.provisioner.ensuredProviderIDs(); len(ensured) != 0 {
+		t.Fatalf("EnsureCodexProvider called for %d sessions, want 0", len(ensured))
 	}
 	if state := env.service.Status().State; state != StateSignedOut {
 		t.Fatalf("State = %q, want %q", state, StateSignedOut)

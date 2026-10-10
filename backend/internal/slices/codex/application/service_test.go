@@ -497,91 +497,57 @@ func (redirects *fakeRedirects) stopCount() int {
 	return redirects.stops
 }
 
-// fakeProvisioner records every identity the service registered and
-// which release mode Logout picked. Successful Ensure calls mint
-// distinct provider ids the way the real provisioner does — codex,
-// codex2, codex3… — so multi-account logins land on separate slots,
-// unless the test scripted an explicit providerIDs queue.
+// fakeProvisioner records every Ensure the service made and which
+// release mode Logout picked. The row is fleet-wide, so a successful
+// Ensure always answers with the one fleet id — codex — unless the test
+// scripted an explicit providerIDs queue to model a split the fleet
+// still has to fold.
 type fakeProvisioner struct {
 	mu          sync.Mutex
 	ensureErr   error
 	retireErr   error
 	removeErr   error
 	providerIDs []string
-	nextMint    int
-	ensured     []domain.Identity
 	ensuredIDs  []string
-	retiredIDs  []string
-	removedIDs  []string
 	retired     int
 	removed     int
 }
 
-func (provisioner *fakeProvisioner) EnsureCodexProvider(ctx context.Context, identity domain.Identity) (string, error) {
+func (provisioner *fakeProvisioner) EnsureCodexProvider(ctx context.Context) (string, error) {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
-	provisioner.ensured = append(provisioner.ensured, identity)
 	if provisioner.ensureErr != nil {
 		return "", provisioner.ensureErr
 	}
-	var providerID string
+	providerID := CodexProviderID
 	if len(provisioner.providerIDs) > 0 {
 		providerID = provisioner.providerIDs[0]
 		provisioner.providerIDs = provisioner.providerIDs[1:]
-	} else {
-		provisioner.nextMint++
-		if provisioner.nextMint == 1 {
-			providerID = CodexProviderID
-		} else {
-			providerID = fmt.Sprintf("%s%d", CodexProviderID, provisioner.nextMint)
-		}
 	}
 	provisioner.ensuredIDs = append(provisioner.ensuredIDs, providerID)
 	return providerID, nil
 }
 
-func (provisioner *fakeProvisioner) RetireCodexProvider(ctx context.Context, accountID string) error {
+func (provisioner *fakeProvisioner) RetireCodexProvider(ctx context.Context) error {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	provisioner.retired++
-	provisioner.retiredIDs = append(provisioner.retiredIDs, accountID)
 	return provisioner.retireErr
 }
 
-func (provisioner *fakeProvisioner) RemoveCodexProvider(ctx context.Context, accountID string) error {
+func (provisioner *fakeProvisioner) RemoveCodexProvider(ctx context.Context) error {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	provisioner.removed++
-	provisioner.removedIDs = append(provisioner.removedIDs, accountID)
 	return provisioner.removeErr
 }
 
-func (provisioner *fakeProvisioner) ensuredIdentities() []domain.Identity {
-	provisioner.mu.Lock()
-	defer provisioner.mu.Unlock()
-	return append([]domain.Identity{}, provisioner.ensured...)
-}
-
 // ensuredProviderIDs snapshots the ids successful Ensure calls returned,
-// in order — one row per sign-in, codex then codex2.
+// in order — the fleet row answers codex for every account.
 func (provisioner *fakeProvisioner) ensuredProviderIDs() []string {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	return append([]string{}, provisioner.ensuredIDs...)
-}
-
-// retiredAccountIDs snapshots the account ids Logout asked to retire.
-func (provisioner *fakeProvisioner) retiredAccountIDs() []string {
-	provisioner.mu.Lock()
-	defer provisioner.mu.Unlock()
-	return append([]string{}, provisioner.retiredIDs...)
-}
-
-// removedAccountIDs snapshots the account ids Logout asked to remove.
-func (provisioner *fakeProvisioner) removedAccountIDs() []string {
-	provisioner.mu.Lock()
-	defer provisioner.mu.Unlock()
-	return append([]string{}, provisioner.removedIDs...)
 }
 
 func (provisioner *fakeProvisioner) retireCount() int {

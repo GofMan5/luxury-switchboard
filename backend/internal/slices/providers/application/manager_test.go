@@ -60,13 +60,28 @@ func (keys *fakeKeyPool) DropProvider(_ context.Context, id string) error {
 	return nil
 }
 
-// fakeRouteCascade records the route removals the manager asked for: the
-// delete contract under test is who owns the cascade, not what the routes
-// slice does with it (that slice tests its own removal).
-type fakeRouteCascade map[string]int
+// fakeRouteCascade records the route removals and retargetings the manager
+// asked for: the delete and fold contracts under test are who owns the
+// cascade and with which ids, not what the routes slice does with either
+// call (that slice tests its own removal and reassignment).
+type fakeRouteCascade struct {
+	removed    map[string]int
+	reassigned map[string]string
+}
 
-func (cascade fakeRouteCascade) RemoveProvider(_ context.Context, id string) error {
-	cascade[id]++
+func (cascade *fakeRouteCascade) RemoveProvider(_ context.Context, id string) error {
+	if cascade.removed == nil {
+		cascade.removed = make(map[string]int)
+	}
+	cascade.removed[id]++
+	return nil
+}
+
+func (cascade *fakeRouteCascade) ReassignProvider(_ context.Context, fromID, toID string) error {
+	if cascade.reassigned == nil {
+		cascade.reassigned = make(map[string]string)
+	}
+	cascade.reassigned[fromID] = toID
 	return nil
 }
 
@@ -261,7 +276,7 @@ func TestFailedDeletePersistenceLeavesTheCascadeDoneAndTheEntryRetriable(t *test
 	custom := providerFixture(t, "custom", false)
 	catalog, _ := NewCatalog([]domain.Provider{local, custom}, local.ID)
 	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: map[string]int{"custom": 2}}
-	routes := fakeRouteCascade{}
+	routes := &fakeRouteCascade{}
 	repository := &memoryProviderRepository{saveFail: true}
 	repository.beforeSave = func() {
 		if _, exists := keys.rates["custom"]; exists {
@@ -273,8 +288,8 @@ func TestFailedDeletePersistenceLeavesTheCascadeDoneAndTheEntryRetriable(t *test
 	if err := manager.Delete(context.Background(), "custom"); err == nil {
 		t.Fatal("injected persistence failure was ignored")
 	}
-	if routes["custom"] != 1 || keys.drops["custom"] != 1 || keys.rates["custom"] != 0 {
-		t.Fatalf("failed save rolled the cascade back: routes=%v drops=%v rates=%v", routes, keys.drops, keys.rates)
+	if routes.removed["custom"] != 1 || keys.drops["custom"] != 1 || keys.rates["custom"] != 0 {
+		t.Fatalf("failed save rolled the cascade back: routes=%v drops=%v rates=%v", routes.removed, keys.drops, keys.rates)
 	}
 	if _, exists := catalog.Lookup("custom"); !exists {
 		t.Fatal("failed save removed the entry from the runtime catalog anyway")
@@ -298,15 +313,15 @@ func TestDeleteCascadesRoutesAndKeysBeforeRemovingTheEntry(t *testing.T) {
 	custom := providerFixture(t, "custom", false)
 	catalog, _ := NewCatalog([]domain.Provider{local, custom}, local.ID)
 	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: map[string]int{"custom": 2}}
-	routes := fakeRouteCascade{}
+	routes := &fakeRouteCascade{}
 	repository := &memoryProviderRepository{}
 	manager, _ := NewManager(catalog, repository, keys)
 	manager.SetRouteCascade(routes)
 	if err := manager.Delete(context.Background(), "custom"); err != nil {
 		t.Fatalf("delete with keys and routes was refused: %v", err)
 	}
-	if routes["custom"] != 1 {
-		t.Fatalf("routes were not cascaded: %v", routes)
+	if routes.removed["custom"] != 1 {
+		t.Fatalf("routes were not cascaded: %v", routes.removed)
 	}
 	if keys.drops["custom"] != 1 {
 		t.Fatalf("keys were not cascaded: %v", keys.drops)
@@ -335,7 +350,7 @@ func TestDeletingTheActiveProviderFallsBackToABuiltin(t *testing.T) {
 	custom := providerFixture(t, "custom", false)
 	catalog, _ := NewCatalog([]domain.Provider{local, echo, custom}, custom.ID)
 	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "custom": 77}, count: make(map[string]int)}
-	routes := fakeRouteCascade{}
+	routes := &fakeRouteCascade{}
 	repository := &memoryProviderRepository{}
 	manager, _ := NewManager(catalog, repository, keys)
 	manager.SetRouteCascade(routes)
@@ -378,17 +393,175 @@ func TestDeletingTheLastEnabledProviderIsRefusedBeforeTheCascade(t *testing.T) {
 	custom := providerFixture(t, "custom", false)
 	catalog, _ := NewCatalog([]domain.Provider{local, echo, custom}, custom.ID)
 	keys := &fakeKeyPool{rates: map[string]int{"custom": 77}, count: map[string]int{"custom": 2}}
-	routes := fakeRouteCascade{}
+	routes := &fakeRouteCascade{}
 	manager, _ := NewManager(catalog, &memoryProviderRepository{}, keys)
 	manager.SetRouteCascade(routes)
 	if err := manager.Delete(context.Background(), "custom"); err == nil {
 		t.Fatal("deleting the last enabled provider was accepted")
 	}
-	if routes["custom"] != 0 || keys.drops["custom"] != 0 || keys.rates["custom"] != 77 {
-		t.Fatalf("refused delete still cascaded: routes=%v drops=%v rates=%v", routes, keys.drops, keys.rates)
+	if routes.removed["custom"] != 0 || keys.drops["custom"] != 0 || keys.rates["custom"] != 77 {
+		t.Fatalf("refused delete still cascaded: routes=%v drops=%v rates=%v", routes.removed, keys.drops, keys.rates)
 	}
 	if _, exists := catalog.Lookup("custom"); !exists {
 		t.Fatal("refused delete removed the entry anyway")
+	}
+}
+
+// Folding is the migration Delete refuses to be: a preset row the product
+// no longer mints must not take the operator's routes or its place in the
+// store down with it. The routes are retargeted at the survivor, the
+// folded row's key budget is dropped, the entry leaves the catalog — and
+// the survivor itself is not touched, because the survivor never carried
+// the legacy row's identity.
+func TestFoldRetargetsRoutesDropsKeysAndRemovesTheLegacyEntry(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	fleet := presetFixture(t, "codex", true)
+	legacy := presetFixture(t, "codex2", true)
+	catalog, _ := NewCatalog([]domain.Provider{local, fleet, legacy}, local.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "codex": 0, "codex2": 0}, count: make(map[string]int)}
+	routes := &fakeRouteCascade{}
+	repository := &memoryProviderRepository{}
+	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Fold(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatalf("fold was refused: %v", err)
+	}
+	if routes.reassigned["codex2"] != "codex" {
+		t.Fatalf("routes were not retargeted at the survivor: %v", routes.reassigned)
+	}
+	if len(routes.removed) != 0 {
+		t.Fatalf("a fold deleted routes instead of retargeting them: %v", routes.removed)
+	}
+	if keys.drops["codex2"] != 1 || keys.drops["codex"] != 0 {
+		t.Fatalf("key budget was not dropped from the folded row only: %v", keys.drops)
+	}
+	if _, exists := catalog.Lookup("codex2"); exists {
+		t.Fatal("the folded entry stayed in the catalog")
+	}
+	if _, exists := catalog.Lookup("codex"); !exists {
+		t.Fatal("the survivor left the catalog")
+	}
+	if len(repository.state.Providers) != 2 || repository.state.Providers[1].ID != "codex" {
+		t.Fatalf("the folded entry was not removed from the store: %+v", repository.state.Providers)
+	}
+	if repository.state.ActiveID != "local" {
+		t.Fatalf("an untouched active provider moved: %q", repository.state.ActiveID)
+	}
+}
+
+// The active route rides the fold: the user picked the legacy row while it
+// existed, and the row's accounts now answer through the survivor, so the
+// route moves there rather than falling back to a builtin the user never
+// chose.
+func TestFoldingTheActiveProviderMovesTheRouteToTheSurvivor(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	fleet := presetFixture(t, "codex", true)
+	legacy := presetFixture(t, "codex2", true)
+	catalog, _ := NewCatalog([]domain.Provider{local, fleet, legacy}, legacy.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "codex": 0, "codex2": 0}, count: make(map[string]int)}
+	routes := &fakeRouteCascade{}
+	manager, _ := NewManager(catalog, &memoryProviderRepository{}, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Fold(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatalf("fold of the active provider was refused: %v", err)
+	}
+	active, err := catalog.Active()
+	if err != nil {
+		t.Fatalf("the catalog has no active provider after the fold: %v", err)
+	}
+	if active.ID != "codex" {
+		t.Fatalf("active route moved to %q, want the survivor codex", active.ID)
+	}
+}
+
+// A disabled survivor cannot take the active route — requests would queue
+// against a row that admits nothing — so the fold falls back to the same
+// deterministic builtin a delete would pick.
+func TestFoldingIntoADisabledSurvivorFallsBackToTheBuiltin(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	fleet := presetFixture(t, "codex", false)
+	legacy := presetFixture(t, "codex2", true)
+	catalog, _ := NewCatalog([]domain.Provider{local, fleet, legacy}, legacy.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "codex": 0, "codex2": 0}, count: make(map[string]int)}
+	routes := &fakeRouteCascade{}
+	repository := &memoryProviderRepository{}
+	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Fold(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatalf("fold into a disabled survivor was refused: %v", err)
+	}
+	if repository.state.ActiveID != "local" {
+		t.Fatalf("active route moved to %q, want the builtin fallback", repository.state.ActiveID)
+	}
+}
+
+// Every degenerate fold is refused before anything is cascaded: a
+// self-fold, a builtin source, a missing source, a missing target. The
+// migration calling this decides what to fold from its own list, but a
+// refusal must not leave half-retargeted routes behind.
+func TestFoldRefusesDegenerateFoldsBeforeTouchingAnything(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	fleet := presetFixture(t, "codex", true)
+	legacy := presetFixture(t, "codex2", true)
+	catalog, _ := NewCatalog([]domain.Provider{local, fleet, legacy}, local.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "codex": 0, "codex2": 0}, count: make(map[string]int)}
+	routes := &fakeRouteCascade{}
+	repository := &memoryProviderRepository{}
+	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Fold(context.Background(), "codex2", "codex2"); err == nil {
+		t.Fatal("a provider was folded into itself")
+	}
+	if err := manager.Fold(context.Background(), "local", "codex"); !errors.Is(err, ErrBuiltinProvider) {
+		t.Fatalf("a builtin provider was folded: %v", err)
+	}
+	if err := manager.Fold(context.Background(), "ghost", "codex"); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("a missing provider was folded: %v", err)
+	}
+	if err := manager.Fold(context.Background(), "codex2", "ghost"); err == nil {
+		t.Fatal("a provider was folded into a missing target")
+	}
+	if len(routes.reassigned) != 0 || len(routes.removed) != 0 || len(keys.drops) != 0 {
+		t.Fatalf("refused folds still cascaded: routes=%v drops=%v", routes, keys.drops)
+	}
+	if len(catalog.List()) != 3 {
+		t.Fatalf("refused folds changed the catalog: %+v", catalog.List())
+	}
+}
+
+// The migration folds one row per call and may fail partway: a failed save
+// leaves the entry listed but its routes retargeted and its key budget
+// dropped — the same consistent, retryable state a failed delete leaves.
+// Retrying finishes the job; a folded row is simply absent from the next
+// list, so the pass resumes where it stopped.
+func TestAFoldThatFailsPartwayIsRetriable(t *testing.T) {
+	local := providerFixture(t, "local", true)
+	fleet := presetFixture(t, "codex", true)
+	legacy := presetFixture(t, "codex2", true)
+	catalog, _ := NewCatalog([]domain.Provider{local, fleet, legacy}, local.ID)
+	keys := &fakeKeyPool{rates: map[string]int{"local": 0, "codex": 0, "codex2": 0}, count: make(map[string]int)}
+	routes := &fakeRouteCascade{}
+	repository := &memoryProviderRepository{saveFail: true}
+	manager, _ := NewManager(catalog, repository, keys)
+	manager.SetRouteCascade(routes)
+	if err := manager.Fold(context.Background(), "codex2", "codex"); err == nil {
+		t.Fatal("injected persistence failure was ignored")
+	}
+	if routes.reassigned["codex2"] != "codex" || keys.drops["codex2"] != 1 {
+		t.Fatalf("failed save rolled the cascade back: routes=%v drops=%v", routes.reassigned, keys.drops)
+	}
+	if _, exists := catalog.Lookup("codex2"); !exists {
+		t.Fatal("failed save removed the entry from the runtime catalog anyway")
+	}
+	repository.saveFail = false
+	if err := manager.Fold(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatalf("retry after a failed save was refused: %v", err)
+	}
+	if _, exists := catalog.Lookup("codex2"); exists {
+		t.Fatal("the retried fold left the legacy entry in the catalog")
+	}
+	if routes.reassigned["codex2"] != "codex" || keys.drops["codex2"] != 2 {
+		t.Fatalf("the retried fold did not finish the job: routes=%v drops=%v", routes.reassigned, keys.drops)
 	}
 }
 
@@ -446,6 +619,21 @@ func providerFixture(t *testing.T, id string, builtin bool) domain.Provider {
 	return provider
 }
 
+// presetFixture builds the codex preset row the provisioner owns: the
+// canonical endpoint, bearer auth, the preset marker, and the fleet row's
+// zero RPM. Only Enabled differs between a live fleet row and a parked one.
+func presetFixture(t *testing.T, id string, enabled bool) domain.Provider {
+	t.Helper()
+	provider, err := domain.New(domain.Params{
+		ID: id, Name: id, BaseURL: "https://chatgpt.com/backend-api/codex",
+		AuthMode: domain.AuthBearer, Enabled: enabled, Preset: domain.PresetCodex,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider
+}
+
 // An unreadable provider store must block the first write rather than let it
 // atomically replace the file: the runtime catalog after a failed load holds
 // builtins plus nothing, and saving it would erase every provider definition
@@ -473,6 +661,9 @@ func TestFailedLoadBlocksTheFirstWrite(t *testing.T) {
 	}
 	if err := manager.Delete(context.Background(), local.ID); !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("a delete over an unreadable store was accepted: %v", err)
+	}
+	if err := manager.Fold(context.Background(), "codex2", "codex"); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("a fold over an unreadable store was accepted: %v", err)
 	}
 	if repository.saved {
 		t.Fatal("an unreadable store was rewritten")

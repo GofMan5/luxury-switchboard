@@ -128,9 +128,9 @@ func TestASuccessfulLoginExchangesTheRedirectCodeWithTheStoredVerifierAndSignsIn
 	if len(saves) != 1 {
 		t.Fatalf("store.Save called %d times, want 1", len(saves))
 	}
-	ensured := env.provisioner.ensuredIdentities()
-	if len(ensured) != 1 || ensured[0].Email != "user@example.com" {
-		t.Fatalf("provisioner ensured %+v, want one identity for user@example.com", ensured)
+	ensured := env.provisioner.ensuredProviderIDs()
+	if len(ensured) != 1 || ensured[0] != CodexProviderID {
+		t.Fatalf("provisioner ensured %v, want one call answering the fleet id %q", ensured, CodexProviderID)
 	}
 
 	// The connection is signed in with the identity and the provider.
@@ -271,7 +271,7 @@ func TestAFailedExchangeReportsTheAuthErrorAndStoresNothing(t *testing.T) {
 	if saves := env.store.savedSessions(); len(saves) != 0 {
 		t.Fatalf("store.Save called %d times, want 0", len(saves))
 	}
-	if ensured := env.provisioner.ensuredIdentities(); len(ensured) != 0 {
+	if ensured := env.provisioner.ensuredProviderIDs(); len(ensured) != 0 {
 		t.Fatalf("EnsureCodexProvider called %d times, want 0", len(ensured))
 	}
 	if conn := env.service.Status(); conn.State != StateSignedOut {
@@ -292,7 +292,7 @@ func TestALoginWhoseSessionCannotBeStoredFailsBeforeProvisioning(t *testing.T) {
 	}
 	// A session the disk rejected gets no provider entry: provisioning is
 	// only for durable sessions.
-	if ensured := env.provisioner.ensuredIdentities(); len(ensured) != 0 {
+	if ensured := env.provisioner.ensuredProviderIDs(); len(ensured) != 0 {
 		t.Fatalf("EnsureCodexProvider called %d times, want 0", len(ensured))
 	}
 	if conn := env.service.Status(); conn.State != StateSignedOut {

@@ -410,3 +410,124 @@ func TestRemoveProviderDeletesEveryAssignmentThatNamesIt(t *testing.T) {
 		t.Fatalf("listeners were not told about both affected targets: %v", notified)
 	}
 }
+
+// Folding a provider into another is a route-preserving migration: the
+// assignments keep their models and chains, but the folded provider's rows
+// now name the survivor. A route that silently stopped resolving because an
+// entry the product stopped creating disappeared would be data loss, not
+// cleanup.
+func TestReassignProviderRetargetsEveryAssignmentThatNamesIt(t *testing.T) {
+	repository := &memoryRepository{values: []domain.Assignment{
+		{Target: domain.TargetRelay, PublicModel: "model-a", UpstreamModel: "up-a", ProviderID: "codex2", Enabled: true},
+		{Target: domain.TargetRelay, PublicModel: "model-b", UpstreamModel: "up-b", ProviderID: "codex2", Enabled: true},
+		{Target: domain.TargetRelay, PublicModel: "model-b", UpstreamModel: "up-b", ProviderID: "agent", Enabled: true},
+		{Target: domain.TargetTunnel, PublicModel: "public-b", UpstreamModel: "up-b", ProviderID: "codex2", ContextLimitKiB: 128 * 1024, Enabled: true},
+	}}
+	service, _ := NewService(repository, providers{"codex": true, "codex2": true, "agent": true})
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var notified []domain.Target
+	service.OnChanged(func(target domain.Target) { notified = append(notified, target) })
+
+	if err := service.ReassignProvider(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := service.Resolve(domain.TargetRelay, "model-a"); !ok || got.ProviderID != "codex" {
+		t.Fatalf("a relay route did not survive the fold on the survivor: %+v", got)
+	}
+	chain := service.List(domain.TargetRelay)
+	if len(chain) != 3 {
+		t.Fatalf("the fold must not change the number of relay rows: %+v", chain)
+	}
+	for _, assignment := range repository.values {
+		if assignment.ProviderID == "codex2" {
+			t.Fatalf("a persisted row still names the folded provider: %+v", assignment)
+		}
+	}
+	agentUntouched := false
+	for _, assignment := range service.List(domain.TargetRelay) {
+		if assignment.ProviderID == "agent" && assignment.PublicModel == "model-b" && assignment.UpstreamModel == "up-b" {
+			agentUntouched = true
+		}
+	}
+	if !agentUntouched {
+		t.Fatalf("an unrelated provider's row was touched: %+v", service.List(domain.TargetRelay))
+	}
+	if got, ok := service.Resolve(domain.TargetTunnel, "public-b"); !ok || got.ProviderID != "codex" {
+		t.Fatalf("a tunnel route did not survive the fold on the survivor: %+v", got)
+	}
+	relay, tunnel := false, false
+	for _, target := range notified {
+		relay = relay || target == domain.TargetRelay
+		tunnel = tunnel || target == domain.TargetTunnel
+	}
+	if !relay || !tunnel {
+		t.Fatalf("listeners were not told about both affected targets: %v", notified)
+	}
+}
+
+// A rewritten relay row whose (model, survivor) pair the chain already had
+// is dropped: the duplicate would only make failover try the same provider
+// twice. The first row in stored order wins, which on a chain is the link
+// the operator ordered first — its upstream model is the one that serves.
+func TestReassignProviderDropsARewrittenRowTheChainAlreadyHas(t *testing.T) {
+	repository := &memoryRepository{values: []domain.Assignment{
+		{Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "up-first", ProviderID: "codex2", Enabled: true, Priority: 1},
+		{Target: domain.TargetRelay, PublicModel: "glm", UpstreamModel: "up-second", ProviderID: "codex", Enabled: true, Priority: 2},
+	}}
+	service, _ := NewService(repository, providers{"codex": true, "codex2": true})
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ReassignProvider(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	chain := service.List(domain.TargetRelay)
+	if len(chain) != 1 {
+		t.Fatalf("the folded chain kept a duplicate link: %+v", chain)
+	}
+	if chain[0].ProviderID != "codex" || chain[0].UpstreamModel != "up-first" {
+		t.Fatalf("the chain did not keep the operator's first link: %+v", chain[0])
+	}
+	if len(repository.values) != 1 || repository.values[0].ProviderID != "codex" {
+		t.Fatalf("the persisted chain kept a duplicate link: %+v", repository.values)
+	}
+}
+
+// A provider that no route names is folded by doing nothing: an unavailable
+// store must not make a no-op fold fail, because the migration calls this
+// for every legacy row whether or not the operator ever routed through it.
+func TestReassignProviderWithoutRoutesSavesNothing(t *testing.T) {
+	repository := &memoryRepository{fail: true, values: []domain.Assignment{
+		{Target: domain.TargetRelay, PublicModel: "model-a", UpstreamModel: "up-a", ProviderID: "agent", Enabled: true},
+	}}
+	service, _ := NewService(repository, providers{"codex": true, "agent": true})
+	if err := service.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	service.OnChanged(func(domain.Target) { t.Fatal("a fold without routes notified a target") })
+
+	if err := service.ReassignProvider(context.Background(), "codex2", "codex"); err != nil {
+		t.Fatalf("an empty fold hit the store: %v", err)
+	}
+	if len(repository.values) != 1 {
+		t.Fatalf("the fold rewrote rows it did not touch: %+v", repository.values)
+	}
+}
+
+// Folding a provider onto itself, or naming no provider at all, is a caller
+// bug the routes layer refuses instead of quietly rewriting nothing.
+func TestReassignProviderRefusesDegenerateArguments(t *testing.T) {
+	service, _ := NewService(&memoryRepository{}, providers{"codex": true})
+	if err := service.ReassignProvider(context.Background(), "codex", "codex"); err == nil {
+		t.Fatal("a self-fold was accepted")
+	}
+	if err := service.ReassignProvider(context.Background(), "", "codex"); err == nil {
+		t.Fatal("a blank provider id was accepted")
+	}
+	if err := service.ReassignProvider(context.Background(), "codex", ""); err == nil {
+		t.Fatal("a blank survivor id was accepted")
+	}
+}

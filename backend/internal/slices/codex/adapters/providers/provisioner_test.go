@@ -1,10 +1,13 @@
 package providers
 
-// The provisioner keeps one catalog entry per codex account. These tests
-// pin the lifecycle through the registry port: a fresh login mints (or
-// claims) an entry bound to the account, a returning login relinks the
-// same row, logout retires it while keeping the binding, and removal
-// deletes exactly what the account owns.
+// The provisioner keeps exactly one catalog entry for the whole codex
+// fleet. These tests pin the lifecycle through the registry port: the
+// first sign-in creates the fleet row under the literal id with the
+// canonical shape, later sign-ins refresh that same row in place,
+// legacy per-account rows a pre-1.0.56 release minted are folded into
+// it so the operator's routes survive the upgrade, logout parks the
+// row while keeping the preset marker, and removal deletes every
+// preset entry the codex slice owns — never a stranger's.
 
 import (
 	"context"
@@ -15,7 +18,6 @@ import (
 	"testing"
 
 	codexapp "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
-	codexdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 	providerapp "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/application"
 	providerdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/domain"
 )
@@ -29,12 +31,14 @@ const (
 	callAdd
 	callUpdate
 	callSetPreset
+	callFold
 	callDelete
 )
 
 type registryCall struct {
 	kind      callKind
 	id        string
+	toID      string
 	params    providerdomain.Params
 	preset    providerdomain.Preset
 	accountID providerdomain.AccountID
@@ -42,10 +46,11 @@ type registryCall struct {
 
 // fakeRegistry stands in for the providers manager. It mirrors the real
 // contract the provisioner relies on: List answers existence (disabled
-// entries included), Update preserves the stored builtin flag, preset and
-// account id, SetPreset is the only binding change, Add honors the
-// requested id and reports collisions, and Delete refuses entries the
-// manager cannot delete.
+// entries included), Update preserves the stored builtin flag, preset
+// and account id, SetPreset is the only binding change, Add honors the
+// requested id and reports collisions, Fold removes the folded entry
+// (the route retargeting it stands for is the manager's business), and
+// Delete refuses entries the manager cannot delete.
 type fakeRegistry struct {
 	t               *testing.T
 	entries         map[string]providerdomain.Provider
@@ -54,7 +59,7 @@ type fakeRegistry struct {
 	dropPresetOnAdd bool
 	updateErr       error
 	deleteErr       error
-	addRefuses      map[string]bool
+	foldErr         error
 	nextMint        uint32
 	calls           []registryCall
 }
@@ -95,9 +100,6 @@ func (fake *fakeRegistry) Add(ctx context.Context, params providerdomain.Params)
 	fake.record(registryCall{kind: callAdd, params: params})
 	if err := ctx.Err(); err != nil {
 		return providerdomain.Provider{}, err
-	}
-	if fake.addRefuses[params.ID] {
-		return providerdomain.Provider{}, providerapp.ErrProviderIDExists
 	}
 	id := params.ID
 	if fake.mintIDs {
@@ -168,6 +170,21 @@ func (fake *fakeRegistry) SetPreset(ctx context.Context, id string, preset provi
 	return provider, nil
 }
 
+func (fake *fakeRegistry) Fold(ctx context.Context, fromID, toID string) error {
+	fake.record(registryCall{kind: callFold, id: fromID, toID: toID})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if fake.foldErr != nil {
+		return fake.foldErr
+	}
+	if _, ok := fake.entries[fromID]; !ok {
+		return errNotFound
+	}
+	delete(fake.entries, fromID)
+	return nil
+}
+
 func (fake *fakeRegistry) Delete(ctx context.Context, id string) error {
 	fake.record(registryCall{kind: callDelete, id: id})
 	if err := ctx.Err(); err != nil {
@@ -212,10 +229,6 @@ func paramsOf(provider providerdomain.Provider) providerdomain.Params {
 	}
 }
 
-func testIdentity(email, accountID string) codexdomain.Identity {
-	return codexdomain.Identity{Email: email, AccountID: accountID}
-}
-
 // customParams seeds a provider the preset does not own.
 func customParams(id string) providerdomain.Params {
 	return providerdomain.Params{
@@ -228,13 +241,77 @@ func customParams(id string) providerdomain.Params {
 }
 
 func countCalls(fake *fakeRegistry, kind callKind) int {
-	count := 0
-	for _, call := range fake.calls {
+	return len(filterKinds(fake.calls, kind))
+}
+
+// filterKinds narrows a call list to one verb, so a test can count calls
+// made after its seeding mark without the seeding itself.
+func filterKinds(calls []registryCall, kind callKind) []registryCall {
+	var matched []registryCall
+	for _, call := range calls {
 		if call.kind == kind {
-			count++
+			matched = append(matched, call)
 		}
 	}
-	return count
+	return matched
+}
+
+// callNames render a call sequence readably: the choreography — which
+// registry verb answers which lifecycle step — is part of what these
+// tests pin, so failures have to name it.
+var callNames = map[callKind]string{
+	callList:      "list",
+	callAdd:       "add",
+	callUpdate:    "update",
+	callSetPreset: "setpreset",
+	callFold:      "fold",
+	callDelete:    "delete",
+}
+
+func kindsString(kinds []callKind) string {
+	parts := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		name := callNames[kind]
+		if name == "" {
+			name = fmt.Sprintf("kind%d", kind)
+		}
+		parts = append(parts, name)
+	}
+	return strings.Join(parts, " ")
+}
+
+func callKinds(calls []registryCall) []callKind {
+	kinds := make([]callKind, len(calls))
+	for i, call := range calls {
+		kinds[i] = call.kind
+	}
+	return kinds
+}
+
+// wantKinds fatals unless the recorded calls happened in exactly the
+// given order.
+func wantKinds(t *testing.T, calls []registryCall, kinds ...callKind) {
+	t.Helper()
+	got := callKinds(calls)
+	if len(got) != len(kinds) {
+		t.Fatalf("call kinds = %q, want %q", kindsString(got), kindsString(kinds))
+	}
+	for i, kind := range got {
+		if kind != kinds[i] {
+			t.Fatalf("call kinds = %q, want %q", kindsString(got), kindsString(kinds))
+		}
+	}
+}
+
+// foldIDs lists every fold's from→to pair in call order.
+func foldIDs(fake *fakeRegistry) [][2]string {
+	var pairs [][2]string
+	for _, call := range fake.calls {
+		if call.kind == callFold {
+			pairs = append(pairs, [2]string{call.id, call.toID})
+		}
+	}
+	return pairs
 }
 
 // collidingRegistry reports every Add as a lost race, whatever the id.
@@ -251,12 +328,13 @@ func (registry *collidingRegistry) Add(ctx context.Context, params providerdomai
 }
 
 // seedPreset plants a codex preset entry directly in the catalog, the
-// shape an earlier release or a hand-edited file can leave behind.
-func seedPreset(t *testing.T, registry *fakeRegistry, id, accountID string, enabled bool) providerdomain.Provider {
+// shape an earlier release or a hand-edited file can leave behind: the
+// name and account binding of that release's per-account rows.
+func seedPreset(t *testing.T, registry *fakeRegistry, id, name, accountID string, enabled bool) providerdomain.Provider {
 	t.Helper()
 	params := providerdomain.Params{
 		ID:         id,
-		Name:       retireName,
+		Name:       name,
 		BaseURL:    baseURL,
 		AuthMode:   providerdomain.AuthBearer,
 		Dialect:    providerdomain.DialectAuto,
@@ -274,13 +352,14 @@ func seedPreset(t *testing.T, registry *fakeRegistry, id, accountID string, enab
 	return provider
 }
 
-// A fresh login provisions one canonical preset entry bound to the
-// account.
-func TestFreshLoginCreatesTheCanonicalCodexEntry(t *testing.T) {
+// The first sign-in provisions the one canonical fleet row: the literal
+// id, the fixed fleet name, the bearer shape the relay expects, and —
+// the point of the fleet — no account binding at all.
+func TestAFreshCatalogGetsTheCanonicalFleetRow(t *testing.T) {
 	registry := newRegistry(t)
 	provisioner := NewProvisioner(registry)
 
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef"))
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
 	if err != nil {
 		t.Fatalf("EnsureCodexProvider: %v", err)
 	}
@@ -294,8 +373,8 @@ func TestFreshLoginCreatesTheCanonicalCodexEntry(t *testing.T) {
 	if !ok {
 		t.Fatalf("no entry under %q", codexapp.CodexProviderID)
 	}
-	if entry.Name != "Codex — user@example.com" {
-		t.Errorf("Name = %q", entry.Name)
+	if entry.Name != fleetName {
+		t.Errorf("Name = %q, want %q", entry.Name, fleetName)
 	}
 	if entry.BaseURL == nil || entry.BaseURL.String() != baseURL {
 		t.Errorf("BaseURL = %v", entry.BaseURL)
@@ -327,23 +406,23 @@ func TestFreshLoginCreatesTheCanonicalCodexEntry(t *testing.T) {
 	if entry.Preset != providerdomain.PresetCodex {
 		t.Errorf("Preset = %q, want codex", entry.Preset)
 	}
-	if entry.AccountID != "acct-1234567890abcdef" {
-		t.Errorf("AccountID = %q", entry.AccountID)
+	if entry.AccountID != "" {
+		t.Errorf("AccountID = %q, want the fleet-wide empty binding", entry.AccountID)
 	}
 }
 
-// Re-login of the SAME account relinks its own entry: the email may have
-// changed on the account, the provider row is refreshed in place.
-func TestReLoginRefreshesTheExistingEntry(t *testing.T) {
+// Every later sign-in answers with the same row: the catalog never
+// grows with the fleet. The choreography is a read and an in-place
+// refresh — no Add, no binding change, no fold.
+func TestALaterSignInRefreshesTheSameRow(t *testing.T) {
 	registry := newRegistry(t)
 	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", accountID)); err != nil {
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
 		t.Fatalf("first EnsureCodexProvider: %v", err)
 	}
 	since := registry.mark()
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", accountID))
+
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
 	if err != nil {
 		t.Fatalf("second EnsureCodexProvider: %v", err)
 	}
@@ -353,614 +432,72 @@ func TestReLoginRefreshesTheExistingEntry(t *testing.T) {
 	if len(registry.entries) != 1 {
 		t.Fatalf("catalog holds %d entries, want 1", len(registry.entries))
 	}
-	entry := registry.entries[codexapp.CodexProviderID]
-	if entry.Name != "Codex — second@example.com" {
-		t.Errorf("Name = %q", entry.Name)
-	}
-	if entry.AccountID != accountID {
-		t.Errorf("AccountID = %q", entry.AccountID)
-	}
-	if !entry.Enabled {
-		t.Error("entry is disabled")
-	}
 	if countCalls(registry, callAdd) != 1 {
-		t.Errorf("Add called %d times, want the single first-login add", countCalls(registry, callAdd))
+		t.Errorf("Add called %d times, want the first sign-in only", countCalls(registry, callAdd))
 	}
-	calls := since()
-	if len(calls) != 3 ||
-		calls[0].kind != callList ||
-		calls[1].kind != callUpdate ||
-		calls[2].kind != callSetPreset {
-		t.Fatalf("re-login calls = %+v, want [list update setpreset]", calls)
-	}
+	wantKinds(t, since(), callList, callUpdate)
 }
 
-// A returning login re-enables a retired row.
-func TestReLoginReEnablesADisabledEntry(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	entry, ok := registry.entries[codexapp.CodexProviderID]
-	if !ok {
-		t.Fatalf("no entry under %q", codexapp.CodexProviderID)
-	}
-	entry.Enabled = false
-	registry.entries[codexapp.CodexProviderID] = entry
-
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if !registry.entries[codexapp.CodexProviderID].Enabled {
-		t.Error("entry stayed disabled")
-	}
-	if countCalls(registry, callAdd) != 1 {
-		t.Errorf("Add called %d times, want 1", countCalls(registry, callAdd))
-	}
-}
-
-// A second ACCOUNT gets its own entry: multi-account is the point.
-func TestALoginWithADifferentAccountGetsItsOwnEntry(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-
-	first, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001"))
-	if err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	second, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001"))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if first != codexapp.CodexProviderID {
-		t.Errorf("first providerID = %q, want %q", first, codexapp.CodexProviderID)
-	}
-	if second != codexapp.CodexProviderID+"2" {
-		t.Errorf("second providerID = %q, want %q", second, codexapp.CodexProviderID+"2")
-	}
-	if len(registry.entries) != 2 {
-		t.Fatalf("catalog holds %d entries, want 2", len(registry.entries))
-	}
-	firstEntry := registry.entries[codexapp.CodexProviderID]
-	secondEntry := registry.entries[codexapp.CodexProviderID+"2"]
-	if firstEntry.AccountID != "acct-first000000001" || secondEntry.AccountID != "acct-second000000001" {
-		t.Errorf("accounts = %q / %q", firstEntry.AccountID, secondEntry.AccountID)
-	}
-	if !firstEntry.Enabled || !secondEntry.Enabled {
-		t.Error("an entry is disabled")
-	}
-}
-
-// A hand-configured provider squatting on the literal codex id is
-// refused, not overwritten.
-func TestACustomProviderOnTheCodexIDIsRefused(t *testing.T) {
-	registry := newRegistry(t)
-	if _, err := registry.Add(context.Background(), customParams(codexapp.CodexProviderID)); err != nil {
-		t.Fatalf("seed custom provider: %v", err)
-	}
-	provisioner := NewProvisioner(registry)
-
-	_, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef"))
-	if !errors.Is(err, ErrProviderIdTaken) {
-		t.Fatalf("EnsureCodexProvider error = %v, want ErrProviderIdTaken", err)
-	}
-	if len(registry.entries) != 1 {
-		t.Fatalf("catalog holds %d entries, want the seed only", len(registry.entries))
-	}
-	entry := registry.entries[codexapp.CodexProviderID]
-	if entry.Preset != "" || entry.AccountID != "" {
-		t.Errorf("stranger entry gained preset=%q account=%q", entry.Preset, entry.AccountID)
-	}
-	if countCalls(registry, callAdd) != 1 {
-		t.Errorf("Add called %d times, want the single seed", countCalls(registry, callAdd))
-	}
-}
-
-// An Add that loses a race on the literal id is refused.
-func TestAnAddThatRacesIntoATakenIDIsRefused(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(&collidingRegistry{fakeRegistry: registry})
-
-	since := registry.mark()
-	_, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef"))
-	if !errors.Is(err, ErrProviderIdTaken) {
-		t.Fatalf("EnsureCodexProvider error = %v, want ErrProviderIdTaken", err)
-	}
-	calls := since()
-	if len(calls) != 2 || calls[0].kind != callList || calls[1].kind != callAdd {
-		t.Fatalf("calls = %+v, want [list add]", calls)
-	}
-}
-
-// The first UNBOUND preset entry is claimed for a new account — the
-// shape a pre-multi-account release left behind.
-func TestTheFirstUnboundPresetEntryIsClaimedForANewAccount(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001")); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	seedPreset(t, registry, codexapp.CodexProviderID+"2", "", false)
-	since := registry.mark()
-
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001"))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if providerID != codexapp.CodexProviderID+"2" {
-		t.Fatalf("providerID = %q, want the seeded slot %q", providerID, codexapp.CodexProviderID+"2")
-	}
-	entry := registry.entries[codexapp.CodexProviderID+"2"]
-	if !entry.Enabled {
-		t.Error("claimed entry is disabled")
-	}
-	if entry.Name != "Codex — second@example.com" {
-		t.Errorf("Name = %q", entry.Name)
-	}
-	if entry.AccountID != "acct-second000000001" {
-		t.Errorf("AccountID = %q", entry.AccountID)
-	}
-	if len(registry.entries) != 2 {
-		t.Fatalf("catalog holds %d entries, want 2", len(registry.entries))
-	}
-	calls := since()
-	if countCalls(registry, callAdd) != 1 {
-		t.Errorf("Add called %d times, want the first login only", countCalls(registry, callAdd))
-	}
-	if len(calls) != 3 || calls[0].kind != callList || calls[1].kind != callUpdate || calls[2].kind != callSetPreset {
-		t.Fatalf("claim calls = %+v, want [list update setpreset]", calls)
-	}
-}
-
-// A stranger on a derived id is skipped, not refused: only the literal id
-// is reserved.
-func TestAStrangerOnACodexNIDIsSkipped(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001")); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	stranger, err := registry.Add(context.Background(), customParams(codexapp.CodexProviderID+"2"))
-	if err != nil {
-		t.Fatalf("seed stranger: %v", err)
-	}
-
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001"))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if providerID != codexapp.CodexProviderID+"3" {
-		t.Fatalf("providerID = %q, want %q", providerID, codexapp.CodexProviderID+"3")
-	}
-	if got := registry.entries[codexapp.CodexProviderID+"2"]; got != stranger {
-		t.Error("the stranger was written")
-	}
-}
-
-// An Add that loses a race on a derived id moves on to the next slot.
-func TestAnAddRacingIntoACodexNIDMovesOn(t *testing.T) {
-	registry := newRegistry(t)
-	registry.addRefuses = map[string]bool{codexapp.CodexProviderID + "2": true}
-	provisioner := NewProvisioner(registry)
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001")); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001"))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if providerID != codexapp.CodexProviderID+"3" {
-		t.Fatalf("providerID = %q, want %q", providerID, codexapp.CodexProviderID+"3")
-	}
-	if len(registry.entries) != 2 {
-		t.Fatalf("catalog holds %d entries, want 2", len(registry.entries))
-	}
-}
-
-// Retire disables the account's entry and neutralizes its name, but
-// keeps the binding so the row survives the sign-out.
-func TestRetireDisablesTheEntryAndKeepsTheBinding(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("EnsureCodexProvider: %v", err)
-	}
-
-	if err := provisioner.RetireCodexProvider(context.Background(), accountID); err != nil {
-		t.Fatalf("RetireCodexProvider: %v", err)
-	}
-	entry, ok := registry.entries[codexapp.CodexProviderID]
-	if !ok {
-		t.Fatal("the entry was removed")
-	}
-	if entry.Enabled {
-		t.Error("entry is still enabled")
-	}
-	if entry.Name != retireName {
-		t.Errorf("Name = %q, want %q", entry.Name, retireName)
-	}
-	if entry.Preset != providerdomain.PresetCodex {
-		t.Errorf("Preset = %q, want codex", entry.Preset)
-	}
-	if entry.AccountID != accountID {
-		t.Errorf("AccountID = %q, want the binding kept", entry.AccountID)
-	}
-}
-
-func TestRetireWithoutAnEntryIsANoOp(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-
-	if err := provisioner.RetireCodexProvider(context.Background(), "acct-1234567890abcdef"); err != nil {
-		t.Fatalf("RetireCodexProvider: %v", err)
-	}
-	if len(registry.calls) != 1 || registry.calls[0].kind != callList {
-		t.Fatalf("calls = %+v, want a single list", registry.calls)
-	}
-}
-
-func TestRetireLeavesACustomProviderAlone(t *testing.T) {
+// A stranger on the literal id blocks the fleet outright: the id is the
+// routing anchor the relay's token source matches, so nothing may be
+// derived around it anymore. The stranger is never written.
+func TestAStrangerOnTheLiteralIDRefusesTheFleet(t *testing.T) {
 	registry := newRegistry(t)
 	stranger, err := registry.Add(context.Background(), customParams(codexapp.CodexProviderID))
 	if err != nil {
 		t.Fatalf("seed stranger: %v", err)
 	}
+	since := registry.mark()
 	provisioner := NewProvisioner(registry)
 
-	if err := provisioner.RetireCodexProvider(context.Background(), "acct-1234567890abcdef"); err != nil {
-		t.Fatalf("RetireCodexProvider: %v", err)
+	_, err = provisioner.EnsureCodexProvider(context.Background())
+	if !errors.Is(err, ErrProviderIdTaken) {
+		t.Fatalf("EnsureCodexProvider error = %v, want ErrProviderIdTaken", err)
 	}
 	if entry := registry.entries[codexapp.CodexProviderID]; entry != stranger {
 		t.Error("the stranger was written")
 	}
-	for _, kind := range []callKind{callUpdate, callSetPreset, callDelete} {
-		if count := countCalls(registry, kind); count != 0 {
-			t.Errorf("call kind %d happened %d times, want 0: a stranger is never written", kind, count)
+	for _, kind := range []callKind{callAdd, callUpdate, callSetPreset, callFold, callDelete} {
+		if count := len(filterKinds(since(), kind)); count != 0 {
+			t.Errorf("call %q happened %d times, want 0: a stranger is never written", callNames[kind], count)
 		}
 	}
 }
 
-func TestRetireRefusesWhileTheCodexEntryIsActive(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("EnsureCodexProvider: %v", err)
-	}
-	before := registry.entries[codexapp.CodexProviderID]
-	registry.activeID = codexapp.CodexProviderID
-
-	err := provisioner.RetireCodexProvider(context.Background(), accountID)
-	if !errors.Is(err, providerapp.ErrActiveProvider) {
-		t.Fatalf("RetireCodexProvider error = %v, want ErrActiveProvider", err)
-	}
-	if entry := registry.entries[codexapp.CodexProviderID]; entry != before {
-		t.Error("the refused retire changed the entry")
-	}
-}
-
-func TestRetireIsIdempotent(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("EnsureCodexProvider: %v", err)
-	}
-	for round := 0; round < 2; round++ {
-		if err := provisioner.RetireCodexProvider(context.Background(), accountID); err != nil {
-			t.Fatalf("round %d RetireCodexProvider: %v", round, err)
-		}
-	}
-	entry, ok := registry.entries[codexapp.CodexProviderID]
-	if !ok {
-		t.Fatal("the entry was removed")
-	}
-	if entry.Enabled {
-		t.Error("entry is still enabled")
-	}
-	if entry.Preset != providerdomain.PresetCodex || entry.AccountID != accountID {
-		t.Errorf("Preset = %q AccountID = %q, want the binding kept", entry.Preset, entry.AccountID)
-	}
-}
-
-// The account's own next login relinks its retired entry.
-func TestARetiredEntryIsRelinkedByItsOwnAccount(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	if err := provisioner.RetireCodexProvider(context.Background(), accountID); err != nil {
-		t.Fatalf("RetireCodexProvider: %v", err)
-	}
-
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("returning@example.com", accountID))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if providerID != codexapp.CodexProviderID {
-		t.Errorf("providerID = %q, want the retired row relinked", providerID)
-	}
-	if countCalls(registry, callAdd) != 1 {
-		t.Errorf("Add called %d times, want 1", countCalls(registry, callAdd))
-	}
-	entry := registry.entries[codexapp.CodexProviderID]
-	if !entry.Enabled {
-		t.Error("entry is disabled")
-	}
-	if entry.Name != "Codex — returning@example.com" {
-		t.Errorf("Name = %q", entry.Name)
-	}
-}
-
-// A retired row is bound to its account: another account cannot claim
-// it.
-func TestARetiredEntryIsNotClaimedByAnotherAccount(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001")); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	if err := provisioner.RetireCodexProvider(context.Background(), "acct-first000000001"); err != nil {
-		t.Fatalf("RetireCodexProvider: %v", err)
-	}
-
-	providerID, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001"))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if providerID != codexapp.CodexProviderID+"2" {
-		t.Fatalf("providerID = %q, want %q", providerID, codexapp.CodexProviderID+"2")
-	}
-	entry, ok := registry.entries[codexapp.CodexProviderID]
-	if !ok {
-		t.Fatal("the retired row was removed")
-	}
-	if entry.Enabled || entry.Name != retireName || entry.AccountID != "acct-first000000001" {
-		t.Errorf("retired row = enabled:%v name:%q account:%q", entry.Enabled, entry.Name, entry.AccountID)
-	}
-}
-
-func TestRemoveDeletesTheProvisionedEntry(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("EnsureCodexProvider: %v", err)
-	}
-
-	if err := provisioner.RemoveCodexProvider(context.Background(), accountID); err != nil {
-		t.Fatalf("RemoveCodexProvider: %v", err)
-	}
-	if len(registry.entries) != 0 {
-		t.Fatalf("catalog holds %d entries, want 0", len(registry.entries))
-	}
-}
-
-func TestRemoveDeletesOnlyTheBoundEntry(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001")); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001")); err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-
-	if err := provisioner.RemoveCodexProvider(context.Background(), "acct-first000000001"); err != nil {
-		t.Fatalf("RemoveCodexProvider: %v", err)
-	}
-	if len(registry.entries) != 1 {
-		t.Fatalf("catalog holds %d entries, want 1", len(registry.entries))
-	}
-	entry := registry.entries[codexapp.CodexProviderID+"2"]
-	if entry.AccountID != "acct-second000000001" {
-		t.Errorf("survivor AccountID = %q", entry.AccountID)
-	}
-}
-
-// An empty account id tears down every preset entry — the shape a
-// pre-multi-account release could leave behind with no live account.
-func TestRemoveWithoutAnAccountDeletesEveryPresetEntry(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("first@example.com", "acct-first000000001")); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("second@example.com", "acct-second000000001")); err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	stranger, err := registry.Add(context.Background(), customParams("mine"))
-	if err != nil {
-		t.Fatalf("seed stranger: %v", err)
-	}
-
-	if err := provisioner.RemoveCodexProvider(context.Background(), ""); err != nil {
-		t.Fatalf("RemoveCodexProvider: %v", err)
-	}
-	if len(registry.entries) != 1 {
-		t.Fatalf("catalog holds %d entries, want the stranger only", len(registry.entries))
-	}
-	if entry := registry.entries["mine"]; entry != stranger {
-		t.Error("the stranger was written")
-	}
-}
-
-func TestRemoveWithoutAnEntryIsANoOp(t *testing.T) {
-	registry := newRegistry(t)
+// An Add that loses a race on the literal id is the same refusal: the
+// slot was free when List read it and is not now.
+func TestAnAddRacingIntoTheLiteralIDRefusesTheFleet(t *testing.T) {
+	registry := &collidingRegistry{newRegistry(t)}
 	provisioner := NewProvisioner(registry)
 
-	if err := provisioner.RemoveCodexProvider(context.Background(), "acct-1234567890abcdef"); err != nil {
-		t.Fatalf("RemoveCodexProvider: %v", err)
+	_, err := provisioner.EnsureCodexProvider(context.Background())
+	if !errors.Is(err, ErrProviderIdTaken) {
+		t.Fatalf("EnsureCodexProvider error = %v, want ErrProviderIdTaken", err)
 	}
-	if len(registry.calls) != 1 || registry.calls[0].kind != callList {
-		t.Fatalf("calls = %+v, want a single list", registry.calls)
-	}
+	wantKinds(t, registry.calls, callList, callAdd)
 }
 
-func TestRemoveRefusesWhileTheCodexEntryIsActive(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("EnsureCodexProvider: %v", err)
-	}
-	before := registry.entries[codexapp.CodexProviderID]
-	registry.activeID = codexapp.CodexProviderID
-
-	err := provisioner.RemoveCodexProvider(context.Background(), accountID)
-	if !errors.Is(err, providerapp.ErrActiveProvider) {
-		t.Fatalf("RemoveCodexProvider error = %v, want ErrActiveProvider", err)
-	}
-	if entry := registry.entries[codexapp.CodexProviderID]; entry != before {
-		t.Error("the refused remove deleted the entry")
-	}
-}
-
-func TestRemoveRefusesOnABuiltinCodexEntry(t *testing.T) {
-	registry := newRegistry(t)
-	entry := seedPreset(t, registry, codexapp.CodexProviderID, "", true)
-	entry.Builtin = true
-	registry.entries[codexapp.CodexProviderID] = entry
-	provisioner := NewProvisioner(registry)
-
-	err := provisioner.RemoveCodexProvider(context.Background(), "")
-	if !errors.Is(err, providerapp.ErrBuiltinProvider) {
-		t.Fatalf("RemoveCodexProvider error = %v, want ErrBuiltinProvider", err)
-	}
-	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
-		t.Fatal("the builtin entry was deleted")
-	}
-}
-
-func TestRemoveCarriesARegistryFailureThroughAndKeepsTheEntry(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("EnsureCodexProvider: %v", err)
-	}
-	registry.deleteErr = errors.New("boom")
-
-	err := provisioner.RemoveCodexProvider(context.Background(), accountID)
-	if err != registry.deleteErr {
-		t.Fatalf("RemoveCodexProvider error = %v, want the registry failure verbatim", err)
-	}
-	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
-		t.Fatal("the entry was deleted despite the failure")
-	}
-}
-
-// A cancelled context refuses before the catalog is even read.
-func TestACancelledContextPropagates(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if _, err := provisioner.EnsureCodexProvider(ctx, testIdentity("user@example.com", "acct-1234567890abcdef")); !errors.Is(err, context.Canceled) {
-		t.Errorf("EnsureCodexProvider error = %v, want context.Canceled", err)
-	}
-	if err := provisioner.RetireCodexProvider(ctx, "acct-1234567890abcdef"); !errors.Is(err, context.Canceled) {
-		t.Errorf("RetireCodexProvider error = %v, want context.Canceled", err)
-	}
-	if err := provisioner.RemoveCodexProvider(ctx, "acct-1234567890abcdef"); !errors.Is(err, context.Canceled) {
-		t.Errorf("RemoveCodexProvider error = %v, want context.Canceled", err)
-	}
-	if len(registry.calls) != 0 {
-		t.Fatalf("registry calls = %+v, want none: the context is checked before the catalog is read", registry.calls)
-	}
-	if len(registry.entries) != 0 {
-		t.Fatalf("catalog holds %d entries, want 0", len(registry.entries))
-	}
-}
-
-func TestRegistryErrorsPropagateVerbatim(t *testing.T) {
-	registry := newRegistry(t)
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	registry.updateErr = errors.New("boom")
-
-	_, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID))
-	if err != registry.updateErr {
-		t.Fatalf("EnsureCodexProvider error = %v, want the registry failure verbatim", err)
-	}
-}
-
-// A registry that mints its own ids still ends up with one bound entry,
-// and the minted id is remembered.
-func TestAMintingRegistryGetsItsEntryRemembered(t *testing.T) {
+// A registry that mints its own id moves the routing anchor out from
+// under the relay; the provisioner refuses rather than chase it.
+func TestAMintingRegistryIsRefused(t *testing.T) {
 	registry := newRegistry(t)
 	registry.mintIDs = true
 	provisioner := NewProvisioner(registry)
 
-	first, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef"))
-	if err != nil {
-		t.Fatalf("first EnsureCodexProvider: %v", err)
-	}
-	if first != "provider_00000001" {
-		t.Fatalf("providerID = %q, want the minted id", first)
-	}
-	since := registry.mark()
-	second, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef"))
-	if err != nil {
-		t.Fatalf("second EnsureCodexProvider: %v", err)
-	}
-	if second != first {
-		t.Fatalf("providerID = %q, want %q", second, first)
-	}
-	if countCalls(registry, callAdd) != 1 {
-		t.Errorf("Add called %d times, want 1", countCalls(registry, callAdd))
-	}
-	calls := since()
-	if len(calls) != 3 || calls[0].kind != callList || calls[1].kind != callUpdate || calls[2].kind != callSetPreset {
-		t.Fatalf("re-login calls = %+v, want [list update setpreset]", calls)
+	_, err := provisioner.EnsureCodexProvider(context.Background())
+	if err == nil || err.Error() != `codex row was minted under "provider_00000001"` {
+		t.Fatalf("EnsureCodexProvider error = %v, want the minted-id refusal", err)
 	}
 }
 
-// Login/logout cycles on a minting registry stay clean: no duplicate
-// entries accumulate.
-func TestLoginLogoutLoginOnAMintingRegistryStaysClean(t *testing.T) {
-	registry := newRegistry(t)
-	registry.mintIDs = true
-	provisioner := NewProvisioner(registry)
-	const accountID = "acct-1234567890abcdef"
-
-	for round := 0; round < 2; round++ {
-		if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", accountID)); err != nil {
-			t.Fatalf("round %d EnsureCodexProvider: %v", round, err)
-		}
-		if err := provisioner.RemoveCodexProvider(context.Background(), accountID); err != nil {
-			t.Fatalf("round %d RemoveCodexProvider: %v", round, err)
-		}
-	}
-	if countCalls(registry, callAdd) != 2 {
-		t.Errorf("Add called %d times, want 2", countCalls(registry, callAdd))
-	}
-	if countCalls(registry, callDelete) != 2 {
-		t.Errorf("Delete called %d times, want 2", countCalls(registry, callDelete))
-	}
-	if len(registry.entries) != 0 {
-		t.Fatalf("catalog holds %d entries, want 0", len(registry.entries))
-	}
-}
-
-// A registry that drops the preset binding on Add gets corrected.
+// A registry that loses the preset on the way in is corrected by
+// SetPreset, keyed by the id the registry reported.
 func TestARegistryThatLosesThePresetOnAddIsCorrected(t *testing.T) {
 	registry := newRegistry(t)
 	registry.dropPresetOnAdd = true
 	provisioner := NewProvisioner(registry)
 
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity("user@example.com", "acct-1234567890abcdef")); err != nil {
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
 		t.Fatalf("EnsureCodexProvider: %v", err)
 	}
 	if countCalls(registry, callSetPreset) != 1 {
@@ -970,37 +507,472 @@ func TestARegistryThatLosesThePresetOnAddIsCorrected(t *testing.T) {
 	if !ok {
 		t.Fatalf("no entry under %q", codexapp.CodexProviderID)
 	}
-	if entry.Preset != providerdomain.PresetCodex || entry.AccountID != "acct-1234567890abcdef" {
-		t.Errorf("Preset = %q AccountID = %q, want both restored", entry.Preset, entry.AccountID)
+	if entry.Preset != providerdomain.PresetCodex || entry.AccountID != "" {
+		t.Errorf("Preset = %q AccountID = %q, want the marker restored and no binding", entry.Preset, entry.AccountID)
 	}
 }
 
-// A very long email still yields a valid entry.
-func TestAVeryLongEmailKeepsTheEntryValid(t *testing.T) {
+// Legacy per-account rows a pre-1.0.56 release minted are folded into
+// the fleet row: the fleet row is ensured first, then each legacy row
+// is folded away so the operator's routes survive the upgrade pointed
+// at the row that now serves every account.
+func TestLegacyPresetRowsAreFoldedIntoTheFleetRow(t *testing.T) {
+	registry := newRegistry(t)
+	seedPreset(t, registry, codexapp.CodexProviderID+"2", "Codex — first@example.com", "acct-first000000001", true)
+	seedPreset(t, registry, codexapp.CodexProviderID+"3", "Codex — second@example.com", "acct-second000000001", false)
+	provisioner := NewProvisioner(registry)
+
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	if providerID != codexapp.CodexProviderID {
+		t.Errorf("providerID = %q, want %q", providerID, codexapp.CodexProviderID)
+	}
+	if len(registry.entries) != 1 {
+		t.Fatalf("catalog holds %d entries, want the fleet row only", len(registry.entries))
+	}
+	entry := registry.entries[codexapp.CodexProviderID]
+	if entry.Preset != providerdomain.PresetCodex || entry.AccountID != "" || !entry.Enabled {
+		t.Errorf("fleet row = preset:%q account:%q enabled:%v, want codex, unbound, enabled", entry.Preset, entry.AccountID, entry.Enabled)
+	}
+	folds := foldIDs(registry)
+	if len(folds) != 2 ||
+		folds[0] != [2]string{codexapp.CodexProviderID + "2", codexapp.CodexProviderID} ||
+		folds[1] != [2]string{codexapp.CodexProviderID + "3", codexapp.CodexProviderID} {
+		t.Fatalf("folds = %v, want each legacy row folded into the fleet row in list order", folds)
+	}
+	wantKinds(t, registry.calls, callList, callAdd, callFold, callFold)
+}
+
+// A fold that fails aborts the ensure with the remainder in place, and
+// the next attempt finishes the migration: List only ever names rows
+// that still exist, so the retry folds whatever is left and never
+// re-adds the fleet row.
+func TestAFailingFoldAbortsTheEnsureAndTheRetryFinishes(t *testing.T) {
+	registry := newRegistry(t)
+	seedPreset(t, registry, codexapp.CodexProviderID+"2", "Codex — first@example.com", "acct-first000000001", true)
+	seedPreset(t, registry, codexapp.CodexProviderID+"3", "Codex — second@example.com", "acct-second000000001", true)
+	registry.foldErr = errors.New("boom")
+	provisioner := NewProvisioner(registry)
+
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != registry.foldErr {
+		t.Fatalf("first EnsureCodexProvider error = %v, want the fold failure verbatim", err)
+	}
+	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
+		t.Fatal("the fleet row was not created before the folds")
+	}
+	if _, ok := registry.entries[codexapp.CodexProviderID+"2"]; !ok {
+		t.Fatal("the row whose fold failed was removed anyway")
+	}
+	if _, ok := registry.entries[codexapp.CodexProviderID+"3"]; !ok {
+		t.Fatal("the row after the failed fold was removed anyway")
+	}
+
+	registry.foldErr = nil
+	since := registry.mark()
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
+	if err != nil {
+		t.Fatalf("retry EnsureCodexProvider: %v", err)
+	}
+	if providerID != codexapp.CodexProviderID {
+		t.Errorf("providerID = %q, want %q", providerID, codexapp.CodexProviderID)
+	}
+	if len(registry.entries) != 1 {
+		t.Fatalf("catalog holds %d entries, want the fleet row only", len(registry.entries))
+	}
+	if count := countCalls(registry, callAdd); count != 1 {
+		t.Errorf("Add called %d times, want the first attempt only: the retry claims the existing row", count)
+	}
+	wantKinds(t, since(), callList, callUpdate, callFold, callFold)
+}
+
+// A pre-1.0.56 release bound the literal row to one account. The fleet
+// row carries no binding, so the ensure clears it in place — the row
+// keeps its id and its routes, the account stops owning it.
+func TestAPreviousReleaseBindingOnTheLiteralRowIsCleared(t *testing.T) {
+	registry := newRegistry(t)
+	seedPreset(t, registry, codexapp.CodexProviderID, "Codex — user@example.com", "acct-1234567890abcdef", true)
+	provisioner := NewProvisioner(registry)
+
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	if providerID != codexapp.CodexProviderID {
+		t.Errorf("providerID = %q, want %q", providerID, codexapp.CodexProviderID)
+	}
+	entry := registry.entries[codexapp.CodexProviderID]
+	if entry.AccountID != "" {
+		t.Errorf("AccountID = %q, want the binding cleared", entry.AccountID)
+	}
+	if entry.Name != fleetName {
+		t.Errorf("Name = %q, want %q", entry.Name, fleetName)
+	}
+	if !entry.Enabled || entry.Preset != providerdomain.PresetCodex {
+		t.Errorf("row = enabled:%v preset:%q, want enabled and codex", entry.Enabled, entry.Preset)
+	}
+	if count := countCalls(registry, callFold); count != 0 {
+		t.Errorf("Fold called %d times, want 0: the row keeps its id", count)
+	}
+	wantKinds(t, registry.calls, callList, callUpdate, callSetPreset)
+}
+
+// Only the literal id is reserved. A stranger on any other id is not
+// the fleet's business: nothing reads it, nothing writes it, nothing
+// folds it.
+func TestAStrangerOnAnotherIDIsNeverTouched(t *testing.T) {
 	registry := newRegistry(t)
 	provisioner := NewProvisioner(registry)
-	email := strings.Repeat("a", 200) + "@example.com"
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("first EnsureCodexProvider: %v", err)
+	}
+	stranger, err := registry.Add(context.Background(), customParams(codexapp.CodexProviderID+"-mine"))
+	if err != nil {
+		t.Fatalf("seed stranger: %v", err)
+	}
 
-	if _, err := provisioner.EnsureCodexProvider(context.Background(), testIdentity(email, "acct-1234567890abcdef")); err != nil {
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
+	if err != nil {
+		t.Fatalf("second EnsureCodexProvider: %v", err)
+	}
+	if providerID != codexapp.CodexProviderID {
+		t.Errorf("providerID = %q, want %q", providerID, codexapp.CodexProviderID)
+	}
+	if got := registry.entries[codexapp.CodexProviderID+"-mine"]; got != stranger {
+		t.Error("the stranger was written")
+	}
+	if count := countCalls(registry, callFold); count != 0 {
+		t.Errorf("Fold called %d times, want 0: a stranger is never folded", count)
+	}
+}
+
+// Retire parks the fleet row when its last live account signs out: the
+// preset marker survives — SetPreset is never called — so a returning
+// login relinks the same row, but nothing routes traffic to credentials
+// the accounts slice no longer holds.
+func TestRetireParksTheFleetRow(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
 		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RetireCodexProvider: %v", err)
 	}
 	entry, ok := registry.entries[codexapp.CodexProviderID]
 	if !ok {
-		t.Fatalf("no entry under %q", codexapp.CodexProviderID)
+		t.Fatal("the entry was removed")
 	}
-	if got := len([]rune(entry.Name)); got > nameLimit {
-		t.Errorf("Name is %d runes, want at most %d", got, nameLimit)
+	if entry.Enabled {
+		t.Error("entry is still enabled")
+	}
+	if entry.Name != fleetName {
+		t.Errorf("Name = %q, want %q", entry.Name, fleetName)
+	}
+	if entry.Preset != providerdomain.PresetCodex {
+		t.Errorf("Preset = %q, want the marker kept", entry.Preset)
+	}
+	if count := countCalls(registry, callSetPreset); count != 0 {
+		t.Errorf("SetPreset called %d times, want 0: retire never touches the marker", count)
 	}
 }
 
-func TestProviderNameCapsAndFilters(t *testing.T) {
-	if got := providerName("user@example.com"); got != "Codex — user@example.com" {
-		t.Errorf("providerName = %q", got)
+// A failed migration can leave legacy preset rows behind; retire parks
+// them with the fleet row — their accounts are signed out too, or the
+// caller would not be retiring.
+func TestRetireParksLegacyRowsToo(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
 	}
-	if got := providerName(strings.Repeat("a", 200) + "@example.com"); got != "Codex — "+strings.Repeat("a", 72) {
-		t.Errorf("providerName = %q, want the prefix plus 72 runes", got)
+	seedPreset(t, registry, codexapp.CodexProviderID+"2", "Codex — first@example.com", "acct-first000000001", true)
+
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RetireCodexProvider: %v", err)
 	}
-	if got := providerName("bad\x01user\x7f@example.com"); got != "Codex — baduser@example.com" {
-		t.Errorf("providerName = %q, want control characters dropped", got)
+	if len(registry.entries) != 2 {
+		t.Fatalf("catalog holds %d entries, want both parked", len(registry.entries))
+	}
+	for id, entry := range registry.entries {
+		if entry.Enabled {
+			t.Errorf("entry %s is still enabled", id)
+		}
+		if entry.Preset != providerdomain.PresetCodex {
+			t.Errorf("entry %s preset = %q, want codex kept", id, entry.Preset)
+		}
+	}
+	wantKinds(t, registry.calls, callList, callAdd, callList, callUpdate, callUpdate)
+}
+
+// Retire with nothing to park is a single read, not an error.
+func TestRetireWithoutAnEntryIsANoOp(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RetireCodexProvider: %v", err)
+	}
+	wantKinds(t, registry.calls, callList)
+}
+
+// A stranger squatting even on the literal id is not the preset's
+// business: retire parks preset rows only and leaves the stranger
+// byte-identical.
+func TestRetireLeavesACustomProviderAlone(t *testing.T) {
+	registry := newRegistry(t)
+	stranger, err := registry.Add(context.Background(), customParams(codexapp.CodexProviderID))
+	if err != nil {
+		t.Fatalf("seed stranger: %v", err)
+	}
+	since := registry.mark()
+	provisioner := NewProvisioner(registry)
+
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RetireCodexProvider: %v", err)
+	}
+	if got := registry.entries[codexapp.CodexProviderID]; got != stranger {
+		t.Error("the stranger was written")
+	}
+	wantKinds(t, since(), callList)
+}
+
+// An entry the registry cannot switch off while it is active refuses
+// the retire: the row stays byte-identical and the refusal travels
+// verbatim.
+func TestRetireRefusesWhileTheFleetRowIsActive(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	registry.activeID = codexapp.CodexProviderID
+	before := registry.entries[codexapp.CodexProviderID]
+
+	err := provisioner.RetireCodexProvider(context.Background())
+	if !errors.Is(err, providerapp.ErrActiveProvider) {
+		t.Fatalf("RetireCodexProvider error = %v, want ErrActiveProvider", err)
+	}
+	if got := registry.entries[codexapp.CodexProviderID]; got != before {
+		t.Error("the refused retire still wrote the row")
+	}
+}
+
+// Retiring twice leaves the same parked row — the second round is
+// another update with the identical shape.
+func TestRetireIsIdempotent(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("first RetireCodexProvider: %v", err)
+	}
+
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("second RetireCodexProvider: %v", err)
+	}
+	if len(registry.entries) != 1 {
+		t.Fatalf("catalog holds %d entries, want the parked row", len(registry.entries))
+	}
+	entry := registry.entries[codexapp.CodexProviderID]
+	if entry.Enabled {
+		t.Error("entry is still enabled")
+	}
+	if entry.Preset != providerdomain.PresetCodex {
+		t.Errorf("Preset = %q, want the marker kept", entry.Preset)
+	}
+}
+
+// A sign-in after a retire relinks the same row: the preset marker
+// survived the park, so the ensure refreshes the row in place instead
+// of adding a second one.
+func TestARetiredRowIsRelinkedByTheNextLogin(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("first EnsureCodexProvider: %v", err)
+	}
+	if err := provisioner.RetireCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RetireCodexProvider: %v", err)
+	}
+	since := registry.mark()
+
+	providerID, err := provisioner.EnsureCodexProvider(context.Background())
+	if err != nil {
+		t.Fatalf("relink EnsureCodexProvider: %v", err)
+	}
+	if providerID != codexapp.CodexProviderID {
+		t.Errorf("providerID = %q, want %q", providerID, codexapp.CodexProviderID)
+	}
+	if count := countCalls(registry, callAdd); count != 1 {
+		t.Errorf("Add called %d times, want the original sign-in only: the row is relinked, not reminted", count)
+	}
+	entry := registry.entries[codexapp.CodexProviderID]
+	if !entry.Enabled {
+		t.Error("entry is still parked")
+	}
+	if entry.Name != fleetName {
+		t.Errorf("Name = %q, want %q", entry.Name, fleetName)
+	}
+	wantKinds(t, since(), callList, callUpdate)
+}
+
+// Removal is the full teardown: the fleet row and any legacy preset row
+// a failed migration left behind are deleted, and a stranger on any id
+// survives untouched.
+func TestRemoveDeletesEveryPresetEntry(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	seedPreset(t, registry, codexapp.CodexProviderID+"2", "Codex — first@example.com", "acct-first000000001", true)
+	stranger, err := registry.Add(context.Background(), customParams("mine"))
+	if err != nil {
+		t.Fatalf("seed stranger: %v", err)
+	}
+
+	if err := provisioner.RemoveCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RemoveCodexProvider: %v", err)
+	}
+	if len(registry.entries) != 1 {
+		t.Fatalf("catalog holds %d entries, want the stranger only", len(registry.entries))
+	}
+	if got := registry.entries["mine"]; got != stranger {
+		t.Error("the stranger was written")
+	}
+	if count := countCalls(registry, callDelete); count != 2 {
+		t.Errorf("Delete called %d times, want both preset rows", count)
+	}
+	if count := countCalls(registry, callFold); count != 0 {
+		t.Errorf("Fold called %d times, want 0: removal deletes, it does not fold", count)
+	}
+}
+
+// Removal with nothing to delete is a single read, not an error.
+func TestRemoveWithoutAnEntryIsANoOp(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+
+	if err := provisioner.RemoveCodexProvider(context.Background()); err != nil {
+		t.Fatalf("RemoveCodexProvider: %v", err)
+	}
+	wantKinds(t, registry.calls, callList)
+}
+
+// An entry the registry cannot delete while it is active refuses the
+// removal: the row stays and the refusal travels verbatim.
+func TestRemoveRefusesWhileTheFleetRowIsActive(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	registry.activeID = codexapp.CodexProviderID
+
+	err := provisioner.RemoveCodexProvider(context.Background())
+	if !errors.Is(err, providerapp.ErrActiveProvider) {
+		t.Fatalf("RemoveCodexProvider error = %v, want ErrActiveProvider", err)
+	}
+	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
+		t.Error("the refused removal still deleted the row")
+	}
+}
+
+// A codex preset entry the registry reports as builtin refuses the
+// removal rather than deleting what the catalog owns.
+func TestRemoveRefusesOnABuiltinCodexEntry(t *testing.T) {
+	registry := newRegistry(t)
+	seedPreset(t, registry, codexapp.CodexProviderID, fleetName, "", true)
+	builtin := registry.entries[codexapp.CodexProviderID]
+	// The registry reports the codex entry as builtin: a seeded row the
+	// manager owns. The provisioner must refuse the delete, not strip the
+	// flag to reach it.
+	builtin.Builtin = true
+	registry.entries[codexapp.CodexProviderID] = builtin
+	provisioner := NewProvisioner(registry)
+
+	err := provisioner.RemoveCodexProvider(context.Background())
+	if !errors.Is(err, providerapp.ErrBuiltinProvider) {
+		t.Fatalf("RemoveCodexProvider error = %v, want ErrBuiltinProvider", err)
+	}
+	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
+		t.Error("the refused removal still deleted the row")
+	}
+}
+
+// A registry failure during removal travels verbatim and leaves the
+// entries it did not reach in place.
+func TestRemoveCarriesARegistryFailureThroughAndKeepsTheEntry(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("EnsureCodexProvider: %v", err)
+	}
+	registry.deleteErr = errors.New("boom")
+
+	err := provisioner.RemoveCodexProvider(context.Background())
+	if err != registry.deleteErr {
+		t.Fatalf("RemoveCodexProvider error = %v, want the registry failure verbatim", err)
+	}
+	if _, ok := registry.entries[codexapp.CodexProviderID]; !ok {
+		t.Error("the failed removal still deleted the row")
+	}
+}
+
+// A cancelled context refuses before the registry is touched: all three
+// lifecycle steps check it first.
+func TestACancelledContextPropagates(t *testing.T) {
+	for _, step := range []struct {
+		name string
+		call func(provisioner *Provisioner, ctx context.Context) error
+	}{
+		{"ensure", func(provisioner *Provisioner, ctx context.Context) error {
+			_, err := provisioner.EnsureCodexProvider(ctx)
+			return err
+		}},
+		{"retire", func(provisioner *Provisioner, ctx context.Context) error {
+			return provisioner.RetireCodexProvider(ctx)
+		}},
+		{"remove", func(provisioner *Provisioner, ctx context.Context) error {
+			return provisioner.RemoveCodexProvider(ctx)
+		}},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			registry := newRegistry(t)
+			provisioner := NewProvisioner(registry)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			if err := step.call(provisioner, ctx); err != context.Canceled {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+			if len(registry.calls) != 0 {
+				t.Fatalf("registry calls = %q, want none: a cancelled context refuses before the catalog is read", kindsString(callKinds(registry.calls)))
+			}
+			if len(registry.entries) != 0 {
+				t.Fatalf("catalog holds %d entries, want none", len(registry.entries))
+			}
+		})
+	}
+}
+
+// Registry failures propagate verbatim from every step that performs a
+// write — an update refusal on a later sign-in is not swallowed into a
+// success.
+func TestRegistryErrorsPropagateVerbatim(t *testing.T) {
+	registry := newRegistry(t)
+	provisioner := NewProvisioner(registry)
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != nil {
+		t.Fatalf("first EnsureCodexProvider: %v", err)
+	}
+	registry.updateErr = errors.New("boom")
+
+	if _, err := provisioner.EnsureCodexProvider(context.Background()); err != registry.updateErr {
+		t.Fatalf("second EnsureCodexProvider error = %v, want the update failure verbatim", err)
 	}
 }

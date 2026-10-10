@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	codexapp "github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
@@ -10,8 +11,10 @@ import (
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
 
-// errNotCodex reports a request for a provider the token source does not
-// serve. The codex bearer token must never travel to another upstream.
+// errNotCodex reports a request the token source does not serve: another
+// provider's id, or the fleet row while no account is linked to it. The
+// codex bearer token must never travel to another upstream, and a fleet
+// row nobody serves has no credential to give.
 var errNotCodex = errors.New("provider is not the codex provider")
 
 // defaultTryAcquireBudget bounds the acquire TryAcquire performs. The fast
@@ -39,10 +42,20 @@ type credentialService interface {
 	RejectAccessToken(rejectedAccessToken string)
 }
 
-// TokenSource serves the codex session's OAuth token as the relay credential
-// for the "codex" provider.
+// TokenSource serves the codex fleet's OAuth tokens as the relay
+// credential for the "codex" provider row. The row is fleet-wide — one
+// entry for every account — so each acquire rotates through the linked
+// accounts and the fleet's quotas share the load instead of every
+// request funneling through the first account.
 type TokenSource struct {
 	service credentialService
+
+	// rotation counts the acquires already served and picks the account
+	// the next one leases. It is atomic because acquires run on
+	// concurrent request goroutines; the rotation is a load decision,
+	// not a sequence to guard — two concurrent acquires may take the
+	// same account, and the next pair lands on the next one.
+	rotation atomic.Uint64
 
 	// tryAcquireBudget caps how long TryAcquire's acquire may run. It is
 	// fixed at construction from defaultTryAcquireBudget; tests shrink it
@@ -58,17 +71,18 @@ func NewTokenSource(service credentialService) *TokenSource {
 var _ relayapp.CredentialSource = (*TokenSource)(nil)
 var _ relayapp.CredentialCounter = (*TokenSource)(nil)
 
-// Acquire returns the account's access token as the credential for a codex
-// request. The providerID is the routing itself — every signed-in account
-// provisions its own provider entry — so it is resolved to the account that
-// serves it, and a provider nobody serves is refused: the codex bearer
-// token must never travel to another upstream, and the fallback holds no
-// credential for a codex entry. The token is never queued for —
-// AcquireAccessToken does its own waiting — so waiting is never invoked and
-// the reported wait is zero. Session errors (not signed in, refresh failed)
-// propagate verbatim so the relay can classify them.
+// Acquire returns an account's access token as the credential for a
+// codex request. The fleet is one provider row, so the account that
+// serves the request is the rotation's pick — the next linked account
+// in the fleet order — not a name derived from the provider id. A
+// provider that is not the fleet row is refused: the codex bearer
+// token must never travel to another upstream, and the fallback holds
+// no credential for a codex entry. The token is never queued for —
+// AcquireAccessToken does its own waiting — so waiting is never invoked
+// and the reported wait is zero. Session errors (not signed in, refresh
+// failed) propagate verbatim so the relay can classify them.
 func (source *TokenSource) Acquire(ctx context.Context, providerID, model string, waiting func()) (relayapp.CredentialLease, time.Duration, error) {
-	account, ok := source.accountFor(providerID)
+	account, ok := source.accountForRequest(providerID)
 	if !ok {
 		return nil, 0, errNotCodex
 	}
@@ -89,7 +103,7 @@ func (source *TokenSource) Acquire(ctx context.Context, providerID, model string
 // instead of queueing behind the refresh. A refresh that completes inside
 // the budget is still served.
 func (source *TokenSource) TryAcquire(providerID, model string) (relayapp.CredentialLease, bool) {
-	account, ok := source.accountFor(providerID)
+	account, ok := source.accountForRequest(providerID)
 	if !ok {
 		return nil, false
 	}
@@ -102,18 +116,25 @@ func (source *TokenSource) TryAcquire(providerID, model string) (relayapp.Creden
 	return &tokenLease{service: source.service, token: token}, true
 }
 
-// Count reports how many credentials the source can serve for providerID.
-// The signed-in account is one credential, but a rejected token can be
-// refreshed once, so it counts as two: the relay's rotation budget allows
-// one bad token followed by one refreshed token, and then gives up. An
-// account that needs re-auth serves zero — its chain is dead — and a
-// provider nobody serves is not this source's problem at all.
+// Count reports how many credentials the source can serve for the fleet
+// row. Every signed-in account is one credential, but a rejected token
+// can be refreshed once, so each counts as two: the relay's rotation
+// budget allows one bad token followed by one refreshed token per
+// account, and then gives up. An account that needs re-auth serves
+// zero — its chain is dead — and a provider that is not the fleet row,
+// or a fleet row no account is linked to, is not this source's problem
+// at all.
 func (source *TokenSource) Count(providerID string) int {
-	account, ok := source.accountFor(providerID)
-	if !ok || account.State != codexapp.StateSignedIn {
+	if providerID != codexapp.CodexProviderID {
 		return 0
 	}
-	return 2
+	count := 0
+	for _, account := range source.fleetAccounts() {
+		if account.State == codexapp.StateSignedIn {
+			count += 2
+		}
+	}
+	return count
 }
 
 // tokenLease holds the acquired token and the session it came from.
@@ -196,26 +217,48 @@ func (source *CompositeSource) Count(providerID string) int {
 	return source.fallback.Count(providerID)
 }
 
-// routesToCodex reports whether providerID is a codex account's provider
-// entry: the provisioner registers one per signed-in account, and the
-// relay dispatches them by name, so the entry set in Status() is the
-// routing table. A codex catalog entry nobody currently serves is not
-// here — it routes to the fallback, which holds no credential for it, and
-// the request fails rather than borrowing a key.
+// routesToCodex reports whether providerID is the fleet row this source
+// serves: the literal codex id with at least one account linked to it.
+// The fleet row with no linked account is not here — it routes to the
+// fallback, which holds no credential for it, and the request fails
+// rather than borrowing a key.
 func (source *TokenSource) routesToCodex(providerID string) bool {
-	_, ok := source.accountFor(providerID)
-	return ok
+	if providerID != codexapp.CodexProviderID {
+		return false
+	}
+	return len(source.fleetAccounts()) > 0
 }
 
-// accountFor resolves the provider entry the relay dispatches by name to
-// the account that serves it: one entry, one account, one token chain.
-// The scan is linear over the account rows — a human-sized list — and the
-// resolution is one in-memory read on the request path.
-func (source *TokenSource) accountFor(providerID string) (codexapp.AccountStatus, bool) {
-	for _, account := range source.service.Status().Accounts {
-		if account.ProviderID == providerID {
-			return account, true
+// fleetAccounts returns the account rows linked to the fleet row, in the
+// Status order — sorted by AccountID, the same deterministic order on
+// every read. An account linked to no provider (its provisioning failed)
+// is not behind the row and does not serve it; the rotation walks the
+// rest.
+func (source *TokenSource) fleetAccounts() []codexapp.AccountStatus {
+	accounts := source.service.Status().Accounts
+	rows := make([]codexapp.AccountStatus, 0, len(accounts))
+	for _, account := range accounts {
+		if account.ProviderID == codexapp.CodexProviderID {
+			rows = append(rows, account)
 		}
 	}
-	return codexapp.AccountStatus{}, false
+	return rows
+}
+
+// accountForRequest resolves the provider entry the relay dispatches by
+// name to the account that serves this request. The fleet has one row,
+// so the name is the literal codex id and the account is the rotation's
+// pick: the next linked account in the fleet order. Another provider's
+// id is refused — the codex bearer token must never travel to another
+// upstream — and the fleet row with no linked account has no credential
+// to give either.
+func (source *TokenSource) accountForRequest(providerID string) (codexapp.AccountStatus, bool) {
+	if providerID != codexapp.CodexProviderID {
+		return codexapp.AccountStatus{}, false
+	}
+	rows := source.fleetAccounts()
+	if len(rows) == 0 {
+		return codexapp.AccountStatus{}, false
+	}
+	return rows[int(source.rotation.Add(1)-1)%len(rows)], true
 }

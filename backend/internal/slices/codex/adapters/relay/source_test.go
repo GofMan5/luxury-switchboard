@@ -84,8 +84,9 @@ func (fallbackLease) Credential() relayapp.Credential {
 
 func (fallbackLease) Finish(outcome relayapp.AttemptOutcome) {}
 
-// accountRow is one signed-in account's routing row: the provider entry
-// its provisioner registered, and the account the entry serves.
+// accountRow is one account's routing row: the fleet row's literal id
+// when the account is linked to it ("" when it is not), and the account
+// itself.
 func accountRow(providerID, accountID string, state codexapp.ConnState) codexapp.AccountStatus {
 	return codexapp.AccountStatus{AccountID: accountID, ProviderID: providerID, State: state}
 }
@@ -255,67 +256,126 @@ func TestOtherProvidersAreRefusedByTheTokenSource(t *testing.T) {
 	}
 }
 
-func TestCountReflectsThatAccountState(t *testing.T) {
+func TestCountReflectsTheFleetStates(t *testing.T) {
 	cases := []struct {
-		providerID string
-		state      codexapp.ConnState
-		want       int
+		name     string
+		accounts []codexapp.AccountStatus
+		want     int
 	}{
-		{codexapp.CodexProviderID, codexapp.StateSignedIn, 2},
-		{codexapp.CodexProviderID, codexapp.StateSignedOut, 0},
-		{codexapp.CodexProviderID, codexapp.StateReauthNeeded, 0},
+		{"one signed-in account", []codexapp.AccountStatus{
+			accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn),
+		}, 2},
+		{"one signed-out account", []codexapp.AccountStatus{
+			accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedOut),
+		}, 0},
+		{"one account needing re-auth", []codexapp.AccountStatus{
+			accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateReauthNeeded),
+		}, 0},
+		{"two signed-in accounts", []codexapp.AccountStatus{
+			accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn),
+			accountRow(codexapp.CodexProviderID, "account-2", codexapp.StateSignedIn),
+		}, 4},
+		{"a broken chain starves only its own account", []codexapp.AccountStatus{
+			accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn),
+			accountRow(codexapp.CodexProviderID, "account-2", codexapp.StateReauthNeeded),
+			accountRow(codexapp.CodexProviderID, "account-3", codexapp.StateSignedOut),
+		}, 2},
 	}
 	for _, testCase := range cases {
 		service := &fakeService{
-			status: codexapp.Status{State: testCase.state, Accounts: []codexapp.AccountStatus{accountRow(testCase.providerID, "account-1", testCase.state)}},
+			status: codexapp.Status{State: codexapp.StateSignedIn, Accounts: testCase.accounts},
 			token:  "tok-1",
 		}
 		source := NewTokenSource(service)
-		if count := source.Count(testCase.providerID); count != testCase.want {
-			t.Errorf("Count(%q, %q) = %d, want %d", testCase.providerID, testCase.state, count, testCase.want)
+		if count := source.Count(codexapp.CodexProviderID); count != testCase.want {
+			t.Errorf("%s: Count = %d, want %d", testCase.name, count, testCase.want)
 		}
 	}
 }
 
-// Every account is its own route: acquiring through the second account's
-// provider entry asks the session for the second account's token, and the
-// count follows that entry alone, so one broken account cannot starve or
-// inflate another's rotation budget.
-func TestEachAccountServesItsOwnProviderEntry(t *testing.T) {
+// The fleet row is one entry for every account, and the rotation is the
+// load spread: consecutive requests lease consecutive linked accounts in
+// the Status order, wrapping around the fleet. An account linked to no
+// provider — its provisioning failed — never takes a turn; the rotation
+// walks the linked accounts only.
+func TestTheFleetRotatesThroughItsLinkedAccounts(t *testing.T) {
 	service := &fakeService{
 		status: codexapp.Status{
 			State: codexapp.StateSignedIn,
 			Accounts: []codexapp.AccountStatus{
 				accountRow(codexapp.CodexProviderID, "account-1", codexapp.StateSignedIn),
-				accountRow(codexapp.CodexProviderID+"2", "account-2", codexapp.StateSignedIn),
+				accountRow("", "account-2", codexapp.StateSignedIn),
+				accountRow(codexapp.CodexProviderID, "account-3", codexapp.StateSignedIn),
+				accountRow(codexapp.CodexProviderID, "account-4", codexapp.StateSignedIn),
 			},
 		},
 		token: "tok-1",
 	}
 	source := NewTokenSource(service)
 
-	for _, providerID := range []string{codexapp.CodexProviderID + "2", codexapp.CodexProviderID} {
-		if _, _, err := source.Acquire(context.Background(), providerID, "gpt-5", nil); err != nil {
-			t.Fatalf("Acquire(%q): %v", providerID, err)
+	for i := 0; i < 6; i++ {
+		if _, _, err := source.Acquire(context.Background(), codexapp.CodexProviderID, "gpt-5", nil); err != nil {
+			t.Fatalf("Acquire %d: %v", i, err)
 		}
 	}
-	if ids := service.acquiredIDs; len(ids) != 2 || ids[0] != "account-2" || ids[1] != "account-1" {
-		t.Errorf("acquired account ids = %v, want the entry's own account each time", ids)
+	want := []string{
+		"account-1", "account-3", "account-4",
+		"account-1", "account-3", "account-4",
 	}
-
-	if count := source.Count(codexapp.CodexProviderID + "2"); count != 2 {
-		t.Errorf("Count(codex2) = %d, want 2", count)
+	ids := service.acquiredIDs
+	if len(ids) != len(want) {
+		t.Fatalf("acquired account ids = %v, want %v", ids, want)
 	}
-	if count := source.Count(codexapp.CodexProviderID); count != 2 {
-		t.Errorf("Count(codex) = %d, want 2", count)
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Errorf("acquire %d leased %s, want %s", i, ids[i], want[i])
+		}
 	}
 }
 
-// The routing is the account rows, not a remembered provider name: a
-// codex catalog entry nobody serves is refused outright, without the
-// session ever being asked for a token.
-func TestAProviderEntryNobodyServesIsRefused(t *testing.T) {
-	service := &fakeService{status: codexapp.Status{State: codexapp.StateSignedOut}, token: "tok-1"}
+// After the fold no account carries a legacy codex id, but the defense
+// stands on its own: the token travels only behind the fleet row's
+// literal id. An account row still naming another provider is not the
+// fleet — that id is refused, and the fleet it leaves behind is empty,
+// so the literal id is refused too, and the session is never asked.
+func TestALegacyAccountRowDoesNotServeTheFleetRow(t *testing.T) {
+	service := &fakeService{
+		status: codexapp.Status{
+			State:    codexapp.StateSignedIn,
+			Accounts: []codexapp.AccountStatus{accountRow(codexapp.CodexProviderID+"2", "account-1", codexapp.StateSignedIn)},
+		},
+		token: "tok-1",
+	}
+	source := NewTokenSource(service)
+
+	for _, providerID := range []string{codexapp.CodexProviderID + "2", codexapp.CodexProviderID} {
+		if _, _, err := source.Acquire(context.Background(), providerID, "gpt-5", nil); !errors.Is(err, errNotCodex) {
+			t.Errorf("Acquire(%q) err = %v, want errNotCodex", providerID, err)
+		}
+		if lease, ok := source.TryAcquire(providerID, "gpt-5"); lease != nil || ok {
+			t.Errorf("TryAcquire(%q) = (%v, %v), want (nil, false)", providerID, lease, ok)
+		}
+		if count := source.Count(providerID); count != 0 {
+			t.Errorf("Count(%q) = %d, want 0", providerID, count)
+		}
+	}
+	if len(service.acquireCalls) != 0 {
+		t.Errorf("the session saw %d acquire calls, want 0", len(service.acquireCalls))
+	}
+}
+
+// The routing is the account rows, not a remembered provider name: the
+// fleet row is served only by the accounts linked to it, and with none
+// linked it is refused outright, without the session ever being asked
+// for a token.
+func TestAFleetRowNoAccountServesIsRefused(t *testing.T) {
+	service := &fakeService{
+		status: codexapp.Status{
+			State:    codexapp.StateSignedIn,
+			Accounts: []codexapp.AccountStatus{accountRow("", "account-1", codexapp.StateSignedIn)},
+		},
+		token: "tok-1",
+	}
 	source := NewTokenSource(service)
 
 	if _, _, err := source.Acquire(context.Background(), codexapp.CodexProviderID, "gpt-5", nil); !errors.Is(err, errNotCodex) {

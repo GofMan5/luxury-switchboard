@@ -475,6 +475,11 @@ export class FixtureSession implements ControlPlaneSession {
         // The real parser refuses an empty text before anything moves.
         const text = String(body.text ?? '')
         if (text.trim() === '') throw new Error('codex import payload could not be parsed')
+        // A stale pair whose refresh the server refused: the wrapper wording
+        // is the exact text the frontend maps to its actionable copy.
+        if (text.includes('rejected')) {
+          throw new Error('codex import failed: none of the 1 credentials produced a codex session: codex refresh token was rejected: codex oauth refresh failed: refresh_token_reused')
+        }
         return this.#codexImportResult(text.includes('plus') ? 'Plus' : 'Pro')
       }
       case 'codex.import.files': {

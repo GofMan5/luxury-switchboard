@@ -293,16 +293,20 @@ func invalidPayload() platform.MethodError {
 }
 
 const (
-	// maxImportTextBytes bounds pasted credential text. Real auth JSON is
-	// a few kilobytes, so 64 KiB refuses a runaway paste at the boundary
-	// with the same error the service gives an unusable file — long
-	// before the parser spends time on it.
-	maxImportTextBytes = 64 * 1024
-	// maxImportPaths caps how many files one import may name. The flow
-	// stops at the first file that yields a session, so the cap exists
-	// for the failure case: the all-failed summary stays readable and
-	// the per-file reads stay bounded.
-	maxImportPaths = 16
+	// maxImportTextBytes bounds pasted credential text. A real auth
+	// export is a few kilobytes per account, so 192 KiB admits a
+	// fleet pasted as one array while typical escaping still leaves
+	// the request inside the 256 KiB protocol frame. A pathological
+	// paste that escapes past the frame is refused cleanly by the
+	// shell's outgoing-frame check and never reaches the sidecar, so
+	// the parser cannot be spent on it.
+	maxImportTextBytes = 192 * 1024
+	// maxImportPaths caps how many files one import may name. Every
+	// candidate from every file is imported, so the cap is a read
+	// bound, not a stopping rule: 128 files covers a fleet folder in
+	// one call while keeping the all-failed summary readable and the
+	// per-file reads bounded.
+	maxImportPaths = 128
 )
 
 // decodeImportText accepts only {"text": ...}: strictly one field, decoded

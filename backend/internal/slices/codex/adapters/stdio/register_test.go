@@ -878,6 +878,46 @@ func TestImportFilesSendsEveryPathInOrderAndAnswersTheFileItCameFrom(t *testing.
 	}
 }
 
+// Fleet-sized imports fit in one call. A paste at the text cap and a
+// file list at the path cap both reach the service unchanged — the
+// caps refuse what is past them, never a fleet the caps claim to
+// admit. This is the boundary the caps exist to draw, so it is pinned
+// from the passing side, not only from the refusal side.
+func TestFleetSizedImportsReachTheServiceInOneCall(t *testing.T) {
+	service := &fakeService{importJSONRes: application.ImportResult{
+		Status: application.Status{State: application.StateSignedIn},
+	}, importFilesRes: application.ImportResult{
+		Status: application.Status{State: application.StateSignedIn},
+	}}
+
+	fleetPaste := strings.Repeat("a", 192*1024)
+	pastePayload := payloadOf(t, exchange(t, service,
+		`"method":"codex.import.json","payload":{"text":"`+fleetPaste+`"}`)[0])
+	if pastePayload["state"] != "signed_in" {
+		t.Fatalf("fleet paste import answered the wrong state: %+v", pastePayload)
+	}
+	if texts := service.importedTexts(t); len(texts) != 1 || texts[0] != fleetPaste {
+		t.Fatalf("paste reached the service as %d texts, want one unchanged fleet paste", len(texts))
+	}
+
+	fleetPaths := make([]string, 128)
+	for index := range fleetPaths {
+		fleetPaths[index] = fmt.Sprintf("C:/fleet/auth-%d.json", index)
+	}
+	fleetPayload, err := json.Marshal(fleetPaths)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	filesPayload := payloadOf(t, exchange(t, service,
+		`"method":"codex.import.files","payload":{"paths":`+string(fleetPayload)+`}`)[0])
+	if filesPayload["state"] != "signed_in" {
+		t.Fatalf("fleet files import answered the wrong state: %+v", filesPayload)
+	}
+	if lists := service.importedPathsLists(t); len(lists) != 1 || len(lists[0]) != 128 {
+		t.Fatalf("files reached the service as %d lists, want one list of 128 paths", len(lists))
+	}
+}
+
 func TestImportFailureCarriesTheServiceError(t *testing.T) {
 	service := &fakeService{importJSONErr: errors.New("no codex credentials found")}
 
@@ -917,12 +957,12 @@ func TestImportPayloadsThatCannotBeSentAreRefused(t *testing.T) {
 	// Each command runs through its own server: the harness drives one
 	// worker, so a batch would answer "busy" before it answered the
 	// refusal under test.
-	oversized := strings.Repeat("a", 64*1024+1)
-	seventeenPaths := make([]string, 17)
-	for index := range seventeenPaths {
-		seventeenPaths[index] = "f"
+	oversized := strings.Repeat("a", 192*1024+1)
+	tooManyPaths := make([]string, 129)
+	for index := range tooManyPaths {
+		tooManyPaths[index] = "f"
 	}
-	seventeenPayload, err := json.Marshal(seventeenPaths)
+	tooManyPayload, err := json.Marshal(tooManyPaths)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -932,7 +972,7 @@ func TestImportPayloadsThatCannotBeSentAreRefused(t *testing.T) {
 		`"method":"codex.import.json","payload":{"text":"` + oversized + `"}`,
 		`"method":"codex.import.json","payload":{"text":"ok","note":"x"}`,
 		`"method":"codex.import.files","payload":{"paths":[]}`,
-		`"method":"codex.import.files","payload":{"paths":` + string(seventeenPayload) + `}`,
+		`"method":"codex.import.files","payload":{"paths":` + string(tooManyPayload) + `}`,
 		`"method":"codex.import.files","payload":{"paths":["C:/auth/a.json",""]}`,
 		`"method":"codex.import.files","payload":{"text":"no paths here"}`,
 	}

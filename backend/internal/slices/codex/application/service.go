@@ -825,14 +825,25 @@ func (service *Service) importGuard() error {
 
 // importCandidate turns one parsed credential into a session. What the
 // candidate carries decides the path, mirroring the upstream codex
-// tooling: a refresh token is live proof that can be exchanged right
-// now, so it is exchanged — and its failure is the import's failure,
-// because importing a dead token would sign the user into nothing; a
-// full pair without a refresh token and a bare access token are stored
-// exactly as handed over, network-free, because the access token
-// itself is valid until it expires.
+// tooling. A refresh-capable pair whose access token has not expired
+// imports offline, exactly like a refresh-less pair: the access token
+// is valid proof until its own expiry, and the refresh token is kept
+// with the session so the runtime's refresh-on-expiry loop renews it
+// later — so no import needs the network when the credentials already
+// answer for themselves, and a route that is down or a refresh token
+// another machine already rotated cannot refuse a still-valid import.
+// A pair that cannot serve — missing, expired, or without a readable
+// expiry, the same rule NeedsRefresh applies to stored sessions — pays
+// for the live exchange, and that failure is the import's failure,
+// because importing a token that cannot be exchanged now would sign
+// the user into nothing. A bare access token is stored exactly as
+// handed over, network-free.
 func (service *Service) importCandidate(ctx context.Context, candidate CredentialCandidate) (domain.Session, error) {
 	if candidate.RefreshToken != "" {
+		if session, err := importFullPair(candidate); err == nil && !session.NeedsRefresh(service.now(), refreshSkew) {
+			session.RefreshToken = candidate.RefreshToken
+			return session, nil
+		}
 		return service.importViaRefresh(ctx, candidate)
 	}
 	if candidate.IDToken != "" {

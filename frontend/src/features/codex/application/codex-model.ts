@@ -70,6 +70,10 @@ const PROVISION_FAILED_COPY = 'Codex signed in, but the provider could not be ad
 const EXCHANGE_FAILED_COPY = 'The sign-in could not be completed. Try again.'
 const GENERIC_IMPORT_COPY = 'The Codex credentials could not be imported.'
 const NO_USABLE_FILES_COPY = 'None of the selected files held Codex credentials. Pick the file that was exported from Codex.'
+/** The stale-pair outcome the backend now names: the refresh exchange ran and the server refused it. */
+const REFRESH_REJECTED_COPY = 'The Codex sign-in server refused these credentials. Export fresh credentials from Codex, then import them again.'
+/** The refresh exchange could not run at all; the credentials themselves were never judged. */
+const IMPORT_UNREACHABLE_COPY = 'The Codex sign-in server could not be reached. Check the connection, then try again.'
 const GENERIC_QUOTA_COPY = 'The Codex usage could not be loaded.'
 const QUOTA_NOT_SIGNED_IN_COPY = 'The account is no longer signed in. Sign in again to see its usage.'
 /** The refusal text the backend emits when Codex backs the active route; matched by containment, joined errors included. */
@@ -83,9 +87,12 @@ function mapLoginErrorString(value: string): string | null {
   return null
 }
 
-/** Maps import failures; the one refusal a user can act on is "no file held credentials". */
+/** Maps import failures the user can act on; the markers are the backend's own refusal wording, joined errors included. */
 function mapImportError(value: string): string | null {
   if (value.includes('none of the selected files held codex credentials')) return NO_USABLE_FILES_COPY
+  // The rejection wrapper carries the unreachable text inside it, so it must be matched first.
+  if (value.includes('codex refresh token was rejected')) return REFRESH_REJECTED_COPY
+  if (value.includes('codex oauth refresh failed')) return IMPORT_UNREACHABLE_COPY
   return null
 }
 

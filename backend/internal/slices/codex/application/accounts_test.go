@@ -287,6 +287,108 @@ func TestMultiAccountImportLandsEveryCandidate(t *testing.T) {
 	}
 }
 
+// importableAccessToken mints the access token of an import candidate:
+// an unsigned JWT whose payload carries the exp the freshness rule
+// reads. Real access tokens are JWTs of exactly this shape; the expiry
+// claim, not the signature, is what an offline import decision is
+// allowed to trust.
+func importableAccessToken(expiresIn time.Duration) string {
+	claims := fmt.Sprintf(`{"exp":%d}`, time.Now().Add(expiresIn).Unix())
+	return "jwt." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".unsigned"
+}
+
+// A candidate whose pair still stands imports without touching the
+// network. The access token answers for itself until its own expiry, so
+// a refresh exchange that cannot run — no route to the auth server, or
+// a refresh token already rotated by another machine — has no right to
+// refuse a still-valid import. The refresh token lands with the session
+// so the runtime's refresh-on-expiry loop renews it later, and the
+// acquired token is the candidate's own.
+func TestAFreshPairImportsWithoutTouchingTheNetwork(t *testing.T) {
+	env := newTestEnv(t)
+	candidateAccess := importableAccessToken(time.Hour)
+	env.parser.candidates = []CredentialCandidate{
+		{
+			Kind:         CredentialFull,
+			IDToken:      importableIDToken("fresh@example.com", "account-1"),
+			AccessToken:  candidateAccess,
+			RefreshToken: "refresh-fresh",
+		},
+	}
+	env.authorizer.setRefreshResult(domain.Session{}, errors.New("codex oauth refresh failed: no route to host"))
+
+	result, err := env.service.ImportJSON(context.Background(), "fresh pair")
+	if err != nil {
+		t.Fatalf("ImportJSON() error = %v, want nil", err)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 0 {
+		t.Fatalf("refresh calls = %v, want none for a pair whose access token has not expired", refreshes)
+	}
+	if len(result.Status.Accounts) != 1 || accountStatus(t, result.Status, "account-1").State != StateSignedIn {
+		t.Fatalf("imported rows = %+v, want one signed-in row for account-1", result.Status.Accounts)
+	}
+
+	stored := env.store.storedSessions()
+	if len(stored) != 1 {
+		t.Fatalf("store holds %d sessions, want 1", len(stored))
+	}
+	if stored[0].AccessToken != candidateAccess {
+		t.Fatalf("stored access token = %q, want the candidate's own", stored[0].AccessToken)
+	}
+	if stored[0].RefreshToken != "refresh-fresh" {
+		t.Fatalf("stored refresh token = %q, want the candidate's refresh token kept", stored[0].RefreshToken)
+	}
+	if token, err := env.service.AcquireAccessToken(context.Background(), "account-1"); err != nil || token == "" {
+		t.Fatalf("AcquireAccessToken(account-1) = %q, %v; want the imported token served", token, err)
+	}
+}
+
+// A stale pair — access token already expired — still pays for the live
+// exchange, because an expired access token proves nothing and the
+// refresh token is the only live proof left.
+func TestAStalePairStillExchangesItsRefreshToken(t *testing.T) {
+	env := newTestEnv(t)
+	env.parser.candidates = []CredentialCandidate{
+		{
+			Kind:         CredentialFull,
+			IDToken:      importableIDToken("stale@example.com", "account-1"),
+			AccessToken:  importableAccessToken(-time.Hour),
+			RefreshToken: "refresh-stale",
+		},
+	}
+	env.authorizer.setRefreshResult(accountSession("account-1", "stale@example.com"), nil)
+
+	if _, err := env.service.ImportJSON(context.Background(), "stale pair"); err != nil {
+		t.Fatalf("ImportJSON() error = %v, want nil", err)
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 || refreshes[0] != "refresh-stale" {
+		t.Fatalf("refresh calls = %v, want one exchange of the candidate's refresh token", refreshes)
+	}
+	stored := env.store.storedSessions()
+	if len(stored) != 1 || stored[0].AccessToken != "access-stale@example.com" {
+		t.Fatalf("stored session = %+v, want the refreshed session's access token", stored)
+	}
+}
+
+// A refresh-only candidate has no pair to stand on, so a failed
+// exchange is still the import's failure: importing it would sign the
+// user into nothing.
+func TestARefreshOnlyCandidateThatCannotExchangeStillFails(t *testing.T) {
+	env := newTestEnv(t)
+	env.parser.candidates = []CredentialCandidate{
+		{Kind: CredentialRefresh, RefreshToken: "refresh-only"},
+	}
+	env.authorizer.setRefreshResult(domain.Session{}, errors.New("codex oauth refresh failed: refresh_token_reused"))
+
+	_, err := env.service.ImportJSON(context.Background(), "refresh only")
+	if err == nil {
+		t.Fatalf("ImportJSON() error = nil, want the failed exchange to fail the import")
+	}
+	if refreshes := env.authorizer.refreshes(); len(refreshes) != 1 || refreshes[0] != "refresh-only" {
+		t.Fatalf("refresh calls = %v, want one exchange attempt", refreshes)
+	}
+}
+
 // The quota card asks per account: a probe for account-2 presents
 // account-2's access token and account-2's id, never account-1's.
 func TestAQuotaProbeTargetsTheNamedAccount(t *testing.T) {

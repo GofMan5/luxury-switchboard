@@ -840,13 +840,35 @@ describe('CodexModel', () => {
     model.dispose()
   })
 
-  it('maps a rejected refresh token to readable copy', async () => {
+  it('maps a refresh token the sign-in server rejected to readable copy', async () => {
     const port = new FakeCodexPort()
-    port.importJsonError = new ControlPlaneError('command_failed', 'auth.json: the refresh token was rejected upstream')
+    port.importJsonError = new ControlPlaneError(
+      'command_failed',
+      'codex import failed: none of the 1 credentials produced a codex session: codex refresh token was rejected: codex oauth refresh failed: refresh_token_reused',
+    )
     const model = new CodexModel(port)
     await model.connect()
     await model.importFromJson('{"tokens":{}}')
-    expect(model.snapshot()).toMatchObject({ loginPhase: 'error', loginError: 'The Codex credentials could not be imported.' })
+    expect(model.snapshot()).toMatchObject({
+      loginPhase: 'error',
+      loginError: 'The Codex sign-in server refused these credentials. Export fresh credentials from Codex, then import them again.',
+    })
+    model.dispose()
+  })
+
+  it('maps a sign-in server that could not be reached to readable copy', async () => {
+    const port = new FakeCodexPort()
+    port.importJsonError = new ControlPlaneError(
+      'command_failed',
+      'codex import failed: none of the 1 credentials produced a codex session: codex oauth refresh failed: dial tcp 1.2.3.4:443: connect: no route to host',
+    )
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.importFromJson('{"tokens":{}}')
+    expect(model.snapshot()).toMatchObject({
+      loginPhase: 'error',
+      loginError: 'The Codex sign-in server could not be reached. Check the connection, then try again.',
+    })
     model.dispose()
   })
 

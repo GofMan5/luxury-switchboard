@@ -2,8 +2,12 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 
 import { Activity, ArrowDown, ArrowUp, ClipboardPaste, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
 import { useProviders } from '../../providers/ui/useProviders'
 import { useAppServices } from '../../../app/services'
-import { hasCodexQuota } from '../../codex/application/codex-capability'
+import { hasCodexLogin, hasCodexQuota } from '../../codex/application/codex-capability'
+import type { CodexAccount } from '../../codex/domain/codex'
 import CodexAccountsPane from '../../codex/ui/CodexAccountsPane'
+import CodexSignInDialog from '../../codex/ui/CodexSignInDialog'
+import DisconnectCodexDialog from '../../codex/ui/DisconnectCodexDialog'
+import { logoutErrorCopy } from '../../codex/ui/codex-copy'
 import { useCodex } from '../../codex/ui/useCodex'
 import { Button } from '../../../shared/ui/Button'
 import { Pill } from '../../../shared/ui/chrome'
@@ -34,9 +38,32 @@ export default function ApiKeysPage() {
   const codexAccounts = selectedProvider === 'codex' && hasCodexQuota(capabilities)
   // The footer caption counts accounts, not keys, and it reads the live count
   // so a disconnect or a second sign-in is reflected on the next render.
-  const { state: codexState } = useCodex()
+  const { model: codexModel, state: codexState } = useCodex()
   const codexCount = codexState.accounts.length
   const accountCaption = `${codexCount} account${codexCount === 1 ? '' : 's'} · usage windows refresh on demand`
+  // The account lifecycle lives on this page now: the sign-in dialog adds and
+  // renews accounts, the table refreshes usage and signs out.
+  const [signInCodex, setSignInCodex] = useState(false)
+  const [disconnectCodex, setDisconnectCodex] = useState<{ accountId: string; email: string; otherSignedIn: number } | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
+  const codexCanSignIn = hasCodexLogin(capabilities)
+  const codexSignedIn = codexState.accounts.filter((account) => account.state === 'signed_in')
+  const codexUsagePending = codexSignedIn.some((account) => codexState.quotas[account.accountId]?.pending === true)
+  const refreshCodexUsage = () => {
+    void Promise.all(codexSignedIn.map((account) => codexModel.refreshQuota(account.accountId)))
+  }
+  const signInCodexAgain = () => {
+    setSignInCodex(true)
+    void codexModel.startLogin()
+  }
+  // A disconnect targets one account: the dialog names it and says how many
+  // signed-in accounts survive, so the owner knows what stays working.
+  const beginCodexDisconnect = (accountId: string) => {
+    const account = codexState.accounts.find((entry) => entry.accountId === accountId)
+    if (!account) return
+    const otherSignedIn = codexState.accounts.filter((entry) => entry.accountId !== accountId && entry.state === 'signed_in').length
+    setDisconnectCodex({ accountId, email: account.email, otherSignedIn })
+  }
 
   useEffect(() => {
     if (selectedProvider && !codexAccounts) void model.load(selectedProvider)
@@ -66,7 +93,19 @@ export default function ApiKeysPage() {
               {providers.catalog.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
             </select>
           </label>
-          {codexAccounts ? null : (
+          {codexAccounts ? (
+            <>
+              <Button disabled={codexSignedIn.length === 0 || codexUsagePending} onClick={refreshCodexUsage}>
+                <RefreshCcw size={16} aria-hidden="true" className={codexUsagePending ? styles.spinning : undefined} />
+                {codexUsagePending ? 'Checking…' : 'Refresh usage'}
+              </Button>
+              {codexCanSignIn ? (
+                <Button variant="primary" onClick={() => setSignInCodex(true)}>
+                  <Plus size={16} aria-hidden="true" />Add account
+                </Button>
+              ) : null}
+            </>
+          ) : (
             <>
               <Button disabled={!selectedProvider || state.checkingPool} onClick={() => void model.checkPool()}>
                 <Activity size={16} aria-hidden="true" className={state.checkingPool ? styles.spinning : undefined} />
@@ -85,7 +124,12 @@ export default function ApiKeysPage() {
 
       {codexAccounts ? (
         <div className={styles.quotaBody}>
-          <CodexAccountsPane />
+          <CodexAccountsPane
+            canSignIn={codexCanSignIn}
+            onAddAccount={() => setSignInCodex(true)}
+            onSignIn={signInCodexAgain}
+            onSignOut={(account: CodexAccount) => beginCodexDisconnect(account.accountId)}
+          />
         </div>
       ) : (
         <>
@@ -165,7 +209,7 @@ export default function ApiKeysPage() {
       )}
       <footer className={styles.footer}>
         <span>{codexAccounts ? accountCaption : `${ordered.length} keys · lower number means higher priority`}</span>
-        <span>{codexAccounts ? 'Sign-in lives on the Providers page' : 'Secrets and proxy credentials are write-only'}</span>
+        <span>{codexAccounts ? 'Accounts sign in and out on this page' : 'Secrets and proxy credentials are write-only'}</span>
       </footer>
 
       {editor ? (
@@ -203,6 +247,28 @@ export default function ApiKeysPage() {
           onCancel={() => setRemoveKey(null)}
           onConfirm={async () => {
             if (await model.remove(removeKey.id)) setRemoveKey(null)
+          }}
+        />
+      ) : null}
+      {signInCodex ? (
+        <CodexSignInDialog
+          onDismiss={() => setSignInCodex(false)}
+          onDisconnect={beginCodexDisconnect}
+        />
+      ) : null}
+      {disconnectCodex !== null ? (
+        <DisconnectCodexDialog
+          email={disconnectCodex.email}
+          otherSignedIn={disconnectCodex.otherSignedIn}
+          pending={disconnecting}
+          error={logoutErrorCopy(codexState.logoutError)}
+          onCancel={() => setDisconnectCodex(null)}
+          onConfirm={async () => {
+            setDisconnecting(true)
+            const ok = await codexModel.logout(disconnectCodex.accountId)
+            setDisconnecting(false)
+            if (!ok) return
+            setDisconnectCodex(null)
           }}
         />
       ) : null}

@@ -7,7 +7,8 @@ import type { CodexModelState, CodexQuotaCard } from '../application/codex-model
 import CodexAccountsPane from './CodexAccountsPane'
 
 // The pane reads the shared Codex state through useCodex and owns exactly one
-// action — the per-account usage probe — so the mock stays that small. The
+// model action — the per-account usage probe — while sign-in and sign-out are
+// the host page's to run, so the pane only receives callbacks to ask. The
 // model object is created once, exactly like the real service instance the
 // app hands out, so effect dependencies stay stable across re-renders.
 const mocks = vi.hoisted(() => {
@@ -16,6 +17,9 @@ const mocks = vi.hoisted(() => {
     state: null as unknown as CodexModelState,
     refreshQuota,
     model: { refreshQuota },
+    onAddAccount: vi.fn(),
+    onSignIn: vi.fn(),
+    onSignOut: vi.fn(),
   }
 })
 vi.mock('./useCodex', () => ({
@@ -31,6 +35,9 @@ afterEach(cleanup)
 beforeEach(() => {
   mocks.refreshQuota.mockReset()
   mocks.refreshQuota.mockResolvedValue(undefined)
+  mocks.onAddAccount.mockReset()
+  mocks.onSignIn.mockReset()
+  mocks.onSignOut.mockReset()
   mocks.state = stateAt({})
 })
 
@@ -82,9 +89,16 @@ const samQuota = quotaAt({
   secondary: { present: true, remainingPercent: 64, windowMinutes: 10_080, resetAt: 1_789_172_800 },
 })
 
-function renderPane(state: CodexModelState) {
+function renderPane(state: CodexModelState, canSignIn = true) {
   mocks.state = state
-  return render(<CodexAccountsPane />)
+  return render(
+    <CodexAccountsPane
+      canSignIn={canSignIn}
+      onAddAccount={mocks.onAddAccount}
+      onSignIn={mocks.onSignIn}
+      onSignOut={mocks.onSignOut}
+    />,
+  )
 }
 
 function meter(label: string | RegExp) {
@@ -96,11 +110,17 @@ function rowButton(email: string) {
 }
 
 describe('CodexAccountsPane', () => {
-  it('renders every account as its own row with plan, state and usage windows', () => {
+  it('renders every account as its own row in the cockpit grid', () => {
     renderPane(stateAt({
       accounts: [devAccount, samAccount],
       quotas: { 'acct-1': cardAt({ quota: devQuota }), 'acct-2': cardAt({ quota: samQuota }) },
     }))
+
+    // The grid announces itself as one named region with a stable column set.
+    expect(screen.getByRole('region', { name: 'Codex accounts and usage' })).toBeTruthy()
+    for (const header of ['Account', 'State', '5h window', 'Weekly window', 'Updated', 'Actions']) {
+      expect(screen.getByRole('columnheader', { name: header })).toBeTruthy()
+    }
 
     expect(screen.getByText('dev@example.com')).toBeTruthy()
     expect(screen.getByText('sam@example.com')).toBeTruthy()
@@ -142,7 +162,14 @@ describe('CodexAccountsPane', () => {
       accounts: [devAccount, samAccount],
       quotas: { 'acct-1': cardAt({ quota: devQuota }) },
     })
-    view.rerender(<CodexAccountsPane />)
+    view.rerender(
+      <CodexAccountsPane
+        canSignIn
+        onAddAccount={mocks.onAddAccount}
+        onSignIn={mocks.onSignIn}
+        onSignOut={mocks.onSignOut}
+      />,
+    )
 
     expect(mocks.refreshQuota).toHaveBeenCalledTimes(2)
     expect(mocks.refreshQuota).toHaveBeenCalledWith('acct-2')
@@ -154,12 +181,26 @@ describe('CodexAccountsPane', () => {
     expect(mocks.refreshQuota).toHaveBeenCalledWith('acct-1')
 
     mocks.state = stateAt({ accounts: [devAccount, samAccount], quotas: { 'acct-1': failed } })
-    view.rerender(<CodexAccountsPane />)
+    view.rerender(
+      <CodexAccountsPane
+        canSignIn
+        onAddAccount={mocks.onAddAccount}
+        onSignIn={mocks.onSignIn}
+        onSignOut={mocks.onSignOut}
+      />,
+    )
     expect(mocks.refreshQuota).toHaveBeenCalledTimes(3)
     expect(mocks.refreshQuota).toHaveBeenCalledWith('acct-2')
 
     // Same set again: the effect does not re-fire, so no probe storm.
-    view.rerender(<CodexAccountsPane />)
+    view.rerender(
+      <CodexAccountsPane
+        canSignIn
+        onAddAccount={mocks.onAddAccount}
+        onSignIn={mocks.onSignIn}
+        onSignOut={mocks.onSignOut}
+      />,
+    )
     expect(mocks.refreshQuota).toHaveBeenCalledTimes(3)
   })
 
@@ -201,39 +242,69 @@ describe('CodexAccountsPane', () => {
 
     const busy = rowButton('dev@example.com')
     expect(busy.disabled).toBe(true)
-    expect(busy.textContent).toBe('Checking…')
     expect(screen.getByText('Checking usage…')).toBeTruthy()
     // The sibling row keeps working while this one waits.
     expect(rowButton('sam@example.com').disabled).toBe(false)
   })
 
-  it('answers a reauth row with the expiry hint, no meters, no alert and a locked button', () => {
+  it('answers a reauth row with the expiry hint, no meters, and the row actions that ask the page', () => {
     renderPane(stateAt({ accounts: [reauthAccount] }))
 
     expect(screen.getByText('Sign-in needed')).toBeTruthy()
-    expect(screen.getByText('The session expired. Sign in again from the Providers page and the usage windows return.')).toBeTruthy()
+    expect(screen.getByText('The session expired. Sign in again and the usage windows return.')).toBeTruthy()
     expect(screen.queryByRole('meter')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
     expect(rowButton('dev@example.com').disabled).toBe(true)
     // No live session, so mount did not probe.
     expect(mocks.refreshQuota).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in again for dev@example.com' }))
+    expect(mocks.onSignIn).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out dev@example.com' }))
+    expect(mocks.onSignOut).toHaveBeenCalledTimes(1)
+    expect(mocks.onSignOut).toHaveBeenCalledWith(reauthAccount)
   })
 
-  it('answers a signed-out row with the sign-out hint and no meters', () => {
+  it('answers a signed-out row with the sign-out hint and no sign-out button', () => {
     renderPane(stateAt({ accounts: [signedOutAccount] }))
 
     expect(screen.getByText('Signed out')).toBeTruthy()
-    expect(screen.getByText('This account is signed out. Sign in again from the Providers page.')).toBeTruthy()
+    expect(screen.getByText('This account is signed out. Sign in again to bring it back.')).toBeTruthy()
     expect(screen.queryByRole('meter')).toBeNull()
     expect(rowButton('dev@example.com').disabled).toBe(true)
     expect(mocks.refreshQuota).not.toHaveBeenCalled()
+    // Still worth renewing, but nothing to unlink.
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in again for dev@example.com' }))
+    expect(mocks.onSignIn).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Sign out dev@example.com' })).toBeNull()
   })
 
-  it('answers no accounts with the empty hint and no rows', () => {
+  it('hides the row sign-in action when the build cannot sign in', () => {
+    renderPane(stateAt({ accounts: [reauthAccount] }), false)
+
+    expect(screen.queryByRole('button', { name: 'Sign in again for dev@example.com' })).toBeNull()
+    // The session can still be unlinked without the sign-in capability.
+    expect(screen.getByRole('button', { name: 'Sign out dev@example.com' })).toBeTruthy()
+  })
+
+  it('answers no accounts with the empty state whose Add account asks the page', () => {
     renderPane(stateAt({}))
 
-    expect(screen.getByText('Codex is not signed in. Sign in from the Providers page and the usage windows appear here.')).toBeTruthy()
+    expect(screen.getByText('No Codex accounts yet')).toBeTruthy()
+    expect(screen.getByText('Add a ChatGPT account and its usage windows appear here.')).toBeTruthy()
     expect(screen.queryByRole('meter')).toBeNull()
+    expect(mocks.refreshQuota).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add account' }))
+    expect(mocks.onAddAccount).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers no empty-state button when the build cannot sign in', () => {
+    renderPane(stateAt({}), false)
+
+    expect(screen.getByText('No Codex accounts yet')).toBeTruthy()
+    expect(screen.getByText('Adding Codex accounts is not available in this build.')).toBeTruthy()
     expect(screen.queryByRole('button')).toBeNull()
     expect(mocks.refreshQuota).not.toHaveBeenCalled()
   })

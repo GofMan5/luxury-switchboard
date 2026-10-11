@@ -1,69 +1,73 @@
-/* The accounts list rides the page's scroll area: rows carry their own
- * padding, hairline separators echo the keys table it replaces, and nothing
- * here scrolls on its own. One account is one block — header, then its
- * usage rows — and the block's own bottom line separates accounts. */
+/* The pane borrows the keys table's grammar exactly: one dense grid, one row
+ * per account, a sticky header that holds still while the page's scroll area
+ * moves, and icon actions at the row end. Windows report as inline meters, so
+ * a single glance covers the whole pool the way the keys list covers its
+ * keys. Columns hide by class, not by position — note rows span columns and
+ * would break nth-child hiding. */
 
-.pane { display: grid; min-width: 0; }
+.pane { min-width: 0; }
 
-.account { display: grid; border-bottom: 1px solid var(--border-subtle); }
-.account:last-child { border-bottom: none; }
+.table { width: 100%; min-width: 970px; border-collapse: collapse; table-layout: fixed; }
+.table th, .table td { height: 52px; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; vertical-align: middle; }
+.table th { position: sticky; z-index: 2; top: 0; height: 34px; color: var(--text-muted); background: var(--bg-chrome); font-size: 10.5px; font-weight: 640; letter-spacing: 0.05em; text-transform: uppercase; box-shadow: 0 1px 0 var(--border-subtle); }
+.table tbody tr:hover { background: color-mix(in srgb, var(--bg-hover) 72%, transparent); }
+.table th:nth-child(1) { width: 250px; }
+.table th:nth-child(2) { width: 108px; }
+.table th:nth-child(3), .table th:nth-child(4) { width: 190px; }
+.table th:nth-child(5) { width: 122px; }
+.table th:last-child { width: 100px; }
 
-.accountHead { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 14px 20px; }
-.accountText { display: grid; flex: 1 1 220px; gap: 3px; min-width: 0; }
-.email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
-.accountText small { color: var(--text-muted); font-size: 11.5px; line-height: 1.4; }
+.accountCell { padding-top: 9px; padding-bottom: 9px; }
+.accountLabel { display: grid; gap: 2px; min-width: 0; }
+.email { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+.accountNote { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.rowError { margin: 4px 0 0; color: var(--text-danger); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
 
-/* A failed probe keeps the last good rows and adds a reason — a red bar, not
- * a wiped list; the tone is text-level danger like every error in the app. */
-.error { margin: 0; border-bottom: 1px solid color-mix(in srgb, var(--status-danger) 30%, var(--border-subtle)); padding: 11px 20px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 6%, var(--bg-canvas)); font-size: 12.5px; line-height: 1.5; }
+.stateCell { white-space: nowrap; }
 
-.windows { display: grid; margin: 0; padding: 0; list-style: none; }
-
-/* One window per row: its name, the meter, what is left, when it resets. The
- * meter fills on remaining — a full bar is a healthy window. */
-.window {
-  display: grid;
-  grid-template-columns: 118px minmax(140px, 1fr) 84px auto;
-  grid-template-areas: 'title meter remaining resets';
-  align-items: center;
-  gap: 8px 14px;
-  border-bottom: 1px solid var(--border-subtle);
-  padding: 13px 20px;
-}
-.window:last-child { border-bottom: none; }
-.windowTitle { grid-area: title; color: var(--text-primary); font-size: 12.5px; font-weight: 640; }
-
-.meter { grid-area: meter; overflow: hidden; height: 6px; border-radius: 3px; background: var(--bg-raised); }
+.windowCell { padding-top: 11px; padding-bottom: 11px; }
+.meter { height: 6px; overflow: hidden; border-radius: 3px; background: var(--bg-raised); }
 .meterFill { height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--status-info) 62%, var(--bg-surface)); transition: width var(--motion-standard) var(--ease-standard); }
 .meterFill[data-tone='warning'] { background: color-mix(in srgb, var(--status-warning) 62%, var(--bg-surface)); }
 .meterFill[data-tone='danger'] { background: color-mix(in srgb, var(--status-danger) 70%, var(--bg-surface)); }
-
-.remaining { grid-area: remaining; color: var(--text-secondary); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
+.windowLine { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 6px; }
+.remaining { color: var(--text-secondary); font-size: 12px; font-weight: 620; font-variant-numeric: tabular-nums; }
 .remaining[data-tone='warning'] { color: var(--status-warning); }
-.remaining[data-tone='danger'] { color: var(--text-danger); }
+.remaining[data-tone='danger'] { color: var(--status-danger); }
+.resets { overflow: hidden; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Absolute local stamps: the day is part of the fact, so a window that
- * resets on another day names it instead of implying "today". */
-.resets { grid-area: resets; color: var(--text-muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.absentCell { color: var(--text-disabled); font-size: 12px; text-align: center; }
+.noteCell { color: var(--text-muted); font-size: 11.5px; line-height: 1.45; }
+.updatedCell { color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-.stamp { margin: 0; padding: 10px 20px; color: var(--text-muted); font-size: 11.5px; }
-.hint { margin: 0; padding: 16px 20px; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+.actionsCell { padding-top: 11px; padding-bottom: 11px; }
+.rowActions { display: flex; justify-content: flex-end; gap: 4px; }
+.iconAction { display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 7px; color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), transform var(--motion-fast); }
+.iconAction svg { width: 15px; height: 15px; }
+.iconAction:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-raised); }
+.iconAction:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.iconAction:active:not(:disabled) { transform: translateY(1px); }
+.iconAction[data-danger='true']:hover:not(:disabled) { color: var(--text-danger); }
+.iconAction:disabled { color: var(--text-disabled); cursor: not-allowed; }
 
-/* Compact: the row folds to two lines — name with its numbers, meter across
- * the full width beneath, reset stamp on its own line under the meter. */
-@media (max-width: 959px) {
-  .window {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      'title remaining'
-      'meter meter'
-      'resets resets';
-    row-gap: 7px;
-  }
-}
+.empty { display: grid; align-content: center; justify-items: center; gap: 14px; min-height: 260px; padding: 0 24px 24px; }
 
 .spinning { animation: icon-spin 1s linear infinite; }
 [data-animations='off'] .spinning { animation: none; }
-@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+
+@media (max-width: 959px) {
+  .table { min-width: 640px; }
+  .table th:nth-child(1) { width: 200px; }
+  .table th:nth-child(2) { width: 96px; }
+  .table th:nth-child(3), .table th:nth-child(4) { width: 150px; }
+  .table th:last-child { width: 96px; }
+  .updatedHead, .updatedCell { display: none; }
+  .resets { display: none; }
+  .iconAction { width: 28px; height: 28px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinning { animation: none; }
+}
 
 @keyframes icon-spin { to { transform: rotate(360deg); } }

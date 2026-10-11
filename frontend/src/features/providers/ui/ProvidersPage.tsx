@@ -9,6 +9,7 @@ import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import { hasCodexLogin } from '../../codex/application/codex-capability'
 import type { CodexAccount } from '../../codex/domain/codex'
 import DisconnectCodexDialog from '../../codex/ui/DisconnectCodexDialog'
+import { logoutErrorCopy } from '../../codex/ui/codex-copy'
 import { useCodex } from '../../codex/ui/useCodex'
 import type { Provider, ProviderInput, RateUnit } from '../domain/provider'
 import { isCodex } from '../domain/provider'
@@ -379,19 +380,6 @@ function rateShort(provider: Provider): string {
 function rateLabel(provider: Provider): string {
   if (provider.rpm === 0) return 'Unlimited'
   return `${provider.rpm} per ${provider.rateUnit === 'second' ? 'second' : 'minute'}`
-}
-
-// The backend's refusal sentences (the active-route guard among them) are
-// short and user-facing, so they travel verbatim; anything this long is a
-// dump (a provider list, an error blob) that has no place in a confirm
-// dialog, so it is cut at a word boundary instead.
-const LOGOUT_ERROR_MAX = 200
-function logoutErrorCopy(error: string): string {
-  const trimmed = error.trim()
-  if (trimmed.length <= LOGOUT_ERROR_MAX) return trimmed
-  const cut = trimmed.slice(0, LOGOUT_ERROR_MAX)
-  const boundary = cut.lastIndexOf(' ')
-  return `${boundary > 0 ? cut.slice(0, boundary) : cut}…`
 }
 
 function ProviderEditor({ mode, provider, pending, operationError, active, onClose, onSubmit }: {

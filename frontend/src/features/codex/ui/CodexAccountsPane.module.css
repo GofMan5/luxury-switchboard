@@ -3,27 +3,57 @@
  * moves, and icon actions at the row end. Windows report as inline meters, so
  * a single glance covers the whole pool the way the keys list covers its
  * keys. Columns hide by class, not by position — note rows span columns and
- * would break nth-child hiding. */
+ * would break nth-child hiding. Above the grid sits the toolbar: the filters
+ * take the left, the scope actions the right, and both wrap on narrow panes
+ * instead of overflowing. The compact view is the same data in list form for
+ * when the pane gets too narrow for the grid to breathe. */
 
 .pane { min-width: 0; }
 
-.table { width: 100%; min-width: 970px; border-collapse: collapse; table-layout: fixed; }
+/* Toolbar */
+.toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.toolbarFilters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.toolbarActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.search { min-width: 180px; height: 34px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 10px; color: var(--text-primary); background: var(--bg-field); font-size: 12.5px; transition: border-color var(--motion-fast), background var(--motion-fast); }
+.search:hover { border-color: var(--border-field); background: var(--bg-raised); }
+.search:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.toolbarSelect { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }
+.toolbarSelect select { min-width: 110px; height: 34px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 10px; color: var(--text-primary); background: var(--bg-field); transition: border-color var(--motion-fast), background var(--motion-fast); }
+.toolbarSelect select:hover { border-color: var(--border-field); background: var(--bg-raised); }
+.toolbarSelect select:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.paneError { margin: 0 0 12px; color: var(--text-danger); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
+
+/* Grid */
+.table { width: 100%; min-width: 1100px; border-collapse: collapse; table-layout: fixed; }
 .table th, .table td { height: 52px; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; vertical-align: middle; }
 .table th { position: sticky; z-index: 2; top: 0; height: 34px; color: var(--text-muted); background: var(--bg-chrome); font-size: 10.5px; font-weight: 640; letter-spacing: 0.05em; text-transform: uppercase; box-shadow: 0 1px 0 var(--border-subtle); }
 .table tbody tr:hover { background: color-mix(in srgb, var(--bg-hover) 72%, transparent); }
-.table th:nth-child(1) { width: 250px; }
-.table th:nth-child(2) { width: 108px; }
-.table th:nth-child(3), .table th:nth-child(4) { width: 190px; }
-.table th:nth-child(5) { width: 122px; }
+.table th:nth-child(1) { width: 40px; }
+.table th:nth-child(2) { width: 230px; }
+.table th:nth-child(3) { width: 110px; }
+.table th:nth-child(4) { width: 90px; }
+.table th:nth-child(5) { width: 70px; }
+.table th:nth-child(6), .table th:nth-child(7) { width: 190px; }
+.table th:nth-child(8) { width: 122px; }
 .table th:last-child { width: 100px; }
+
+.selectHead, .selectCell { text-align: center; }
+.selectHead input, .selectCell input, .compactHead input { width: 14px; height: 14px; margin: 0; accent-color: var(--status-info); cursor: pointer; }
+.selectHead input:focus-visible, .selectCell input:focus-visible, .compactHead input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 .accountCell { padding-top: 9px; padding-bottom: 9px; }
 .accountLabel { display: grid; gap: 2px; min-width: 0; }
 .email { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+.loginMethod { color: var(--text-muted); font-size: 10.5px; line-height: 1.3; }
 .accountNote { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .rowError { margin: 4px 0 0; color: var(--text-danger); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
 
-.stateCell { white-space: nowrap; }
+.stateCell { display: grid; gap: 4px; justify-items: start; white-space: nowrap; }
+.wakingNote { color: var(--text-muted); font-size: 10.5px; line-height: 1.3; }
+
+.planCell { text-align: center; }
+.resetsCell { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; text-align: center; }
+.absentValue { color: var(--text-disabled); font-size: 12px; }
 
 .windowCell { padding-top: 11px; padding-bottom: 11px; }
 .meter { height: 6px; overflow: hidden; border-radius: 3px; background: var(--bg-raised); }
@@ -50,17 +80,31 @@
 .iconAction[data-danger='true']:hover:not(:disabled) { color: var(--text-danger); }
 .iconAction:disabled { color: var(--text-disabled); cursor: not-allowed; }
 
+/* Compact view: the same rows as cards when the pane is too narrow for a grid. */
+.compactList { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.compactRow { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-surface); }
+.compactHead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.compactHead .email { flex: 1 1 140px; min-width: 0; }
+.compactHead .rowActions { justify-content: flex-start; }
+.compactResets { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.compactNote { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.compactWindows { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.compactWindow { display: grid; min-width: 0; }
+.compactUpdated { color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.noMatch { padding: 26px 12px; color: var(--text-muted); font-size: 11.5px; line-height: 1.45; list-style: none; }
+
 .empty { display: grid; align-content: center; justify-items: center; gap: 14px; min-height: 260px; padding: 0 24px 24px; }
 
 .spinning { animation: icon-spin 1s linear infinite; }
 [data-animations='off'] .spinning { animation: none; }
 
 @media (max-width: 959px) {
-  .table { min-width: 640px; }
-  .table th:nth-child(1) { width: 200px; }
-  .table th:nth-child(2) { width: 96px; }
-  .table th:nth-child(3), .table th:nth-child(4) { width: 150px; }
-  .table th:last-child { width: 96px; }
+  .table { min-width: 780px; }
+  .table th:nth-child(2) { width: 200px; }
+  .table th:nth-child(3) { width: 96px; }
+  .table th:nth-child(4) { width: 84px; }
+  .table th:nth-child(6), .table th:nth-child(7) { width: 150px; }
+  .table th:nth-child(5), .resetsCell { display: none; }
   .updatedHead, .updatedCell { display: none; }
   .resets { display: none; }
   .iconAction { width: 28px; height: 28px; }

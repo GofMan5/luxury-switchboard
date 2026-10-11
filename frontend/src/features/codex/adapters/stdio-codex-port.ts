@@ -1,17 +1,19 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import { openExternal } from '../../../platform/lifecycle/open-external'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
-import type { CodexAccount, CodexAccountState, CodexLoginPhase, CodexLoginStatus, CodexQuotaReport, CodexQuotaResult, CodexQuotaWindow, CodexStatus } from '../domain/codex'
-import type { CodexDeviceLoginStart, CodexImportResult, CodexPort } from '../application/codex-port'
+import { aggregateCodexState, type CodexAccount, type CodexAccountState, type CodexLoginPhase, type CodexLoginStatus, type CodexQuotaReport, type CodexQuotaResult, type CodexQuotaWindow, type CodexStatus, type CodexWakeOutcome, type CodexWakeResult } from '../domain/codex'
+import type { CodexDeviceLoginStart, CodexImportResult, CodexPort, CodexQuotaAllResult } from '../application/codex-port'
 
 const LOGIN_PHASES: readonly CodexLoginPhase[] = ['idle', 'waiting', 'exchanging', 'success', 'error']
 const ACCOUNT_STATES: readonly CodexAccountState[] = ['signed_out', 'signed_in', 'reauth_needed']
 
-type AccountRow = { state?: string; email?: unknown; plan?: unknown; accountId?: unknown; providerId?: unknown }
+type AccountRow = { state?: string; email?: unknown; plan?: unknown; accountId?: unknown; providerId?: unknown; loginMethod?: unknown; resets?: unknown }
 type StatusPayload = { state?: string; accounts?: unknown; importedFrom?: unknown }
 type QuotaPayload = { accountId?: unknown; quota?: unknown; error?: unknown }
+type QuotaAllPayload = { results?: unknown }
 type QuotaReportPayload = { fetchedAt?: unknown; planType?: unknown; primary?: unknown; secondary?: unknown }
 type QuotaWindowPayload = { present?: unknown; remainingPercent?: unknown; windowMinutes?: unknown; resetAt?: unknown }
+type WakePayload = { results?: unknown }
 
 /** The window a probe did not report: no meter, neutral full value. */
 const unreportedWindow: CodexQuotaWindow = { present: false, remainingPercent: 100 }
@@ -77,19 +79,35 @@ export class StdioCodexPort implements CodexPort {
       // field is broken still reports real rows, so the state is recomputed
       // from them rather than wiping the accounts away.
       const stated = ACCOUNT_STATES.find((candidate) => candidate === value.state)
-      return { state: stated ?? aggregateState(accounts), accounts }
+      return { state: stated ?? aggregateCodexState(accounts), accounts }
     })
   }
 
   quota(accountId: string, signal?: AbortSignal): Promise<CodexQuotaResult> {
     const result = this.#session.call<QuotaPayload>('codex.quota', { accountId }, signal)
-    return result.then((value) => ({
-      accountId: typeof value.accountId === 'string' ? value.accountId : '',
-      quota: coerceQuotaReport(value.quota),
-      // A probe failure is a result field, never a transport rejection;
-      // anything but text has nothing to say and stays silent.
-      error: typeof value.error === 'string' && value.error.trim() !== '' ? value.error : undefined,
-    }))
+    return result.then(coerceQuotaResult)
+  }
+
+  quotaAll(signal?: AbortSignal): Promise<CodexQuotaAllResult> {
+    const result = this.#session.call<QuotaAllPayload>('codex.quota.all', undefined, signal)
+    // The fleet check answers the same per-account rows the single probe
+    // answers; a malformed list is "no rows", never a crash.
+    return result.then((value) => ({ results: Array.isArray(value.results) ? value.results.flatMap(coerceQuotaRows) : [] }))
+  }
+
+  async wake(accountIds: readonly string[] | null, signal?: AbortSignal): Promise<CodexWakeResult> {
+    // null asks the backend for the whole fleet in one call; the wire carries
+    // a single optional accountId, so a named selection becomes one call per
+    // account and the rows merge in the selection's order. An empty
+    // selection wakes nothing, and waking nothing is a completed wake.
+    if (accountIds !== null && accountIds.length === 0) return { results: [] }
+    if (accountIds === null) {
+      const value = await this.#session.call<WakePayload>('codex.wake', undefined, signal)
+      return { results: coerceWakeRows(value) }
+    }
+    const answers = await Promise.all(accountIds.map((accountId) =>
+      this.#session.call<WakePayload>('codex.wake', { accountId }, signal)))
+    return { results: answers.flatMap((value) => coerceWakeRows(value)) }
   }
 
   async logout(accountId: string | null, remove: boolean, signal?: AbortSignal): Promise<void> {
@@ -126,7 +144,7 @@ function coerceImportResult(value: StatusPayload): CodexImportResult {
   const accounts = coerceAccountRows(value.accounts)
   const stated = ACCOUNT_STATES.find((candidate) => candidate === value.state)
   return {
-    state: stated ?? aggregateState(accounts),
+    state: stated ?? aggregateCodexState(accounts),
     accounts,
     importedFrom: typeof value.importedFrom === 'string' && value.importedFrom !== '' ? value.importedFrom : undefined,
   }
@@ -139,22 +157,20 @@ function coerceAccountRows(entries: readonly unknown[]): readonly CodexAccount[]
     if (typeof entry !== 'object' || entry === null) return []
     const row = entry as AccountRow
     const state = ACCOUNT_STATES.find((candidate) => candidate === row.state)
+    // loginMethod and resets ride the row whenever the backend's store
+    // carries them; anything malformed reads as "not reported" rather than
+    // a guess, exactly like the label fields above.
+    const resets = row.resets
     return [{
       state: state ?? 'signed_out',
       email: typeof row.email === 'string' ? row.email : '',
       plan: typeof row.plan === 'string' ? row.plan : '',
       accountId: typeof row.accountId === 'string' ? row.accountId : '',
       providerId: typeof row.providerId === 'string' ? row.providerId : '',
+      loginMethod: typeof row.loginMethod === 'string' && row.loginMethod !== '' ? row.loginMethod : undefined,
+      resets: typeof resets === 'number' && Number.isFinite(resets) && Number.isInteger(resets) && resets >= 0 ? resets : undefined,
     }]
   })
-}
-
-/** The backend aggregate over rows: signed in once any account is, reauth
- * only when every signed-in one broke, signed out otherwise. */
-function aggregateState(accounts: readonly CodexAccount[]): CodexAccountState {
-  if (accounts.some((account) => account.state === 'signed_in')) return 'signed_in'
-  if (accounts.some((account) => account.state === 'reauth_needed')) return 'reauth_needed'
-  return 'signed_out'
 }
 
 /** A quota block only exists once a probe succeeded (fetchedAt is set); a
@@ -189,4 +205,42 @@ function coerceQuotaWindow(value: unknown): CodexQuotaWindow {
     windowMinutes: typeof minutes === 'number' && Number.isFinite(minutes) && minutes >= 1 ? Math.round(minutes) : undefined,
     resetAt: typeof resetAt === 'number' && Number.isFinite(resetAt) && resetAt > 0 ? resetAt : undefined,
   }
+}
+
+/** One quota row: the account, the settled probe, and a failure as status
+ * text. A probe failure is a result field, never a transport rejection;
+ * anything but text has nothing to say and stays silent. */
+function coerceQuotaResult(entry: unknown): CodexQuotaResult {
+  if (typeof entry !== 'object' || entry === null) return { accountId: '' }
+  const row = entry as QuotaPayload
+  return {
+    accountId: typeof row.accountId === 'string' ? row.accountId : '',
+    quota: coerceQuotaReport(row.quota),
+    error: typeof row.error === 'string' && row.error.trim() !== '' ? row.error : undefined,
+  }
+}
+
+/** Quota rows for the fleet check: an entry that is not an object is not a
+ * row and is dropped, never coerced into a phantom account. */
+function coerceQuotaRows(entry: unknown): CodexQuotaResult[] {
+  if (typeof entry !== 'object' || entry === null) return []
+  return [coerceQuotaResult(entry)]
+}
+
+/** Wake rows: the account, the state the backend saw, and a failure as
+ * status text when the wake could not run. An entry that is not an object
+ * is dropped; an unknown state fails safe to signed_out, the same fallback
+ * the status rows use. */
+function coerceWakeRows(value: WakePayload): readonly CodexWakeOutcome[] {
+  if (!Array.isArray(value.results)) return []
+  return value.results.flatMap((entry): CodexWakeOutcome[] => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const row = entry as { accountId?: unknown; state?: string; error?: unknown }
+    const state = ACCOUNT_STATES.find((candidate) => candidate === row.state)
+    return [{
+      accountId: typeof row.accountId === 'string' ? row.accountId : '',
+      state: state ?? 'signed_out',
+      error: typeof row.error === 'string' && row.error.trim() !== '' ? row.error : undefined,
+    }]
+  })
 }

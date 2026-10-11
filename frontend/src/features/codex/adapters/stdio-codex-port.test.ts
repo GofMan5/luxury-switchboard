@@ -201,6 +201,99 @@ describe('StdioCodexPort', () => {
     expect(session.call).toHaveBeenNthCalledWith(4, 'codex.logout', { remove: true }, undefined)
   })
 
+  it('wakes the whole fleet in one call and coerces the outcome rows it gets back', async () => {
+    const session = sessionWith({
+      'codex.wake': {
+        results: [
+          { accountId: 'acct-1', state: 'signed_in' },
+          { accountId: 'acct-2', state: 'linked', error: 'codex is not signed in' },
+          'not a row',
+        ],
+      },
+    })
+    const port = new StdioCodexPort(session)
+
+    await expect(port.wake(null)).resolves.toEqual({
+      results: [
+        { accountId: 'acct-1', state: 'signed_in' },
+        { accountId: 'acct-2', state: 'signed_out', error: 'codex is not signed in' },
+      ],
+    })
+    expect(session.call).toHaveBeenLastCalledWith('codex.wake', undefined, undefined)
+  })
+
+  it('splits a wake selection into one call per account and merges the outcomes in order', async () => {
+    const session = sessionWith({})
+    vi.mocked(session.call).mockImplementation(async (command: string, payload?: unknown) => {
+      if (command !== 'codex.wake' || typeof payload !== 'object' || payload === null) {
+        throw new Error(`unexpected command ${command}`)
+      }
+      return { results: [{ accountId: (payload as { accountId?: string }).accountId, state: 'reauth_needed' }] }
+    })
+    const port = new StdioCodexPort(session)
+
+    await expect(port.wake(['acct-2', 'acct-1'])).resolves.toEqual({
+      results: [
+        { accountId: 'acct-2', state: 'reauth_needed' },
+        { accountId: 'acct-1', state: 'reauth_needed' },
+      ],
+    })
+    expect(session.call).toHaveBeenNthCalledWith(1, 'codex.wake', { accountId: 'acct-2' }, undefined)
+    expect(session.call).toHaveBeenNthCalledWith(2, 'codex.wake', { accountId: 'acct-1' }, undefined)
+
+    // An empty selection wakes nothing, and waking nothing is a completed wake.
+    await expect(port.wake([])).resolves.toEqual({ results: [] })
+    expect(session.call).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the fleet usage check as one command with the rows a single probe answers', async () => {
+    const session = sessionWith({
+      'codex.quota.all': {
+        results: [
+          { accountId: 'acct-1', quota: { fetchedAt: 7, primary: { present: true, remainingPercent: 300.6 } } },
+          { accountId: 'acct-2', error: 'codex is not signed in' },
+          null,
+        ],
+      },
+    })
+    const port = new StdioCodexPort(session)
+
+    await expect(port.quotaAll()).resolves.toEqual({
+      results: [
+        {
+          accountId: 'acct-1',
+          quota: {
+            fetchedAt: 7,
+            primary: { present: true, remainingPercent: 100 },
+            secondary: { present: false, remainingPercent: 100 },
+          },
+        },
+        { accountId: 'acct-2', error: 'codex is not signed in' },
+      ],
+    })
+    expect(session.call).toHaveBeenLastCalledWith('codex.quota.all', undefined, undefined)
+  })
+
+  it('carries the login method and reset count on each row, reading anything malformed as not reported', async () => {
+    const port = new StdioCodexPort(sessionWith({
+      'codex.status': {
+        state: 'signed_in',
+        accounts: [
+          { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex', loginMethod: 'device', resets: 3 },
+          { state: 'reauth_needed', email: 'sam@example.com', plan: 'Plus', accountId: 'acct-2', providerId: 'codex', loginMethod: '', resets: -2.5 },
+        ],
+      },
+    }))
+
+    await expect(port.status()).resolves.toEqual({
+      state: 'signed_in',
+      accounts: [
+        { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex', loginMethod: 'device', resets: 3 },
+        { state: 'reauth_needed', email: 'sam@example.com', plan: 'Plus', accountId: 'acct-2', providerId: 'codex' },
+      ],
+    })
+  })
+
   it('reads the import outcome: the state, the accounts it produced, and the file it came from', async () => {
     const port = new StdioCodexPort(sessionWith({
       'codex.import.json': {

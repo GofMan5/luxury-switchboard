@@ -31,6 +31,8 @@ type codexService interface {
 	Status() application.Status
 	Logout(ctx context.Context, accountID string, removeEntry bool) error
 	RefreshQuota(ctx context.Context, accountID string) application.QuotaSnapshot
+	Wake(ctx context.Context, accountID string) []application.WakeOutcome
+	RefreshQuotaAll(ctx context.Context) []application.QuotaOutcome
 	OnChanged(func(application.Snapshot))
 }
 
@@ -46,14 +48,16 @@ type fakeService struct {
 	status       application.Status
 	logoutErr    error
 
-	deviceStartErr  error
-	deviceView      application.DeviceLoginView
-	importJSONErr   error
-	importJSONRes   application.ImportResult
-	importFilesErr  error
-	importFilesRes  application.ImportResult
-	importPathsFail bool
-	quotaSnapshot   application.QuotaSnapshot
+	deviceStartErr   error
+	deviceView       application.DeviceLoginView
+	importJSONErr    error
+	importJSONRes    application.ImportResult
+	importFilesErr   error
+	importFilesRes   application.ImportResult
+	importPathsFail  bool
+	quotaSnapshot    application.QuotaSnapshot
+	quotaAllOutcomes []application.QuotaOutcome
+	wakeOutcomes     []application.WakeOutcome
 
 	mu            sync.Mutex
 	cancelCalls   int
@@ -66,6 +70,9 @@ type fakeService struct {
 	quotaProbes   int
 	probedIDs     []string
 	quotaCtxs     []context.Context
+	quotaAllCtxs  []context.Context
+	wakeTargets   []string
+	wakeCtxs      []context.Context
 }
 
 func (service *fakeService) LoginStart() (string, error) {
@@ -139,6 +146,27 @@ func (service *fakeService) RefreshQuota(ctx context.Context, accountID string) 
 	return service.quotaSnapshot
 }
 
+// RefreshQuotaAll records the context the same way the single probe
+// does — the fleet check rides the command's own cancellation — and
+// answers with the canned outcomes, exactly as the real service would.
+func (service *fakeService) RefreshQuotaAll(ctx context.Context) []application.QuotaOutcome {
+	service.mu.Lock()
+	service.quotaAllCtxs = append(service.quotaAllCtxs, ctx)
+	service.mu.Unlock()
+	return service.quotaAllOutcomes
+}
+
+// Wake records the id and the context it was handed, then answers with
+// the canned outcomes. The empty id the toolbar's wake-all sends is one
+// of the ids a test can pin here.
+func (service *fakeService) Wake(ctx context.Context, accountID string) []application.WakeOutcome {
+	service.mu.Lock()
+	service.wakeTargets = append(service.wakeTargets, accountID)
+	service.wakeCtxs = append(service.wakeCtxs, ctx)
+	service.mu.Unlock()
+	return service.wakeOutcomes
+}
+
 func (service *fakeService) OnChanged(listener func(application.Snapshot)) {
 	service.mu.Lock()
 	service.subscriptions++
@@ -166,6 +194,31 @@ func (service *fakeService) quotaProbeCtxs(t *testing.T) []context.Context {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	return append([]context.Context(nil), service.quotaCtxs...)
+}
+
+// quotaAllCtxsOf returns the contexts the fleet check handler passed
+// down, for the same reason the single probe records its own.
+func (service *fakeService) quotaAllCtxsOf(t *testing.T) []context.Context {
+	t.Helper()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return append([]context.Context(nil), service.quotaAllCtxs...)
+}
+
+// wakeTargetIDs returns the ids the wake handler passed down, in command
+// order; wakeCtxsOf the contexts, for the same cancellation pin.
+func (service *fakeService) wakeTargetIDs(t *testing.T) []string {
+	t.Helper()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return append([]string(nil), service.wakeTargets...)
+}
+
+func (service *fakeService) wakeCtxsOf(t *testing.T) []context.Context {
+	t.Helper()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return append([]context.Context(nil), service.wakeCtxs...)
 }
 
 // logoutRemoveFlags returns the remove flags the handlers passed down,
@@ -460,20 +513,28 @@ func TestLoginStatusCarriesTheDeviceCodeWhileOneIsShown(t *testing.T) {
 }
 
 // assertAccountRow pins one status row's exact shape: the id-token
-// labels plus the account's own state and the Providers-page entry it
-// serves — no more, because a row is not a second copy of the status.
-func assertAccountRow(t *testing.T, row any, accountID, email, plan, state, providerID string) {
+// labels, the account's own state, the Providers-page entry it serves,
+// how the session arrived and how many limit cycles it burned — no
+// more, because a row is not a second copy of the status. loginMethod
+// is the empty string when the row must carry none; resets always
+// travels, so zero is an answer the table renders, not a missing field.
+func assertAccountRow(t *testing.T, row any, accountID, email, plan, state, providerID, loginMethod string, resets json.Number) {
 	t.Helper()
 	fields, ok := row.(map[string]any)
 	if !ok {
 		t.Fatalf("account row is not an object: %+v", row)
 	}
 	want := map[string]any{
-		"accountId":  accountID,
-		"email":      email,
-		"plan":       plan,
-		"state":      state,
-		"providerId": providerID,
+		"accountId":   accountID,
+		"email":       email,
+		"plan":        plan,
+		"state":       state,
+		"providerId":  providerID,
+		"loginMethod": loginMethod,
+		"resets":      resets,
+	}
+	if loginMethod == "" {
+		delete(want, "loginMethod")
 	}
 	if len(fields) != len(want) {
 		t.Fatalf("account row answered %d fields, want %d: %+v", len(fields), len(want), fields)
@@ -490,11 +551,13 @@ func TestStatusCarriesTheStateAndEveryAccountRow(t *testing.T) {
 		State: application.StateSignedIn,
 		Accounts: []application.AccountStatus{
 			{
-				AccountID:  "acc_7",
-				Email:      "dev@example.com",
-				Plan:       "pro",
-				State:      application.StateSignedIn,
-				ProviderID: "codex",
+				AccountID:   "acc_7",
+				Email:       "dev@example.com",
+				Plan:        "pro",
+				State:       application.StateSignedIn,
+				ProviderID:  "codex",
+				LoginMethod: "browser",
+				Resets:      3,
 			},
 			{
 				AccountID: "acc_9",
@@ -517,12 +580,15 @@ func TestStatusCarriesTheStateAndEveryAccountRow(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("status answered %d account rows, want 2: %+v", len(rows), payload)
 	}
-	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "pro", "signed_in", "codex")
+	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "pro", "signed_in", "codex", "browser", json.Number("3"))
 	// A second row proves the array is real, not a re-labelled single
 	// account: it keeps its own state — reauth — even while the aggregate
 	// says signed in, and an entry that has not been provisioned yet
-	// carries an empty provider id rather than a borrowed one.
-	assertAccountRow(t, rows[1], "acc_9", "ops@example.com", "plus", "reauth_needed", "")
+	// carries an empty provider id rather than a borrowed one. Its
+	// session landed before the method was recorded, so the row carries
+	// no loginMethod — absent, not blank — while resets still answers
+	// zero: the count is an answer, not an optional extra.
+	assertAccountRow(t, rows[1], "acc_9", "ops@example.com", "plus", "reauth_needed", "", "", json.Number("0"))
 	if len(payload) != 2 {
 		t.Fatalf("status answered %d fields, want state and accounts: %+v", len(payload), payload)
 	}
@@ -743,6 +809,239 @@ func TestAQuotaCommandWithPayloadFieldsIsRefused(t *testing.T) {
 	}
 }
 
+// TestQuotaAllAnswersOneCardPerAccount pins the fleet check's shape:
+// one card per outcome, in the service's order, and each card answers
+// exactly like the single-account quota command — the meters it
+// learned, or the error that stopped it learning them. A card's failure
+// is a result, never a refusal: one stubborn account must not answer
+// for the fleet.
+func TestQuotaAllAnswersOneCardPerAccount(t *testing.T) {
+	service := &fakeService{quotaAllOutcomes: []application.QuotaOutcome{
+		{
+			AccountID: "acc_7",
+			Snapshot: application.QuotaSnapshot{
+				FetchedAt: 1_800_000_000,
+				Usage: domain.Usage{
+					PlanType: "plus",
+					Primary: domain.QuotaWindow{
+						Present:          true,
+						RemainingPercent: 38,
+						WindowMinutes:    5,
+						ResetAt:          time.Unix(1_800_001_800, 0).UTC(),
+					},
+				},
+			},
+		},
+		{
+			AccountID: "acc_9",
+			Snapshot:  application.QuotaSnapshot{Err: "codex oauth usage probe failed: http 503"},
+		},
+	}}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.quota.all","payload":{}`)[0])
+
+	if len(payload) != 1 {
+		t.Fatalf("quota all answered %d fields, want only results: %+v", len(payload), payload)
+	}
+	cards, ok := payload["results"].([]any)
+	if !ok {
+		t.Fatalf("quota all answered without a results array: %+v", payload)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("quota all answered %d cards, want one per account: %+v", len(cards), payload)
+	}
+	settled, ok := cards[0].(map[string]any)
+	if !ok {
+		t.Fatalf("quota all card is not an object: %+v", cards[0])
+	}
+	if settled["accountId"] != "acc_7" {
+		t.Fatalf("first card accountId = %#v, want acc_7", settled["accountId"])
+	}
+	report, ok := settled["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("settled card carried no quota report: %+v", settled)
+	}
+	if report["fetchedAt"] != json.Number("1800000000") {
+		t.Fatalf("quota all fetchedAt = %#v, want the probe's epoch", report["fetchedAt"])
+	}
+	if report["planType"] != "plus" {
+		t.Fatalf("quota all planType = %#v, want plus", report["planType"])
+	}
+	assertQuotaWindow(t, quotaWindowOf(t, report, "primary"), true, json.Number("38"), map[string]json.Number{
+		"windowMinutes": json.Number("5"),
+		"resetAt":       json.Number("1800001800"),
+	})
+	if len(settled) != 2 {
+		t.Fatalf("settled card answered %d fields, want account and report: %+v", len(settled), settled)
+	}
+	failed, ok := cards[1].(map[string]any)
+	if !ok {
+		t.Fatalf("quota all card is not an object: %+v", cards[1])
+	}
+	if failed["accountId"] != "acc_9" {
+		t.Fatalf("second card accountId = %#v, want acc_9", failed["accountId"])
+	}
+	if failed["error"] != "codex oauth usage probe failed: http 503" {
+		t.Fatalf("second card error = %#v, want the probe's own text", failed["error"])
+	}
+	if _, present := failed["quota"]; present {
+		t.Fatalf("failed card invented a report it never got: %+v", failed)
+	}
+	// The fleet check ran once and rode the command's own context, so a
+	// shell that aborts the frame also aborts every HTTP call behind it.
+	ctxs := service.quotaAllCtxsOf(t)
+	if len(ctxs) != 1 {
+		t.Fatalf("quota all ran %d times, want 1", len(ctxs))
+	}
+	if ctxs[0] == context.Background() {
+		t.Fatal("quota all ran on context.Background, want the command's cancellable context")
+	}
+}
+
+// TestQuotaAllBeforeAnyAccountAnswersAnEmptyArray pins the JSON shape:
+// a fleet with nothing stored carries an empty array, not null — the
+// toolbar must tell "no accounts" apart from a field that went missing
+// — while the command still reaches the service once, because the
+// emptiness is the service's answer, not the adapter's guess.
+func TestQuotaAllBeforeAnyAccountAnswersAnEmptyArray(t *testing.T) {
+	service := &fakeService{}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.quota.all","payload":{}`)[0])
+
+	cards, ok := payload["results"].([]any)
+	if !ok {
+		t.Fatalf("quota all before any account = %#v, want an empty array", payload["results"])
+	}
+	if len(cards) != 0 {
+		t.Fatalf("quota all before any account = %v, want empty", cards)
+	}
+	if ctxs := service.quotaAllCtxsOf(t); len(ctxs) != 1 {
+		t.Fatalf("quota all reached the service %d times, want 1", len(ctxs))
+	}
+}
+
+// TestQuotaAllTakesNoPayloadFields keeps the fleet check a fieldless
+// command: it decides its own account list, so a client that tries to
+// narrow it gets the standard refusal instead of being silently
+// ignored.
+func TestQuotaAllTakesNoPayloadFields(t *testing.T) {
+	service := &fakeService{}
+
+	failure := failureOf(t, exchange(t, service, `"method":"codex.quota.all","payload":{"accountId":"acc_7"}`)[0])
+
+	if failure["code"] != "invalid_payload" {
+		t.Fatalf("error code = %#v, want invalid_payload", failure["code"])
+	}
+	if failure["message"] != "codex command payload is invalid" {
+		t.Fatalf("error message = %#v, want the adapter's refusal text", failure["message"])
+	}
+	if ctxs := service.quotaAllCtxsOf(t); len(ctxs) != 0 {
+		t.Fatalf("refused payload still probed the fleet %d times, want 0", len(ctxs))
+	}
+}
+
+// TestWakeTargetsTheAccountItWasNamed pins the single-account wake: the
+// frame's accountId is the id the service receives, and the answer is
+// one row per outcome — the row's own state, no error while none
+// happened — riding the command's cancellable context.
+func TestWakeTargetsTheAccountItWasNamed(t *testing.T) {
+	service := &fakeService{wakeOutcomes: []application.WakeOutcome{
+		{AccountID: "acc_7", State: application.StateSignedIn},
+	}}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.wake","payload":{"accountId":"acc_7"}`)[0])
+
+	if len(payload) != 1 {
+		t.Fatalf("wake answered %d fields, want only results: %+v", len(payload), payload)
+	}
+	rows, ok := payload["results"].([]any)
+	if !ok {
+		t.Fatalf("wake answered without a results array: %+v", payload)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("wake answered %d rows, want the one account: %+v", len(rows), payload)
+	}
+	row, ok := rows[0].(map[string]any)
+	if !ok {
+		t.Fatalf("wake row is not an object: %+v", rows[0])
+	}
+	if row["accountId"] != "acc_7" || row["state"] != "signed_in" {
+		t.Fatalf("wake row = %+v, want acc_7 signed in", row)
+	}
+	if _, present := row["error"]; present {
+		t.Fatalf("a wake that succeeded still reported an error: %+v", row)
+	}
+	if len(row) != 2 {
+		t.Fatalf("wake row answered %d fields, want account and state: %+v", len(row), row)
+	}
+	targets := service.wakeTargetIDs(t)
+	if len(targets) != 1 || targets[0] != "acc_7" {
+		t.Fatalf("wake targeted %v, want the account the frame named", targets)
+	}
+	ctxs := service.wakeCtxsOf(t)
+	if len(ctxs) != 1 {
+		t.Fatalf("wake ran %d times, want 1", len(ctxs))
+	}
+	if ctxs[0] == context.Background() {
+		t.Fatal("wake ran on context.Background, want the command's cancellable context")
+	}
+}
+
+// TestWakeWithoutAnAccountWakesTheFleet pins the wake-all: the toolbar
+// sends no accountId, the service receives the empty id, and every
+// outcome rides the same answer — including a row that failed, whose
+// error is a field on that row, never a refusal that hides the rows
+// that succeeded.
+func TestWakeWithoutAnAccountWakesTheFleet(t *testing.T) {
+	service := &fakeService{wakeOutcomes: []application.WakeOutcome{
+		{AccountID: "acc_7", State: application.StateSignedIn},
+		{AccountID: "acc_9", State: application.StateReauthNeeded, Err: "codex session needs sign-in again"},
+	}}
+
+	payload := payloadOf(t, exchange(t, service, `"method":"codex.wake"`)[0])
+
+	rows, ok := payload["results"].([]any)
+	if !ok || len(rows) != 2 {
+		t.Fatalf("wake-all answered %v rows, want one per account: %+v", payload["results"], payload)
+	}
+	failed, ok := rows[1].(map[string]any)
+	if !ok {
+		t.Fatalf("wake row is not an object: %+v", rows[1])
+	}
+	if failed["accountId"] != "acc_9" || failed["state"] != "reauth_needed" {
+		t.Fatalf("failed wake row = %+v, want acc_9 reauth_needed", failed)
+	}
+	if failed["error"] != "codex session needs sign-in again" {
+		t.Fatalf("failed wake row error = %#v, want the service's own text", failed["error"])
+	}
+	if len(failed) != 3 {
+		t.Fatalf("failed wake row answered %d fields, want account, state and error: %+v", len(failed), failed)
+	}
+	targets := service.wakeTargetIDs(t)
+	if len(targets) != 1 || targets[0] != "" {
+		t.Fatalf("wake-all targeted %v, want the empty id that means the fleet", targets)
+	}
+}
+
+// TestWakeTakesNoUnexpectedPayloadFields keeps the wake payload a
+// closed contract: the accountId it takes is the only field, so
+// anything else a client puts in the frame gets the standard refusal.
+func TestWakeTakesNoUnexpectedPayloadFields(t *testing.T) {
+	service := &fakeService{}
+
+	failure := failureOf(t, exchange(t, service, `"method":"codex.wake","payload":{"accountId":"acc_7","force":true}`)[0])
+
+	if failure["code"] != "invalid_payload" {
+		t.Fatalf("error code = %#v, want invalid_payload", failure["code"])
+	}
+	if failure["message"] != "codex command payload is invalid" {
+		t.Fatalf("error message = %#v, want the adapter's refusal text", failure["message"])
+	}
+	if targets := service.wakeTargetIDs(t); len(targets) != 0 {
+		t.Fatalf("refused wake still reached the service for %v, want no calls", targets)
+	}
+}
+
 func TestLogoutAnswersAnEmptyObject(t *testing.T) {
 	service := &fakeService{}
 
@@ -824,7 +1123,7 @@ func TestImportJSONSendsTrimmedTextAndAnswersTheLandedAccount(t *testing.T) {
 	if !ok || len(rows) != 1 {
 		t.Fatalf("json import answered %v account rows, want the landed account: %+v", payload["accounts"], payload)
 	}
-	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "pro", "signed_in", "codex")
+	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "pro", "signed_in", "codex", "", json.Number("0"))
 	// A paste drags whitespace with it; the wire owes the parser the
 	// trimmed text because leading spaces would disguise the JSON it
 	// keys on. Pasted JSON has no file to name, so importedFrom must
@@ -865,7 +1164,7 @@ func TestImportFilesSendsEveryPathInOrderAndAnswersTheFileItCameFrom(t *testing.
 	if !ok || len(rows) != 1 {
 		t.Fatalf("file import answered %v account rows, want the landed account: %+v", payload["accounts"], payload)
 	}
-	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "", "signed_in", "codex")
+	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "", "signed_in", "codex", "", json.Number("0"))
 	if payload["importedFrom"] != "auth-codex.json" {
 		t.Fatalf("importedFrom = %#v, want the base name of the winning file", payload["importedFrom"])
 	}
@@ -1042,7 +1341,7 @@ func TestASnapshotChangeEmitsExactlyOneCodexChangedEvent(t *testing.T) {
 	if !ok || len(rows) != 1 {
 		t.Fatalf("push carried %v account rows, want the signed-in account: %+v", payload["accounts"], payload)
 	}
-	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "pro", "signed_in", "codex")
+	assertAccountRow(t, rows[0], "acc_7", "dev@example.com", "pro", "signed_in", "codex", "", json.Number("0"))
 	if len(payload) != 4 {
 		t.Fatalf("push carried %d fields, want the login pair, state and accounts: %+v", len(payload), payload)
 	}
@@ -1162,7 +1461,7 @@ func TestAPanickingHandlerFailsTheCommandNotTheProtocol(t *testing.T) {
 	if !ok || len(rows) != 1 {
 		t.Fatalf("status after a panic carried %v account rows, want 1: %+v", payload["accounts"], payload)
 	}
-	assertAccountRow(t, rows[0], "acc_7", "", "", "signed_in", "codex")
+	assertAccountRow(t, rows[0], "acc_7", "", "", "signed_in", "codex", "", json.Number("0"))
 	if payload["state"] != "signed_in" {
 		t.Fatalf("status after a panic carried the wrong state: %+v", payload)
 	}

@@ -16,6 +16,10 @@ vi.mock('../../codex/ui/CodexAccountsPane', () => ({
       <button type="button" onClick={props.onAddAccount}>pane-add</button>
       <button type="button" onClick={props.onSignIn}>pane-sign-in</button>
       <button type="button" onClick={() => props.onSignOut({ accountId: 'acct-1', email: 'dev@example.com', state: 'signed_in' })}>pane-sign-out</button>
+      <button type="button" onClick={() => props.onRemove([
+        { accountId: 'acct-1', email: 'dev@example.com', state: 'signed_in' },
+        { accountId: 'acct-2', email: 'sam@example.com', state: 'signed_in' },
+      ])}>pane-remove</button>
     </div>
   ),
 }))
@@ -30,8 +34,8 @@ vi.mock('../../codex/ui/CodexSignInDialog', () => ({
 vi.mock('../../codex/ui/DisconnectCodexDialog', () => ({
   default: (props: DisconnectDialogProps) => (
     <div data-testid="codex-disconnect-dialog">
-      <span>{props.email}</span>
-      <span>other {props.otherSignedIn}</span>
+      {props.accounts.map((account) => <span key={account.accountId}>{account.email}</span>)}
+      <span>{props.remove ? 'remove-mode' : 'disconnect-mode'}</span>
       <button type="button" onClick={props.onCancel}>mock-cancel</button>
       <button type="button" onClick={() => void props.onConfirm()}>mock-confirm</button>
     </div>
@@ -52,14 +56,15 @@ type PaneProps = {
   onAddAccount: () => void
   onSignIn: () => void
   onSignOut: (account: { accountId: string; email: string; state: string }) => void
+  onRemove: (accounts: readonly { accountId: string; email: string; state: string }[]) => void
 }
 type SignInDialogProps = {
   onDismiss: () => void
   onDisconnect: (accountId: string) => void
 }
 type DisconnectDialogProps = {
-  email: string
-  otherSignedIn: number
+  accounts: readonly { accountId: string; email: string; state: string }[]
+  remove: boolean
   pending: boolean
   error: string
   onCancel: () => void
@@ -71,7 +76,6 @@ const mockUseProviders = vi.mocked(useProviders)
 const mockUseCodex = vi.mocked(useCodex)
 const mockUseAppServices = vi.mocked(useAppServices)
 const mockLoad = vi.fn()
-const mockRefreshQuota = vi.fn()
 const mockStartLogin = vi.fn()
 const mockLogout = vi.fn()
 
@@ -98,7 +102,7 @@ function show(
   mockUseAppServices.mockReturnValue({ capabilities } as never)
   mockUseProviders.mockReturnValue({ state: { catalog } } as never)
   mockUseCodex.mockReturnValue({
-    model: { refreshQuota: mockRefreshQuota, startLogin: mockStartLogin, logout: mockLogout },
+    model: { startLogin: mockStartLogin, logout: mockLogout },
     state: {
       loginPhase: 'idle',
       activeMethod: null,
@@ -128,8 +132,6 @@ function selectProvider(id: string) {
 
 beforeEach(() => {
   mockLoad.mockReset()
-  mockRefreshQuota.mockReset()
-  mockRefreshQuota.mockResolvedValue(undefined)
   mockStartLogin.mockReset()
   mockLogout.mockReset()
   mockLogout.mockResolvedValue(true)
@@ -165,46 +167,15 @@ describe('ApiKeysPage codex accounts branch', () => {
     expect(screen.queryByText('1 account · usage windows refresh on demand')).toBeNull()
   })
 
-  it('offers the codex header actions and passes the sign-in capability down to the pane', () => {
+  it('offers the codex header action and passes the sign-in capability down to the pane', () => {
     show(['codex.login', 'codex.quota'])
     selectProvider('codex')
 
-    expect(screen.getByRole('button', { name: 'Refresh usage' })).toBeTruthy()
+    // Usage refresh lives in the pane next to the accounts it refreshes, so
+    // the header keeps only the account lifecycle action.
+    expect(screen.queryByRole('button', { name: 'Refresh usage' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Add account' })).toBeTruthy()
     expect(screen.getByTestId('codex-accounts-pane').getAttribute('data-can-sign-in')).toBe('true')
-  })
-
-  it('refreshes every signed-in account from the header at once', () => {
-    show(
-      ['codex.login', 'codex.quota'],
-      [codexAccount('acct-1', 'dev@example.com'), codexAccount('acct-2', 'sam@example.com')],
-    )
-    selectProvider('codex')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh usage' }))
-
-    expect(mockRefreshQuota).toHaveBeenCalledTimes(2)
-    expect(mockRefreshQuota).toHaveBeenCalledWith('acct-1')
-    expect(mockRefreshQuota).toHaveBeenCalledWith('acct-2')
-  })
-
-  it('locks the header refresh while a probe is in flight', () => {
-    show(['codex.login', 'codex.quota'], undefined, { quotas: { 'acct-1': { pending: true } } })
-    selectProvider('codex')
-
-    const busy = screen.getByRole('button', { name: 'Checking…' }) as HTMLButtonElement
-    expect(busy.disabled).toBe(true)
-    expect(mockRefreshQuota).not.toHaveBeenCalled()
-  })
-
-  it('locks the header refresh when no account is signed in', () => {
-    show(['codex.login', 'codex.quota'], [])
-    selectProvider('codex')
-
-    const refresh = screen.getByRole('button', { name: 'Refresh usage' }) as HTMLButtonElement
-    expect(refresh.disabled).toBe(true)
-    // Nothing to probe, so the button stays quiet instead of failing.
-    expect(mockRefreshQuota).not.toHaveBeenCalled()
   })
 
   it('hides the add-account action when the build cannot sign in', () => {
@@ -212,7 +183,6 @@ describe('ApiKeysPage codex accounts branch', () => {
     selectProvider('codex')
 
     expect(screen.queryByRole('button', { name: 'Add account' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Refresh usage' })).toBeTruthy()
     expect(screen.getByTestId('codex-accounts-pane').getAttribute('data-can-sign-in')).toBe('false')
   })
 
@@ -248,7 +218,7 @@ describe('ApiKeysPage codex accounts branch', () => {
 
     const dialog = screen.getByTestId('codex-disconnect-dialog')
     expect(dialog.textContent).toContain('dev@example.com')
-    expect(dialog.textContent).toContain('other 1')
+    expect(dialog.textContent).toContain('disconnect-mode')
   })
 
   it('signs the account out when the disconnect is confirmed', async () => {
@@ -281,6 +251,64 @@ describe('ApiKeysPage codex accounts branch', () => {
     })
 
     expect(mockLogout).toHaveBeenCalledWith('acct-1')
+    expect(screen.getByTestId('codex-disconnect-dialog')).toBeTruthy()
+  })
+
+  it('confirms a batch removal that covers every account with one fleet command', async () => {
+    show(
+      ['codex.login', 'codex.quota'],
+      [codexAccount('acct-1', 'dev@example.com'), codexAccount('acct-2', 'sam@example.com')],
+    )
+    selectProvider('codex')
+    fireEvent.click(screen.getByRole('button', { name: 'pane-remove' }))
+
+    const dialog = screen.getByTestId('codex-disconnect-dialog')
+    expect(dialog.textContent).toContain('dev@example.com')
+    expect(dialog.textContent).toContain('sam@example.com')
+    expect(dialog.textContent).toContain('remove-mode')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'mock-confirm' }))
+    })
+
+    expect(mockLogout).toHaveBeenCalledTimes(1)
+    expect(mockLogout).toHaveBeenCalledWith(null, true)
+    expect(screen.queryByTestId('codex-disconnect-dialog')).toBeNull()
+  })
+
+  it('removes a partial batch one account at a time', async () => {
+    show(
+      ['codex.login', 'codex.quota'],
+      [codexAccount('acct-1', 'dev@example.com'), codexAccount('acct-2', 'sam@example.com'), codexAccount('acct-3', 'third@example.com')],
+    )
+    selectProvider('codex')
+    fireEvent.click(screen.getByRole('button', { name: 'pane-remove' }))
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'mock-confirm' }))
+    })
+
+    expect(mockLogout).toHaveBeenCalledWith('acct-1', true)
+    expect(mockLogout).toHaveBeenCalledWith('acct-2', true)
+    expect(mockLogout).not.toHaveBeenCalledWith(null, true)
+    expect(screen.queryByTestId('codex-disconnect-dialog')).toBeNull()
+  })
+
+  it('keeps the removal dialog open when the batch is refused', async () => {
+    mockLogout.mockResolvedValue(false)
+    show(
+      ['codex.login', 'codex.quota'],
+      [codexAccount('acct-1', 'dev@example.com'), codexAccount('acct-2', 'sam@example.com')],
+    )
+    selectProvider('codex')
+    fireEvent.click(screen.getByRole('button', { name: 'pane-remove' }))
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'mock-confirm' }))
+    })
+
+    expect(mockLogout).toHaveBeenCalledTimes(1)
+    expect(mockLogout).toHaveBeenCalledWith(null, true)
     expect(screen.getByTestId('codex-disconnect-dialog')).toBeTruthy()
   })
 

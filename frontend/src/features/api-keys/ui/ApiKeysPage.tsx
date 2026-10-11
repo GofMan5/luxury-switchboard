@@ -42,27 +42,40 @@ export default function ApiKeysPage() {
   const codexCount = codexState.accounts.length
   const accountCaption = `${codexCount} account${codexCount === 1 ? '' : 's'} · usage windows refresh on demand`
   // The account lifecycle lives on this page now: the sign-in dialog adds and
-  // renews accounts, the table refreshes usage and signs out.
+  // renews accounts, the accounts pane refreshes usage, wakes and filters,
+  // and this page confirms the sign-outs and removals.
   const [signInCodex, setSignInCodex] = useState(false)
-  const [disconnectCodex, setDisconnectCodex] = useState<{ accountId: string; email: string; otherSignedIn: number } | null>(null)
+  const [confirmCodex, setConfirmCodex] = useState<{ accounts: readonly CodexAccount[]; remove: boolean } | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
   const codexCanSignIn = hasCodexLogin(capabilities)
-  const codexSignedIn = codexState.accounts.filter((account) => account.state === 'signed_in')
-  const codexUsagePending = codexSignedIn.some((account) => codexState.quotas[account.accountId]?.pending === true)
-  const refreshCodexUsage = () => {
-    void Promise.all(codexSignedIn.map((account) => codexModel.refreshQuota(account.accountId)))
-  }
   const signInCodexAgain = () => {
     setSignInCodex(true)
     void codexModel.startLogin()
   }
-  // A disconnect targets one account: the dialog names it and says how many
-  // signed-in accounts survive, so the owner knows what stays working.
+  // Both entry points land in one confirmation: the dialog reads the live
+  // account set itself, so the copy stays truthful about what survives.
   const beginCodexDisconnect = (accountId: string) => {
     const account = codexState.accounts.find((entry) => entry.accountId === accountId)
     if (!account) return
-    const otherSignedIn = codexState.accounts.filter((entry) => entry.accountId !== accountId && entry.state === 'signed_in').length
-    setDisconnectCodex({ accountId, email: account.email, otherSignedIn })
+    setConfirmCodex({ accounts: [account], remove: false })
+  }
+  const beginCodexRemove = (accounts: readonly CodexAccount[]) => {
+    if (accounts.length === 0) return
+    setConfirmCodex({ accounts, remove: true })
+  }
+  // Removal runs one logout per account so each verdict is its own; only a
+  // selection covering every account collapses to the fleet form, which is
+  // one command for the same effect.
+  const removeCodexAccounts = async (accounts: readonly CodexAccount[]) => {
+    const ids = accounts.map((account) => account.accountId)
+    const coversAll = codexState.accounts.length !== 0
+      && ids.length === codexState.accounts.length
+      && codexState.accounts.every((account) => ids.includes(account.accountId))
+    if (coversAll) return codexModel.logout(null, true)
+    for (const id of ids) {
+      if (!(await codexModel.logout(id, true))) return false
+    }
+    return true
   }
 
   useEffect(() => {
@@ -94,17 +107,11 @@ export default function ApiKeysPage() {
             </select>
           </label>
           {codexAccounts ? (
-            <>
-              <Button disabled={codexSignedIn.length === 0 || codexUsagePending} onClick={refreshCodexUsage}>
-                <RefreshCcw size={16} aria-hidden="true" className={codexUsagePending ? styles.spinning : undefined} />
-                {codexUsagePending ? 'Checking…' : 'Refresh usage'}
+            codexCanSignIn ? (
+              <Button variant="primary" onClick={() => setSignInCodex(true)}>
+                <Plus size={16} aria-hidden="true" />Add account
               </Button>
-              {codexCanSignIn ? (
-                <Button variant="primary" onClick={() => setSignInCodex(true)}>
-                  <Plus size={16} aria-hidden="true" />Add account
-                </Button>
-              ) : null}
-            </>
+            ) : null
           ) : (
             <>
               <Button disabled={!selectedProvider || state.checkingPool} onClick={() => void model.checkPool()}>
@@ -129,6 +136,7 @@ export default function ApiKeysPage() {
             onAddAccount={() => setSignInCodex(true)}
             onSignIn={signInCodexAgain}
             onSignOut={(account: CodexAccount) => beginCodexDisconnect(account.accountId)}
+            onRemove={beginCodexRemove}
           />
         </div>
       ) : (
@@ -256,19 +264,26 @@ export default function ApiKeysPage() {
           onDisconnect={beginCodexDisconnect}
         />
       ) : null}
-      {disconnectCodex !== null ? (
+      {confirmCodex !== null ? (
         <DisconnectCodexDialog
-          email={disconnectCodex.email}
-          otherSignedIn={disconnectCodex.otherSignedIn}
+          accounts={confirmCodex.accounts}
+          remove={confirmCodex.remove}
           pending={disconnecting}
           error={logoutErrorCopy(codexState.logoutError)}
-          onCancel={() => setDisconnectCodex(null)}
+          onCancel={() => setConfirmCodex(null)}
           onConfirm={async () => {
+            const first = confirmCodex.accounts[0]
+            if (!first) {
+              setConfirmCodex(null)
+              return
+            }
             setDisconnecting(true)
-            const ok = await codexModel.logout(disconnectCodex.accountId)
+            const ok = confirmCodex.remove
+              ? await removeCodexAccounts(confirmCodex.accounts)
+              : await codexModel.logout(first.accountId)
             setDisconnecting(false)
             if (!ok) return
-            setDisconnectCodex(null)
+            setConfirmCodex(null)
           }}
         />
       ) : null}

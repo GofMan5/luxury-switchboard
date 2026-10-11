@@ -96,6 +96,9 @@ const signedIn: CodexModelState = {
   importedFrom: '',
   quotas: {},
   logoutError: '',
+  wakingIds: [],
+  probingAll: false,
+  wakeError: '',
 }
 
 // A success that nobody pressed Done for: the sticky phase right after a

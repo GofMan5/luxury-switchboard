@@ -6,6 +6,74 @@ import (
 	"time"
 )
 
+func TestRotated(t *testing.T) {
+	base := time.Unix(1_750_000_000, 0).UTC()
+	window := func(resetAt time.Time) QuotaWindow {
+		return QuotaWindow{Present: true, RemainingPercent: 60, WindowMinutes: 300, ResetAt: resetAt}
+	}
+
+	cases := []struct {
+		name string
+		prev Usage
+		next Usage
+		want bool
+	}{
+		{
+			"the next primary window opening later is a rotation",
+			Usage{Primary: window(base)}, Usage{Primary: window(base.Add(5 * time.Hour))},
+			true,
+		},
+		{
+			"the same window reported again is not a rotation",
+			Usage{Primary: window(base)}, Usage{Primary: window(base)},
+			false,
+		},
+		{
+			"a deadline that went backwards is not a rotation",
+			Usage{Primary: window(base.Add(time.Hour))}, Usage{Primary: window(base)},
+			false,
+		},
+		{
+			"a previous window that was never reported is a baseline, not a rotation",
+			Usage{Primary: QuotaWindow{Present: false, RemainingPercent: 100}},
+			Usage{Primary: window(base)},
+			false,
+		},
+		{
+			"a next window that was never reported is not a rotation",
+			Usage{Primary: window(base)},
+			Usage{Primary: QuotaWindow{Present: false, RemainingPercent: 100}},
+			false,
+		},
+		{
+			"a previous deadline the endpoint left out is a baseline, not a rotation",
+			Usage{Primary: QuotaWindow{Present: true, RemainingPercent: 100}},
+			Usage{Primary: window(base)},
+			false,
+		},
+		{
+			"a next deadline the endpoint left out is not a rotation",
+			Usage{Primary: window(base)},
+			Usage{Primary: QuotaWindow{Present: true, RemainingPercent: 40}},
+			false,
+		},
+		{
+			"the weekly window rotating alone is not a primary rotation",
+			Usage{Primary: window(base), Secondary: window(base)},
+			Usage{Primary: window(base), Secondary: window(base.Add(7 * 24 * time.Hour))},
+			false,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := Rotated(testCase.prev, testCase.next); got != testCase.want {
+				t.Fatalf("Rotated(%+v, %+v) = %v, want %v", testCase.prev, testCase.next, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeQuotaWindow(t *testing.T) {
 	now := time.Unix(1_750_000_000, 0).UTC()
 	ptr := func(value int64) *int64 { return &value }

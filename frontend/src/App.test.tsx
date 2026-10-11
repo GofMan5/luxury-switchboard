@@ -323,4 +323,22 @@ describe('App navigation', () => {
     expect(screen.getByText('12')).toBeTruthy()
     view.unmount()
   })
+
+  it('tells the boot sentinel the shell committed its first frame', async () => {
+    // The hook in public/boot-hook.js keeps the window lit only until this
+    // call: without it, a bundle that mounts nothing stays "pending" and the
+    // sentinel eventually reports a failed start over a working app.
+    const ready = vi.fn()
+    ;(window as typeof window & { __dshBootReady?: () => void }).__dshBootReady = ready
+    try {
+      window.location.hash = ''
+      createSession.mockResolvedValue(fakeSession())
+      const view = render(<App />)
+      await screen.findByRole('button', { name: 'Overview' })
+      expect(ready).toHaveBeenCalledOnce()
+      view.unmount()
+    } finally {
+      delete (window as typeof window & { __dshBootReady?: () => void }).__dshBootReady
+    }
+  })
 }, 30_000)

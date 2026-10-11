@@ -1,4 +1,10 @@
-import type { CodexAccountState, CodexAccount, CodexLoginStatus, CodexQuotaResult, CodexStatus } from '../domain/codex'
+import type { CodexAccountState, CodexAccount, CodexLoginStatus, CodexQuotaResult, CodexStatus, CodexWakeResult } from '../domain/codex'
+
+/** Result of `codex.quota.all`: every account's probe in one answer, the
+ * same per-account rows `codex.quota` answers with. */
+export interface CodexQuotaAllResult {
+  readonly results: readonly CodexQuotaResult[]
+}
 
 /** Result of `codex.login.device.start`: what the user must enter, and where. */
 export interface CodexDeviceLoginStart {
@@ -26,6 +32,13 @@ export interface CodexPort {
   /** Probes one account's usage windows; a failed probe is a result field,
    * not a rejection — the last good windows ride the same answer. */
   quota(accountId: string, signal?: AbortSignal): Promise<CodexQuotaResult>
+  /** Probes every account's usage windows in one call; per-account failures
+   * stay result fields, exactly like the single probe. */
+  quotaAll(signal?: AbortSignal): Promise<CodexQuotaAllResult>
+  /** Asks the backend to refresh tokens for the named accounts (or every
+   * account when accountIds is null). A wake that could not run answers with
+   * per-account error rows, not a rejection. */
+  wake(accountIds: readonly string[] | null, signal?: AbortSignal): Promise<CodexWakeResult>
   /** A disconnect clears a session; accountId null means every account.
    * `remove: true` also deletes the provisioned provider entries and their
    * routes via the backend cascade. */

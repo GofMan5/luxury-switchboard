@@ -52,6 +52,9 @@ function stateAt(overrides: Partial<CodexModelState>): CodexModelState {
     deviceVerificationUrl: '',
     importedFrom: '',
     logoutError: '',
+    wakingIds: [],
+    probingAll: false,
+    wakeError: '',
     ...overrides,
   }
 }

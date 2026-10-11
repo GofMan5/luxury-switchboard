@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/secretstore"
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
@@ -53,6 +54,15 @@ func fixtureSecondSession() domain.Session {
 	return session
 }
 
+// versionOneDocument is the pre-widening on-disk shape: version and
+// session only, no login method, no reset counter. It exists so a
+// tolerance test starts from bytes a real v1 install wrote, not from a
+// v2 document that merely left two fields zero.
+type versionOneDocument struct {
+	Version int            `json:"version"`
+	Session domain.Session `json:"session"`
+}
+
 // writeProtected stores magic + DPAPI(plaintext) at path — the same
 // framing a Save produces — so tests can hand-craft undecodable or
 // future-versioned payloads.
@@ -68,12 +78,12 @@ func writeProtected(t *testing.T, path string, plaintext []byte) {
 	}
 }
 
-// writeLegacyDocument stores a versioned session document at the
-// legacy single-session path, exactly as the pre-accounts store wrote
-// it, so migration tests start from a realistic on-disk state.
-func writeLegacyDocument(t *testing.T, repository *Repository, session domain.Session) {
+// writeLegacyDocument stores a versioned document at the legacy
+// single-session path, exactly as the pre-accounts store wrote it, so
+// migration tests start from a realistic on-disk state.
+func writeLegacyDocument(t *testing.T, repository *Repository, doc document) {
 	t.Helper()
-	plaintext, err := json.Marshal(document{Version: fileVersion, Session: session})
+	plaintext, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,26 +105,44 @@ func assertSessionEqual(t *testing.T, loaded, want domain.Session) {
 	}
 }
 
-// expectSessions asserts the loaded slice matches want session-for-
-// session in order, so the deterministic load order is part of every
+// expectAccounts asserts the loaded slice matches want record-for-record
+// in order — session, login method and reset counter together — so the
+// deterministic load order and the v2 record both stay part of every
 // round trip.
-func expectSessions(t *testing.T, loaded, want []domain.Session) {
+func expectAccounts(t *testing.T, loaded, want []application.StoredAccount) {
 	t.Helper()
 	if len(loaded) != len(want) {
 		t.Fatalf("loaded %d accounts, want %d", len(loaded), len(want))
 	}
 	for i := range want {
-		assertSessionEqual(t, loaded[i], want[i])
+		assertSessionEqual(t, loaded[i].Session, want[i].Session)
+		if loaded[i].LoginMethod != want[i].LoginMethod {
+			t.Fatalf("loaded login method %q, want %q", loaded[i].LoginMethod, want[i].LoginMethod)
+		}
+		if loaded[i].Resets != want[i].Resets {
+			t.Fatalf("loaded reset count %d, want %d", loaded[i].Resets, want[i].Resets)
+		}
 	}
+}
+
+// accountPathOf sorts loaded records the way Load does: by the file
+// name each record's session maps to.
+func accountPathOf(repository *Repository, record application.StoredAccount) string {
+	return repository.accountPath(record.Session)
 }
 
 func TestRepositoryRoundTripIsEncryptedAndAtomic(t *testing.T) {
 	repository := storePaths(t)
 	first, second := fixtureSession(), fixtureSecondSession()
-	if err := repository.Save(context.Background(), first); err != nil {
+	// The record is more than its session: the login method and the
+	// reset counter ride the same file, so the round trip proves the
+	// whole v2 record travels, not just the tokens.
+	firstRecord := application.StoredAccount{Session: first, LoginMethod: application.LoginMethodBrowser, Resets: 3}
+	secondRecord := application.StoredAccount{Session: second, LoginMethod: application.LoginMethodDevice, Resets: 0}
+	if err := repository.Save(context.Background(), firstRecord); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Save(context.Background(), second); err != nil {
+	if err := repository.Save(context.Background(), secondRecord); err != nil {
 		t.Fatal(err)
 	}
 	for _, session := range []domain.Session{first, second} {
@@ -141,35 +169,38 @@ func TestRepositoryRoundTripIsEncryptedAndAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ordered := []domain.Session{first, second}
+	ordered := []application.StoredAccount{firstRecord, secondRecord}
 	sort.Slice(ordered, func(i, j int) bool {
-		return repository.accountPath(ordered[i]) < repository.accountPath(ordered[j])
+		return accountPathOf(repository, ordered[i]) < accountPathOf(repository, ordered[j])
 	})
-	expectSessions(t, loaded, ordered)
+	expectAccounts(t, loaded, ordered)
 
-	// Re-saving an identity replaces exactly that account's file.
+	// Re-saving an identity replaces exactly that account's file, and
+	// the replacement is whole: a fresh record with a moved reset
+	// counter must not find the old count merged back in.
 	first.AccessToken = "replacement-access-token-value"
-	if err := repository.Save(context.Background(), first); err != nil {
+	replacement := application.StoredAccount{Session: first, LoginMethod: application.LoginMethodBrowser, Resets: 4}
+	if err := repository.Save(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err = repository.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	ordered = []domain.Session{first, second}
+	ordered = []application.StoredAccount{replacement, secondRecord}
 	sort.Slice(ordered, func(i, j int) bool {
-		return repository.accountPath(ordered[i]) < repository.accountPath(ordered[j])
+		return accountPathOf(repository, ordered[i]) < accountPathOf(repository, ordered[j])
 	})
-	expectSessions(t, loaded, ordered)
+	expectAccounts(t, loaded, ordered)
 }
 
 func TestClearRemovesOnlyThatAccount(t *testing.T) {
 	repository := storePaths(t)
 	first, second := fixtureSession(), fixtureSecondSession()
-	if err := repository.Save(context.Background(), first); err != nil {
+	if err := repository.Save(context.Background(), application.StoredAccount{Session: first, LoginMethod: application.LoginMethodBrowser}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Save(context.Background(), second); err != nil {
+	if err := repository.Save(context.Background(), application.StoredAccount{Session: second, LoginMethod: application.LoginMethodDevice, Resets: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.Clear(context.Background(), first); err != nil {
@@ -182,18 +213,18 @@ func TestClearRemovesOnlyThatAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectSessions(t, loaded, []domain.Session{second})
+	expectAccounts(t, loaded, []application.StoredAccount{{Session: second, LoginMethod: application.LoginMethodDevice, Resets: 1}})
 }
 
 func TestClearAllRemovesEveryAccountAndTheLegacyFile(t *testing.T) {
 	repository := storePaths(t)
-	if err := repository.Save(context.Background(), fixtureSession()); err != nil {
+	if err := repository.Save(context.Background(), application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Save(context.Background(), fixtureSecondSession()); err != nil {
+	if err := repository.Save(context.Background(), application.StoredAccount{Session: fixtureSecondSession(), LoginMethod: application.LoginMethodDevice}); err != nil {
 		t.Fatal(err)
 	}
-	writeLegacyDocument(t, repository, fixtureSession())
+	writeLegacyDocument(t, repository, document{Version: fileVersion, Session: fixtureSession()})
 	if err := repository.ClearAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -242,33 +273,62 @@ func TestLoadRejectsUnexpectedVersions(t *testing.T) {
 	}
 }
 
+func TestVersionOneFilesAreReadAsUnknownMethodAndZeroResets(t *testing.T) {
+	// A sign-in must not be lost to a schema widening: v1 files predate
+	// the login method and the reset counter, so Load keeps the session
+	// and answers the fields it never had as zero values. The file is
+	// written in the exact v1 shape — no loginMethod, no resets key —
+	// because a v2 document with zeroed fields would prove nothing
+	// about the old bytes a real install wrote.
+	repository := storePaths(t)
+	prepareDir(t, repository)
+	plaintext, err := json.Marshal(versionOneDocument{Version: 1, Session: fixtureSession()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProtected(t, filepath.Join(repository.dir, "codex_v1.dpapi"), plaintext)
+	loaded, err := repository.Load(context.Background())
+	if err != nil {
+		t.Fatalf("a version 1 account file must still load: %v", err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{{Session: fixtureSession(), LoginMethod: "", Resets: 0}})
+}
+
 func TestSaveCreatesMissingParentDirectories(t *testing.T) {
 	base := t.TempDir()
 	repository := NewRepository(filepath.Join(base, "nested", "deeper", accountsDirName), filepath.Join(base, legacyFileName))
-	if err := repository.Save(context.Background(), fixtureSession()); err != nil {
+	if err := repository.Save(context.Background(), application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 2}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := repository.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectSessions(t, loaded, []domain.Session{fixtureSession()})
+	expectAccounts(t, loaded, []application.StoredAccount{{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 2}})
 }
 
 func TestLegacySessionIsMigratedIntoTheAccountDirectory(t *testing.T) {
 	repository := storePaths(t)
-	want := fixtureSession()
-	writeLegacyDocument(t, repository, want)
+	// The legacy store learned the login method and reset counter before
+	// it was retired, so the migration has to carry the whole record —
+	// not just the session — into the account directory.
+	want := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 5}
+	writeLegacyDocument(t, repository, document{
+		Version:     fileVersion,
+		Session:     want.Session,
+		LoginMethod: string(want.LoginMethod),
+		Resets:      want.Resets,
+	})
 
 	loaded, err := repository.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectSessions(t, loaded, []domain.Session{want})
+	expectAccounts(t, loaded, []application.StoredAccount{want})
 
 	// The migration is durable: the account file exists, the legacy
 	// file is gone, and a second load answers from the directory.
-	if _, err := os.Stat(repository.accountPath(want)); err != nil {
+	if _, err := os.Stat(repository.accountPath(want.Session)); err != nil {
 		t.Fatalf("migration did not write the account file: %v", err)
 	}
 	if _, err := os.Stat(repository.legacyPath); !errors.Is(err, os.ErrNotExist) {
@@ -278,7 +338,7 @@ func TestLegacySessionIsMigratedIntoTheAccountDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectSessions(t, again, []domain.Session{want})
+	expectAccounts(t, again, []application.StoredAccount{want})
 }
 
 func TestUnreadableLegacyFileIsAnError(t *testing.T) {
@@ -296,17 +356,17 @@ func TestUnreadableLegacyFileIsAnError(t *testing.T) {
 
 func TestLegacyFileIsIgnoredWhenAccountsExist(t *testing.T) {
 	repository := storePaths(t)
-	want := fixtureSession()
+	want := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 1}
 	if err := repository.Save(context.Background(), want); err != nil {
 		t.Fatal(err)
 	}
-	writeLegacyDocument(t, repository, fixtureSecondSession())
+	writeLegacyDocument(t, repository, document{Version: fileVersion, Session: fixtureSecondSession()})
 
 	loaded, err := repository.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectSessions(t, loaded, []domain.Session{want})
+	expectAccounts(t, loaded, []application.StoredAccount{want})
 	if _, err := os.Stat(repository.legacyPath); err != nil {
 		t.Fatalf("load must not touch the legacy file once accounts exist: %v", err)
 	}

@@ -24,14 +24,19 @@ import (
 
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/application"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
 const (
-	// fileVersion is the on-disk schema version. A file with any other
-	// version is refused rather than best-effort decoded: a session is
-	// only useful whole.
-	fileVersion = 1
+	// fileVersion is the on-disk schema version this package writes.
+	// Version 1 carried only the session; version 2 added the login
+	// method and the reset counter. Version 1 files are still readable
+	// — their accounts simply report an unknown method and zero
+	// resets — because a sign-in must not be lost to a schema widening.
+	// Any other version is refused rather than best-effort decoded: a
+	// session is only useful whole.
+	fileVersion = 2
 
 	// legacyFileName is the single-session file this package wrote
 	// before accounts became plural. Load migrates it once; ClearAll
@@ -52,6 +57,22 @@ var fileMagic = []byte("SWCODEX2\n")
 type document struct {
 	Version int            `json:"version"`
 	Session domain.Session `json:"session"`
+	// LoginMethod is the application LoginMethod value as a string;
+	// version 1 files carry an empty one, which the application reads
+	// as an unknown method.
+	LoginMethod string `json:"loginMethod,omitempty"`
+	Resets      int    `json:"resets"`
+}
+
+// storedAccount renders a decoded document as the application's
+// StoredAccount. LoginMethod and Resets travel verbatim: the store does
+// not interpret them, it only keeps them across restarts.
+func (value document) storedAccount() application.StoredAccount {
+	return application.StoredAccount{
+		Session:     value.Session,
+		LoginMethod: application.LoginMethod(value.LoginMethod),
+		Resets:      value.Resets,
+	}
 }
 
 // Repository persists one Codex account per file inside a directory.
@@ -65,8 +86,8 @@ type Repository struct {
 
 // NewRepository returns a Repository persisting Codex accounts as files
 // in dir. legacyPath is the pre-accounts single-session file, migrated
-// by Load and removed by ClearAll; parent directories are created on
-// the first Save.
+// by Load and removed by ClearAll; parent directories are created on the
+// first Save.
 func NewRepository(dir, legacyPath string) *Repository {
 	return &Repository{dir: dir, legacyPath: legacyPath}
 }
@@ -115,7 +136,7 @@ func (repository *Repository) accountPath(session domain.Session) string {
 // error — silently dropping the user's sign-in would be worse than
 // refusing to start. Once the directory holds accounts, any leftover
 // legacy file is ignored.
-func (repository *Repository) Load(ctx context.Context) ([]domain.Session, error) {
+func (repository *Repository) Load(ctx context.Context) ([]application.StoredAccount, error) {
 	if repository.dir == "" {
 		return nil, errUnconfigured
 	}
@@ -129,9 +150,9 @@ func (repository *Repository) Load(ctx context.Context) ([]domain.Session, error
 	if len(names) == 0 {
 		return repository.loadLegacyOrEmpty()
 	}
-	sessions := make([]domain.Session, 0, len(names))
+	accounts := make([]application.StoredAccount, 0, len(names))
 	for _, name := range names {
-		session, found, err := repository.loadFile(ctx, filepath.Join(repository.dir, name))
+		stored, found, err := repository.loadFile(ctx, filepath.Join(repository.dir, name))
 		if err != nil {
 			return nil, err
 		}
@@ -140,14 +161,16 @@ func (repository *Repository) Load(ctx context.Context) ([]domain.Session, error
 			// the account simply does not exist.
 			continue
 		}
-		sessions = append(sessions, session)
+		accounts = append(accounts, stored)
 	}
-	return sessions, nil
+	return accounts, nil
 }
 
 // loadLegacyOrEmpty migrates the legacy single-session file when the
-// account directory is empty, and answers no accounts otherwise.
-func (repository *Repository) loadLegacyOrEmpty() ([]domain.Session, error) {
+// account directory is empty, and answers no accounts otherwise. The
+// migrated record is rewritten at the current version so the legacy
+// file never survives its own migration.
+func (repository *Repository) loadLegacyOrEmpty() ([]application.StoredAccount, error) {
 	var value document
 	found, err := encryptedfile.Load(repository.legacyPath, fileMagic, encryptedfile.DefaultMaxPlaintext, &value)
 	if err != nil || !found {
@@ -156,16 +179,17 @@ func (repository *Repository) loadLegacyOrEmpty() ([]domain.Session, error) {
 		}
 		return nil, nil
 	}
-	if value.Version != fileVersion {
+	if !supportedVersion(value.Version) {
 		return nil, fmt.Errorf("codex session store could not be migrated: version %d is not supported", value.Version)
 	}
-	if err := encryptedfile.Save(repository.accountPath(value.Session), fileMagic, encryptedfile.DefaultMaxPlaintext, document{Version: fileVersion, Session: value.Session}); err != nil {
+	stored := value.storedAccount()
+	if err := encryptedfile.Save(repository.accountPath(stored.Session), fileMagic, encryptedfile.DefaultMaxPlaintext, documentFromStored(stored)); err != nil {
 		return nil, fmt.Errorf("codex session store could not be migrated: %w", err)
 	}
 	if err := os.Remove(repository.legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("codex session store could not be migrated: %w", err)
 	}
-	return []domain.Session{value.Session}, nil
+	return []application.StoredAccount{stored}, nil
 }
 
 // accountFileNames lists the account files in the directory, sorted by
@@ -190,41 +214,61 @@ func (repository *Repository) accountFileNames() ([]string, error) {
 	return names, nil
 }
 
+// supportedVersion reports whether a stored document version can be
+// read. Version 2 is what this package writes; version 1 is the
+// session-only shape from before login methods and reset counters
+// existed, readable so a schema widening never costs a sign-in.
+func supportedVersion(version int) bool {
+	return version == 1 || version == 2
+}
+
 // loadFile decodes one account file. A missing file is reported as
 // not found rather than an error, so a file removed between the
 // directory listing and the read costs its account nothing.
-func (repository *Repository) loadFile(ctx context.Context, path string) (domain.Session, bool, error) {
+func (repository *Repository) loadFile(ctx context.Context, path string) (application.StoredAccount, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return domain.Session{}, false, fmt.Errorf("codex session store could not be loaded: %w", err)
+		return application.StoredAccount{}, false, fmt.Errorf("codex session store could not be loaded: %w", err)
 	}
 	var value document
 	found, err := encryptedfile.Load(path, fileMagic, encryptedfile.DefaultMaxPlaintext, &value)
 	if err != nil {
-		return domain.Session{}, false, fmt.Errorf("codex session store could not be loaded: %w", err)
+		return application.StoredAccount{}, false, fmt.Errorf("codex session store could not be loaded: %w", err)
 	}
 	if !found {
-		return domain.Session{}, false, nil
+		return application.StoredAccount{}, false, nil
 	}
-	if value.Version != fileVersion {
-		return domain.Session{}, false, fmt.Errorf("codex session store version %d is not supported", value.Version)
+	if !supportedVersion(value.Version) {
+		return application.StoredAccount{}, false, fmt.Errorf("codex session store version %d is not supported", value.Version)
 	}
-	return value.Session, true, nil
+	return value.storedAccount(), true, nil
+}
+
+// documentFromStored renders the record exactly as Save persists it —
+// one place, so the migration writer and the save writer cannot drift.
+func documentFromStored(stored application.StoredAccount) document {
+	return document{
+		Version:     fileVersion,
+		Session:     stored.Session,
+		LoginMethod: string(stored.LoginMethod),
+		Resets:      stored.Resets,
+	}
 }
 
 // Save durably stores one account: it is JSON-encoded, DPAPI-encrypted
 // and written through an atomic replace that also creates the parent
 // directory, so a crash leaves either the previous session or the new
 // one, and re-signing an identity replaces exactly that account's
-// file.
-func (repository *Repository) Save(ctx context.Context, session domain.Session) error {
+// file. The login method and reset counter are part of the record: a
+// caller that reconstructs only the session would erase them here.
+func (repository *Repository) Save(ctx context.Context, stored application.StoredAccount) error {
 	if repository.dir == "" {
 		return errUnconfigured
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("codex session store could not be saved: %w", err)
 	}
-	value := document{Version: fileVersion, Session: session}
-	if err := encryptedfile.Save(repository.accountPath(session), fileMagic, encryptedfile.DefaultMaxPlaintext, value); err != nil {
+	value := documentFromStored(stored)
+	if err := encryptedfile.Save(repository.accountPath(stored.Session), fileMagic, encryptedfile.DefaultMaxPlaintext, value); err != nil {
 		return fmt.Errorf("codex session store could not be saved: %w", err)
 	}
 	return nil

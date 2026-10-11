@@ -73,6 +73,9 @@ function stateAt(overrides: Partial<CodexModelState>): CodexModelState {
     importedFrom: '',
     quotas: {},
     logoutError: '',
+    wakingIds: [],
+    probingAll: false,
+    wakeError: '',
     ...overrides,
   }
 }

@@ -132,6 +132,19 @@
  * and needs only a width override plus an error block. */
 .disconnect { --dialog-width: 460px; }
 .disconnectError { margin: 0; padding: 14px 18px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, transparent); }
+/* Batch confirmations name every account they touch: the list is the
+ * contract, so what the owner sees leaving is exactly what gets removed. */
+.disconnectAccounts {
+  margin: 0;
+  padding: 10px 18px 8px 36px;
+  display: grid;
+  gap: 4px;
+  max-height: 148px;
+  overflow-y: auto;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
 
 .spinning { animation: icon-spin 1s linear infinite; }
 [data-animations='off'] .spinning { animation: none; }

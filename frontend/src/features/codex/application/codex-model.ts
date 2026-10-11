@@ -1,4 +1,4 @@
-import type { CodexAccount, CodexAccountState, CodexLoginStatus, CodexQuotaReport, CodexStatus } from '../domain/codex'
+import { aggregateCodexState, type CodexAccount, type CodexAccountState, type CodexLoginStatus, type CodexQuotaReport, type CodexQuotaResult, type CodexStatus, type CodexWakeOutcome } from '../domain/codex'
 import type { CodexImportResult, CodexPort } from './codex-port'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
 
@@ -37,6 +37,12 @@ export interface CodexModelState {
   readonly importedFrom: string
   /** Readable text when the last disconnect attempt failed. */
   readonly logoutError: string
+  /** Account ids with a token wake in flight; those rows show their waking state. */
+  readonly wakingIds: readonly string[]
+  /** True while the fleet usage check (one probe per account) runs. */
+  readonly probingAll: boolean
+  /** Readable text when the last wake attempt failed as a whole. */
+  readonly wakeError: string
 }
 
 const initialState: CodexModelState = {
@@ -52,6 +58,9 @@ const initialState: CodexModelState = {
   deviceVerificationUrl: '',
   importedFrom: '',
   logoutError: '',
+  wakingIds: [],
+  probingAll: false,
+  wakeError: '',
 }
 
 const TIMEOUT_COPY = 'The control plane did not answer in time. Check that the relay is running, then try again.'
@@ -76,6 +85,8 @@ const REFRESH_REJECTED_COPY = 'The Codex sign-in server refused these credential
 const IMPORT_UNREACHABLE_COPY = 'The Codex sign-in server could not be reached. Check the connection, then try again.'
 const GENERIC_QUOTA_COPY = 'The Codex usage could not be loaded.'
 const QUOTA_NOT_SIGNED_IN_COPY = 'The account is no longer signed in. Sign in again to see its usage.'
+/** One wake failure the user can act on: the fleet refresh call itself could not run. */
+const GENERIC_WAKE_COPY = 'The Codex accounts could not be woken. Try again.'
 /** The refusal text the backend emits when Codex backs the active route; matched by containment, joined errors included. */
 const ACTIVE_PROVIDER_MARKER = 'Codex is the active provider. Switch the active route away from Codex before disconnecting.'
 const ACTIVE_PROVIDER_COPY = 'Codex is the active provider. Switch the active route away from Codex, then disconnect.'
@@ -267,6 +278,56 @@ export class CodexModel {
     }
   }
 
+  async wake(accountIds: readonly string[] | null): Promise<void> {
+    // One wake at a time, like one probe at a time per card; the backend
+    // would queue the rotations anyway, and the rows would flicker twice.
+    if (this.#state.wakingIds.length > 0) return
+    // The targets are the live rows only: a stale selection id (the account
+    // left between click and call) wakes nothing and is not tracked.
+    const targets = accountIds === null
+      ? this.#state.accounts.map((account) => account.accountId)
+      : accountIds.filter((id) => this.#state.accounts.some((account) => account.accountId === id))
+    if (targets.length === 0) return
+    this.#set({ ...this.#state, wakingIds: targets, wakeError: '' })
+    try {
+      const answer = await this.#port.wake(accountIds === null ? null : targets)
+      // The answer carries each account's post-wake state; rows adopt it
+      // immediately so a rotation that already fixed reauth reads as fixed.
+      this.#applyWakeOutcomes(answer.results)
+    } catch (error) {
+      this.#set({ ...this.#state, wakeError: readableError(error, GENERIC_WAKE_COPY) })
+    } finally {
+      this.#set({ ...this.#state, wakingIds: [] })
+      // A rotation may bump rows the answer did not name (a dead refresh
+      // token re-provisions the account, changing resets and state); the
+      // change feed pushes, but the refetch converges even when it does not.
+      await this.#refetch('merge')
+    }
+  }
+
+  async refreshAll(): Promise<void> {
+    if (this.#state.probingAll) return
+    const accounts = this.#state.accounts
+    if (accounts.length === 0) return
+    // Every card flips to pending at once, each keeping its last good
+    // windows: the single probe ages data on failure, and the fleet check
+    // must not throw it away on the way in.
+    const pending: Record<string, CodexQuotaCard> = {}
+    for (const account of accounts) {
+      const previous = this.#state.quotas[account.accountId]
+      pending[account.accountId] = { quota: previous?.quota ?? null, error: '', pending: true }
+    }
+    this.#set({ ...this.#state, probingAll: true, quotas: pending })
+    try {
+      const answer = await this.#port.quotaAll()
+      this.#settleQuotaAll(answer.results)
+    } catch (error) {
+      this.#settleQuotaAllFailure(readableQuotaError(error))
+    } finally {
+      this.#set({ ...this.#state, probingAll: false })
+    }
+  }
+
   async logout(accountId: string | null, remove = false): Promise<boolean> {
     this.#set({ ...this.#state, logoutError: '' })
     try {
@@ -435,6 +496,57 @@ export class CodexModel {
 
   #setQuota(accountId: string, card: CodexQuotaCard): void {
     this.#set({ ...this.#state, quotas: { ...this.#state.quotas, [accountId]: card } })
+  }
+
+  /** Wake outcomes are backend answers about rows, the same authority the
+   * status snapshot has: rows adopt the state each outcome reports and the
+   * aggregate is recomputed over them. A row the answer did not name keeps
+   * its state — the wake only claims what it returned. */
+  #applyWakeOutcomes(outcomes: readonly CodexWakeOutcome[]): void {
+    if (outcomes.length === 0) return
+    const stateById = new Map(outcomes.map((outcome) => [outcome.accountId, outcome.state]))
+    let changed = false
+    const accounts = this.#state.accounts.map((account) => {
+      const state = stateById.get(account.accountId)
+      if (state === undefined || state === account.state) return account
+      changed = true
+      return { ...account, state }
+    })
+    if (!changed) return
+    this.#set({ ...this.#state, accounts, state: aggregateCodexState(accounts) })
+  }
+
+  /** Settles the fleet check one row at a time: a settled probe replaces the
+   * windows, a refused row keeps the last good ones under its failure copy,
+   * and a row missing from the answer (the account arrived mid-flight, or a
+   * broken shell dropped it) settles with what it had so no card spins
+   * forever. */
+  #settleQuotaAll(rows: readonly CodexQuotaResult[]): void {
+    const rowById = new Map(rows.map((row) => [row.accountId, row]))
+    const quotas: Record<string, CodexQuotaCard> = {}
+    for (const account of this.#state.accounts) {
+      const previous = this.#state.quotas[account.accountId]
+      const lastGood = previous?.quota ?? null
+      const row = rowById.get(account.accountId)
+      if (row?.quota !== undefined) {
+        quotas[account.accountId] = { quota: row.quota, error: '', pending: false }
+      } else if (row !== undefined) {
+        quotas[account.accountId] = { quota: lastGood, error: mapQuotaError(row.error ?? ''), pending: false }
+      } else {
+        quotas[account.accountId] = { quota: lastGood, error: previous?.error ?? '', pending: false }
+      }
+    }
+    this.#set({ ...this.#state, quotas })
+  }
+
+  /** A transport-level failure fails every card together: the last good
+   * windows stay, the readable refusal text lands on each, no card spins. */
+  #settleQuotaAllFailure(text: string): void {
+    const quotas: Record<string, CodexQuotaCard> = {}
+    for (const [accountId, card] of Object.entries(this.#state.quotas)) {
+      quotas[accountId] = { quota: card.quota, error: text, pending: false }
+    }
+    this.#set({ ...this.#state, quotas })
   }
 
   #set(state: CodexModelState): void {

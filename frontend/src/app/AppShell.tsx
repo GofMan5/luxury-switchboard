@@ -7,6 +7,7 @@ import { useSettings } from '../features/settings/ui/useSettings'
 import { NotificationsSurface } from '../features/notifications/ui/NotificationsSurface'
 import { UpdateDialog } from '../features/updates/ui/UpdateDialog'
 import { useAppServices } from './services'
+import { markBootReady } from './boot'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
 import { WorkspaceBoundary } from '../shared/ui/WorkspaceBoundary'
@@ -19,6 +20,10 @@ interface AppShellProps extends PropsWithChildren {
 }
 
 export function AppShell({ route, onNavigate, children }: AppShellProps) {
+  // The shell committing is the moment the boot sentinel can stand down:
+  // before this, a dead bundle would have left the window black. It fires
+  // once, after the first real frame, never again on rerender.
+  useEffect(() => { markBootReady() }, [])
   const { model: relay, state: relayState } = useRelay()
   const { state: providersState } = useProviders()
   const { state: settingsState } = useSettings()

@@ -110,6 +110,31 @@ describe('TauriSidecarSession', () => {
     vi.useRealTimers()
   })
 
+  it('gives the codex fleet probes the full backend chain, not the default call guard', async () => {
+    // The fleet quota and the wake run per-account chains in parallel under
+    // one call: they carry the single probe's budget, not 30s times N.
+    for (const method of ['codex.quota.all', 'codex.wake']) {
+      const session = new TauriSidecarSession()
+      await session.start()
+      vi.useFakeTimers()
+      const call = session.call(method)
+      await vi.advanceTimersByTimeAsync(30_000)
+      let timedOut = false
+      void call.then(
+        () => {},
+        () => { timedOut = true },
+      )
+      expect(timedOut).toBe(false)
+      const rejection = expect(call).rejects.toMatchObject({ code: 'timeout' })
+      await vi.advanceTimersByTimeAsync(60_000)
+      await rejection
+      const command = mocks.writes.find((frame) => frame.method === method)
+      expect(mocks.writes).toContainEqual(expect.objectContaining({ method: 'system.cancel', payload: { id: command?.id } }))
+      await session.stop()
+      vi.useRealTimers()
+    }
+  })
+
   it('reconnects after sidecar termination and notifies state models', async () => {
     const session = new TauriSidecarSession()
     await session.start()

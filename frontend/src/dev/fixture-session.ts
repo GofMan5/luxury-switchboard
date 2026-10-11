@@ -216,9 +216,9 @@ let catalogCurrency = 'USD'
 
 export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = '1.0.37-fixture'
-  /** The fixture advertises the Codex preset flow and its usage probe, like a
-   * current control plane. */
-  readonly capabilities = ['codex.login', 'codex.quota']
+  /** The fixture advertises the Codex preset flow, its usage probes and the
+   * fleet wake, like a current control plane. */
+  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake']
   readonly #listeners = new Map<string, Set<EventListener>>()
   readonly #runTimers = new Set<number>()
   #tick = 0
@@ -230,7 +230,7 @@ export class FixtureSession implements ControlPlaneSession {
   // multi-account list to show.
   #codexPhase: 'idle' | 'waiting' | 'exchanging' | 'success' | 'error' = 'idle'
   #codexError = ''
-  #codexAccounts: { state: 'signed_out' | 'signed_in' | 'reauth_needed'; email: string; plan: string; accountId: string; providerId: string }[] = []
+  #codexAccounts: { state: 'signed_out' | 'signed_in' | 'reauth_needed'; email: string; plan: string; accountId: string; providerId: string; loginMethod: 'device' | 'browser'; resets: number }[] = []
   #codexTimers = new Set<number>()
 
   start(): Promise<void> {
@@ -300,22 +300,27 @@ export class FixtureSession implements ControlPlaneSession {
       if (!this.#codexAccounts.some((account) => account.accountId === 'acct_fixture_codex')) {
         this.#codexGrant('alex@example.com', 'Plus', 'acct_fixture_codex')
       } else {
-        this.#codexGrant('sam@example.com', 'Pro', 'acct_fixture_codex_2')
+        // The second account signs in over the device flow and carries a
+        // nonzero reset count, so the dev shell shows both columns the real
+        // multi-account list has.
+        this.#codexGrant('sam@example.com', 'Pro', 'acct_fixture_codex_2', 'device', 3)
       }
       this.#emit('codex.changed', {})
     }, 6_500))
   }
 
-  #codexGrant(email: string, plan: string, accountId: string): void {
+  #codexGrant(email: string, plan: string, accountId: string, loginMethod: 'device' | 'browser' = 'browser', resets = 0): void {
     const existing = this.#codexAccounts.find((account) => account.accountId === accountId)
     if (existing !== undefined) {
       existing.state = 'signed_in'
       existing.email = email
       existing.plan = plan
       existing.providerId = 'codex'
+      existing.loginMethod = loginMethod
+      existing.resets = resets
       return
     }
-    this.#codexAccounts.push({ state: 'signed_in', email, plan, accountId, providerId: 'codex' })
+    this.#codexAccounts.push({ state: 'signed_in', email, plan, accountId, providerId: 'codex', loginMethod, resets })
   }
 
   // The status answer is the aggregate over rows, exactly like the backend:
@@ -328,6 +333,21 @@ export class FixtureSession implements ControlPlaneSession {
         ? 'reauth_needed'
         : 'signed_out'
     return { state, accounts: this.#codexAccounts.map((account) => ({ ...account })) }
+  }
+
+  // One probe answer, shared by the single and the fleet path: usage windows
+  // ride a fresh clock so the reset stamps in the dev UI always read as
+  // plausible local times. Two live meters keep the rows distinguishable.
+  #codexQuota(account: { accountId: string; plan: string }): { fetchedAt: number; planType: string; primary: { present: boolean; remainingPercent: number; windowMinutes: number; resetAt: number }; secondary: { present: boolean; remainingPercent: number; windowMinutes: number; resetAt: number } } {
+    const now = Math.floor(Date.now() / 1000)
+    const primary = account.accountId === 'acct_fixture_codex_2' ? 23 : 76
+    const secondary = account.accountId === 'acct_fixture_codex_2' ? 68 : 41
+    return {
+      fetchedAt: now,
+      planType: account.plan !== '' ? account.plan : 'Pro',
+      primary: { present: true, remainingPercent: primary, windowMinutes: 300, resetAt: now + 3120 },
+      secondary: { present: true, remainingPercent: secondary, windowMinutes: 10080, resetAt: now + 172_800 },
+    }
   }
 
   #codexCancel(): void {
@@ -507,25 +527,32 @@ export class FixtureSession implements ControlPlaneSession {
       case 'codex.quota': {
         // The real sidecar answers with the account it was asked about; a
         // signed-out session is a refusal in the result, not a broken
-        // command — exactly like the backend's probe. Usage windows ride a
-        // fresh clock so the reset stamps in the dev UI always read as
-        // plausible local times.
+        // command — exactly like the backend's probe.
         const accountId = typeof body.accountId === 'string' ? body.accountId : ''
         const account = this.#codexAccounts.find((entry) => entry.accountId === accountId)
         if (account === undefined || account.state !== 'signed_in') return { accountId, error: 'codex is not signed in' }
-        const now = Math.floor(Date.now() / 1000)
-        // Two live meters keep the rows distinguishable at a glance.
-        const primary = account.accountId === 'acct_fixture_codex_2' ? 23 : 76
-        const secondary = account.accountId === 'acct_fixture_codex_2' ? 68 : 41
-        return {
-          accountId,
-          quota: {
-            fetchedAt: now,
-            planType: account.plan !== '' ? account.plan : 'Pro',
-            primary: { present: true, remainingPercent: primary, windowMinutes: 300, resetAt: now + 3120 },
-            secondary: { present: true, remainingPercent: secondary, windowMinutes: 10080, resetAt: now + 172_800 },
-          },
-        }
+        return { accountId, quota: this.#codexQuota(account) }
+      }
+      case 'codex.quota.all': {
+        // The fleet probe answers one row per account the single probe
+        // answers, so a reauth-needed account shows up as its own refusal
+        // instead of silently vanishing from the list.
+        const rows = this.#codexAccounts.map((account) =>
+          account.state === 'signed_in'
+            ? { accountId: account.accountId, quota: this.#codexQuota(account) }
+            : { accountId: account.accountId, error: 'codex is not signed in' })
+        return { results: rows }
+      }
+      case 'codex.wake': {
+        // The wake reports what the backend actually observed per account: a
+        // live session stays live, a broken one stays broken with its reason.
+        const asked = typeof body.accountId === 'string' ? body.accountId : ''
+        const rows = this.#codexAccounts
+          .filter((account) => asked === '' || account.accountId === asked)
+          .map((account) => account.state === 'signed_in'
+            ? { accountId: account.accountId, state: 'signed_in' }
+            : { accountId: account.accountId, state: account.state, error: 'the stored session expired' })
+        return { results: rows }
       }
       case 'codex.logout': {
         // A named account drops only itself; the cascade — or an empty

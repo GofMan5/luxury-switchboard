@@ -12,14 +12,14 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
-// fakeStore records every session it was asked to persist, keyed by the
+// fakeStore records every account it was asked to persist, keyed by the
 // account the session itself names — plural accounts are the contract it
 // stands in for. saves appends only on success so tests can assert
-// exactly which sessions landed; clearCount counts Clear and ClearAll
+// exactly which records landed; clearCount counts Clear and ClearAll
 // together so logout arithmetic stays comparable.
 type fakeStore struct {
 	mu          sync.Mutex
-	accounts    map[string]domain.Session
+	accounts    map[string]StoredAccount
 	order       []string
 	loadErr     error
 	saveErr     error
@@ -29,39 +29,39 @@ type fakeStore struct {
 	// test can hold one save in flight while Logout's Clear and other
 	// store traffic keep working.
 	saveHook func(domain.Session)
-	saves    []domain.Session
+	saves    []StoredAccount
 	clears   int
 }
 
-func (store *fakeStore) Load(ctx context.Context) ([]domain.Session, error) {
+func (store *fakeStore) Load(ctx context.Context) ([]StoredAccount, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.loadErr != nil {
 		return nil, store.loadErr
 	}
-	sessions := make([]domain.Session, 0, len(store.order))
+	stored := make([]StoredAccount, 0, len(store.order))
 	for _, key := range store.order {
-		sessions = append(sessions, store.accounts[key])
+		stored = append(stored, store.accounts[key])
 	}
-	return sessions, nil
+	return stored, nil
 }
 
-func (store *fakeStore) Save(ctx context.Context, session domain.Session) error {
+func (store *fakeStore) Save(ctx context.Context, record StoredAccount) error {
 	store.mu.Lock()
 	hook := store.saveHook
 	store.mu.Unlock()
 	if hook != nil {
 		// Deliberately outside mu: the hook parks, and a Logout that runs
 		// meanwhile must reach Clear without queueing behind this save.
-		hook(session)
+		hook(record.Session)
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.saveErr != nil {
 		return store.saveErr
 	}
-	store.insertLocked(session)
-	store.saves = append(store.saves, session)
+	store.insertLocked(record)
+	store.saves = append(store.saves, record)
 	return nil
 }
 
@@ -96,23 +96,34 @@ func (store *fakeStore) ClearAll(ctx context.Context) error {
 }
 
 // insertLocked places or replaces one account; callers hold mu.
-func (store *fakeStore) insertLocked(session domain.Session) {
+func (store *fakeStore) insertLocked(record StoredAccount) {
 	if store.accounts == nil {
-		store.accounts = map[string]domain.Session{}
+		store.accounts = map[string]StoredAccount{}
 	}
-	key := session.Identity.AccountID
+	key := record.Session.Identity.AccountID
 	if _, ok := store.accounts[key]; !ok {
 		store.order = append(store.order, key)
 	}
-	store.accounts[key] = session
+	store.accounts[key] = record
 }
 
-// seed lands a stored account without going through Save: tests use it
-// to place pre-existing sessions the service must Restore from.
+// seed lands a stored session without going through Save: tests use it
+// to place pre-existing sessions the service must Restore from. The
+// record carries no login method and no resets, exactly what a bare
+// session means on disk.
 func (store *fakeStore) seed(session domain.Session) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.insertLocked(session)
+	store.insertLocked(StoredAccount{Session: session})
+}
+
+// seedStored lands a full record without going through Save: tests use
+// it to place pre-existing method and reset facts the service must
+// Restore from.
+func (store *fakeStore) seedStored(record StoredAccount) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.insertLocked(record)
 }
 
 // setSaveHook installs (nil removes) the pre-record save hook.
@@ -122,16 +133,37 @@ func (store *fakeStore) setSaveHook(hook func(domain.Session)) {
 	store.saveHook = hook
 }
 
-// savedSessions snapshots what the service persisted, in order.
+// savedSessions snapshots the sessions the service persisted, in order.
 func (store *fakeStore) savedSessions() []domain.Session {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	return append([]domain.Session{}, store.saves...)
+	return store.sessionProjection(store.savedAccounts())
 }
 
-// storedSessions snapshots the store's current contents, in Load order.
+// savedAccounts snapshots the full records the service persisted, in
+// order — the method and counter a save was asked to keep.
+func (store *fakeStore) savedAccounts() []StoredAccount {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return append([]StoredAccount{}, store.saves...)
+}
+
+// storedSessions snapshots the store's current sessions, in Load order.
 func (store *fakeStore) storedSessions() []domain.Session {
-	sessions, _ := store.Load(context.Background())
+	return store.sessionProjection(store.storedAccounts())
+}
+
+// storedAccounts snapshots the store's current records, in Load order.
+func (store *fakeStore) storedAccounts() []StoredAccount {
+	stored, _ := store.Load(context.Background())
+	return stored
+}
+
+// sessionProjection maps records down to their sessions, so the
+// session-shaped assertions keep reading what they always read.
+func (store *fakeStore) sessionProjection(records []StoredAccount) []domain.Session {
+	sessions := make([]domain.Session, len(records))
+	for i, record := range records {
+		sessions[i] = record.Session
+	}
 	return sessions
 }
 
@@ -688,6 +720,19 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	env.service.refreshBackoffs = []time.Duration{0, 0}
 	return env
+}
+
+// quotaWaiters reports how many callers are parked waiting for the
+// account's quota gate — the fact a coalescing test needs its loser to
+// establish before the winner may settle.
+func (env *testEnv) quotaWaiters(accountID string) int {
+	env.service.mu.Lock()
+	entry := env.service.accounts[accountID]
+	env.service.mu.Unlock()
+	if entry == nil {
+		return 0
+	}
+	return entry.quotaGate.waiterCount()
 }
 
 // validSession is a session whose access token is comfortably fresh.
@@ -1634,29 +1679,22 @@ func TestConcurrentQuotaRefreshesShareOneProbe(t *testing.T) {
 	block := make(chan struct{})
 	env.authorizer.setUsageBlock(block)
 
-	// The started handshake makes the race this test is about actually
-	// occur. The waiter shares the winner's probe only when it enters
-	// RefreshQuota while that probe is in flight; without the handshake,
-	// close(block) can fire while the second goroutine is still sitting
-	// in a run queue, the winner settles, and the late arrival reads the
-	// post-settle counters, finds the gate free and probes afresh —
-	// production behaving correctly for the schedule that ran, but not
-	// the schedule this test pins. Receiving both signals before
-	// releasing the winner keeps both callers inside the block-open
-	// window, where the winner cannot settle and the waiter's pre-gate
-	// read is guaranteed to see the in-flight probe.
-	started := make(chan struct{}, 2)
+	// The pin is the gate's own waiter accounting, not a start signal:
+	// "the loser reached the gate and parked" is the fact coalescing
+	// depends on, and a goroutine that merely started can still be
+	// sitting in a run queue when the winner settles — the late arrival
+	// then reads post-settle counters, finds the gate free and probes
+	// afresh, correctly for the schedule that ran, but not the schedule
+	// this test pins. Waiting until the waiter is parked behind the
+	// blocked probe makes that schedule the only one possible.
 	results := make(chan QuotaSnapshot, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			started <- struct{}{}
 			results <- env.service.RefreshQuota(context.Background(), "account-1")
 		}()
 	}
-	<-started
-	<-started
-	waitFor(t, "the winner's probe to start", func() bool {
-		return env.authorizer.usageProbeCount() == 1
+	waitFor(t, "the winner's probe to start and the loser to park behind it", func() bool {
+		return env.authorizer.usageProbeCount() == 1 && env.quotaWaiters("account-1") == 1
 	})
 	close(block)
 

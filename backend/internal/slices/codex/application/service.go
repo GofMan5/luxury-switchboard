@@ -665,7 +665,7 @@ func (service *Service) runDeviceLogin(loginCtx context.Context, cancel context.
 	session, exchangeErr := service.authorizer.ExchangeDeviceCode(exchangeCtx, authorization)
 	cancelExchange()
 
-	service.settleExchange(loginCtx, session, exchangeErr)
+	service.settleExchange(loginCtx, LoginMethodDevice, session, exchangeErr)
 }
 
 // ImportJSON signs accounts in from credential text the user pasted:
@@ -969,7 +969,7 @@ func importAccessToken(candidate CredentialCandidate) (domain.Session, error) {
 // even on a provisioning failure, because the tokens are durable.
 func (service *Service) commitImport(session domain.Session, importedFrom string) (ImportResult, bool, error) {
 	saveCtx, cancelSave := context.WithTimeout(context.Background(), exchangeTimeout)
-	saveErr := service.store.Save(saveCtx, session)
+	saveErr := service.store.Save(saveCtx, service.storedAccountForSave(session, LoginMethodImport))
 	cancelSave()
 	if saveErr != nil {
 		// Nothing is persisted and nothing is signed in; provisioning is
@@ -986,7 +986,7 @@ func (service *Service) commitImport(session domain.Session, importedFrom string
 	// providerID is empty on a provisioning failure, and the account
 	// lands with no provider to route through — signed in, tokens kept,
 	// Status showing the gap.
-	service.commitAccountLocked(session, providerID)
+	service.commitAccountLocked(session, providerID, LoginMethodImport)
 	service.phase = PhaseIdle
 	service.loginErr = ""
 	service.clearLoginFlowLocked()
@@ -1189,7 +1189,8 @@ func (service *Service) Restore(ctx context.Context) error {
 		return nil
 	}
 
-	for _, session := range sessions {
+	for _, stored := range sessions {
+		session := stored.Session
 		service.mu.Lock()
 		before := service.snapshotLocked()
 		entry, ok := service.accounts[session.Identity.AccountID]
@@ -1201,6 +1202,11 @@ func (service *Service) Restore(ctx context.Context) error {
 		entry.connState = StateSignedIn
 		entry.invalidated = false
 		entry.providerID = ""
+		// The account facts the store recorded come back with the
+		// session: how this session was signed in and how many limit
+		// cycles it has been through survive a restart.
+		entry.loginMethod = stored.LoginMethod
+		entry.resets = stored.Resets
 		snapshot, listeners, changed := service.diffLocked(before)
 		service.mu.Unlock()
 		if changed {
@@ -1418,7 +1424,9 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 		service.mu.Unlock()
 		return snapshot
 	}
+	before := service.snapshotLocked()
 	entry.quotaProbes++
+	rotated := false
 	if err != nil {
 		snapshot = QuotaSnapshot{
 			FetchedAt: snapshot.FetchedAt,
@@ -1426,13 +1434,43 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 			Err:       err.Error(),
 		}
 	} else {
+		if domain.Rotated(snapshot.Usage, usage) {
+			// The upstream opened a later primary window: the account
+			// spent a limit cycle, and the counter the owner watches
+			// must say so. Rotation is counted here — the one settle
+			// point every probe passes — so no caller can charge it
+			// twice. A failed probe carries the last good Usage, so
+			// detection spans an outage; the first probe after a
+			// restart has no baseline and counts nothing by design.
+			entry.resets++
+			rotated = true
+		}
 		snapshot = QuotaSnapshot{
 			FetchedAt: service.now().Unix(),
 			Usage:     usage,
 		}
 	}
 	entry.quota = snapshot
+	persist := StoredAccount{}
+	if rotated {
+		persist = StoredAccount{Session: entry.session, LoginMethod: entry.loginMethod, Resets: entry.resets}
+	}
+	after, listeners, changed := service.diffLocked(before)
 	service.mu.Unlock()
+	if changed {
+		// The counter lives on the account's row, so a rotation is a
+		// state change the UI hears about — not a card-only detail.
+		service.fire(listeners, after)
+	}
+	if rotated {
+		// The counter is already live in memory; the disk copy is
+		// best-effort. A failing save keeps the in-memory value and the
+		// probe's own result, and the next counted rotation retries —
+		// the same trade applyRefresh makes for tokens.
+		saveCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		service.store.Save(saveCtx, persist)
+		cancel()
+	}
 	return snapshot
 }
 
@@ -1462,6 +1500,151 @@ func (service *Service) probeUsage(ctx context.Context, accountID string) (domai
 		// second rejection simply becomes the reported error.
 		service.InvalidateAccessToken(accessToken)
 	}
+}
+
+// WakeOutcome is one account's answer to a wake request: the state the
+// account ended in, and the failure text when the forced refresh could
+// not deliver a usable token. Err is empty on success.
+type WakeOutcome struct {
+	AccountID string
+	State     ConnState
+	Err       string
+}
+
+// Wake forces a token rotation now: the account's access token is
+// flagged as spent, so the acquire path refreshes instead of serving
+// the cached one. An empty accountID wakes every account. This is what
+// the owner reaches for when the relay stopped serving an account that
+// looks signed in — the token went stale out-of-band and waiting for
+// the next request is not an answer. It is a token action, not a usage
+// probe: a dead refresh token reclassifies the account to reauth-needed
+// exactly as the acquire path would, and a reauth-needed account is not
+// retried at all — that account's refresh already failed once, and only
+// a fresh login fixes it. Failures ride the per-account outcomes; the
+// command-level answer is always the list.
+func (service *Service) Wake(ctx context.Context, accountID string) []WakeOutcome {
+	type wakeTarget struct {
+		id          string
+		refreshable bool
+	}
+
+	service.mu.Lock()
+	targets := []wakeTarget{}
+	if accountID != "" {
+		if entry := service.accounts[accountID]; entry != nil {
+			targets = append(targets, wakeTarget{id: accountID, refreshable: entry.connState == StateSignedIn})
+		}
+	} else {
+		for _, id := range accountIDsLocked(service.accounts) {
+			targets = append(targets, wakeTarget{id: id, refreshable: service.accounts[id].connState == StateSignedIn})
+		}
+	}
+	for _, target := range targets {
+		// Only a signed-in account has a rotation to force; the flag
+		// itself is an implementation detail of the acquire path.
+		if target.refreshable {
+			service.accounts[target.id].invalidated = true
+		}
+	}
+	service.mu.Unlock()
+
+	if len(targets) == 0 {
+		// No account to wake. An explicit id that matches nothing reads
+		// as not signed in — the same answer a acquire would give.
+		if accountID == "" {
+			return []WakeOutcome{}
+		}
+		return []WakeOutcome{{AccountID: accountID, State: StateSignedOut, Err: errNotSignedIn.Error()}}
+	}
+
+	outcomes := make([]WakeOutcome, 0, len(targets))
+	for _, target := range targets {
+		if !target.refreshable {
+			// Reauth-needed: the refresh token already failed. The
+			// honest answer is "sign in again", delivered without a
+			// network round-trip the upstream is guaranteed to refuse.
+			service.mu.Lock()
+			state := StateSignedOut
+			if entry := service.accounts[target.id]; entry != nil {
+				state = entry.connState
+			}
+			service.mu.Unlock()
+			outcomes = append(outcomes, WakeOutcome{AccountID: target.id, State: state, Err: errNeedsSignIn.Error()})
+			continue
+		}
+		outcome := WakeOutcome{AccountID: target.id}
+		if _, err := service.AcquireAccessToken(ctx, target.id); err != nil {
+			outcome.Err = err.Error()
+		}
+		// The state is read after the refresh: a dead refresh token
+		// reclassifies the account right here, and the outcome must
+		// report what the wake actually left behind.
+		service.mu.Lock()
+		state := StateSignedOut
+		if entry := service.accounts[target.id]; entry != nil {
+			state = entry.connState
+		}
+		service.mu.Unlock()
+		outcome.State = state
+		outcomes = append(outcomes, outcome)
+	}
+	return outcomes
+}
+
+// QuotaOutcome pairs one account with the snapshot its probe settled
+// on, so a fleet-wide check can answer every card in one command.
+type QuotaOutcome struct {
+	AccountID string
+	Snapshot  QuotaSnapshot
+}
+
+// quotaProbeWorkers bounds how many usage probes run at once: enough
+// that a fleet check finishes like a small one, few enough that the
+// token refreshes behind the probes cannot look like a burst to the
+// upstream.
+const quotaProbeWorkers = 4
+
+// RefreshQuotaAll probes every account's usage windows, bounded in
+// parallel, and reports each account's settled snapshot in account-id
+// order — the order the status list renders. Each probe is a plain
+// RefreshQuota, so per-account gates coalesce duplicate callers and a
+// cancelled ctx leaves the last settled answers standing. Every account
+// is probed, including reauth-needed ones: their cards report the
+// failure, which is the answer an owner checking the fleet wants.
+func (service *Service) RefreshQuotaAll(ctx context.Context) []QuotaOutcome {
+	service.mu.Lock()
+	ids := accountIDsLocked(service.accounts)
+	service.mu.Unlock()
+
+	outcomes := make([]QuotaOutcome, len(ids))
+	if len(ids) == 0 {
+		return outcomes
+	}
+	position := make(map[string]int, len(ids))
+	for i, id := range ids {
+		position[id] = i
+	}
+
+	work := make(chan string)
+	workers := min(quotaProbeWorkers, len(ids))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range work {
+				// Distinct slice slots: no two workers write the same
+				// outcome, so the shared slice needs no lock.
+				outcomes[position[id]] = QuotaOutcome{AccountID: id, Snapshot: service.RefreshQuota(ctx, id)}
+			}
+		}()
+	}
+	for _, id := range ids {
+		work <- id
+	}
+	close(work)
+	wg.Wait()
+	return outcomes
 }
 
 // runLogin is the login flow's goroutine. It is bounded by loginCtx; on
@@ -1503,14 +1686,14 @@ func (service *Service) runLogin(loginCtx context.Context, cancel context.Cancel
 	session, exchangeErr := service.authorizer.ExchangeCode(exchangeCtx, code, verifier)
 	cancelExchange()
 
-	service.settleExchange(loginCtx, session, exchangeErr)
+	service.settleExchange(loginCtx, LoginMethodBrowser, session, exchangeErr)
 }
 
 // settleExchange lands the phase both sign-in flows share once their code
 // has been granted: either the exchange failed, or its session is saved,
 // checked against a racing logout and provisioned. The browser and device
 // flows differ only in how they got here.
-func (service *Service) settleExchange(loginCtx context.Context, session domain.Session, exchangeErr error) {
+func (service *Service) settleExchange(loginCtx context.Context, method LoginMethod, session domain.Session, exchangeErr error) {
 	if service.loginCancelled(loginCtx) {
 		// Cancellation outranks the exchange result: a completed exchange
 		// for a login the user abandoned is never persisted.
@@ -1528,7 +1711,7 @@ func (service *Service) settleExchange(loginCtx context.Context, session domain.
 	// may be nearly spent while the tokens are perfectly good, and these
 	// machine-speed calls have their own (shorter) bound.
 	saveCtx, cancelSave := context.WithTimeout(context.Background(), exchangeTimeout)
-	saveErr := service.store.Save(saveCtx, session)
+	saveErr := service.store.Save(saveCtx, service.storedAccountForSave(session, method))
 	cancelSave()
 	if saveErr != nil {
 		// Nothing is persisted and nothing is signed in; provisioning is
@@ -1561,7 +1744,7 @@ func (service *Service) settleExchange(loginCtx context.Context, session domain.
 	providerID, ensureErr := service.provisioner.EnsureCodexProvider(ensureCtx)
 	cancelEnsure()
 
-	service.completeLogin(loginCtx, session, providerID, ensureErr)
+	service.completeLogin(loginCtx, method, session, providerID, ensureErr)
 }
 
 // completeLogin commits a login whose session was stored: the tokens are
@@ -1572,7 +1755,7 @@ func (service *Service) settleExchange(loginCtx context.Context, session domain.
 // returned ("" on failure) is committed with the account; the row it
 // names is the one fleet entry, so a re-login of an existing account
 // relinks to the row the fleet already shares.
-func (service *Service) completeLogin(loginCtx context.Context, session domain.Session, providerID string, providerErr error) {
+func (service *Service) completeLogin(loginCtx context.Context, method LoginMethod, session domain.Session, providerID string, providerErr error) {
 	service.mu.Lock()
 	if service.cancelRequested || loginCtx.Err() == context.Canceled {
 		// A cancellation landed during provisioning: the login
@@ -1588,7 +1771,7 @@ func (service *Service) completeLogin(loginCtx context.Context, session domain.S
 		return
 	}
 	before := service.snapshotLocked()
-	service.commitAccountLocked(session, providerID)
+	service.commitAccountLocked(session, providerID, method)
 	if providerErr == nil {
 		service.phase = PhaseSuccess
 		service.loginErr = ""
@@ -1711,7 +1894,12 @@ func (service *Service) stopLoginServer(generation uint64) {
 type refreshGate struct {
 	mu   sync.Mutex
 	held bool
-	done chan struct{}
+	// waiting counts callers parked on done. It is pure accounting —
+	// acquire and release decide nothing from it — and exists so a test
+	// can pin the schedule coalescing depends on: "a waiter is parked"
+	// is otherwise unobservable from outside the gate.
+	waiting int
+	done    chan struct{}
 }
 
 // acquire waits for the gate to open, or for ctx to end first. On error
@@ -1726,14 +1914,21 @@ func (gate *refreshGate) acquire(ctx context.Context) error {
 			return nil
 		}
 		release := gate.done
+		gate.waiting++
 		gate.mu.Unlock()
 		select {
 		case <-release:
 			// The gate opened; contend for it again.
 		case <-ctx.Done():
 			// The caller is gone. Whoever holds the gate keeps it.
+			gate.mu.Lock()
+			gate.waiting--
+			gate.mu.Unlock()
 			return ctx.Err()
 		}
+		gate.mu.Lock()
+		gate.waiting--
+		gate.mu.Unlock()
 	}
 }
 
@@ -1750,6 +1945,16 @@ func (gate *refreshGate) release() {
 	if done != nil {
 		close(done)
 	}
+}
+
+// waiterCount reports how many callers are parked on done right now.
+// Callers that contend and take the gate are not waiting, so this is 0
+// for an uncontended gate and 1 while exactly one caller coalesces
+// behind whoever holds it.
+func (gate *refreshGate) waiterCount() int {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.waiting
 }
 
 // startRefreshLoop launches the refresh loop once, bound to the lifetime
@@ -1924,11 +2129,18 @@ func (service *Service) applyRefresh(accountID string, previous, refreshed domai
 		service.mu.Unlock()
 		return false, nil
 	}
+	// The save runs outside mu, so the account facts travel with it: a
+	// rotation that dropped the login method or reset count would erase
+	// them from disk — memory would keep them until the next restart
+	// silently reset both.
+	loginMethod := entry.loginMethod
+	resets := entry.resets
 	service.mu.Unlock()
 
 	merged := mergeRefreshed(previous, refreshed)
+	stored := StoredAccount{Session: merged, LoginMethod: loginMethod, Resets: resets}
 	saveCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
-	err := service.store.Save(saveCtx, merged)
+	err := service.store.Save(saveCtx, stored)
 	cancel()
 
 	service.mu.Lock()
@@ -2107,11 +2319,13 @@ func (service *Service) statusLocked() Status {
 	for _, id := range accountIDsLocked(service.accounts) {
 		entry := service.accounts[id]
 		rows = append(rows, AccountStatus{
-			AccountID:  id,
-			Email:      entry.session.Identity.Email,
-			Plan:       entry.session.Identity.Plan,
-			State:      entry.connState,
-			ProviderID: entry.providerID,
+			AccountID:   id,
+			Email:       entry.session.Identity.Email,
+			Plan:        entry.session.Identity.Plan,
+			State:       entry.connState,
+			ProviderID:  entry.providerID,
+			LoginMethod: string(entry.loginMethod),
+			Resets:      entry.resets,
 		})
 	}
 	return Status{
@@ -2151,8 +2365,11 @@ func aggregateStateLocked(accounts map[string]*account) ConnState {
 // its account: one account is one row, so a re-login replaces that
 // account's fields in place instead of adding a second row. The
 // provider id travels with the session — "" when provisioning failed
-// or was skipped. Called only with mu held.
-func (service *Service) commitAccountLocked(session domain.Session, providerID string) {
+// or was skipped. The login method records how this session arrived;
+// the reset counter is deliberately untouched — it belongs to the
+// account's history, not to any one session, so a re-login keeps the
+// cycles the account already spent. Called only with mu held.
+func (service *Service) commitAccountLocked(session domain.Session, providerID string, method LoginMethod) {
 	entry, ok := service.accounts[session.Identity.AccountID]
 	if !ok {
 		entry = &account{}
@@ -2162,6 +2379,25 @@ func (service *Service) commitAccountLocked(session domain.Session, providerID s
 	entry.connState = StateSignedIn
 	entry.invalidated = false
 	entry.providerID = providerID
+	entry.loginMethod = method
+}
+
+// storedAccountForSave builds the record a save site persists: the
+// session, the login method that produced it, and the account's current
+// reset count. The save sites run outside mu, so the account facts are
+// read under mu here — resets belong to the account, not the session,
+// and a re-login or re-import of an identity that already exists keeps
+// the cycles it already burned through, while a new identity starts at
+// zero. Call before the session is committed to memory; the committed
+// entry then agrees with what the disk holds.
+func (service *Service) storedAccountForSave(session domain.Session, method LoginMethod) StoredAccount {
+	service.mu.Lock()
+	resets := 0
+	if entry := service.accounts[session.Identity.AccountID]; entry != nil {
+		resets = entry.resets
+	}
+	service.mu.Unlock()
+	return StoredAccount{Session: session, LoginMethod: method, Resets: resets}
 }
 
 // diffLocked compares the observable state against a before snapshot and,

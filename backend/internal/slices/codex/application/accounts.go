@@ -6,18 +6,46 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/codex/domain"
 )
 
+// LoginMethod records how an account's session entered the workspace, so
+// the owner can tell a browser sign-in, a device-code sign-in and an
+// imported credential apart on the accounts screen. The zero value is an
+// unknown method: a record persisted before the field existed.
+type LoginMethod string
+
+const (
+	LoginMethodBrowser LoginMethod = "browser"
+	LoginMethodDevice  LoginMethod = "device"
+	LoginMethodImport  LoginMethod = "import"
+)
+
+// StoredAccount is one account exactly as the store persists it: the
+// session plus the facts that outlive a restart — how the session was
+// signed in and how many rate-limit windows it has burned through. The
+// store owns only this shape; anything the service does not ask it to
+// keep would silently vanish at the next token rotation, so every save
+// site must construct the whole record.
+type StoredAccount struct {
+	Session     domain.Session
+	LoginMethod LoginMethod
+	Resets      int
+}
+
 // account is one signed-in ChatGPT account: its session, its connection
 // state and the working data that belongs to exactly this account — the
-// provisioned provider entry, the invalidation flag and the quota probe
-// state. The refresh and quota gates live here as value fields: entries
-// are only ever inserted or deleted, never swapped, so the gates' identity
-// is stable for the lifetime of an account even across map lookups made
-// from a pointer taken before an edit.
+// provisioned provider entry, the invalidation flag, the quota probe
+// state and the facts carried across restarts. The refresh and quota
+// gates live here as value fields: entries are only ever inserted or
+// deleted, never swapped, so the gates' identity is stable for the
+// lifetime of an account even across map lookups made from a pointer
+// taken before an edit.
 type account struct {
 	session     domain.Session
 	connState   ConnState
 	providerID  string
 	invalidated bool
+
+	loginMethod LoginMethod
+	resets      int
 
 	quota       QuotaSnapshot
 	quotaProbes uint64
@@ -29,12 +57,16 @@ type account struct {
 // key, its labels and the state the UI renders. Email, Plan and AccountID
 // come from the id token's identity; the owner-only Providers screen may
 // show them, which is fine — they are account labels, not credentials.
+// LoginMethod and Resets are likewise labels: how the session arrived and
+// how many limit cycles it has been through.
 type AccountStatus struct {
-	AccountID  string
-	Email      string
-	Plan       string
-	State      ConnState
-	ProviderID string
+	AccountID   string
+	Email       string
+	Plan        string
+	State       ConnState
+	ProviderID  string
+	LoginMethod string
+	Resets      int
 }
 
 // AccountStore persists every signed-in Codex account, keyed by the
@@ -46,10 +78,10 @@ type AccountStore interface {
 	// Load returns every stored account, in the store's deterministic
 	// order. An empty answer means no account is signed in and is not
 	// an error.
-	Load(ctx context.Context) ([]domain.Session, error)
+	Load(ctx context.Context) ([]StoredAccount, error)
 	// Save durably stores one account; saving an identity again
 	// replaces that account's record.
-	Save(ctx context.Context, session domain.Session) error
+	Save(ctx context.Context, stored StoredAccount) error
 	// Clear removes one account's record; a missing record is a
 	// success, because the outcome — that account is gone — is the
 	// same.

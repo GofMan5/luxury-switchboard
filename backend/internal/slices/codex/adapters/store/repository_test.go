@@ -97,7 +97,7 @@ func TestAnUnconfiguredRepositoryRefusesInsteadOfTouchingTheWorkdir(t *testing.T
 		AccountID:      "acc_1",
 		OrganizationID: "org_1",
 	}}
-	requireStoreError(t, repository.Save(context.Background(), session))
+	requireStoreError(t, repository.Save(context.Background(), application.StoredAccount{Session: session}))
 	requireStoreError(t, repository.Clear(context.Background(), session))
 	requireStoreError(t, repository.ClearAll(context.Background()))
 	requireStoreError(t, func() error {
@@ -189,7 +189,7 @@ func TestCanceledContextIsRefusedBeforeDiskAccess(t *testing.T) {
 	} else {
 		requireStoreError(t, err)
 	}
-	if err := repository.Save(ctx, domain.Session{}); err == nil || !errors.Is(err, context.Canceled) {
+	if err := repository.Save(ctx, application.StoredAccount{}); err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("save ignored cancellation: %v", err)
 	} else {
 		requireStoreError(t, err)

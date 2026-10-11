@@ -1,0 +1,21 @@
+/* The pre-bundle screen. This file must not depend on the app bundle in any
+   way — the bundle failing to load or to commit its first frame is exactly
+   when this element is the only thing in the window. */
+#boot-sentinel {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 24px;
+  background: #101214;
+  color: #c8ced4;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+#boot-sentinel[data-state='failed'] {
+  color: #e2a8ad;
+}

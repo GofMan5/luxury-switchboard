@@ -17,6 +17,12 @@ export interface CodexAccount {
   readonly plan: string // backend text, '' when unknown — the UI never invents it
   readonly accountId: string
   readonly providerId: string // the managed provider's id, '' when none
+  /** How the session was created — 'device' or 'browser'; undefined when the
+   * backend row predates the field. A label only, never a credential. */
+  readonly loginMethod?: string
+  /** How many times the account's session was re-provisioned after a dead
+   * refresh token — the backend's counter, carried as-is. */
+  readonly resets?: number
 }
 
 /** One usage window the account's endpoint reported. present=false means the
@@ -58,4 +64,28 @@ export interface CodexQuotaResult {
 export interface CodexStatus {
   readonly state: CodexAccountState
   readonly accounts: readonly CodexAccount[]
+}
+
+/** The aggregate over rows: signed in once any account is, reauth only when
+ * no signed-in one remains, signed out otherwise. The status answer carries
+ * the backend's own aggregate; this recomputes it when only rows are known. */
+export function aggregateCodexState(accounts: readonly CodexAccount[]): CodexAccountState {
+  if (accounts.some((account) => account.state === 'signed_in')) return 'signed_in'
+  if (accounts.some((account) => account.state === 'reauth_needed')) return 'reauth_needed'
+  return 'signed_out'
+}
+
+/** One row of a `codex.wake` answer: which account, the state the backend
+ * saw after trying to refresh its tokens, and a failure as status text when
+ * the wake could not run at all. */
+export interface CodexWakeOutcome {
+  readonly accountId: string
+  readonly state: CodexAccountState
+  readonly error?: string
+}
+
+/** Result of `codex.wake`: one outcome row per requested account, always a
+ * list — an empty selection is "no rows", never a missing field. */
+export interface CodexWakeResult {
+  readonly results: readonly CodexWakeOutcome[]
 }

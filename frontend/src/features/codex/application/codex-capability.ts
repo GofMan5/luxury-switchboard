@@ -7,3 +7,14 @@ export function hasCodexLogin(capabilities: readonly string[]): boolean {
 export function hasCodexQuota(capabilities: readonly string[]): boolean {
   return capabilities.includes('codex.quota')
 }
+
+/** `codex.quota.all` probes every account in one call — the bulk button. */
+export function hasCodexQuotaAll(capabilities: readonly string[]): boolean {
+  return capabilities.includes('codex.quota.all')
+}
+
+/** `codex.wake` re-refreshes tokens for sleeping sessions; without it the
+ * bulk Wake control stays hidden instead of promising an unsupported call. */
+export function hasCodexWake(capabilities: readonly string[]): boolean {
+  return capabilities.includes('codex.wake')
+}

@@ -44,6 +44,24 @@ type Usage struct {
 	Secondary QuotaWindow
 }
 
+// Rotated reports whether next opened a later primary rate-limit window
+// than prev: the upstream moved the account onto a fresh limit cycle, the
+// event the account's reset counter counts. Both readings must carry a
+// primary window with a reset deadline — a window the endpoint did not
+// report is not a rotation, and neither is a deadline it left out, so a
+// pair of absent readings can never manufacture a count. The secondary
+// (weekly) window is deliberately ignored: it rotates at most once a week
+// and would report the account's mere age, not usage pressure.
+func Rotated(prev, next Usage) bool {
+	if !prev.Primary.Present || !next.Primary.Present {
+		return false
+	}
+	if prev.Primary.ResetAt.IsZero() || next.Primary.ResetAt.IsZero() {
+		return false
+	}
+	return next.Primary.ResetAt.After(prev.Primary.ResetAt)
+}
+
 // NormalizeQuotaWindow ports the reference implementation's maths so
 // the numbers agree with what the cockpit showed for the same account:
 //

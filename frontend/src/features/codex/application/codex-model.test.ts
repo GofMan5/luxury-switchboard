@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ControlPlaneError } from '../../../shared/contracts/protocol'
-import type { CodexAccount, CodexLoginStatus, CodexQuotaReport, CodexQuotaResult, CodexStatus } from '../domain/codex'
-import type { CodexDeviceLoginStart, CodexImportResult, CodexPort } from './codex-port'
+import type { CodexAccount, CodexLoginStatus, CodexQuotaReport, CodexQuotaResult, CodexStatus, CodexWakeResult } from '../domain/codex'
+import type { CodexDeviceLoginStart, CodexImportResult, CodexPort, CodexQuotaAllResult } from './codex-port'
 import { CodexModel } from './codex-model'
 
 const signedIn: CodexAccount = { state: 'signed_in', email: 'dev@example.com', plan: 'Pro', accountId: 'acct-1', providerId: 'codex-1' }
@@ -55,6 +55,23 @@ class FakeCodexPort implements CodexPort {
   /** When set, quota stays pending until the test resolves it. */
   quotaDelay: Promise<void> | null = null
 
+  // Fleet usage check: what codex.quota.all answers, and how it can fail.
+  quotaAllResult: CodexQuotaAllResult | null = null
+  quotaAllError: Error | null = null
+  quotaAllCalls = 0
+  /** When set, quotaAll stays pending until the test resolves it. */
+  quotaAllDelay: Promise<void> | null = null
+
+  // Token wake: what codex.wake answers, and how it can fail.
+  wakeResult: CodexWakeResult | null = null
+  wakeError: Error | null = null
+  wakeCalls: (readonly string[] | null)[] = []
+  /** When set, wake stays pending until the test resolves it. */
+  wakeDelay: Promise<void> | null = null
+
+  /** Set to make the status refetch fail after the initial connect. */
+  statusError: Error | null = null
+
   async loginStart(signal?: AbortSignal): Promise<{ authorizeUrl: string }> {
     this.loginStartCalls += 1
     this.abortSignal = signal ?? null
@@ -65,7 +82,10 @@ class FakeCodexPort implements CodexPort {
 
   async loginStatus(): Promise<CodexLoginStatus> { return this.login }
   async loginCancel(): Promise<void> { this.loginCancelCalls += 1 }
-  async status(): Promise<CodexStatus> { return this.statusResult }
+  async status(): Promise<CodexStatus> {
+    if (this.statusError) throw this.statusError
+    return this.statusResult
+  }
 
   async deviceLoginStart(signal?: AbortSignal): Promise<CodexDeviceLoginStart> {
     this.deviceLoginStartCalls += 1
@@ -102,6 +122,25 @@ class FakeCodexPort implements CodexPort {
     await this.quotaDelay
     if (this.quotaError) throw this.quotaError
     return this.quotaResults[accountId] ?? { accountId, error: 'codex is not signed in' }
+  }
+
+  async quotaAll(): Promise<CodexQuotaAllResult> {
+    this.quotaAllCalls += 1
+    await this.quotaAllDelay
+    if (this.quotaAllError) throw this.quotaAllError
+    return this.quotaAllResult ?? {
+      results: this.statusResult.accounts.map((account) =>
+        this.quotaResults[account.accountId] ?? { accountId: account.accountId, error: 'codex is not signed in' }),
+    }
+  }
+
+  async wake(accountIds: readonly string[] | null): Promise<CodexWakeResult> {
+    this.wakeCalls.push(accountIds)
+    await this.wakeDelay
+    if (this.wakeError) throw this.wakeError
+    return this.wakeResult ?? {
+      results: this.statusResult.accounts.map((account) => ({ accountId: account.accountId, state: account.state })),
+    }
   }
 
   async openAuthorizeUrl(url: string): Promise<void> {
@@ -1060,6 +1099,156 @@ describe('CodexModel', () => {
     port.statusResult = { state: 'signed_in', accounts: [secondSignedIn] }
     await model.refresh()
     expect(model.snapshot().quotas['acct-1']).toBeUndefined()
+    model.dispose()
+  })
+
+  it('wakes every account in one call and adopts the states the wake reports', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'reauth_needed', accounts: [needsReauth, secondSignedIn] }
+    let release: () => void = () => {}
+    port.wakeDelay = new Promise<void>((resolve) => { release = () => resolve() })
+    const model = new CodexModel(port)
+    await model.connect()
+    const waking = model.wake(null)
+    expect(model.snapshot().wakingIds).toEqual(['acct-1', 'acct-2'])
+    // The backend store holds the wake's result by the time the call resolves.
+    port.statusResult = { state: 'signed_in', accounts: [signedIn, secondSignedIn] }
+    port.wakeResult = { results: [{ accountId: 'acct-1', state: 'signed_in' }] }
+    release()
+    await waking
+    expect(port.wakeCalls).toEqual([null])
+    expect(model.snapshot().state).toBe('signed_in')
+    expect(model.snapshot().accounts.map((account) => [account.accountId, account.state]))
+      .toEqual([['acct-1', 'signed_in'], ['acct-2', 'signed_in']])
+    expect(model.snapshot().wakingIds).toEqual([])
+    expect(model.snapshot().wakeError).toBe('')
+    model.dispose()
+  })
+
+  it('a wake keeps its outcome rows when the status refetch cannot run', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'reauth_needed', accounts: [needsReauth] }
+    const model = new CodexModel(port)
+    await model.connect()
+    port.statusError = new Error('connection dropped')
+    port.wakeResult = { results: [{ accountId: 'acct-1', state: 'signed_in' }] }
+    await model.wake(null)
+    // The outcome is the last thing the wake learned about the row.
+    expect(model.snapshot().accounts[0]?.state).toBe('signed_in')
+    expect(model.snapshot().state).toBe('signed_in')
+    model.dispose()
+  })
+
+  it('wakes a selection only: live ids pass through, ghost ids and empty lists do nothing', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'signed_in', accounts: [signedIn, secondSignedIn] }
+    port.wakeResult = { results: [] }
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.wake(['acct-2', 'ghost'])
+    expect(port.wakeCalls).toEqual([['acct-2']])
+    await model.wake([])
+    expect(port.wakeCalls).toEqual([['acct-2']])
+    expect(model.snapshot().wakingIds).toEqual([])
+    model.dispose()
+  })
+
+  it('reports a failed wake as readable copy, then clears it on the next success', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'signed_in', accounts: [signedIn] }
+    port.wakeError = new ControlPlaneError('timeout', 'took too long')
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.wake(null)
+    expect(model.snapshot().wakeError).toBe('The control plane did not answer in time. Check that the relay is running, then try again.')
+    expect(model.snapshot().wakingIds).toEqual([])
+    expect(model.snapshot().state).toBe('signed_in')
+    port.wakeError = null
+    port.wakeResult = { results: [] }
+    await model.wake(null)
+    expect(model.snapshot().wakeError).toBe('')
+    model.dispose()
+  })
+
+  it('maps an unknown wake failure to the generic wake copy', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'signed_in', accounts: [signedIn] }
+    port.wakeError = new Error('socket reset mid-flight')
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.wake(null)
+    expect(model.snapshot().wakeError).toBe('The Codex accounts could not be woken. Try again.')
+    model.dispose()
+  })
+
+  it('checks usage for the whole fleet in one pass, each card pending while it runs', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'signed_in', accounts: [signedIn, secondSignedIn] }
+    port.quotaAllResult = {
+      results: [
+        { accountId: 'acct-1', quota: usage },
+        { accountId: 'acct-2', error: 'codex is not signed in' },
+      ],
+    }
+    let release: () => void = () => {}
+    port.quotaAllDelay = new Promise<void>((resolve) => { release = () => resolve() })
+    const model = new CodexModel(port)
+    await model.connect()
+    const checking = model.refreshAll()
+    expect(model.snapshot().probingAll).toBe(true)
+    expect(model.snapshot().quotas['acct-1']?.pending).toBe(true)
+    expect(model.snapshot().quotas['acct-2']?.pending).toBe(true)
+    release()
+    await checking
+    expect(port.quotaAllCalls).toBe(1)
+    expect(model.snapshot().probingAll).toBe(false)
+    expect(model.snapshot().quotas['acct-1']?.quota?.primary.remainingPercent).toBe(78)
+    expect(model.snapshot().quotas['acct-2']).toMatchObject({
+      pending: false,
+      quota: null,
+      error: 'The account is no longer signed in. Sign in again to see its usage.',
+    })
+    model.dispose()
+  })
+
+  it('a failed fleet check keeps the last good windows and names the failure on every card', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'signed_in', accounts: [signedIn, secondSignedIn] }
+    port.quotaResults = { 'acct-1': { accountId: 'acct-1', quota: usage } }
+    const model = new CodexModel(port)
+    await model.connect()
+    await model.refreshQuota('acct-1')
+    port.quotaAllError = new ControlPlaneError('timeout', 'took too long')
+    await model.refreshAll()
+    expect(model.snapshot().quotas['acct-1']).toMatchObject({
+      pending: false,
+      error: 'The control plane did not answer in time. Check that the relay is running, then try again.',
+      quota: { fetchedAt: 1_789_000_000 },
+    })
+    expect(model.snapshot().quotas['acct-2']).toMatchObject({
+      pending: false,
+      quota: null,
+      error: 'The control plane did not answer in time. Check that the relay is running, then try again.',
+    })
+    model.dispose()
+  })
+
+  it('refuses a second fleet check while one is running, and checks nothing without accounts', async () => {
+    const port = new FakeCodexPort()
+    port.statusResult = { state: 'signed_in', accounts: [signedIn] }
+    let release: () => void = () => {}
+    port.quotaAllDelay = new Promise<void>((resolve) => { release = () => resolve() })
+    const model = new CodexModel(port)
+    await model.connect()
+    const first = model.refreshAll()
+    await model.refreshAll()
+    expect(port.quotaAllCalls).toBe(1)
+    release()
+    await first
+    port.statusResult = { state: 'signed_out', accounts: [] }
+    await model.refresh()
+    await model.refreshAll()
+    expect(port.quotaAllCalls).toBe(1)
     model.dispose()
   })
 

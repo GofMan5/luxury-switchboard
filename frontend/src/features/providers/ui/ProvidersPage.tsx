@@ -44,9 +44,9 @@ export default function ProvidersPage() {
   // With the Codex preset available, Add provider starts from a chooser; an
   // older control plane never learns about it and keeps the direct route.
   const [addProvider, setAddProvider] = useState<'choose' | 'codex' | null>(null)
-  // A disconnect targets one account, so the dialog holds the account it is
-  // about to sign out plus how many signed-in accounts survive it.
-  const [disconnectCodex, setDisconnectCodex] = useState<{ accountId: string; email: string; otherSignedIn: number } | null>(null)
+  // A disconnect targets one account: the dialog reads the live account set
+  // itself, so the copy stays truthful about what survives the sign-out.
+  const [confirmCodex, setConfirmCodex] = useState<{ accounts: readonly CodexAccount[]; remove: boolean } | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
   // The codex preset delete rides the same logout command with remove; its
   // pending flag is tracked separately from a provider save/switch.
@@ -103,8 +103,7 @@ export default function ProvidersPage() {
   const beginCodexDisconnect = (accountId: string) => {
     const account = codexState.accounts.find((entry) => entry.accountId === accountId)
     if (!account) return
-    const otherSignedIn = codexState.accounts.filter((entry) => entry.accountId !== accountId && entry.state === 'signed_in').length
-    setDisconnectCodex({ accountId, email: account.email, otherSignedIn })
+    setConfirmCodex({ accounts: [account], remove: false })
   }
   // The list row stands for every account: it leads with the first
   // signed-in email and folds the rest into a count.
@@ -238,19 +237,24 @@ export default function ProvidersPage() {
           onDisconnect={beginCodexDisconnect}
         />
       ) : null}
-      {disconnectCodex !== null ? (
+      {confirmCodex !== null ? (
         <DisconnectCodexDialog
-          email={disconnectCodex.email}
-          otherSignedIn={disconnectCodex.otherSignedIn}
+          accounts={confirmCodex.accounts}
+          remove={confirmCodex.remove}
           pending={disconnecting}
           error={logoutErrorCopy(codexState.logoutError)}
-          onCancel={() => setDisconnectCodex(null)}
+          onCancel={() => setConfirmCodex(null)}
           onConfirm={async () => {
+            const account = confirmCodex.accounts[0]
+            if (!account) {
+              setConfirmCodex(null)
+              return
+            }
             setDisconnecting(true)
-            const ok = await codexModel.logout(disconnectCodex.accountId)
+            const ok = await codexModel.logout(account.accountId)
             setDisconnecting(false)
             if (!ok) return
-            setDisconnectCodex(null)
+            setConfirmCodex(null)
             // With several accounts the add flow stays open: another
             // account can be added or disconnected right away. The catalog
             // refresh picks up any preset-level change.

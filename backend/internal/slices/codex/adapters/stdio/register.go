@@ -1,10 +1,11 @@
 // Package stdio exposes the codex preset's application service over the
 // versioned stdio protocol: browser and device-code sign-in, credential
-// imports, connection status, sign-out and the codex.changed push that
-// lets surfaces refetch instead of polling. The adapter adds no logic of
-// its own — every value comes from the application layer, which already
-// guarantees that login phases and account labels may travel on the wire
-// while session tokens never do.
+// imports, connection status, sign-out, per-account and fleet-wide usage
+// probes, the fleet wake, and the codex.changed push that lets surfaces
+// refetch instead of polling. The adapter adds no logic of its own —
+// every value comes from the application layer, which already guarantees
+// that login phases and account labels may travel on the wire while
+// session tokens never do.
 package stdio
 
 import (
@@ -32,6 +33,8 @@ type codexService interface {
 	Status() application.Status
 	Logout(ctx context.Context, accountID string, removeEntry bool) error
 	RefreshQuota(ctx context.Context, accountID string) application.QuotaSnapshot
+	Wake(ctx context.Context, accountID string) []application.WakeOutcome
+	RefreshQuotaAll(ctx context.Context) []application.QuotaOutcome
 	OnChanged(func(application.Snapshot))
 }
 
@@ -80,13 +83,19 @@ type StatusResult struct {
 // that account's id-token labels plus its own connection state.
 // ProviderID names the Providers-page entry the account serves, so a
 // pane row and a provider row can be told apart even when the entry
-// exists while the account sits signed out.
+// exists while the account sits signed out. LoginMethod is omitted
+// while empty — an account persisted before the field existed reports
+// an unknown method, which the pane renders as such rather than as a
+// blank fact — and Resets always travels: zero reset cycles is itself
+// the answer the Cockpit table shows in its Сбросы column.
 type AccountResult struct {
-	AccountID  string `json:"accountId"`
-	Email      string `json:"email"`
-	Plan       string `json:"plan"`
-	State      string `json:"state"`
-	ProviderID string `json:"providerId"`
+	AccountID   string `json:"accountId"`
+	Email       string `json:"email"`
+	Plan        string `json:"plan"`
+	State       string `json:"state"`
+	ProviderID  string `json:"providerId"`
+	LoginMethod string `json:"loginMethod,omitempty"`
+	Resets      int    `json:"resets"`
 }
 
 // ImportResult reports an import that landed: the live account status —
@@ -135,6 +144,32 @@ type QuotaWindowResult struct {
 	RemainingPercent int   `json:"remainingPercent"`
 	WindowMinutes    int   `json:"windowMinutes,omitempty"`
 	ResetAt          int64 `json:"resetAt,omitempty"`
+}
+
+// WakeResult is the fleet answer to a wake request: one outcome per
+// targeted account, in the service's account order. The command never
+// answers a protocol-level failure — a wake that could not rotate a
+// token is that account's outcome, not the caller's error, because the
+// rest of the list still answers the question it was asked.
+type WakeResult struct {
+	Results []WakeOutcomeResult `json:"results"`
+}
+
+// WakeOutcomeResult is one account's wake outcome on the wire: the
+// state the account ended in plus the failure text when the forced
+// rotation could not deliver a usable token. Error is omitted while
+// empty so a clean wake reads as clean.
+type WakeOutcomeResult struct {
+	AccountID string `json:"accountId"`
+	State     string `json:"state"`
+	Error     string `json:"error,omitempty"`
+}
+
+// QuotaAllResult is the fleet answer to a usage check: one card per
+// account, in the service's account order — the order the accounts list
+// renders, so surfaces can join the two by position as well as by id.
+type QuotaAllResult struct {
+	Results []QuotaResult `json:"results"`
 }
 
 // Register wires the codex commands onto the protocol server and
@@ -242,6 +277,31 @@ func Register(server *platform.Server, service codexService) {
 		// codex.changed for it.
 		return quotaResult(command.AccountID, service.RefreshQuota(ctx, command.AccountID)), nil
 	})
+	server.Handle("codex.quota.all", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		if err := decodeCommand(payload); err != nil {
+			return nil, err
+		}
+		// The fleet check rides the command's context, so a shell that
+		// aborts the frame also aborts the probes it was waiting on; the
+		// per-account gates keep whatever already settled. Pushes stay
+		// the change feed's job — this answer is the list itself.
+		return quotaAllResult(service.RefreshQuotaAll(ctx)), nil
+	})
+	server.Handle("codex.wake", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var command struct {
+			// accountId targets one account's token rotation; absent
+			// means every account — the wake-all the toolbar button
+			// sends. An id that matches nothing is answered inside the
+			// list, as that account's outcome, not as a command error:
+			// the caller asked about accounts, and the answer stays
+			// shaped like them.
+			AccountID string `json:"accountId,omitempty"`
+		}
+		if err := platform.DecodePayload(payload, &command); err != nil {
+			return nil, invalidPayload()
+		}
+		return wakeResult(service.Wake(ctx, command.AccountID)), nil
+	})
 	server.Handle("codex.logout", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
 			// remove is the delete path: the Codex provider entry is
@@ -273,11 +333,12 @@ func Register(server *platform.Server, service codexService) {
 }
 
 // decodeCommand accepts only an empty payload object: every codex
-// command except logout and quota takes no fields, so whatever a client
-// puts there is unexpected by definition and gets the standard
-// invalid_payload refusal instead of being silently ignored. logout and
-// quota decode their own payloads — logout carries the optional remove
-// flag and account id, quota the account it probes.
+// command except logout, quota and wake takes no fields, so whatever a
+// client puts there is unexpected by definition and gets the standard
+// invalid_payload refusal instead of being silently ignored. logout,
+// quota and wake decode their own payloads — logout carries the
+// optional remove flag and account id, quota and wake the account they
+// target.
 func decodeCommand(payload json.RawMessage) error {
 	var command struct{}
 	if err := platform.DecodePayload(payload, &command); err != nil {
@@ -394,11 +455,13 @@ func accountResults(accounts []application.AccountStatus) []AccountResult {
 	rows := make([]AccountResult, 0, len(accounts))
 	for _, account := range accounts {
 		rows = append(rows, AccountResult{
-			AccountID:  account.AccountID,
-			Email:      account.Email,
-			Plan:       account.Plan,
-			State:      string(account.State),
-			ProviderID: account.ProviderID,
+			AccountID:   account.AccountID,
+			Email:       account.Email,
+			Plan:        account.Plan,
+			State:       string(account.State),
+			ProviderID:  account.ProviderID,
+			LoginMethod: account.LoginMethod,
+			Resets:      account.Resets,
 		})
 	}
 	return rows
@@ -439,6 +502,32 @@ func quotaWindowResult(window domain.QuotaWindow) QuotaWindowResult {
 		result.ResetAt = window.ResetAt.Unix()
 	}
 	return result
+}
+
+// quotaAllResult lifts the fleet check onto the wire. The slice is
+// always allocated, so an account-less service answers an empty array —
+// "every card checked" — rather than null.
+func quotaAllResult(outcomes []application.QuotaOutcome) QuotaAllResult {
+	results := make([]QuotaResult, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		results = append(results, quotaResult(outcome.AccountID, outcome.Snapshot))
+	}
+	return QuotaAllResult{Results: results}
+}
+
+// wakeResult lifts the wake list onto the wire. The slice is always
+// allocated for the same reason as the fleet check: a wake of nothing
+// is a completed wake, not a missing answer.
+func wakeResult(outcomes []application.WakeOutcome) WakeResult {
+	results := make([]WakeOutcomeResult, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		results = append(results, WakeOutcomeResult{
+			AccountID: outcome.AccountID,
+			State:     string(outcome.State),
+			Error:     outcome.Err,
+		})
+	}
+	return WakeResult{Results: results}
 }
 
 // changedPayload flattens a snapshot for the codex.changed push. The

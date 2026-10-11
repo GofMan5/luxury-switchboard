@@ -533,14 +533,11 @@ func (service *Service) LoginStart() (string, error) {
 
 	// A cancellation can land in the sliver between the state commit and
 	// this return: the URL handed back would open a login whose flow is
-	// already dying. The context outlives the flags — Logout and
-	// LoginCancel reset cancelRequested, but a cancelled ctx stays
-	// cancelled — so re-check both. A newer LoginStart superseding this
-	// one (loginGen moved on) reads as stale the same way.
-	service.mu.Lock()
-	stale := service.cancelRequested || service.loginGen != generation
-	service.mu.Unlock()
-	if stale || loginCtx.Err() == context.Canceled {
+	// already dying. loginHandbackStale is the witness that cannot be
+	// fooled here — the goroutine's own deferred cancel kills the
+	// context on every exit path, a successful login included, so a
+	// settled flow must still hand back its URL.
+	if service.loginHandbackStale(generation) {
 		return "", errLoginAlreadyCancelled
 	}
 	return authorizeURL, nil
@@ -605,11 +602,11 @@ func (service *Service) DeviceLoginStart() (DeviceLoginView, error) {
 
 	// The same sliver LoginStart closes: a cancellation between the
 	// commit and this return means the flow handed back is already
-	// dying, and a newer start superseding this one reads as stale.
-	service.mu.Lock()
-	stale := service.cancelRequested || service.loginGen != generation
-	service.mu.Unlock()
-	if stale || loginCtx.Err() == context.Canceled {
+	// dying. loginHandbackStale reads the flow, not the context — the
+	// goroutine's own deferred cancel kills the context on every exit
+	// path, a completed device flow included, so the context alone can
+	// never say who cancelled it.
+	if service.loginHandbackStale(generation) {
 		return DeviceLoginView{}, errLoginAlreadyCancelled
 	}
 	return DeviceLoginView{
@@ -1671,6 +1668,25 @@ func (service *Service) loginCancelled(loginCtx context.Context) bool {
 	requested := service.cancelRequested
 	service.mu.Unlock()
 	return requested || loginCtx.Err() == context.Canceled
+}
+
+// loginHandbackStale reports whether the login flow a start call is about
+// to hand back has already been taken away from that caller. Only three
+// things make it stale: a cancellation was requested against it, a newer
+// start superseded it, or it already landed idle — the one phase a
+// cancelled login ends in. The login context is deliberately not
+// consulted: the goroutine's own deferred cancel runs on every exit path,
+// a successful login included, so a dead context alone cannot say who
+// cancelled it. PhaseIdle is the durable witness of an external cancel
+// instead: the goroutine lands idle only through loginCancelled, and the
+// flag reset that comes with that landing clears the flags but cannot
+// un-cancel the flow. A flow that settled on its own — success or a
+// genuine flow error — is not stale and must hand its URL back.
+func (service *Service) loginHandbackStale(generation uint64) bool {
+	service.mu.Lock()
+	stale := service.cancelRequested || service.loginGen != generation || service.phase == PhaseIdle
+	service.mu.Unlock()
+	return stale
 }
 
 // stopLoginServer stops the redirect server only while this login still

@@ -432,3 +432,105 @@ func TestALoginStartDuringACancellationSliverDoesNotHandBackADeadURL(t *testing.
 		return env.service.LoginStatus().Phase == PhaseIdle
 	})
 }
+
+// The handback staleness rule, as a truth table. The old rule also read
+// the login context, and the login goroutine's own deferred cancel kills
+// that context on every exit path — success included. In the fast-fake
+// tests the goroutine can finish before the start call re-checks, and a
+// successful login was misreported as errLoginAlreadyCancelled: the CI
+// flake. The rule now reads only the flow: an external cancel, a
+// superseding start, or a landing on idle (the one phase a cancelled
+// login ends in). Nothing else is stale, a settled flow's URL included.
+func TestLoginHandbackStaleReadsTheFlowNotTheContext(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Each row is the service state at the moment a start call re-checks
+	// its handback, for the generation that call committed.
+	cases := []struct {
+		name       string
+		cancelled  bool   // cancelRequested flag
+		callerGen  uint64 // the generation the start call committed
+		currentGen uint64 // service.loginGen at re-check time
+		phase      LoginPhase
+		want       bool
+	}{
+		{
+			// LoginCancel set the flag under mu before cancelling the
+			// context outside it; the goroutine has not landed yet.
+			name:       "cancel requested while still waiting",
+			cancelled:  true,
+			callerGen:  1,
+			currentGen: 1,
+			phase:      PhaseWaiting,
+			want:       true,
+		},
+		{
+			// A newer start superseded this one and moved the gen on.
+			name:       "superseded by a newer start",
+			callerGen:  1,
+			currentGen: 2,
+			phase:      PhaseWaiting,
+			want:       true,
+		},
+		{
+			// The cancel outlived the flags: the goroutine landed idle,
+			// and that landing reset cancelRequested — but the flow this
+			// caller started is still the one that died.
+			name:       "landed idle after a cancel reset the flag",
+			callerGen:  1,
+			currentGen: 1,
+			phase:      PhaseIdle,
+			want:       true,
+		},
+		{
+			// The flake this rule replaced: the login completed while
+			// the caller was between commit and re-check. The goroutine
+			// deferred cancel has killed the context, yet the URL is
+			// live and must be handed back.
+			name:       "settled with success",
+			callerGen:  1,
+			currentGen: 1,
+			phase:      PhaseSuccess,
+			want:       false,
+		},
+		{
+			// The flow failed on its own; the error text lives in
+			// loginErr and the next start begins fresh. Not a cancel.
+			name:       "settled with a flow error",
+			callerGen:  1,
+			currentGen: 1,
+			phase:      PhaseError,
+			want:       false,
+		},
+		{
+			// The ordinary alive phases: waiting, or exchanging the
+			// authorization code.
+			name:       "still waiting",
+			callerGen:  1,
+			currentGen: 1,
+			phase:      PhaseWaiting,
+			want:       false,
+		},
+		{
+			name:       "exchanging the code",
+			callerGen:  1,
+			currentGen: 1,
+			phase:      PhaseExchanging,
+			want:       false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env.service.mu.Lock()
+			env.service.cancelRequested = tc.cancelled
+			env.service.loginGen = tc.currentGen
+			env.service.phase = tc.phase
+			env.service.mu.Unlock()
+
+			if got := env.service.loginHandbackStale(tc.callerGen); got != tc.want {
+				t.Fatalf("loginHandbackStale(%d) = %v, want %v", tc.callerGen, got, tc.want)
+			}
+		})
+	}
+}

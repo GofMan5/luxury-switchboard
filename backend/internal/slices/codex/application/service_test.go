@@ -1634,10 +1634,27 @@ func TestConcurrentQuotaRefreshesShareOneProbe(t *testing.T) {
 	block := make(chan struct{})
 	env.authorizer.setUsageBlock(block)
 
+	// The started handshake makes the race this test is about actually
+	// occur. The waiter shares the winner's probe only when it enters
+	// RefreshQuota while that probe is in flight; without the handshake,
+	// close(block) can fire while the second goroutine is still sitting
+	// in a run queue, the winner settles, and the late arrival reads the
+	// post-settle counters, finds the gate free and probes afresh —
+	// production behaving correctly for the schedule that ran, but not
+	// the schedule this test pins. Receiving both signals before
+	// releasing the winner keeps both callers inside the block-open
+	// window, where the winner cannot settle and the waiter's pre-gate
+	// read is guaranteed to see the in-flight probe.
+	started := make(chan struct{}, 2)
 	results := make(chan QuotaSnapshot, 2)
 	for i := 0; i < 2; i++ {
-		go func() { results <- env.service.RefreshQuota(context.Background(), "account-1") }()
+		go func() {
+			started <- struct{}{}
+			results <- env.service.RefreshQuota(context.Background(), "account-1")
+		}()
 	}
+	<-started
+	<-started
 	waitFor(t, "the winner's probe to start", func() bool {
 		return env.authorizer.usageProbeCount() == 1
 	})

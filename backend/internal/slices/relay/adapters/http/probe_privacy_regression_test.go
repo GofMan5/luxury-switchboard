@@ -72,6 +72,7 @@ func (body probePrivateReadBody) Read(buffer []byte) (int, error) {
 func TestProbeReadFailureKeepsUsageButNotPrivateTransportText(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		time.Sleep(20 * time.Millisecond)
 		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"partial"}}]}`+"\n\n"+`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":17,"total_tokens":117}}`+"\n\n")
 	}))
 	defer upstream.Close()

@@ -100,6 +100,9 @@ func TestProbeAccountingUsesExistingUsageParsersAcrossDialects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", tc.contentType)
+				// Immediate loopback can finish inside one Windows clock tick.
+				// Make the positive generation-time assertion measure real waiting.
+				time.Sleep(20 * time.Millisecond)
 				fmt.Fprint(w, tc.body)
 			}))
 			defer upstream.Close()

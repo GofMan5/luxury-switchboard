@@ -308,6 +308,7 @@ func TestTheProbeReadsTheAnthropicDialect(t *testing.T) {
 			return
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
+		time.Sleep(20 * time.Millisecond)
 		fmt.Fprint(writer, `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"OK"}}`+"\n\n")
 		fmt.Fprint(writer, `data: {"type":"message_delta","usage":{"output_tokens":9}}`+"\n\n")
 		fmt.Fprint(writer, `data: {"type":"message_stop"}`+"\n\n")

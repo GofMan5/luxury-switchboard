@@ -61,6 +61,7 @@ func TestProbeRejectsInvalidResponsesCompletion(t *testing.T) {
 func TestProbeMeasuresContentAndUsageInTheSameChatEvent(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		time.Sleep(20 * time.Millisecond)
 		fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"thinking"}}],"usage":{"prompt_tokens":100,"completion_tokens":17,"total_tokens":117}}`+"\n\n")
 		w.(http.Flusher).Flush()
 		time.Sleep(20 * time.Millisecond)

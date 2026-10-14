@@ -15,8 +15,6 @@ No account. No cloud of ours. No restart after any setting.
 
 <sub>Current interface · screenshots use fictional demo data, never real credentials or traffic.</sub>
 
-<sub>Current interface · screenshots use fictional demo data, never real credentials or traffic.</sub>
-
 </div>
 
 ## Install
@@ -51,14 +49,14 @@ Updates arrive in-app on every platform: the app downloads the installer for you
 <tr>
 <td width="50%" valign="top">
 
-**Tests**: real streaming probes per model. First token, total, decode rate. Probes never queue ahead of your traffic.
+**Tests**: Short reachability checks or Full · 128k context probes per model. First token, total, decode rate. Probes never queue ahead of your traffic.
 
 ![Tests](docs/screenshots/tests.png)
 
 </td>
 <td width="50%" valign="top">
 
-**Model Routes**: discover catalogs, publish models under your aliases, pin where each is served.
+**Model Routes**: discover catalogs, publish models under your aliases, pin providers and build ordered failover chains.
 
 ![Routes](docs/screenshots/routes.png)
 

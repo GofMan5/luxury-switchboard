@@ -23,12 +23,27 @@ venv/
 model-tunnel*_ed25519*
 id_ed25519*
 id_rsa*
+auth.json
+credentials.json
+.netrc
+.npmrc
+.ssh/
+.aws/
+.gnupg/
+Luxury-Switchboard-backup-*.json
 
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-journal
+*.sqlite-journal
+*.sqlite3-journal
 *.log
 *.dpapi
 runtime/
@@ -48,3 +63,5 @@ backend/bin/
 htmlcov/
 
 browser-screenshots/
+.dsh-vision-toolkit/
+old-backup/

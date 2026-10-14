@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ActivityRequest, ActivitySummary } from '../domain/activity'
 import type { ActivityListResult, ActivityPort } from './activity-port'
 import { ActivityModel } from './activity-model'
@@ -16,7 +16,87 @@ class FakeActivityPort implements ActivityPort {
   subscribe(listener: (request: ActivityRequest) => void) { this.listener = listener; return () => { this.listener = null } }
 }
 
+afterEach(() => vi.useRealTimers())
+
 describe('ActivityModel', () => {
+  it('never lets an older live event replace a terminal row or undercounts visible rows', async () => {
+    const port = new FakeActivityPort()
+    const model = new ActivityModel(port)
+    await model.connect()
+    const terminal = { ...request('same', '2026-01-01T00:00:02Z'), state: 'completed' as const }
+    port.listener?.(terminal)
+    expect(model.snapshot().available).toBe(1)
+    port.listener?.(request('same', '2026-01-01T00:00:01Z'))
+    expect(model.snapshot().requests).toEqual([terminal])
+    model.dispose()
+  })
+
+  it.each(['success', 'failure'] as const)('ignores connect %s after disposal without starting timers', async (outcome) => {
+    vi.useFakeTimers()
+    const port = new FakeActivityPort()
+    let resolve!: (result: ActivityListResult) => void
+    let reject!: (error: Error) => void
+    port.listPromise = new Promise((yes, no) => { resolve = yes; reject = no })
+    const model = new ActivityModel(port)
+    const connecting = model.connect()
+    model.dispose()
+    const before = model.snapshot()
+    if (outcome === 'success') resolve({ requests: [request('late', 'now')], available: 1 })
+    else reject(new Error('late failure'))
+    await connecting
+    const after = model.snapshot()
+    const timers = vi.getTimerCount()
+    model.dispose()
+    expect(after).toBe(before)
+    expect(timers).toBe(0)
+  })
+
+  it('ignores an old summary after dispose and reconnect and allows fresh polling', async () => {
+    vi.useFakeTimers()
+    const port = new FakeActivityPort()
+    const model = new ActivityModel(port)
+    await model.connect()
+    let finish!: (value: ActivitySummary) => void
+    const summaryCall = vi.spyOn(port, 'summary')
+      .mockImplementationOnce(async () => new Promise((resolve) => { finish = resolve }))
+      .mockResolvedValue({ ...summary, requests: 2 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    model.dispose()
+    await model.connect()
+    finish({ ...summary, requests: 99 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(model.snapshot().summary.requests).toBe(2)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(summaryCall).toHaveBeenCalledTimes(3)
+    model.dispose()
+  })
+
+  it('keeps an already received terminal row when a refresh returns an older snapshot', async () => {
+    const port = new FakeActivityPort()
+    const model = new ActivityModel(port)
+    await model.connect()
+    const terminal = { ...request('same', '2026-01-01T00:00:02Z'), state: 'completed' as const }
+    port.listener?.(terminal)
+    port.listPromise = Promise.resolve({ requests: [request('same', '2026-01-01T00:00:01Z')], available: 1 })
+    await model.connect()
+    expect(model.snapshot().requests).toEqual([terminal])
+    model.dispose()
+  })
+
+  it('accepts a newer history terminal over an older event received during connect', async () => {
+    const port = new FakeActivityPort()
+    let finish!: (result: ActivityListResult) => void
+    port.listPromise = new Promise((resolve) => { finish = resolve })
+    const model = new ActivityModel(port)
+    const connecting = model.connect()
+    port.listener?.(request('same', '2026-01-01T00:00:01Z'))
+    const terminal = { ...request('same', '2026-01-01T00:00:02Z'), state: 'completed' as const }
+    finish({ requests: [terminal], available: 1 })
+    await connecting
+    expect(model.snapshot().requests).toEqual([terminal])
+    model.dispose()
+  })
+
   it('keeps events received while the initial history request is in flight', async () => {
     const port = new FakeActivityPort()
     let resolveList!: (result: ActivityListResult) => void

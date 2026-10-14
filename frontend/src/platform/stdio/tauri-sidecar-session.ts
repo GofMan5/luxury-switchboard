@@ -10,7 +10,12 @@ import {
 } from '../../shared/contracts/protocol'
 import type { ControlPlaneSession, EventListener } from './session'
 
+// Match the sidecar/shell byte budgets, not JavaScript UTF-16 lengths.
+const MAX_FRAME_BYTES = 262_144
+const MAX_PAYLOAD_BYTES = 258_048
 const CALL_TIMEOUT_MS = 30_000
+// Pool checks return a partial report at their two-minute backend deadline.
+const KEYS_CHECK_TIMEOUT_MS = 130_000
 const SHUTDOWN_CALL_TIMEOUT_MS = 2_000
 const SHUTDOWN_EXIT_TIMEOUT_MS = 10_000
 const TUNNEL_START_TIMEOUT_MS = 60_000
@@ -117,19 +122,18 @@ export class TauriSidecarSession implements ControlPlaneSession {
       cancel()
       pending.reject(new DOMException('Sidecar command aborted', 'AbortError'))
     }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+    // The terminal promise is observed immediately, independently of native
+    // pipe backpressure. Late send failures cannot replace an already settled call.
+    void this.#write(frame).catch((error: unknown) => {
+      const pending = this.#pending.get(id)
+      if (!pending) return
+      this.#pending.delete(id)
+      window.clearTimeout(pending.timeout)
+      pending.reject(error instanceof Error ? error : new Error('Sidecar command could not be sent'))
+    })
     try {
-      try {
-        await this.#write(frame)
-      } catch (error) {
-        const pending = this.#pending.get(id)
-        if (pending) {
-          this.#pending.delete(id)
-          window.clearTimeout(pending.timeout)
-        }
-        throw error
-      }
-      if (signal?.aborted) abort()
-      else signal?.addEventListener('abort', abort, { once: true })
       return await result
     } finally {
       signal?.removeEventListener('abort', abort)
@@ -204,7 +208,14 @@ export class TauriSidecarSession implements ControlPlaneSession {
 
   async #write(frame: CommandFrame): Promise<void> {
     if (!this.#started) throw new ControlPlaneError('not_connected', 'Sidecar is not connected')
-    await invoke('sidecar_write', { frame: JSON.stringify(frame) })
+    const encoded = JSON.stringify(frame)
+    const encoder = new TextEncoder()
+    if (encoder.encode(encoded).byteLength > MAX_FRAME_BYTES || (frame.payload !== undefined && encoder.encode(JSON.stringify(frame.payload)).byteLength > MAX_PAYLOAD_BYTES)) {
+      throw new ControlPlaneError('command_too_large', frame.method === 'keys.addMany'
+        ? 'This import is too large for one command. Split it into smaller batches; no keys were sent.'
+        : 'This command is too large to send. Reduce its input and try again.')
+    }
+    await invoke('sidecar_write', { frame: encoded })
   }
 
   #consume(chunk: string): void {
@@ -282,6 +293,7 @@ function requestID(): string {
 }
 
 function commandTimeout(method: string): number {
+  if (method === 'keys.check') return KEYS_CHECK_TIMEOUT_MS
   if (method === 'models.discover') return MODEL_DISCOVERY_TIMEOUT_MS
   if (method === 'models.test') return MODEL_TEST_TIMEOUT_MS
   if (method === 'tunnel.start') return TUNNEL_START_TIMEOUT_MS

@@ -1,6 +1,8 @@
 use std::{
+    io::{self, Read},
+    process::ChildStdout,
     sync::{
-        Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -9,18 +11,21 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_shell::{
-    ShellExt,
-    process::{CommandChild, CommandEvent},
-};
+use tauri_plugin_shell::ShellExt;
+
+use crate::sidecar_process::SidecarProcess;
 
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const FRAME_EVENT: &str = "sidecar-frame";
 const LIFECYCLE_EVENT: &str = "sidecar-lifecycle";
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+const SHUTDOWN_FRAME: &str =
+    r#"{"v":1,"id":"native_shutdown","type":"command","method":"system.shutdown"}"#;
 
 #[derive(Default)]
 pub struct SidecarState {
-    child: Mutex<Option<CommandChild>>,
+    child: Mutex<Option<Arc<SidecarProcess>>>,
     generation: AtomicU64,
     exiting: AtomicBool,
 }
@@ -55,36 +60,43 @@ pub fn sidecar_start(
     state: State<'_, SidecarState>,
 ) -> Result<StartResult, String> {
     let mut guard = lock_start(state.inner())?;
-    if let Some(child) = guard.as_ref() {
+    if let Some(child) = guard.as_ref()
+        && !child.has_exited()
+    {
         return Ok(StartResult { pid: child.pid() });
     }
 
+    // Keep the plugin's fixed executable resolution, environment and Windows
+    // CREATE_NO_WINDOW flags. Only pipe/lifecycle ownership is replaced.
     let command = app
         .shell()
         .sidecar("switchboard-sidecar")
-        .map_err(|_| "Sidecar executable is unavailable".to_string())?
-        .set_raw_out(true);
+        .map_err(|_| "Sidecar executable is unavailable".to_string())?;
     let command = if cfg!(debug_assertions) {
         command.env("SWITCHBOARD_PORT", "18798")
     } else {
         command
     };
-    let (receiver, child) = command
-        .spawn()
-        .map_err(|_| "Sidecar could not start".to_string())?;
-    let pid = child.pid();
+    let (process, stdout, stderr) =
+        SidecarProcess::spawn(command.into()).map_err(|_| "Sidecar could not start".to_string())?;
+    let pid = process.pid();
     let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
-    *guard = Some(child);
-    drop(guard);
+    *guard = Some(process.clone());
 
     let event_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        forward_events(event_app, receiver, pid, generation).await;
+    let event_process = process.clone();
+    thread::spawn(move || forward_events(event_app, stdout, event_process, generation));
+    thread::spawn(move || {
+        // Drain raw diagnostics in fixed-size chunks; never retain or forward
+        // provider metadata, and never wait for a stderr newline.
+        if drain_diagnostics(stderr).is_err() {
+            finish_process(&app, &process, generation, "error");
+        }
     });
     Ok(StartResult { pid })
 }
 
-fn lock_start(state: &SidecarState) -> Result<MutexGuard<'_, Option<CommandChild>>, String> {
+fn lock_start(state: &SidecarState) -> Result<MutexGuard<'_, Option<Arc<SidecarProcess>>>, String> {
     let guard = state
         .child
         .lock()
@@ -96,18 +108,22 @@ fn lock_start(state: &SidecarState) -> Result<MutexGuard<'_, Option<CommandChild
 }
 
 #[tauri::command]
-pub fn sidecar_write(state: State<'_, SidecarState>, frame: String) -> Result<(), String> {
+pub async fn sidecar_write(state: State<'_, SidecarState>, frame: String) -> Result<(), String> {
     validate_outgoing(&frame)?;
-    let mut guard = state
-        .child
-        .lock()
-        .map_err(|_| "Sidecar state is unavailable".to_string())?;
-    let child = guard
-        .as_mut()
-        .ok_or_else(|| "Sidecar is not running".to_string())?;
-    child
-        .write(format!("{frame}\n").as_bytes())
-        .map_err(|_| "Sidecar command could not be sent".to_string())
+    let (process, reply) = {
+        let guard = lock_start(state.inner())?;
+        let process = guard
+            .as_ref()
+            .ok_or_else(|| "Sidecar is not running".to_string())?
+            .clone();
+        // Queue admission is nonblocking and serialized with start/stop. No
+        // lifecycle mutex survives a write to the child's full stdin pipe.
+        let reply = process.queue_frame(&frame, WRITE_TIMEOUT)?;
+        (process, reply)
+    };
+    tauri::async_runtime::spawn_blocking(move || process.wait_for_write(reply, WRITE_TIMEOUT))
+        .await
+        .map_err(|_| "Sidecar command could not be sent".to_string())?
 }
 
 #[tauri::command]
@@ -118,9 +134,7 @@ pub fn sidecar_stop(state: State<'_, SidecarState>) -> Result<(), String> {
         .map_err(|_| "Sidecar state is unavailable".to_string())?
         .take();
     if let Some(child) = child {
-        child
-            .kill()
-            .map_err(|_| "Sidecar could not be stopped".to_string())?;
+        child.stop()?;
     }
     Ok(())
 }
@@ -129,7 +143,7 @@ pub fn stop_on_exit(app: &AppHandle) {
     if let Ok(mut guard) = app.state::<SidecarState>().child.lock()
         && let Some(child) = guard.take()
     {
-        let _ = child.kill();
+        let _ = child.stop();
     }
 }
 
@@ -138,36 +152,176 @@ pub fn begin_graceful_exit(app: &AppHandle) -> bool {
     if state.exiting.swap(true, Ordering::AcqRel) {
         return false;
     }
-    // The watchdog is armed before the shutdown frame is written, not after: a
-    // wedged sidecar with a full pipe blocks that write forever, so a watchdog
-    // spawned only once the write returns would never start and neither would
-    // the ten-second force-kill behind it.
+    let process = state.child.lock().ok().and_then(|child| child.clone());
     let app = app.clone();
     thread::spawn(move || {
-        for _ in 0..200 {
-            if app
-                .state::<SidecarState>()
-                .child
-                .lock()
-                .map(|child| child.is_none())
-                .unwrap_or(true)
-            {
-                app.exit(0);
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
+        if let Some(process) = process {
+            graceful_shutdown(&process, EXIT_TIMEOUT);
         }
-        stop_on_exit(&app);
         app.exit(0);
     });
-    if let Ok(mut guard) = state.child.lock()
-        && let Some(child) = guard.as_mut()
-    {
-        let _ = child.write(
-            b"{\"v\":1,\"id\":\"native_shutdown\",\"type\":\"command\",\"method\":\"system.shutdown\"}\n",
-        );
-    }
     true
+}
+
+fn graceful_shutdown(process: &SidecarProcess, timeout: Duration) {
+    // The exit deadline belongs to the owned Child, not the writer. Even a full
+    // queue or blocked write cannot keep this thread from force-stopping it.
+    let _ = process.queue_frame(SHUTDOWN_FRAME, timeout);
+    let deadline = std::time::Instant::now() + timeout;
+    while !process.has_exited() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = process.stop();
+}
+
+fn forward_events(
+    app: AppHandle,
+    stdout: ChildStdout,
+    process: Arc<SidecarProcess>,
+    generation: u64,
+) {
+    let result = read_frames(stdout, |text| {
+        let state = app.state::<SidecarState>();
+        let child = state.child.lock().map_err(|_| ())?;
+        if !matching_process(
+            child.as_ref().map(|child| child.pid()),
+            state.generation.load(Ordering::Acquire),
+            process.pid(),
+            generation,
+        ) {
+            return Err(());
+        }
+        app.emit(FRAME_EVENT, text).map_err(|_| ())
+    });
+    let lifecycle = match result {
+        Ok(()) => "stopped",
+        Err(ReadFailure::Protocol) => "protocol-error",
+        Err(ReadFailure::Io) => "error",
+    };
+    finish_process(&app, &process, generation, lifecycle);
+}
+
+fn finish_process(
+    app: &AppHandle,
+    process: &SidecarProcess,
+    generation: u64,
+    lifecycle: &'static str,
+) {
+    let state = app.state::<SidecarState>();
+    if let Ok(mut child) = state.child.lock()
+        && let Some(lifecycle) = lifecycle_for_process(
+            child.as_ref().map(|child| child.pid()),
+            state.generation.load(Ordering::Acquire),
+            process.pid(),
+            generation,
+            lifecycle,
+        )
+    {
+        child.take();
+        let _ = process.stop();
+        // Serialize removal and lifecycle emission with restart admission, so
+        // an old reader never disconnects a newly started generation.
+        let _ = app.emit(LIFECYCLE_EVENT, LifecycleEvent { state: lifecycle });
+    }
+}
+
+fn lifecycle_for_process(
+    active_pid: Option<u32>,
+    active_generation: u64,
+    completed_pid: u32,
+    completed_generation: u64,
+    state: &'static str,
+) -> Option<&'static str> {
+    matching_process(
+        active_pid,
+        active_generation,
+        completed_pid,
+        completed_generation,
+    )
+    .then_some(state)
+}
+
+fn matching_process(
+    active_pid: Option<u32>,
+    active_generation: u64,
+    completed_pid: u32,
+    completed_generation: u64,
+) -> bool {
+    active_pid == Some(completed_pid) && active_generation == completed_generation
+}
+
+#[derive(Debug)]
+enum ReadFailure {
+    Io,
+    Protocol,
+}
+
+fn read_frames(
+    mut reader: impl Read,
+    mut emit: impl FnMut(String) -> Result<(), ()>,
+) -> Result<(), ReadFailure> {
+    let mut buffer = Vec::with_capacity(8 * 1024);
+    let mut chunk = [0; 8 * 1024];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                return if buffer.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ReadFailure::Protocol)
+                };
+            }
+            Ok(count) => decode_frames(&mut buffer, &chunk[..count], &mut emit)
+                .map_err(|_| ReadFailure::Protocol)?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ReadFailure::Io),
+        }
+    }
+}
+
+fn drain_diagnostics(mut reader: impl Read) -> io::Result<()> {
+    let mut chunk = [0; 8 * 1024];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn decode_frames(
+    buffer: &mut Vec<u8>,
+    bytes: &[u8],
+    mut emit: impl FnMut(String) -> Result<(), ()>,
+) -> Result<(), ()> {
+    for &byte in bytes {
+        if byte != b'\n' {
+            // A cap-byte payload may have a CRLF delimiter, but no extra byte.
+            if buffer.len() >= MAX_FRAME_BYTES
+                && !(buffer.len() == MAX_FRAME_BYTES && byte == b'\r')
+            {
+                return Err(());
+            }
+            buffer.push(byte);
+            continue;
+        }
+        if buffer.last() == Some(&b'\r') {
+            buffer.pop();
+        }
+        if buffer.is_empty() || buffer.len() > MAX_FRAME_BYTES {
+            return Err(());
+        }
+        let frame = std::mem::replace(buffer, Vec::with_capacity(8 * 1024));
+        let text = String::from_utf8(frame).map_err(|_| ())?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| ())?;
+        if value.get("v").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(());
+        }
+        emit(text)?;
+    }
+    Ok(())
 }
 
 fn validate_outgoing(frame: &str) -> Result<(), String> {
@@ -200,11 +354,8 @@ fn valid_request_id(value: &str) -> bool {
 }
 
 fn allowed_method(method: &str) -> bool {
-    // One list for both editions, on purpose. The shell only decides which frames
-    // are well formed enough to forward; whether a command exists is the sidecar's
-    // answer, and the public sidecar is compiled without those handlers, so an
-    // owner method reaches it and comes back `method_not_found`. Splitting this
-    // list per edition would buy a different error string, not a boundary.
+    // The shell validates frame shape, not handler existence. Removed methods
+    // stay allowed for compatibility; the sidecar returns method_not_found.
     matches!(
         method,
         "system.handshake"
@@ -250,6 +401,7 @@ fn allowed_method(method: &str) -> bool {
             | "routes.upsert"
             | "routes.upsertMany"
             | "routes.delete"
+            | "routes.remove"
             | "models.discover"
             | "models.test"
             | "analytics.prices.setCurrency"
@@ -280,118 +432,6 @@ fn allowed_method(method: &str) -> bool {
                              // newer than every shipped shell: an old shell's call gets a clean
                              // method_not_found, not a frame error.
     )
-}
-
-async fn forward_events(
-    app: AppHandle,
-    mut receiver: tauri::async_runtime::Receiver<CommandEvent>,
-    pid: u32,
-    generation: u64,
-) {
-    let mut buffer = Vec::with_capacity(8 * 1024);
-    let mut lifecycle_state = "stopped";
-    while let Some(event) = receiver.recv().await {
-        match event {
-            CommandEvent::Stdout(bytes) => {
-                if append_frames(&app, &mut buffer, &bytes).is_err() {
-                    lifecycle_state = "protocol-error";
-                    break;
-                }
-            }
-            CommandEvent::Terminated(_) => {
-                break;
-            }
-            CommandEvent::Error(_) => {
-                lifecycle_state = "error";
-                break;
-            }
-            CommandEvent::Stderr(_) => {
-                // Diagnostics are intentionally not forwarded to the WebView.
-            }
-            _ => {}
-        }
-    }
-    let state = app.state::<SidecarState>();
-    let mut lifecycle = None;
-    if let Ok(mut child) = state.child.lock() {
-        let active_generation = state.generation.load(Ordering::Acquire);
-        lifecycle = lifecycle_for_process(
-            child.as_ref().map(CommandChild::pid),
-            active_generation,
-            pid,
-            generation,
-            lifecycle_state,
-        );
-        if lifecycle.is_some()
-            && let Some(child) = child.take()
-        {
-            let _ = child.kill();
-        }
-    }
-    if let Some(state) = lifecycle {
-        let _ = app.emit(LIFECYCLE_EVENT, LifecycleEvent { state });
-    }
-}
-
-fn lifecycle_for_process(
-    active_pid: Option<u32>,
-    active_generation: u64,
-    completed_pid: u32,
-    completed_generation: u64,
-    state: &'static str,
-) -> Option<&'static str> {
-    matching_process(
-        active_pid,
-        active_generation,
-        completed_pid,
-        completed_generation,
-    )
-    .then_some(state)
-}
-
-fn matching_process(
-    active_pid: Option<u32>,
-    active_generation: u64,
-    completed_pid: u32,
-    completed_generation: u64,
-) -> bool {
-    active_pid == Some(completed_pid) && active_generation == completed_generation
-}
-
-fn append_frames(app: &AppHandle, buffer: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ()> {
-    decode_frames(buffer, bytes, |text| {
-        app.emit(FRAME_EVENT, text).map_err(|_| ())
-    })
-}
-
-fn decode_frames(
-    buffer: &mut Vec<u8>,
-    bytes: &[u8],
-    mut emit: impl FnMut(String) -> Result<(), ()>,
-) -> Result<(), ()> {
-    for &byte in bytes {
-        if byte != b'\n' {
-            if buffer.len() == MAX_FRAME_BYTES {
-                return Err(());
-            }
-            buffer.push(byte);
-            continue;
-        }
-        if buffer.last() == Some(&b'\r') {
-            buffer.pop();
-        }
-        if buffer.is_empty() {
-            return Err(());
-        }
-        let frame = std::mem::replace(buffer, Vec::with_capacity(8 * 1024));
-        let text = String::from_utf8(frame).map_err(|_| ())?;
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| ())?;
-        if value.get("v").and_then(serde_json::Value::as_u64) != Some(1) {
-            return Err(());
-        }
-        emit(text)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -459,6 +499,113 @@ mod tests {
             Some("protocol-error")
         );
         assert_eq!(lifecycle_for_process(Some(10), 2, 10, 1, "stopped"), None);
+    }
+
+    #[test]
+    fn native_exit_deadline_survives_a_full_write_queue() {
+        let process = crate::sidecar_process::tests::stalled_process();
+        let _cleanup = crate::sidecar_process::tests::StopOnDrop(process.clone());
+        let writer = process.clone();
+        let pending = thread::spawn(move || {
+            writer.write_frame(&"x".repeat(1024 * 1024), Duration::from_secs(5))
+        });
+        thread::sleep(Duration::from_millis(50));
+        for _ in 0..8 {
+            process
+                .queue_frame("queued", Duration::from_secs(5))
+                .unwrap();
+        }
+        assert!(
+            process
+                .queue_frame("overflow", Duration::from_secs(5))
+                .is_err()
+        );
+        let started = std::time::Instant::now();
+        graceful_shutdown(&process, Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(pending.join().unwrap().is_err());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !process.has_exited() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(process.has_exited());
+        assert!(process.queue_frame("late", WRITE_TIMEOUT).is_err());
+    }
+
+    #[test]
+    fn byte_frames_survive_utf8_chunk_splits_at_the_exact_limit() {
+        let prefix = r#"{"v":1,"id":"x","type":"command","method":"relay.status","payload":""#;
+        let suffix = "\"}";
+        for size in [MAX_FRAME_BYTES - 1, MAX_FRAME_BYTES, MAX_FRAME_BYTES + 1] {
+            let padding = size - prefix.len() - suffix.len();
+            let frame = format!(
+                "{prefix}{}{suffix}",
+                "é".repeat(padding / 2) + &"x".repeat(padding % 2)
+            );
+            assert_eq!(frame.len(), size);
+            assert_eq!(validate_outgoing(&frame).is_ok(), size <= MAX_FRAME_BYTES);
+            for delimiter in ["\n", "\r\n"] {
+                let bytes = (frame.clone() + delimiter).into_bytes();
+                let mut buffer = Vec::new();
+                let mut delivered = Vec::new();
+                let result = bytes.chunks(7).try_for_each(|chunk| {
+                    decode_frames(&mut buffer, chunk, |text| {
+                        delivered.push(text);
+                        Ok(())
+                    })
+                });
+                assert_eq!(result.is_ok(), size <= MAX_FRAME_BYTES);
+                assert!(buffer.len() <= MAX_FRAME_BYTES + 1);
+                if size <= MAX_FRAME_BYTES {
+                    assert_eq!(delivered, [frame.clone()]);
+                } else {
+                    assert!(delivered.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_partial_or_oversized_output_never_reaches_the_webview() {
+        for bytes in [
+            b"\xff\n".to_vec(),
+            b"{}\n".to_vec(),
+            b"{\"v\":2}\n".to_vec(),
+            b"{\"v\":1}".to_vec(),
+            b"\n".to_vec(),
+            vec![b'x'; MAX_FRAME_BYTES + 1],
+        ] {
+            let mut count = 0;
+            assert!(matches!(
+                read_frames(bytes.as_slice(), |_| {
+                    count += 1;
+                    Ok(())
+                }),
+                Err(ReadFailure::Protocol)
+            ));
+            assert_eq!(count, 0);
+        }
+        assert!(read_frames(b"{\"v\":1}\n".as_slice(), |_| Err(())).is_err());
+    }
+
+    #[test]
+    fn stderr_without_newlines_is_drained_with_bounded_reads() {
+        struct Diagnostics {
+            remaining: usize,
+        }
+        impl Read for Diagnostics {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                assert!(bytes.len() <= 8 * 1024);
+                let count = bytes.len().min(self.remaining);
+                self.remaining -= count;
+                bytes[..count].fill(0xff);
+                Ok(count)
+            }
+        }
+        drain_diagnostics(Diagnostics {
+            remaining: 1024 * 1024,
+        })
+        .unwrap();
     }
 
     #[test]

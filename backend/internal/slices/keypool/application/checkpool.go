@@ -8,86 +8,153 @@ import (
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/keypool/domain"
 )
 
-// PoolProber answers whether one concrete credential still authenticates at
-// its provider. The cheap honest probe is the provider's own catalog endpoint:
-// an answer with the key attached says the key is alive, a 401/403 says it is
-// not, and anything else says nothing.
+// PoolProber checks the provider's configured catalog using one concrete key.
+// Only 2xx authenticates; 401/403 rejects; other statuses are inconclusive.
 type PoolProber interface {
-	// ProbeKey reports the HTTP status the provider answered for this key's
-	// catalog request. A zero status means the probe never got an answer —
-	// the provider, not the key, is unreachable — and must not count against
-	// the credential.
 	ProbeKey(ctx context.Context, providerID string, key domain.Key) int
 }
 
-// PoolReport says what a pool check found, by counting rather than by naming
-// keys: the rows above already carry their own badges.
+// PoolReport distinguishes actual work, answers, and credential verdicts. Pinned
+// environment keys are excluded. Skipped keys were not dispatched before the
+// safety deadline or were removed/replaced while waiting for a worker.
 type PoolReport struct {
-	Checked   int  `json:"checked"`
-	Rejected  int  `json:"rejected"`
-	Reachable bool `json:"reachable"`
+	Total        int  `json:"total"`
+	Checked      int  `json:"checked"`
+	Answered     int  `json:"answered"`
+	Accepted     int  `json:"accepted"`
+	Rejected     int  `json:"rejected"`
+	Inconclusive int  `json:"inconclusive"`
+	Skipped      int  `json:"skipped"`
+	Reachable    bool `json:"reachable"`
 }
 
-// CheckPool probes every key of a provider concurrently and files each answer
-// through the scheduler: a rejected key earns its authentication streak (the
-// dead-key badge and its notification ride on the same counter), an accepted
-// one resets it. Probes bypass the scheduler on purpose — a cooled key is
-// exactly the one worth checking.
+const maxPoolCheckDuration = 2 * time.Minute
+
+// runPoolProbe keeps the worker responsive when a PoolProber ignores cancellation.
+// Only its buffered result channel can be touched after the worker stops.
+func runPoolProbe(ctx context.Context, prober PoolProber, providerID string, key domain.Key) (int, bool) {
+	result := make(chan int, 1)
+	go func() {
+		result <- prober.ProbeKey(ctx, providerID, key)
+	}()
+	select {
+	case status := <-result:
+		if ctx.Err() != nil {
+			return 0, false
+		}
+		return status, true
+	case <-ctx.Done():
+		return 0, false
+	}
+}
+
+// CheckPool bypasses quota/cooldowns deliberately: a cooled key is worth
+// checking. Three workers bound network fan-out per check. At most three calls
+// that ignore context can outlive each check; the real HTTP prober honors context.
+// The probe phase has a safety deadline and reports incomplete checks honestly.
 func (manager *Manager) CheckPool(ctx context.Context, providerID string, prober PoolProber) (PoolReport, error) {
+	if err := ctx.Err(); err != nil {
+		return PoolReport{}, err
+	}
+	manager.opMu.Lock()
 	manager.mu.RLock()
-	userKeys := manager.combinedLocked(manager.userKeys)
-	// The map is read under the same lock its writers hold: EnsureProvider and
-	// RemoveProvider run on other stdio workers while a check is in flight, and
-	// an unlocked read of a concurrently written map is a runtime fatal that no
-	// recover() in the protocol server can catch — it would take the whole
-	// sidecar down with the window still open.
+	keys := manager.combinedLocked(manager.userKeys)
 	_, known := manager.providerRates[providerID]
 	manager.mu.RUnlock()
 	if !known {
+		manager.opMu.Unlock()
 		return PoolReport{}, ErrUnknownProvider
 	}
-	candidates := make([]domain.Key, 0, len(userKeys))
-	for _, key := range userKeys {
+	leases := make([]*Lease, 0, len(keys))
+	for _, key := range keys {
 		if key.ProviderID == providerID && !key.Pinned {
-			candidates = append(candidates, key)
+			if lease := manager.scheduler.probeLease(providerID, key.ID); lease != nil {
+				leases = append(leases, lease)
+			}
 		}
 	}
-	if len(candidates) == 0 || prober == nil {
-		return PoolReport{Reachable: true}, nil
+	manager.opMu.Unlock()
+	report := PoolReport{Total: len(leases), Skipped: len(leases)}
+	if len(leases) == 0 || prober == nil {
+		return report, ctx.Err()
 	}
-	report := PoolReport{Checked: len(candidates)}
-	statuses := make([]int, len(candidates))
-	var group sync.WaitGroup
-	// Bounded fan-out: three at a time keeps a large pool from looking like an
-	// attack burst to a provider that counts requests.
-	bounded := make(chan struct{}, 3)
-	for index, key := range candidates {
-		group.Add(1)
-		go func(index int, key domain.Key) {
-			defer group.Done()
-			bounded <- struct{}{}
-			defer func() { <-bounded }()
-			probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			statuses[index] = prober.ProbeKey(probeCtx, providerID, key)
-		}(index, key)
+	checkCtx, cancel := context.WithTimeout(ctx, maxPoolCheckDuration)
+	defer cancel()
+	statuses := make([]int, len(leases))
+	attempted := make([]bool, len(leases))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(3, len(leases)) {
+		workers.Go(func() {
+			for index := range jobs {
+				if checkCtx.Err() != nil {
+					return
+				}
+				lease := leases[index]
+				current := manager.scheduler.probeLease(providerID, lease.keyID)
+				if current == nil || current.generation != lease.generation {
+					continue
+				}
+				probeCtx, probeCancel := context.WithTimeout(checkCtx, 15*time.Second)
+				attempted[index] = true
+				status, completed := runPoolProbe(probeCtx, prober, providerID, lease.Key())
+				probeCancel()
+				if !completed {
+					// A context-ignoring prober may still be running in its detached
+					// call. Do not start another one on this worker: three workers
+					// means three is the maximum number of calls left behind.
+					statuses[index] = 0
+					return
+				}
+				statuses[index] = status
+				if checkCtx.Err() != nil {
+					statuses[index] = 0
+					return
+				}
+				// File at probe completion, not after the slowest sibling: an old fast
+				// refusal must not overwrite a newer traffic success during that wait.
+				switch {
+				case status == 401 || status == 403:
+					lease.Finish(domain.Outcome{Kind: domain.OutcomeAuthentication})
+				case status >= 200 && status < 300:
+					lease.Finish(domain.Outcome{Kind: domain.OutcomeSuccess})
+				}
+			}
+		})
 	}
-	group.Wait()
-	for index, key := range candidates {
-		switch {
-		case statuses[index] == 0:
-			// No answer at all: the provider was unreachable for this probe
-			// round, which says nothing about the credential.
+dispatch:
+	for index := range leases {
+		select {
+		case <-checkCtx.Done():
+			break dispatch
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	for index, status := range statuses {
+		if !attempted[index] {
 			continue
-		case statuses[index] == 401 || statuses[index] == 403:
+		}
+		report.Checked++
+		report.Skipped--
+		if status != 0 {
+			report.Answered++
+		}
+		switch {
+		case status == 401 || status == 403:
 			report.Rejected++
-			manager.scheduler.finish(providerID, key.ID, domain.Outcome{Kind: domain.OutcomeAuthentication})
+		case status >= 200 && status < 300:
+			report.Accepted++
 		default:
-			manager.scheduler.finish(providerID, key.ID, domain.Outcome{Kind: domain.OutcomeSuccess})
+			report.Inconclusive++
 		}
-		if statuses[index] != 0 {
-			report.Reachable = true
-		}
+	}
+	report.Reachable = report.Answered > 0
+	// An internal safety deadline gives a partial report; caller cancellation is
+	// terminal cancellation, never a misleading successful check response.
+	if err := ctx.Err(); err != nil {
+		return report, err
 	}
 	return report, nil
 }

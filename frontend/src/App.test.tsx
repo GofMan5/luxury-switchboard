@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ControlPlaneSession, EventListener } from './platform/stdio/session'
 import type { Settings } from './features/settings/domain/settings'
@@ -108,6 +108,29 @@ describe('App navigation', () => {
       ['Guardrails', 'Guardrails'],
       ['Settings', 'Settings'],
     ])
+  })
+
+  it('filters streaming probes through the provider scope selector', async () => {
+    window.location.hash = ''
+    createSession.mockResolvedValue(fakeSession(undefined, settings, {
+      'providers.list': { activeId: 'local', providers: [provider, { ...provider, id: 'other', name: 'Other' }, { ...provider, id: 'disabled', name: 'Disabled', enabled: false }] },
+      'models.discover': { models: ['shared-model', 'image-model'] },
+    }))
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /^Tests$/u }))
+    const scope = await screen.findByRole('combobox', { name: 'Provider scope' })
+    expect(await screen.findByRole('button', { name: 'Test shared-model on Local' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'Test shared-model on Other' })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: 'Disabled' })).toBeNull()
+    fireEvent.change(scope, { target: { value: 'other' } })
+    expect(screen.queryByRole('button', { name: 'Test shared-model on Local' })).toBeNull()
+    const probe = screen.getByRole('button', { name: 'Test shared-model on Other' })
+    expect(probe.closest('tr')?.querySelector('td:nth-child(2)')?.textContent).toContain('Other')
+    expect(screen.getByRole('button', { name: 'Test image-model on Other' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Run shown' })).toBeTruthy()
+    fireEvent.change(scope, { target: { value: 'all' } })
+    expect(screen.getByRole('button', { name: 'Run all' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Test shared-model on Local' })).toBeTruthy()
   })
 
   // Reaching the heading proves only that the route resolves - the page renders one
@@ -252,6 +275,32 @@ describe('App navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show 180 more' }))
     expect(await screen.findByText('Showing 360 of 5000 models')).toBeTruthy()
     expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(360)
+    view.unmount()
+  })
+
+  it('confirms model route deletion before touching the control plane', async () => {
+    const routes = [
+      { target: 'relay', publicModel: 'model-a', upstreamModel: 'model-a', providerId: 'local', contextLimitKiB: 0, enabled: true },
+      { target: 'relay', publicModel: 'model-a', upstreamModel: 'model-a-backup', providerId: 'other', contextLimitKiB: 0, enabled: true },
+    ]
+    const call = vi.fn()
+    createSession.mockResolvedValue({ ...fakeSession(undefined, settings, {
+      'providers.list': { activeId: 'local', providers: [provider, { ...provider, id: 'other', name: 'Other' }] },
+      'routes.list': { routes },
+    }), call: async <T,>(method: string, ...args: unknown[]) => {
+      call(method, ...args)
+      if (method === 'routes.delete') return undefined as T
+      return fakeSession(undefined, settings, { 'routes.list': { routes } }).call<T>(method)
+    } })
+    const view = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Model Routes' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete model-a on Local' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete model route' })
+    expect(within(dialog).getByText(/All 2 assignments for this model are removed/u)).toBeTruthy()
+    expect(call).not.toHaveBeenCalledWith('routes.delete', expect.anything())
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Delete model route' })).toBeNull()
+    expect(call).not.toHaveBeenCalledWith('routes.delete', expect.anything())
     view.unmount()
   })
 

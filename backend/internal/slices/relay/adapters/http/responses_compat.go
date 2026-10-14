@@ -444,13 +444,48 @@ type responsesAnswerState struct {
 	created json.Number
 
 	text       string
-	sawText    bool
 	refusal    string
+	parts      []responsesTextPart
+	partIndex  map[string]int
 	incomplete string
 	failure    string
 	failed     bool
 	calls      []any
 	usage      map[string]any
+}
+
+type responsesTextPart struct {
+	text, refusal string
+}
+
+// setPart updates one logical content part; its done snapshot replaces the
+// preview, never another part. Encounter order is the stream's output order.
+func (state *responsesAnswerState) setPart(output, content any, text string, refusal, appendDelta bool) {
+	if output == nil {
+		output = 0
+	}
+	if content == nil {
+		content = 0
+	}
+	key := fmt.Sprint(output) + ":" + fmt.Sprint(content)
+	if state.partIndex == nil {
+		state.partIndex = make(map[string]int)
+	}
+	index, exists := state.partIndex[key]
+	if !exists {
+		index = len(state.parts)
+		state.partIndex[key] = index
+		state.parts = append(state.parts, responsesTextPart{})
+	}
+	target := &state.parts[index].text
+	if refusal {
+		target = &state.parts[index].refusal
+	}
+	if appendDelta {
+		*target += text
+	} else {
+		*target = text
+	}
 }
 
 // consume folds one event into the state. Delta events append the
@@ -461,23 +496,22 @@ func (state *responsesAnswerState) consume(event map[string]any) {
 		state.consumeResponse(responseOf(event))
 	case "response.output_text.delta":
 		if delta, ok := event["delta"].(string); ok {
-			state.text += delta
-			state.sawText = true
+			state.setPart(event["output_index"], event["content_index"], delta, false, true)
 		}
 	case "response.output_text.done":
-		if text, ok := event["text"].(string); ok && !state.sawText {
-			state.text += text
+		if text, ok := event["text"].(string); ok {
+			state.setPart(event["output_index"], event["content_index"], text, false, false)
 		}
 	case "response.refusal.delta":
 		if delta, ok := event["delta"].(string); ok {
-			state.refusal += delta
+			state.setPart(event["output_index"], event["content_index"], delta, true, true)
 		}
 	case "response.refusal.done":
-		if refusal, ok := event["refusal"].(string); ok && state.refusal == "" {
-			state.refusal += refusal
+		if refusal, ok := event["refusal"].(string); ok {
+			state.setPart(event["output_index"], event["content_index"], refusal, true, false)
 		}
 	case "response.output_item.done":
-		state.consumeItem(event["item"])
+		state.consumeItem(event["output_index"], event["item"])
 	}
 }
 
@@ -520,11 +554,11 @@ func (state *responsesAnswerState) consumeResponse(response map[string]any) {
 		state.usage = usage
 	}
 	if output, ok := response["output"].([]any); ok && len(output) > 0 {
-		state.text = ""
-		state.refusal = ""
+		state.parts = nil
+		state.partIndex = nil
 		state.calls = nil
-		for _, item := range output {
-			state.consumeItem(item)
+		for index, item := range output {
+			state.consumeItem(index, item)
 		}
 	}
 }
@@ -533,7 +567,7 @@ func (state *responsesAnswerState) consumeResponse(response map[string]any) {
 // text and the refusal (only where empty — deltas already carry the same
 // words); a function or custom tool call becomes a chat tool call, the
 // only chat-dialect home a call has.
-func (state *responsesAnswerState) consumeItem(value any) {
+func (state *responsesAnswerState) consumeItem(outputIndex, value any) {
 	item, ok := value.(map[string]any)
 	if !ok {
 		return
@@ -541,20 +575,19 @@ func (state *responsesAnswerState) consumeItem(value any) {
 	switch itemType, _ := item["type"].(string); itemType {
 	case "message":
 		parts, _ := item["content"].([]any)
-		for _, part := range parts {
+		for contentIndex, part := range parts {
 			partObject, ok := part.(map[string]any)
 			if !ok {
 				continue
 			}
 			switch partType, _ := partObject["type"].(string); partType {
 			case "output_text":
-				if text, ok := partObject["text"].(string); ok && state.text == "" {
-					state.text += text
-					state.sawText = true
+				if text, ok := partObject["text"].(string); ok {
+					state.setPart(outputIndex, contentIndex, text, false, false)
 				}
 			case "refusal":
-				if refusal, ok := partObject["refusal"].(string); ok && state.refusal == "" {
-					state.refusal += refusal
+				if refusal, ok := partObject["refusal"].(string); ok {
+					state.setPart(outputIndex, contentIndex, refusal, true, false)
 				}
 			}
 		}
@@ -582,6 +615,12 @@ func (state *responsesAnswerState) consumeItem(value any) {
 // guardrail reads — with the chat refusal field set alongside, and the
 // finish reason says what the Responses status said.
 func (state *responsesAnswerState) emit(wantsStream bool) ([]byte, error) {
+	var text, refusal strings.Builder
+	for _, part := range state.parts {
+		text.WriteString(part.text)
+		refusal.WriteString(part.refusal)
+	}
+	state.text, state.refusal = text.String(), refusal.String()
 	if state.failed {
 		return state.emitFailure(wantsStream)
 	}

@@ -81,8 +81,8 @@ const GuardrailProviderModeCap = 128
 
 func Defaults() Settings {
 	return Settings{
-		ListenerPort: 8798, MaxRequestMiB: 64,
-		HeaderTimeoutSeconds: 45, StreamIdleSeconds: 60,
+		ListenerPort: 8798, MaxRequestMiB: 128,
+		HeaderTimeoutSeconds: 300, StreamIdleSeconds: 300,
 		HeartbeatSeconds: 15, StreamProbationMilliseconds: 250,
 		RetryBaseMilliseconds: 500, RetryMaxSeconds: 30,
 		PermanentAttempts: 2, MaxQueued: 10_000,

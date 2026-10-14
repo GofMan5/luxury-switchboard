@@ -1,6 +1,6 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
-import type { ApiKeysPort, PoolCheckReport } from '../application/api-keys-port'
+import type { ApiKeysListResult, ApiKeysPort, PoolCheckReport } from '../application/api-keys-port'
 
 export class StdioApiKeysPort implements ApiKeysPort {
   readonly #session: ControlPlaneSession
@@ -9,9 +9,9 @@ export class StdioApiKeysPort implements ApiKeysPort {
     this.#session = session
   }
 
-  async list(providerId: string, signal?: AbortSignal): Promise<readonly ApiKey[]> {
-    const result = await this.#session.call<{ keys: readonly ApiKey[] }>('keys.list', { providerId }, signal)
-    return result.keys
+  async list(providerId: string, signal?: AbortSignal): Promise<ApiKeysListResult> {
+    const result = await this.#session.call<ApiKeysListResult>('keys.list', { providerId }, signal)
+    return { keys: result.keys, available: Math.max(result.available ?? result.keys.length, result.keys.length) }
   }
 
   checkPool(providerId: string, signal?: AbortSignal): Promise<PoolCheckReport> {

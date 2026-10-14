@@ -141,6 +141,45 @@ func TestGuardrailModeIsPublishedWithoutRequiringARestart(t *testing.T) {
 	}
 }
 
+func TestLiveApplyAndPersistenceFailuresKeepPreviousSettings(t *testing.T) {
+	repository := &memoryRepository{}
+	service, _ := NewService(repository)
+	previous := service.Snapshot()
+	livePort := previous.ListenerPort
+	var published int
+	service.OnApplied(func(domain.Settings) { published++ })
+	service.SetLiveApply(func(_ context.Context, old, next domain.Settings) (func(context.Context) error, error) {
+		if next.ListenerPort == 9999 {
+			return nil, errors.New("occupied")
+		}
+		livePort = next.ListenerPort
+		return func(context.Context) error { livePort = old.ListenerPort; return nil }, nil
+	})
+	next := previous
+	next.ListenerPort = 9999
+	if _, err := service.Update(context.Background(), next); err == nil {
+		t.Fatal("bind failure hidden")
+	}
+	if repository.found || !service.Snapshot().Equal(previous) || livePort != previous.ListenerPort || published != 0 {
+		t.Fatal("failed apply persisted/published settings")
+	}
+	next.ListenerPort = 9000
+	repository.fail = true
+	if _, err := service.Update(context.Background(), next); err == nil {
+		t.Fatal("disk failure hidden")
+	}
+	if !service.Snapshot().Equal(previous) || livePort != previous.ListenerPort || published != 0 {
+		t.Fatal("failed save kept tentative live values")
+	}
+	repository.fail = false
+	if _, err := service.Update(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	if livePort != 9000 || repository.settings.ListenerPort != 9000 || published != 1 {
+		t.Fatal("valid apply did not commit")
+	}
+}
+
 func TestInvalidGuardrailModeIsRejectedWithoutChangingAnything(t *testing.T) {
 	service, _ := NewService(&memoryRepository{})
 	var calls int

@@ -1,6 +1,6 @@
 import type { PropsWithChildren } from 'react'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { ArrowUpCircle, PanelLeftClose, PanelLeftOpen, Square } from 'lucide-react'
+import { ArrowUpCircle, PanelLeftClose, PanelLeftOpen, Play, Square, Waypoints } from 'lucide-react'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
 import { useSettings } from '../features/settings/ui/useSettings'
@@ -72,9 +72,10 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
 
   return (
     <div className={styles.shell} data-sidebar={collapsed ? 'collapsed' : undefined}>
+      <a className="skip-link" href="#workspace" onClick={(event) => { event.preventDefault(); document.getElementById('workspace')?.focus() }}>Skip to workspace</a>
       <aside className={styles.sidebar} aria-label="Sidebar">
         <div className={styles.brand}>
-          <span className={styles.brandMark} aria-hidden="true">L</span>
+          <span className={styles.brandMark} aria-hidden="true"><Waypoints size={23} strokeWidth={1.7} /></span>
           <span className={styles.brandName}>Luxury Switchboard</span>
         </div>
         <nav className={styles.navigation} aria-label="Main navigation">
@@ -146,17 +147,17 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
           </div>
           <div className={styles.runtimeActions}>
             <Button
-              variant={needsStop ? 'danger' : 'primary'}
+              variant={needsStop ? 'secondary' : 'primary'}
               disabled={relayState.pending}
               onClick={() => void relay.toggle()}
             >
-              <Square size={13} fill="currentColor" aria-hidden="true" />
+              {needsStop ? <Square size={11} fill="currentColor" aria-hidden="true" /> : <Play size={13} fill="currentColor" aria-hidden="true" />}
               {relayState.pending ? 'Applying…' : live ? 'Stop relay' : needsStop ? 'Retry stop' : 'Start relay'}
             </Button>
             <NotificationsSurface />
           </div>
         </header>
-        <main className={styles.content}>
+        <main id="workspace" tabIndex={-1} className={styles.content}>
           {/* Around the workspace, not the shell: a screen that throws must not
               take the sidebar with it, because navigating away is the recovery.
               Keyed on the route so that navigation discards a failed boundary. */}

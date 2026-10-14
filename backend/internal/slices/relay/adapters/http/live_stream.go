@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -190,6 +191,9 @@ type liveStreamBody struct {
 }
 
 func (body *liveStreamBody) Read(into []byte) (int, error) {
+	if body.completed {
+		return 0, io.EOF
+	}
 	if len(body.source.prefix) == 0 && len(body.source.pending) == 0 && body.source.pendingErr == nil {
 		select {
 		case value, open := <-body.source.reads:
@@ -223,7 +227,6 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 	prefixServing := len(body.source.prefix) > 0
 	count, err := body.source.Read(into)
 	if count > 0 {
-		body.delivered += int64(count)
 		if body.idle != nil {
 			body.idle.Reset(body.idleFor)
 		}
@@ -232,7 +235,19 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 		}
 		if !prefixServing {
 			body.inspector.Feed(into[:count])
+			if body.inspector.overflow {
+				_ = body.Close()
+				return 0, errResponseTooLarge
+			}
+			if body.inspector.terminal != "" {
+				count = body.inspector.consumed
+				err = io.EOF
+				if body.inspector.terminal == "response.invalid" {
+					err = errIncompleteSSE
+				}
+			}
 		}
+		body.delivered += int64(count)
 		// The copy stays bounded: the review at the end reads the prefix,
 		// the way the buffered path inspects an over-long answer. The wire
 		// flows as the provider writes it — a proxy's memory is the bound,
@@ -242,7 +257,7 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 		}
 	}
 	if err != nil && !body.completed {
-		body.complete()
+		_ = body.Close()
 	}
 	return count, err
 }

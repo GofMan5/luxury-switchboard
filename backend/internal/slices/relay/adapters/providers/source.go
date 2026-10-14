@@ -65,7 +65,7 @@ func (source *Source) Current(_ context.Context, model string) (relayapp.Route, 
 	if err != nil {
 		return relayapp.Route{}, err
 	}
-	return source.providerRoute(provider, upstreamModel), nil
+	return source.providerRoute(provider, upstreamModel)
 }
 
 func (source *Source) Pinned(_ context.Context, providerID, upstreamModel string) (relayapp.Route, error) {
@@ -73,7 +73,7 @@ func (source *Source) Pinned(_ context.Context, providerID, upstreamModel string
 	if !exists {
 		return relayapp.Route{}, providerapp.ErrProviderUnavailable
 	}
-	return source.providerRoute(provider, upstreamModel), nil
+	return source.providerRoute(provider, upstreamModel)
 }
 
 // Next walks the failover chain past the provider that just refused. Entries
@@ -93,7 +93,8 @@ func (source *Source) Next(_ context.Context, currentProviderID, publicModel str
 		if !exists || !provider.Enabled {
 			continue
 		}
-		return source.providerRoute(provider, candidate.UpstreamModel), true, nil
+		route, err := source.providerRoute(provider, candidate.UpstreamModel)
+		return route, err == nil, err
 	}
 	return relayapp.Route{}, false, nil
 }
@@ -104,9 +105,21 @@ func (source *Source) Degrade(providerID string) {
 	}
 }
 
-func (source *Source) providerRoute(provider providerdomain.Provider, upstreamModel string) relayapp.Route {
+func (source *Source) providerRoute(provider providerdomain.Provider, upstreamModel string) (relayapp.Route, error) {
+	// The token source reserves the fleet id, so a stale/tampered catalog or
+	// custom squatter cannot bind its credential to another destination. Check
+	// the captured route, not only edits in the owner control plane.
+	if provider.ID == "codex" || provider.Preset == providerdomain.PresetCodex {
+		if provider.Preset != providerdomain.PresetCodex || provider.BaseURL == nil || provider.BaseURL.String() != providerdomain.CodexBaseURL || provider.AuthMode != providerdomain.AuthBearer || provider.AuthHeader != "" {
+			return relayapp.Route{}, providerapp.ErrProviderUnavailable
+		}
+	}
+	if provider.BaseURL == nil {
+		return relayapp.Route{}, providerapp.ErrProviderUnavailable
+	}
+	baseURL := *provider.BaseURL
 	route := relayapp.Route{
-		ProviderID: provider.ID, ProviderName: provider.Name, BaseURL: provider.BaseURL,
+		ProviderID: provider.ID, ProviderName: provider.Name, BaseURL: &baseURL,
 		AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader, Dialect: string(provider.Dialect),
 		ImageCompat: provider.ImageCompat, UpstreamModel: upstreamModel, CacheTTL: provider.CacheTTL,
 		Format: string(provider.Format), ChatPath: provider.ChatPath,
@@ -131,5 +144,5 @@ func (source *Source) providerRoute(provider providerdomain.Provider, upstreamMo
 		route.ResponsesPath = "/responses"
 		route.ResponsesStateless = true
 	}
-	return route
+	return route, nil
 }

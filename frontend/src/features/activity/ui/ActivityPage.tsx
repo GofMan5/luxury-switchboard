@@ -43,6 +43,7 @@ export default function ActivityPage() {
     [source, stateFilter, deferredSearch],
   )
   const selected = source.find((request) => request.id === selectedID)
+  const keyboardAnchor = requests.some((request) => request.id === selectedID) ? selectedID : requests[0]?.id
   const loading = activity.phase === 'loading' && activity.requests.length === 0
   const failed = activity.phase === 'error'
 
@@ -102,7 +103,7 @@ export default function ActivityPage() {
           {paused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}
           {paused ? 'Resume' : 'Pause'}
         </Button>
-        <Button variant="primary" disabled={!selected} onClick={() => setInspectorOpen(true)}>Details</Button>
+        <Button variant="secondary" disabled={!selected} onClick={() => setInspectorOpen(true)}>Details</Button>
       </div>
 
       {failed ? (
@@ -136,7 +137,7 @@ export default function ActivityPage() {
                   <tr key={row} className={styles.skeletonRow} aria-hidden="true">
                     <td colSpan={10}><span className={styles.skeleton} /></td>
                   </tr>
-                )) : requests.map((request, index) => {
+                )) : requests.map((request) => {
                   // The highlight means "this row is what the panel shows": a
                   // closed panel marks nothing, even though the id is kept so
                   // the Details button can reopen the same request.
@@ -147,7 +148,7 @@ export default function ActivityPage() {
                       data-selected={isSelected}
                       data-row=""
                       aria-selected={isSelected}
-                      tabIndex={request.id === selectedID || (selectedID === '' && index === 0) ? 0 : -1}
+                      tabIndex={request.id === keyboardAnchor ? 0 : -1}
                       onClick={() => openRequest(request.id)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {

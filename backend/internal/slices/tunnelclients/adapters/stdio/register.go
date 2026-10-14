@@ -11,11 +11,7 @@ import (
 
 func Register(server *platform.Server, service *application.Service) {
 	server.Handle("clients.list", func(_ context.Context, _ json.RawMessage) (any, error) {
-		clients := service.List()
-		return map[string]any{
-			"clients":   withinOneFrame(clients),
-			"available": len(clients),
-		}, nil
+		return clientsResponse(service.List()), nil
 	})
 	server.Handle("clients.events", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var query struct {
@@ -38,9 +34,13 @@ func Register(server *platform.Server, service *application.Service) {
 		if err := service.SetProfile(ctx, domain.Profile{IP: command.IP, Banned: command.Banned, Note: command.Note}); err != nil {
 			return nil, platform.MethodError{Code: "invalid_payload", Message: "Client profile could not be saved"}
 		}
-		return map[string]any{"clients": service.List()}, nil
+		return clientsResponse(service.List()), nil
 	})
 	service.OnChanged(func() { _ = server.Emit("clients.changed", map[string]bool{"changed": true}) })
+}
+
+func clientsResponse(clients []domain.Client) map[string]any {
+	return map[string]any{"clients": withinOneFrame(clients), "available": len(clients)}
 }
 
 // withinOneFrame drops the idle tail of the client list until the answer fits

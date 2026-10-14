@@ -35,7 +35,9 @@ type ipLimit struct {
 	notify  chan struct{}
 }
 
-type ipWaiter struct{}
+// Distinct queued requests require distinct addresses; Go may coalesce pointers
+// to zero-sized allocations, which lets a later request impersonate the head.
+type ipWaiter struct{ identity byte }
 
 func newIPLimiter() *ipLimiter {
 	return &ipLimiter{next: make(map[string]*ipLimit), now: time.Now, notify: make(chan struct{})}

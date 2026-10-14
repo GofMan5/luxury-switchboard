@@ -14,7 +14,7 @@ import { Pill } from '../../../shared/ui/chrome'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { AddApiKey, ApiKey, ImportApiKeys, ImportApiKeysReport, UpdateApiKey } from '../domain/api-key'
 import { useApiKeys } from './useApiKeys'
-import { parsePastedKeys, proxyURLIsValid, MAX_IMPORT_KEYS, MAX_IMPORT_FRAME_CHARS, type PastedKey } from './key-form'
+import { parsePastedKeys, proxyURLIsValid, MAX_IMPORT_KEYS, type PastedKey } from './key-form'
 import styles from './ApiKeysPage.module.css'
 
 export default function ApiKeysPage() {
@@ -144,19 +144,18 @@ export default function ApiKeysPage() {
           {state.poolReport ? (
             <div className={styles.poolReport} data-rejected={state.poolReport.rejected > 0 || undefined} role="status">
               <div>
+                <span>{state.poolReport.checked} of {state.poolReport.total ?? state.poolReport.checked} keys checked · {state.poolReport.skipped ?? 0} skipped</span>
                 <strong>
-                  {state.poolReport.reachable
-                    ? state.poolReport.rejected === 0
-                      ? `All ${state.poolReport.checked} keys answered`
-                      : `${state.poolReport.rejected} of ${state.poolReport.checked} keys were rejected`
-                    : 'The provider did not answer the check'}
+                  {state.poolReport.checked === 0
+                    ? 'No keys were checked'
+                    : state.poolReport.accepted === state.poolReport.checked
+                      ? `All ${state.poolReport.checked} checked keys authenticate`
+                      : `${state.poolReport.accepted} accepted · ${state.poolReport.rejected} rejected · ${state.poolReport.inconclusive} inconclusive`}
                 </strong>
                 <span>
-                  {state.poolReport.reachable
-                    ? state.poolReport.rejected === 0
-                      ? 'Every credential still authenticates.'
-                      : 'Rejected keys kept answering 401 on their own catalog request. The rows below carry their verdicts.'
-                    : 'No verdict about the keys: an unreachable provider says nothing about its credentials.'}
+                  {state.poolReport.checked > 0 && state.poolReport.accepted === state.poolReport.checked
+                    ? 'Every checked credential returned a successful 2xx response.'
+                    : `${state.poolReport.answered} of ${state.poolReport.checked} checked keys received an HTTP response. Only 2xx accepts a credential; 401/403 rejects it. Other responses or no response say nothing about credentials.`}
                 </span>
               </div>
               {rejectedCount > 0 ? <Button variant="danger" disabled={Boolean(state.pendingId)} onClick={() => void model.removeRejected()}>Remove {rejectedCount} rejected</Button> : null}
@@ -216,7 +215,7 @@ export default function ApiKeysPage() {
         </>
       )}
       <footer className={styles.footer}>
-        <span>{codexAccounts ? accountCaption : `${ordered.length} keys · lower number means higher priority`}</span>
+        <span>{codexAccounts ? accountCaption : `${state.available > ordered.length ? `Showing ${ordered.length} of ${state.available}` : ordered.length} keys · lower number means higher priority`}</span>
         <span>{codexAccounts ? 'Accounts sign in and out on this page' : 'Secrets and proxy credentials are write-only'}</span>
       </footer>
 
@@ -389,14 +388,7 @@ function BulkImport({ providerId, unit, pending, operationError, onClose, onImpo
       setError(`Import at most ${MAX_IMPORT_KEYS} keys at once; split the list.`)
       return
     }
-    // The command travels as one protocol frame the desktop shell caps at
-    // 256 KiB. Pasting the wrong clipboard (a config, a log) used to exceed it
-    // and die as a generic transport failure; measuring the exact serialized
-    // size says it in a sentence the caller can act on.
-    if (JSON.stringify(parsed).length > MAX_IMPORT_FRAME_CHARS) {
-      setError('This paste is too large for one command. Split it into smaller batches, or check the wrong clipboard did not land here.')
-      return
-    }
+    // The session checks the complete command/payload in UTF-8 bytes before send.
     if (!Number.isInteger(parsedRPM) || parsedRPM < 0 || parsedRPM > 1_000_000) {
       setError('Enter a limit from 0 to 1,000,000.')
       return

@@ -41,13 +41,14 @@ const (
 )
 
 type Scheduler struct {
-	mu         sync.Mutex
-	providers  map[string]*providerState
-	waiters    []*waiter
-	notify     chan struct{}
-	nextTicket uint64
-	now        func() time.Time
-	maxQueued  int
+	mu             sync.Mutex
+	providers      map[string]*providerState
+	waiters        []*waiter
+	notify         chan struct{}
+	nextTicket     uint64
+	nextGeneration uint64
+	now            func() time.Time
+	maxQueued      int
 	// deadKeyListeners hear about a key whose authentication streak crossed the
 	// dead threshold: the notification feed is the consumer, and it wants the
 	// label, not the internal state.
@@ -65,6 +66,7 @@ type providerState struct {
 
 type keyState struct {
 	key           domain.Key
+	generation    uint64
 	starts        []time.Time
 	cooldownUntil time.Time
 	balanceUntil  time.Time
@@ -90,6 +92,7 @@ type Lease struct {
 	scheduler  *Scheduler
 	providerID string
 	keyID      string
+	generation uint64
 	key        domain.Key
 	once       sync.Once
 }
@@ -148,6 +151,10 @@ func (scheduler *Scheduler) Configure(providerID string, rpm int, window time.Du
 		for _, state := range states {
 			if old := findKey(previous, state.key.ID); old != nil {
 				state.starts = slices.Clone(old.starts)
+				if old.key.ProxyURL != state.key.ProxyURL {
+					continue // old egress verdicts do not describe the replacement
+				}
+				state.generation = old.generation
 				state.cooldownUntil = old.cooldownUntil
 				state.balanceUntil = old.balanceUntil
 				state.blockedModels = cloneBlocks(old.blockedModels)
@@ -155,6 +162,12 @@ func (scheduler *Scheduler) Configure(providerID string, rpm int, window time.Du
 				state.authStreak = old.authStreak
 				state.lastOutcome = old.lastOutcome
 			}
+		}
+	}
+	for _, state := range states {
+		if state.generation == 0 {
+			scheduler.nextGeneration++
+			state.generation = scheduler.nextGeneration
 		}
 	}
 	provider := &providerState{rpm: rpm, window: window, keys: states}
@@ -210,7 +223,7 @@ func (scheduler *Scheduler) AcquireWithQueue(ctx context.Context, providerID, mo
 			key.starts = append(key.starts, now)
 			lease := &Lease{
 				scheduler: scheduler, providerID: providerID,
-				keyID: key.key.ID, key: key.key,
+				keyID: key.key.ID, key: key.key, generation: key.generation,
 			}
 			scheduler.mu.Unlock()
 			return lease, now.Sub(started), nil
@@ -276,14 +289,35 @@ func (scheduler *Scheduler) TryAcquire(providerID, model string) (*Lease, bool) 
 	key.starts = append(key.starts, now)
 	return &Lease{
 		scheduler: scheduler, providerID: providerID,
-		keyID: key.key.ID, key: key.key,
+		keyID: key.key.ID, key: key.key, generation: key.generation,
 	}, true
 }
 
 func (lease *Lease) Finish(outcome domain.Outcome) {
 	lease.once.Do(func() {
-		lease.scheduler.finish(lease.providerID, lease.keyID, outcome)
+		lease.scheduler.finish(lease.providerID, lease.keyID, lease.generation, outcome)
 	})
+}
+
+// InvalidateProvider retires the old endpoint/auth profile and its health.
+// Quota starts and cumulative throttle counters are not health and survive.
+func (scheduler *Scheduler) InvalidateProvider(providerID string) {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	provider := scheduler.providers[providerID]
+	if provider == nil {
+		return
+	}
+	for _, key := range provider.keys {
+		scheduler.nextGeneration++
+		key.generation = scheduler.nextGeneration
+		key.cooldownUntil = time.Time{}
+		key.balanceUntil = time.Time{}
+		clear(key.blockedModels)
+		key.authStreak = 0
+		key.lastOutcome = nil
+	}
+	scheduler.broadcastLocked()
 }
 
 func (scheduler *Scheduler) Reset(providerID, keyID string) bool {
@@ -384,10 +418,22 @@ func (scheduler *Scheduler) OnDeadKey(listener func(providerID, label string)) {
 	scheduler.mu.Unlock()
 }
 
-func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outcome) {
+// probeLease binds a catalog check to the same credential/egress incarnation
+// as traffic, without consuming generation quota or bypassing its cooldown.
+func (scheduler *Scheduler) probeLease(providerID, keyID string) *Lease {
 	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
 	key := findKey(scheduler.providers[providerID], keyID)
 	if key == nil {
+		return nil
+	}
+	return &Lease{scheduler: scheduler, providerID: providerID, keyID: keyID, key: key.key, generation: key.generation}
+}
+
+func (scheduler *Scheduler) finish(providerID, keyID string, generation uint64, outcome domain.Outcome) {
+	scheduler.mu.Lock()
+	key := findKey(scheduler.providers[providerID], keyID)
+	if key == nil || key.generation != generation {
 		scheduler.mu.Unlock()
 		return
 	}
@@ -418,8 +464,8 @@ func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outc
 		key.cooldownUntil = maxTime(key.cooldownUntil, now.Add(authCooldown))
 	default:
 	}
-	// Health bookkeeping: the streak survives a rate limit or a server error
-	// (those say nothing about the credential) and breaks on anything else.
+	// The streak counts consecutive authentication verdicts. Inconclusive
+	// catalog checks do not file an outcome; finished traffic attempts do.
 	kind := outcome.Kind
 	key.lastOutcome = &kind
 	deadNow := false
@@ -446,7 +492,13 @@ func (scheduler *Scheduler) finish(providerID, keyID string, outcome domain.Outc
 func (scheduler *Scheduler) firstDispatchableLocked(now time.Time) (*waiter, *keyState) {
 	for _, pending := range scheduler.waiters {
 		provider := scheduler.providers[pending.providerID]
-		if provider == nil || !rateAvailable(provider.starts, provider.rpm) {
+		if provider == nil {
+			continue
+		}
+		// Another provider's Acquire may be walking this queue. Eligibility
+		// must use current windows for every candidate, not just its caller.
+		scheduler.pruneLocked(provider, now)
+		if !rateAvailable(provider.starts, provider.rpm) {
 			continue
 		}
 		if key := selectKey(provider, pending.model, now); key != nil {
@@ -496,12 +548,17 @@ func pruneStarts(starts []time.Time, now time.Time, window time.Duration) []time
 	for index < len(starts) && !starts[index].After(cutoff) {
 		index++
 	}
-	return slices.Clone(starts[index:])
+	// Drop the expired head in place. Appending reuses the remaining capacity
+	// until Go grows/compacts the backing slice; that cost is amortized across
+	// starts, rather than cloning the whole live window on every acquisition.
+	clear(starts[:index])
+	return starts[index:]
 }
 
 func (scheduler *Scheduler) nextWakeLocked(now time.Time) time.Duration {
 	next := now.Add(time.Minute)
 	for _, provider := range scheduler.providers {
+		scheduler.pruneLocked(provider, now)
 		window := provider.window
 		if window <= 0 {
 			window = rateWindow

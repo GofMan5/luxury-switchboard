@@ -10,8 +10,8 @@ export class StdioClientsPort implements ClientsPort {
   }
 
   async list(signal?: AbortSignal) {
-    const value = await this.#session.call<{ clients: readonly TunnelClient[] }>('clients.list', undefined, signal)
-    return value.clients
+    const value = await this.#session.call<{ clients: readonly TunnelClient[]; available?: number }>('clients.list', undefined, signal)
+    return { clients: value.clients, available: Math.max(value.clients.length, value.available ?? value.clients.length) }
   }
 
   async events(ip: string, signal?: AbortSignal) {
@@ -20,8 +20,8 @@ export class StdioClientsPort implements ClientsPort {
   }
 
   async saveProfile(profile: TunnelClientProfile, signal?: AbortSignal) {
-    const value = await this.#session.call<{ clients: readonly TunnelClient[] }>('clients.profile', profile, signal)
-    return value.clients
+    const value = await this.#session.call<{ clients: readonly TunnelClient[]; available?: number }>('clients.profile', profile, signal)
+    return { clients: value.clients, available: Math.max(value.clients.length, value.available ?? value.clients.length) }
   }
 
   subscribe(listener: () => void) {

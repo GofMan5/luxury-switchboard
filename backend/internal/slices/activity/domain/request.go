@@ -63,6 +63,8 @@ type Retry struct {
 }
 
 type Finish struct {
+	ProviderID      string
+	ProviderName    string
 	Status          int
 	BytesOut        int64
 	Cancelled       bool

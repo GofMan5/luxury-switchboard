@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 type DispatchRequest struct {
@@ -54,4 +55,35 @@ type ProbeReport struct {
 // sees the answer whole; the probe reads the stream as it arrives.
 type StreamProber interface {
 	Probe(ctx context.Context, providerID, model string) (ProbeReport, error)
+}
+
+// ProbeProfile is deliberately small: model testing has two operator-facing
+// budgets, and keeping them typed prevents arbitrary request sizes crossing the
+// control-plane boundary.
+type ProbeProfile string
+
+const (
+	ProbeProfileShort    ProbeProfile = "short"
+	ProbeProfileFull128K ProbeProfile = "full-128k"
+)
+
+func (profile ProbeProfile) Valid() bool {
+	return profile == ProbeProfileShort || profile == ProbeProfileFull128K
+}
+
+// The shared input leaves headroom for output and protocol framing. Token counts
+// vary by provider tokenizer; this probes approximately 128k, not an exact limit.
+var fullProbeInput = strings.Repeat("context ", 127_500) + "\nReply with OK."
+
+func (profile ProbeProfile) Prompt() string {
+	if profile == ProbeProfileFull128K {
+		return fullProbeInput
+	}
+	return "Reply OK"
+}
+
+// ProfiledStreamProber is optional so older test doubles and sidecars keep the
+// short-probe contract while the live relay can opt into the larger profile.
+type ProfiledStreamProber interface {
+	ProbeWithProfile(ctx context.Context, providerID, model string, profile ProbeProfile) (ProbeReport, error)
 }

@@ -52,6 +52,19 @@ func prepareDir(t *testing.T, repository *Repository) {
 	}
 }
 
+func TestSaveRefusesEmptyOrUnidentifiedAccountsWithoutWriting(t *testing.T) {
+	for _, session := range []domain.Session{
+		{Identity: domain.Identity{AccountID: "fixture-account-id"}},
+		{AccessToken: "fixture-access-without-id"},
+	} {
+		repository := storePaths(t)
+		requireStoreError(t, repository.Save(context.Background(), application.StoredAccount{Session: session}))
+		if _, err := os.Stat(repository.dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("invalid account save touched the account directory")
+		}
+	}
+}
+
 func TestLoadOfEmptyDirectoryReportsNoAccounts(t *testing.T) {
 	sessions, err := storePaths(t).Load(context.Background())
 	if err != nil {

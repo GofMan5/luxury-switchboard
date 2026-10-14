@@ -81,11 +81,26 @@ func assetNameFor(goos, goarch string) string {
 // connectorAssetFor answers the pinned download for a platform. Split from
 // connectorAsset so the naming is testable on every host.
 func connectorAssetFor(goos, goarch string) (url string, checksum string, err error) {
+	// Upstream 2026.9.3 ships no Windows ARM64 executable. Use its exact
+	// verified x64 asset only after ensureConnector checks OS emulation support.
+	if goos == "windows" && goarch == "arm64" {
+		goarch = "amd64"
+	}
 	checksum, ok := connectorSHA256[goos+"/"+goarch]
 	if !ok {
 		return "", "", fmt.Errorf("the tunnel connector has no pinned build for %s/%s", goos, goarch)
 	}
 	return connectorURLBase + assetNameFor(goos, goarch), checksum, nil
+}
+
+func checkConnectorPlatform(goos, goarch string, supportsX64 func() (bool, error)) error {
+	if goos != "windows" || goarch != "arm64" {
+		return nil
+	}
+	if supported, err := supportsX64(); err != nil || !supported {
+		return errors.New("the pinned tunnel connector requires Windows x64 emulation; this ARM64 system does not report support")
+	}
+	return nil
 }
 
 func connectorAsset() (string, string, error) {
@@ -114,6 +129,9 @@ func hashFile(path string) (string, error) {
 // On darwin the pinned artifact is the release's .tgz; the runnable binary is
 // extracted from the verified archive.
 func (runtime *Runtime) ensureConnector(ctx context.Context) (string, error) {
+	if err := checkConnectorPlatform(goruntime.GOOS, goruntime.GOARCH, x64EmulationSupported); err != nil {
+		return "", err
+	}
 	root, err := appdata.Root()
 	if err != nil {
 		return "", err

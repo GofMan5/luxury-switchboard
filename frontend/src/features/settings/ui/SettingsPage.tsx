@@ -37,7 +37,13 @@ export default function SettingsPage() {
   // back to the first tab.
   const [tab, setTab] = useState<SettingsTab>('relay')
   if (!state.settings) {
-    return <section className={styles.page}><header className="page-header"><div><h1>Settings</h1><p>Loading validated runtime configuration…</p></div></header></section>
+    return <section className={styles.page}>
+      <header className="page-header"><div><h1>Settings</h1><p>Validated runtime configuration</p></div></header>
+      {state.phase === 'error' ? <div className={styles.error} role="alert">
+        <span>{state.error || 'Settings are unavailable'}</span>
+        <Button variant="secondary" onClick={() => void model.connect()}>Retry</Button>
+      </div> : <p className="page-body" role="status">Loading validated runtime configuration…</p>}
+    </section>
   }
   return <SettingsForm key={JSON.stringify(state.settings)} initial={state.settings} pending={state.pending} error={state.error} tab={tab} onTab={setTab} onSave={(value) => model.save(value)} />
 }
@@ -148,7 +154,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
               />
               <NumberField
                 label="Maximum request" min={1} max={256} suffix="MiB" presets={[32, 64, 128]} {...field('maxRequestMiB')}
-                note="The largest single request the relay accepts, headers included. 64 MiB fits a context window far past every current model; lower it only to defend memory on a small machine."
+                note="The largest single request the relay accepts, headers included. 128 MiB leaves room for a bounded 128k-context probe plus output and request overhead; lower it only to defend memory on a small machine."
               />
               <NumberField
                 label="Maximum queued" min={100} max={100000} presets={[1_000, 10_000, 50_000]} {...field('maxQueued')}
@@ -165,12 +171,12 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
           {tab === 'reliability' ? (
             <div className={styles.fields}>
               <NumberField
-                label="Response headers" min={5} max={300} suffix="sec" presets={[30, 45, 60, 120]} {...field('headerTimeoutSeconds')}
-                note="How long a provider may think before its first byte. Cold requests on big contexts prefill for a while — under ~30 seconds those get cut before they start."
+                label="Response headers" min={5} max={300} suffix="sec" presets={[60, 120, 300]} {...field('headerTimeoutSeconds')}
+                note="How long a provider may think before its first byte. Full · 128k tests and cold requests can prefill for minutes; this default keeps those requests from being cut before they start."
               />
               <NumberField
                 label="Stream idle" min={15} max={900} suffix="sec" presets={[60, 300, 900]} {...field('streamIdleSeconds')}
-                note="The silence budget inside a live stream: no bytes for this long and the attempt is abandoned and retried on another key. Providers that prefill silently for minutes need this raised."
+                note="The silence budget inside a live stream: no bytes for this long and the attempt is abandoned and retried on another key. The 300-second default tolerates long reasoning pauses without allowing an unbounded stream."
               />
               <NumberField
                 label="Stream heartbeat" min={5} max={300} suffix="s" presets={[15, 30, 60]} {...field('heartbeatSeconds')}

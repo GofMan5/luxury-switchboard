@@ -13,6 +13,10 @@ No account. No cloud of ours. No restart after any setting.
 
 ![Overview](docs/screenshots/overview.png)
 
+<sub>Current interface · screenshots use fictional demo data, never real credentials or traffic.</sub>
+
+<sub>Current interface · screenshots use fictional demo data, never real credentials or traffic.</sub>
+
 </div>
 
 ## Install
@@ -96,7 +100,7 @@ Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` on Windows, 
 
 ## Development
 
-Go 1.25+ · Rust 1.96+ · Node 24+ · pnpm 10+.
+Go 1.26.9+ · Rust 1.96+ · Node 24+ · pnpm 10+.
 
 ```powershell
 pnpm install

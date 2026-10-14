@@ -46,6 +46,20 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		return map[string]int{"saved": len(command.Routes)}, nil
 	})
+	server.Handle("routes.remove", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var command struct {
+			Target      domain.Target `json:"target"`
+			PublicModel string        `json:"publicModel"`
+			ProviderID  string        `json:"providerId"`
+		}
+		if platform.DecodePayload(payload, &command) != nil {
+			return nil, invalid()
+		}
+		if err := service.Remove(ctx, command.Target, command.PublicModel, command.ProviderID); err != nil {
+			return nil, operationError(err, "route_delete_failed", "Route could not be deleted")
+		}
+		return map[string]bool{"deleted": true}, nil
+	})
 	server.Handle("routes.delete", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
 			Target      domain.Target `json:"target"`

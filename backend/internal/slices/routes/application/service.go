@@ -382,6 +382,29 @@ func (service *Service) Delete(ctx context.Context, target domain.Target, public
 	return service.persist(ctx, kept, target)
 }
 
+// Remove removes one provider's assignment, leaving sibling routes intact.
+// Delete remains the explicit whole-model operation.
+func (service *Service) Remove(ctx context.Context, target domain.Target, publicModel, providerID string) error {
+	if err := domain.ValidateIdentity(target, publicModel); err != nil {
+		return err
+	}
+	if providerID == "" || providerID != strings.TrimSpace(providerID) {
+		return errors.New("route provider is required")
+	}
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	if err := service.Availability(); err != nil {
+		return err
+	}
+	service.mu.RLock()
+	candidate := slices.Clone(service.assignments)
+	service.mu.RUnlock()
+	kept := slices.DeleteFunc(candidate, func(item domain.Assignment) bool {
+		return item.Target == target && item.PublicModel == publicModel && item.ProviderID == providerID
+	})
+	return service.persist(ctx, kept, target)
+}
+
 // RemoveProvider is the cascade behind deleting a provider: every assignment
 // that names it, relay and tunnel alike, goes with the provider in one save,
 // and the listeners hear about each target that actually lost a row. Delete

@@ -47,7 +47,7 @@ func TestEveryPinnedPlatformNamesItsAsset(t *testing.T) {
 			t.Fatalf("%s asset URL mismatch: %s", platform, url)
 		}
 	}
-	for _, platform := range []string{"windows/arm64", "freebsd/amd64", "plan9/amd64"} {
+	for _, platform := range []string{"freebsd/amd64", "plan9/amd64"} {
 		goos, goarch, _ := strings.Cut(platform, "/")
 		if _, _, err := connectorAssetFor(goos, goarch); err == nil {
 			t.Fatalf("%s is not pinned but answered with an asset", platform)
@@ -121,7 +121,9 @@ func TestAFailedStartDoesNotWedgeTheNextOne(t *testing.T) {
 	runtime := NewRuntime(&fakeGateway{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before the start begins: it fails immediately
-	if _, err := runtime.Start(ctx, domain.Config{Port: 1, Token: strings.Repeat("t", 32)}); err == nil {
+	// Exercise process startup directly with the offline helper: Runtime.Start
+	// also ensures the real pinned download, which is not a test dependency.
+	if _, err := runtime.serve(ctx, helperProcess(t), "http://127.0.0.1:1"); err == nil {
 		t.Fatal("a cancelled start reported success")
 	}
 	runtime.mu.Lock()

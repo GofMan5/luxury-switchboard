@@ -109,7 +109,7 @@ export class RoutesModel {
     }
     return this.#mutate('*', async () => {
       if (additions.length > 0) await this.#publishAll(additions)
-      for (const publicModel of removals) await this.#port.delete(target, publicModel)
+      for (const publicModel of removals) await this.#port.remove(target, publicModel, providerId)
     })
   }
 
@@ -143,6 +143,9 @@ export class RoutesModel {
       await this.load(this.#state.target, true)
       this.#set({ ...this.#state, pending: '', error: error instanceof ControlPlaneError ? error.message : 'Route could not be saved' })
       return false
+    } finally {
+      // Reconciliation may fail or be superseded; the write still completed.
+      if (this.#state.pending) this.#set({ ...this.#state, pending: '' })
     }
   }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -54,6 +55,43 @@ func TestTheReaderRefusesADirectoryWithoutNamingIt(t *testing.T) {
 	}
 	if !errors.Is(err, errFileUnreadable) {
 		t.Fatalf("error = %v, want the unreadable refusal", err)
+	}
+}
+
+func TestTheReaderBoundsAllocationBeforeReadingAnOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Small bounded fixture, not an OOM test; the old reader allocates its
+	// full 4 MiB while the capped reader needs only cap+1 bytes.
+	if err := file.Truncate(4 << 20); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err = FileReader{}.ReadAuthFile(path)
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, application.ErrAuthFileTooLarge) {
+		t.Fatalf("oversized read: %v", err)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 2<<20 {
+		t.Fatalf("oversized read allocated %d bytes before refusal", allocated)
+	}
+	for _, size := range []int{platform.MaxFrameBytes - 1, platform.MaxFrameBytes, platform.MaxFrameBytes + 1} {
+		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		text, err := FileReader{}.ReadAuthFile(path)
+		if size > platform.MaxFrameBytes {
+			if !errors.Is(err, application.ErrAuthFileTooLarge) || text != "" {
+				t.Fatal("overflow did not fail closed")
+			}
+		} else if err != nil || len(text) != size {
+			t.Fatalf("size %d refused: %v", size, err)
+		}
 	}
 }
 

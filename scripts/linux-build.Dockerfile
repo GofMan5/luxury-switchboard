@@ -1,5 +1,5 @@
 FROM node:24-bookworm AS node
-FROM golang:1.25-bookworm AS go
+FROM golang:1.26.9-bookworm AS go
 FROM rust:1.96-bookworm AS rust
 FROM ubuntu:22.04 AS build
 

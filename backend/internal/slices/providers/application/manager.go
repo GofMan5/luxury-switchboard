@@ -33,6 +33,8 @@ type KeyPool interface {
 	// EnsureProvider registers the provider's request budget: the limit and the
 	// window it is counted over.
 	EnsureProvider(providerID string, rpm int, window time.Duration) error
+	// InvalidateProvider retires old profile verdicts without resetting quotas.
+	InvalidateProvider(providerID string)
 	RemoveProvider(string) error
 	// DropProvider is the delete-side companion of EnsureProvider: it
 	// deletes every key that belongs to the provider, then its budget.
@@ -153,12 +155,14 @@ func (manager *Manager) Add(ctx context.Context, params domain.Params) (domain.P
 		return domain.Provider{}, err
 	}
 	providers := append(manager.catalog.List(), provider)
+	// Admission is published only after the provider is durable. Otherwise a
+	// concurrent restore/key command can save a key during this write, and a
+	// failed write cannot roll the budget back while that orphan key exists.
+	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
+		return domain.Provider{}, fmt.Errorf("provider settings could not be saved: %w", err)
+	}
 	if err := manager.keys.EnsureProvider(provider.ID, provider.RPM, provider.RateWindow()); err != nil {
 		return domain.Provider{}, err
-	}
-	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
-		_ = manager.keys.RemoveProvider(provider.ID)
-		return domain.Provider{}, fmt.Errorf("provider settings could not be saved: %w", err)
 	}
 	if err := manager.catalog.Replace(providers, active.ID); err != nil {
 		return domain.Provider{}, err
@@ -211,6 +215,11 @@ func (manager *Manager) Update(ctx context.Context, id string, params domain.Par
 	if err != nil {
 		return domain.Provider{}, err
 	}
+	// OAuth credentials belong to the managed destination, not an editable
+	// endpoint. Canonical repair and retirement use this same path.
+	if current.Preset == domain.PresetCodex && (updated.BaseURL.String() != "https://chatgpt.com/backend-api/codex" || updated.AuthMode != domain.AuthBearer || updated.AuthHeader != "" || updated.ModelsPath != "/models" || updated.Format != domain.FormatResponses || updated.ChatPath != "/v1/chat/completions") {
+		return domain.Provider{}, errors.New("managed codex destination cannot be edited")
+	}
 	active, err := manager.catalog.Active()
 	if err != nil {
 		return domain.Provider{}, err
@@ -219,15 +228,19 @@ func (manager *Manager) Update(ctx context.Context, id string, params domain.Par
 		return domain.Provider{}, ErrActiveProvider
 	}
 	providers[index] = updated
+	// A provisional shorter window can prune consumed starts irreversibly.
+	// Publish the validated runtime budget only after the durable save succeeds.
+	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
+		return domain.Provider{}, fmt.Errorf("provider settings could not be saved: %w", err)
+	}
 	if err := manager.keys.EnsureProvider(id, updated.RPM, updated.RateWindow()); err != nil {
 		return domain.Provider{}, err
 	}
-	if err := manager.repository.Save(ctx, SavedState{Providers: providers, ActiveID: active.ID}); err != nil {
-		_ = manager.keys.EnsureProvider(id, current.RPM, current.RateWindow())
-		return domain.Provider{}, fmt.Errorf("provider settings could not be saved: %w", err)
-	}
 	if err := manager.catalog.Replace(providers, active.ID); err != nil {
 		return domain.Provider{}, err
+	}
+	if !sameCredentialProfile(current, updated) {
+		manager.keys.InvalidateProvider(id)
 	}
 	return updated, nil
 }
@@ -248,7 +261,8 @@ func (manager *Manager) SetPreset(ctx context.Context, id string, preset domain.
 	if index < 0 {
 		return domain.Provider{}, ErrProviderUnavailable
 	}
-	params := paramsOf(providers[index])
+	current := providers[index]
+	params := paramsOf(current)
 	params.Preset = preset
 	params.AccountID = accountID
 	updated, err := domain.New(params)
@@ -265,6 +279,9 @@ func (manager *Manager) SetPreset(ctx context.Context, id string, preset domain.
 	}
 	if err := manager.catalog.Replace(providers, active.ID); err != nil {
 		return domain.Provider{}, err
+	}
+	if !sameCredentialProfile(current, updated) {
+		manager.keys.InvalidateProvider(id)
 	}
 	return updated, nil
 }

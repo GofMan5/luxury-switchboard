@@ -5,6 +5,7 @@ import type { ClientsPort } from './clients-port'
 export interface ClientsState {
   readonly phase: 'loading' | 'ready' | 'error'
   readonly clients: readonly TunnelClient[]
+  readonly available: number
   readonly events: readonly TunnelClientEvent[]
   readonly selectedIp: string
   readonly pendingIp: string
@@ -13,7 +14,7 @@ export interface ClientsState {
 
 export class ClientsModel {
   readonly #port: ClientsPort
-  #state: ClientsState = { phase: 'loading', clients: [], events: [], selectedIp: '', pendingIp: '', error: '' }
+  #state: ClientsState = { phase: 'loading', clients: [], available: 0, events: [], selectedIp: '', pendingIp: '', error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #timer: ReturnType<typeof setTimeout> | undefined
@@ -45,11 +46,11 @@ export class ClientsModel {
     const generation = ++this.#generation
     try {
       const selectedIp = this.#state.selectedIp
-      const [clients, events] = await Promise.all([
+      const [listed, events] = await Promise.all([
         this.#port.list(),
         selectedIp ? this.#port.events(selectedIp) : Promise.resolve(this.#state.events),
       ])
-      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', clients, events, error: '' })
+      if (generation === this.#generation) this.#set({ ...this.#state, phase: 'ready', ...listed, events, error: '' })
     } catch {
       if (generation === this.#generation) this.#set({ ...this.#state, phase: 'error', error: 'Tunnel clients are unavailable' })
     }
@@ -85,8 +86,8 @@ export class ClientsModel {
     // address the owner just banned.
     this.#generation++
     try {
-      const clients = await this.#port.saveProfile({ ...profile, note })
-      this.#set({ ...this.#state, phase: 'ready', clients, pendingIp: '', error: '' })
+      const listed = await this.#port.saveProfile({ ...profile, note })
+      this.#set({ ...this.#state, phase: 'ready', ...listed, pendingIp: '', error: '' })
       return true
     } catch {
       this.#set({ ...this.#state, pendingIp: '', error: 'Client decision could not be saved' })

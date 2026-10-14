@@ -90,6 +90,9 @@ jobs:
             exit 1
           fi
       - name: Check source
+        # GitHub's bash wrapper stops at every native nonzero exit on all hosts;
+        # PowerShell's default wrapper can hide an earlier exit behind cargo.
+        shell: bash
         run: |
           pnpm version:check
           pnpm --dir frontend lint

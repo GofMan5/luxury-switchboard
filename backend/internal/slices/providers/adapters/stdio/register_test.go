@@ -57,6 +57,7 @@ type memoryKeyPool struct {
 	removed []string
 }
 
+func (pool *memoryKeyPool) InvalidateProvider(string)                       {}
 func (pool *memoryKeyPool) EnsureProvider(string, int, time.Duration) error { return nil }
 
 func (pool *memoryKeyPool) RemoveProvider(providerID string) error {

@@ -125,7 +125,7 @@ func (catalog *Catalog) Replace(providers []domain.Provider, activeID string) er
 func sameRelayProvider(left, right domain.Provider) bool {
 	return left.ID == right.ID && left.BaseURL.String() == right.BaseURL.String() &&
 		left.AuthMode == right.AuthMode && left.AuthHeader == right.AuthHeader &&
-		left.Dialect == right.Dialect && left.CacheTTL == right.CacheTTL &&
+		left.Dialect == right.Dialect && left.Format == right.Format && left.ChatPath == right.ChatPath && left.CacheTTL == right.CacheTTL &&
 		left.ImageCompat == right.ImageCompat && left.Enabled == right.Enabled &&
 		left.Preset == right.Preset && left.AccountID == right.AccountID
 }

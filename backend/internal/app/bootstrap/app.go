@@ -59,7 +59,6 @@ import (
 	relayroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/routes"
 	relaystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/stdio"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
-	relaydomain "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/domain"
 	routedpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/dpapi"
 	routeproviders "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/providers"
 	routestdio "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/stdio"
@@ -353,6 +352,20 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	// The mode is a setting, so changing it must take effect on the next request
 	// rather than at the next launch. The per-provider override table rides the
 	// same path: settings own it, the inspector enforces it.
+	settingsService.SetLiveApply(func(ctx context.Context, previous, next settingsdomain.Settings) (func(context.Context) error, error) {
+		oldAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(previous.ListenerPort)))
+		newAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(next.ListenerPort)))
+		if oldAddress == newAddress {
+			return nil, nil
+		}
+		applyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := relay.Rebind(applyCtx, newAddress)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		return func(rollbackCtx context.Context) error { return relay.Rebind(rollbackCtx, oldAddress) }, nil
+	})
 	settingsService.OnApplied(func(applied settingsdomain.Settings) {
 		normalized := applied.Normalized()
 		if mode, err := guardraildomain.ParseMode(normalized.GuardrailMode); err == nil {
@@ -366,9 +379,8 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		updatesRefresher.SetInterval(updatesapp.IntervalFromSetting(normalized.UpdateCheckInterval))
 		routeService.SetChainMode(normalized.ChainMode)
 		routes.SetFailoverEnabled(applied.FailoverEnabled)
-		// Everything below used to wait for a restart; it applies in place now.
-		// The port move rebinds the listener around a stop/start of the relay;
-		// the rest just reconfigure their own piece.
+		// Infallible reconfiguration follows the durable settings commit;
+		// the listener move was already applied transactionally above.
 		httpRuntime.Reconfigure(relayhttp.Config{
 			MaxRequestBytes:       int64(applied.MaxRequestMiB) * 1024 * 1024,
 			ResponseHeaderTimeout: time.Duration(applied.HeaderTimeoutSeconds) * time.Second,
@@ -386,28 +398,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		}
 		guardrails.SetCapacity(normalized.GuardrailFindings)
 		modelGateway.SetTimeout(max(time.Duration(applied.HeaderTimeoutSeconds)*time.Second, 90*time.Second))
-		next := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(applied.ListenerPort)))
-		if next != httpRuntime.Address() {
-			previous := httpRuntime.Address()
-			live := relay.Snapshot().State == relaydomain.StateLive
-			if live {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = relay.Stop(ctx)
-				cancel()
-			}
-			httpRuntime.SetAddress(next)
-			// A relay.stop racing the rebind wins: the address moved, but nobody
-			// resurrects a relay the operator just stopped.
-			if live && relay.Snapshot().State == relaydomain.StateStopped {
-				if _, err := relay.Start(); err != nil {
-					// Roll the address back so the recorded settings and the
-					// bound listener cannot disagree silently; saving the same
-					// port again then retries instead of no-op'ing.
-					httpRuntime.SetAddress(previous)
-					logger.Printf("relay could not bind the new port; the listener stayed on the old one")
-				}
-			}
-		}
+
 	})
 	// The initial values come from the same record, so a restart and a live
 	// change leave the relay in the same state.
@@ -436,7 +427,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 }
 
 func (app *App) Run(ctx context.Context) error {
-	if app.healthMonitor != nil && app.healthMonitor.Enabled() {
+	if app.healthMonitor != nil {
 		healthCtx, cancelHealth := context.WithCancel(context.Background())
 		app.healthCancel = cancelHealth
 		go app.healthMonitor.Run(healthCtx, 2*time.Minute)

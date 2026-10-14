@@ -4,9 +4,10 @@ import { useAppServices } from '../../../app/services'
 import { useProviders } from '../../providers/ui/useProviders'
 import { formatClock, formatDuration } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
-import { EmptyState, Panel, Pill, Segmented } from '../../../shared/ui/chrome'
+import { EmptyState, Pill } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
-import type { ModelTestResult } from '../../models/domain/model'
+import type { ModelTestProfile, ModelTestResult } from '../../models/domain/model'
+import { MODEL_TEST_PROFILES } from '../../models/domain/model'
 import { testResultKey, type TestTarget } from '../application/tests-model'
 import styles from './TestsPage.module.css'
 
@@ -30,6 +31,7 @@ export default function TestsPage() {
   const state = useSyncExternalStore(tests.subscribe, tests.snapshot)
   const { state: providers } = useProviders()
   const [scope, setScope] = useState('all')
+  const [profile, setProfile] = useState<ModelTestProfile>('short')
   const [sort, setSort] = useState<SortKey>('model')
   const [ascending, setAscending] = useState(true)
 
@@ -92,7 +94,11 @@ export default function TestsPage() {
       const testable = Array.isArray(catalog) ? catalog.filter((model) => !IMAGE_MODEL.test(model)) : []
       if (testable.length > 0) targets.push({ providerId: provider.id, providerName: provider.name, models: testable })
     }
-    void tests.run(targets)
+    void tests.run(targets, profile)
+  }
+
+  const runSingle = (row: { providerId: string; providerName: string; model: string }) => {
+    void tests.run([{ providerId: row.providerId, providerName: row.providerName, models: [row.model] }], profile)
   }
 
   const sortable = (key: SortKey, label: string, numeric = false) => (
@@ -120,7 +126,7 @@ export default function TestsPage() {
       {state.running ? (
         <div className={styles.runProgress} role="status">
           <div className={styles.runTrack}><div className={styles.runFill} style={{ width: `${state.runTotal > 0 ? Math.round(100 * state.runDone / state.runTotal) : 0}%` }} /></div>
-          <span>{state.runDone} of {state.runTotal} measured{state.runFailed > 0 ? ` · ${state.runFailed} failed` : ''}</span>
+          <span><strong>{MODEL_TEST_PROFILES[state.profile].label}</strong> · {state.runDone} of {state.runTotal} measured{state.runFailed > 0 ? ` · ${state.runFailed} failed` : ''}</span>
         </div>
       ) : null}
       {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
@@ -131,28 +137,32 @@ export default function TestsPage() {
       ) : null}
 
       <div className="page-body">
-        <Panel
-          title="Providers"
-          subtitle={`${scopedProviders.length} in scope · ${rows.length} models`}
-          actions={
-            <div className={styles.scopeRow}>
-              <Segmented
-                label="Provider scope"
-                value={scope}
-                onChange={setScope}
-                options={[
-                  { id: 'all', label: 'All providers' },
-                  ...enabledProviders.map((provider) => ({ id: provider.id, label: provider.name })),
-                ]}
-              />
-              {scope !== 'all' ? (
-                <Button variant="ghost" disabled={state.catalogs[scope] === 'loading' || state.running} onClick={() => void tests.refreshCatalog(scope)}>
-                  <RefreshCw size={14} />Refresh catalog
-                </Button>
-              ) : null}
+        <section className={styles.results} aria-label="Provider tests">
+          <header className={styles.scopeRow}>
+            <label className={styles.scopeSelect}>
+              <span>Provider scope</span>
+              <select value={scope} onChange={(event) => setScope(event.currentTarget.value)}>
+                <option value="all">All providers</option>
+                {enabledProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+              </select>
+            </label>
+            <div className={styles.profilePicker} role="group" aria-label="Test profile">
+              {(Object.entries(MODEL_TEST_PROFILES) as [ModelTestProfile, (typeof MODEL_TEST_PROFILES)[ModelTestProfile]][]).map(([key, info]) => (
+                <button key={key} type="button" className={profile === key ? styles.profileOptionActive : styles.profileOption} aria-pressed={profile === key} onClick={() => setProfile(key)} disabled={state.running}>
+                  <strong>{info.label}</strong><span>{info.eyebrow}</span>
+                </button>
+              ))}
             </div>
-          }
-        >
+            <div className={styles.scopeSummary}>
+              <strong>{scopedProviders.length} provider{scopedProviders.length === 1 ? '' : 's'} · {rows.length} models</strong>
+              <span>{MODEL_TEST_PROFILES[profile].detail}</span>
+            </div>
+            {scope !== 'all' ? (
+              <Button variant="ghost" disabled={state.catalogs[scope] === 'loading' || state.running} onClick={() => void tests.refreshCatalog(scope)}>
+                <RefreshCw size={14} />Refresh catalog
+              </Button>
+            ) : null}
+          </header>
           {rows.length === 0 ? (
             <EmptyState
               icon={FlaskConical}
@@ -174,12 +184,12 @@ export default function TestsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row) => <TestRow key={testResultKey(row.providerId, row.model)} row={row} running={state.running} onRun={() => void tests.run([{ providerId: row.providerId, providerName: row.providerName, models: [row.model] }])} />)}
+                  {rows.map((row) => <TestRow key={testResultKey(row.providerId, row.model)} row={row} running={state.running} onRun={() => runSingle(row)} />)}
                 </tbody>
               </table>
             </div>
           )}
-        </Panel>
+        </section>
       </div>
     </section>
   )
@@ -195,10 +205,10 @@ function TestRow({ row, running, onRun }: { row: { providerId: string; providerN
     return (
       <tr>
         <td><Pill>Image model</Pill></td>
-        <td className={styles.modelCell} title={row.model}>{row.model}</td>
+        <td className={styles.modelCell} title={`${row.model} · ${row.providerName}`}><span>{row.model}</span><small className={styles.compactProvider}>{row.providerName}</small></td>
         <td>{row.providerName}</td>
         <td className={styles.num} colSpan={3}><span className={styles.imageNote}>text probe not applicable</span></td>
-        <td className={styles.rowActions}><button type="button" className={styles.rowButton} disabled={running} onClick={onRun}><Play size={12} aria-hidden="true" />Run</button></td>
+        <td className={styles.num}><button type="button" className={styles.rowRun} disabled={running} aria-label={`Test ${row.model} on ${row.providerName}`} onClick={onRun}><Play size={13} aria-hidden="true" /></button></td>
       </tr>
     )
   }
@@ -211,7 +221,7 @@ function TestRow({ row, running, onRun }: { row: { providerId: string; providerN
           : state === 'unavailable' && result ? <Pill tone={result.errorCode === 'pool_busy' ? 'warning' : 'danger'}>{result.errorCode === 'result_missing' ? 'No answer' : result.errorCode === 'interrupted' ? 'Stopped' : result.errorCode === 'provider_failed' ? 'Unreachable' : result.errorCode === 'pool_busy' ? 'Pool busy' : `HTTP ${result.status || '—'}`}</Pill>
           : <Pill>Untested</Pill>}
       </td>
-      <td className={styles.modelCell} title={row.model}>{row.model}</td>
+      <td className={styles.modelCell} title={`${row.model} · ${row.providerName}`}><span>{row.model}</span><small className={styles.compactProvider}>{row.providerName}</small></td>
       <td>{row.providerName}</td>
       <td className={styles.num}>{result?.ttftMs ? formatDuration(result.ttftMs) : '—'}</td>
       <td className={styles.num}>{result?.latencyMs ? formatDuration(result.latencyMs) : '—'}</td>

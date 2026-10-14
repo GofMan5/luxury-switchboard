@@ -33,7 +33,7 @@ export default function ClientsPage() {
 
       <div className="page-body">
         <MetricStrip>
-          <Metric label="Connected clients" value={state.clients.length.toLocaleString()} />
+          <Metric label="Connected clients" value={state.available.toLocaleString()} />
           <Metric label="Active now" value={metrics.active.toLocaleString()} tone={metrics.active > 0 ? 'success' : undefined} />
           <Metric label="Queued" value={metrics.queued.toLocaleString()} tone={metrics.queued > 0 ? 'warning' : undefined} />
           <Metric label="Banned" value={metrics.banned.toLocaleString()} tone={metrics.banned > 0 ? 'danger' : undefined} />
@@ -43,7 +43,7 @@ export default function ClientsPage() {
         <section className={styles.clients}>
         <header>
           <div><UsersRound size={17} aria-hidden="true" /><h2>Clients</h2></div>
-          <span>Bans apply to new requests. Notes stay on this machine.</span>
+          <span>{state.available > state.clients.length ? `Newest ${state.clients.length.toLocaleString()} of ${state.available.toLocaleString()}. Load metrics cover this subset. ` : ''}Bans apply to new requests. Notes stay on this machine.</span>
         </header>
         <div className={styles.tableWrap}>
           <table>

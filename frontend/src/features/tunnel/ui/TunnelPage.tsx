@@ -12,7 +12,13 @@ import styles from './TunnelPage.module.css'
 export default function TunnelPage() {
   const { model, state } = useTunnel()
   const snapshot = state.snapshot
-  if (!snapshot) return <section><header className="page-header"><div><h1>Tunnel</h1><p>Loading secure gateway…</p></div></header></section>
+  if (!snapshot) return <section className={styles.page}>
+    <header className="page-header"><div><h1>Tunnel</h1><p>Secure public model gateway</p></div></header>
+    {state.phase === 'error' ? <div className={`${styles.error} ${styles.recovery}`} role="alert">
+      <span>{state.error || 'Tunnel is unavailable'}</span>
+      <Button variant="secondary" onClick={() => void model.connect()}>Retry</Button>
+    </div> : <p className="page-body" role="status">Loading secure gateway…</p>}
+  </section>
   return <TunnelForm key={`${snapshot.address}:${snapshot.port}:${snapshot.rpmPerIp}:${snapshot.contextLimitKiB}:${snapshot.brandResponse}`} snapshot={snapshot} pending={state.pending} error={state.error} onSave={(config) => model.configure(config)} onStart={() => model.start()} onStop={() => model.stop()} onReveal={() => model.reveal()} onRotate={() => model.rotate()} onPrivacyTest={() => model.privacyTest()} />
 }
 

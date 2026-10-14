@@ -2,6 +2,7 @@ package imports
 
 import (
 	"errors"
+	"io"
 	"os"
 
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
@@ -31,7 +32,12 @@ func NewFileReader() FileReader { return FileReader{} }
 // ReadAuthFile implements application.AuthFileReader. It returns the
 // file's bytes as text or an error that names no path and no contents.
 func (FileReader) ReadAuthFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return "", errFileUnreadable
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, platform.MaxFrameBytes+1))
 	if err != nil {
 		return "", errFileUnreadable
 	}

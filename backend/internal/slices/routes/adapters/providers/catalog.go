@@ -5,4 +5,7 @@ import providerapp "github.com/luxuryprivate/switchboard/backend/internal/slices
 type Catalog struct{ catalog *providerapp.Catalog }
 
 func NewCatalog(catalog *providerapp.Catalog) *Catalog { return &Catalog{catalog: catalog} }
-func (adapter *Catalog) Exists(id string) bool         { _, exists := adapter.catalog.Get(id); return exists }
+func (adapter *Catalog) Exists(id string) bool {
+	_, exists := adapter.catalog.Lookup(id)
+	return exists
+}

@@ -193,6 +193,14 @@ func (manager *Manager) EnsureProvider(providerID string, rpm int, window time.D
 	return manager.apply(nil)
 }
 
+// InvalidateProvider follows a durable profile edit. Metadata/rate edits do
+// not call it; starts stay consumed while old endpoint verdicts are retired.
+func (manager *Manager) InvalidateProvider(providerID string) {
+	manager.opMu.Lock()
+	defer manager.opMu.Unlock()
+	manager.scheduler.InvalidateProvider(providerID)
+}
+
 func (manager *Manager) RemoveProvider(providerID string) error {
 	manager.opMu.Lock()
 	defer manager.opMu.Unlock()

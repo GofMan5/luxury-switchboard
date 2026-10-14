@@ -368,6 +368,14 @@ type Service struct {
 
 	mu sync.Mutex
 
+	// Shared for ordinary per-account mutations; exclusive only for fleet-wide
+	// load/clear. Status never takes this I/O fence and unrelated saves run in
+	// parallel. Gates remain stable across removal and a later sign-in.
+	persistenceMu   sync.RWMutex
+	diskGates       map[string]*accountLifecycle
+	fleetGeneration uint64
+	clearingAll     uint64
+
 	phase    LoginPhase
 	loginErr string
 
@@ -411,6 +419,7 @@ func NewService(store AccountStore, authorizer Authorizer, redirects RedirectSer
 		files:              files,
 		now:                now,
 		accounts:           map[string]*account{},
+		diskGates:          map[string]*accountLifecycle{},
 		loginTimeout:       defaultLoginTimeout,
 		deviceLoginTimeout: defaultDeviceLoginTimeout,
 		refreshInterval:    defaultRefreshInterval,
@@ -682,6 +691,7 @@ func (service *Service) ImportJSON(ctx context.Context, text string) (ImportResu
 	if err := service.importGuard(); err != nil {
 		return ImportResult{}, err
 	}
+	versions := service.captureImportVersions()
 	candidates, err := service.parser.ParseCredentials(text)
 	if err != nil {
 		return ImportResult{}, err
@@ -696,7 +706,7 @@ func (service *Service) ImportJSON(ctx context.Context, text string) (ImportResu
 		}
 		// Pasted text has no file to name: ImportedFrom stays empty and
 		// the UI renders the account, not a source.
-		result, _, err := service.commitImport(session, "")
+		result, _, err := service.commitImport(ctx, session, "", versions.forAccount(session.Identity.AccountID))
 		return result, err
 	}
 	failures := make([]string, 0, len(candidates))
@@ -707,7 +717,7 @@ func (service *Service) ImportJSON(ctx context.Context, text string) (ImportResu
 			failures = append(failures, err.Error())
 			continue
 		}
-		if _, ok, err := service.commitImport(session, ""); err != nil && !ok {
+		if _, ok, err := service.commitImport(ctx, session, "", versions.forAccount(session.Identity.AccountID)); err != nil && !ok {
 			failures = append(failures, err.Error())
 			continue
 		}
@@ -741,6 +751,7 @@ func (service *Service) ImportFiles(ctx context.Context, paths []string) (Import
 	if err := service.importGuard(); err != nil {
 		return ImportResult{}, err
 	}
+	versions := service.captureImportVersions()
 	failures := make([]string, 0, len(paths))
 	landedFiles := 0
 	importedFrom := ""
@@ -771,7 +782,7 @@ func (service *Service) ImportFiles(ctx context.Context, paths []string) (Import
 				failures = append(failures, fmt.Sprintf("auth file %s: %v", name, err))
 				continue
 			}
-			result, landed, err := service.commitImport(session, name)
+			result, landed, err := service.commitImport(ctx, session, name, versions.forAccount(session.Identity.AccountID))
 			if err != nil && !landed {
 				failures = append(failures, fmt.Sprintf("auth file %s: %v", name, err))
 				continue
@@ -967,7 +978,19 @@ func importAccessToken(candidate CredentialCandidate) (domain.Session, error) {
 // status or restore re-attempts the provider entry. The bool reports
 // whether the session landed — stored and signed in — which is true
 // even on a provisioning failure, because the tokens are durable.
-func (service *Service) commitImport(session domain.Session, importedFrom string) (ImportResult, bool, error) {
+func (service *Service) commitImport(ctx context.Context, session domain.Session, importedFrom string, version lifecycleVersion) (ImportResult, bool, error) {
+	id := session.Identity.AccountID
+	release, err := service.lockAccountDisk(ctx, id)
+	if err != nil {
+		return ImportResult{}, false, err
+	}
+	defer release()
+	service.mu.Lock()
+	current := service.versionMatchesLocked(id, version)
+	service.mu.Unlock()
+	if !current {
+		return ImportResult{}, false, errLoginAlreadyCancelled
+	}
 	saveCtx, cancelSave := context.WithTimeout(context.Background(), exchangeTimeout)
 	saveErr := service.store.Save(saveCtx, service.storedAccountForSave(session, LoginMethodImport))
 	cancelSave()
@@ -982,6 +1005,10 @@ func (service *Service) commitImport(session domain.Session, importedFrom string
 	cancelEnsure()
 
 	service.mu.Lock()
+	if !service.versionMatchesLocked(id, version) {
+		service.mu.Unlock()
+		return ImportResult{}, false, errLoginAlreadyCancelled
+	}
 	before := service.snapshotLocked()
 	// providerID is empty on a provisioning failure, and the account
 	// lands with no provider to route through — signed in, tokens kept,
@@ -992,6 +1019,7 @@ func (service *Service) commitImport(session domain.Session, importedFrom string
 	service.clearLoginFlowLocked()
 	snapshot, listeners, changed := service.diffLocked(before)
 	service.mu.Unlock()
+	release()
 	if changed {
 		service.fire(listeners, snapshot)
 	}
@@ -1077,6 +1105,7 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 		id      string
 		session domain.Session
 		live    bool
+		entry   *account
 	}
 	service.mu.Lock()
 	targets := make([]logoutTarget, 0, len(service.accounts))
@@ -1095,6 +1124,7 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 			id:      id,
 			session: entry.session,
 			live:    live,
+			entry:   entry,
 		})
 		if live {
 			liveTargets = true
@@ -1140,24 +1170,30 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 			}
 		}
 	}
-	if accountID == "" {
-		if err := service.store.ClearAll(ctx); err != nil {
-			failures = append(failures, fmt.Errorf("codex session could not be cleared: %v", err))
-		}
-	} else {
-		for _, target := range targets {
-			if err := service.store.Clear(ctx, target.session); err != nil {
-				failures = append(failures, fmt.Errorf("codex session could not be cleared: %v", err))
-			}
-		}
-	}
-
+	// Revoke serving before waiting for an already-started Save. Pending
+	// identities remain addressable on failure, but never serve credentials.
 	service.mu.Lock()
 	before := service.snapshotLocked()
-	for _, target := range targets {
-		delete(service.accounts, target.id)
+	if accountID == "" {
+		service.fleetGeneration++
+		service.clearingAll++
+		// Include sign-ins that completed while the provider was released.
+		targets = targets[:0]
+		for _, id := range accountIDsLocked(service.accounts) {
+			entry := service.accounts[id]
+			targets = append(targets, logoutTarget{id: id, session: entry.session, entry: entry})
+		}
 	}
-	if len(service.accounts) == 0 {
+	for _, target := range targets {
+		if service.accounts[target.id] != target.entry {
+			continue
+		}
+		service.lifecycleLocked(target.id).generation++
+		target.entry.pendingDeletion = true
+		target.entry.connState = StateSignedOut
+		target.entry.providerID = ""
+	}
+	if aggregateStateLocked(service.accounts) == StateSignedOut {
 		service.phase = PhaseIdle
 		service.loginErr = ""
 		service.clearLoginFlowLocked()
@@ -1166,6 +1202,64 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 	service.mu.Unlock()
 	if changed {
 		service.fire(listeners, snapshot)
+	}
+
+	if accountID == "" {
+		service.persistenceMu.Lock()
+		clearErr := service.store.ClearAll(ctx)
+		service.mu.Lock()
+		before = service.snapshotLocked()
+		if clearErr == nil {
+			for _, target := range targets {
+				if service.accounts[target.id] == target.entry {
+					delete(service.accounts, target.id)
+				}
+			}
+		}
+		service.clearingAll--
+		snapshot, listeners, changed = service.diffLocked(before)
+		service.mu.Unlock()
+		service.persistenceMu.Unlock()
+		if clearErr != nil {
+			failures = append(failures, fmt.Errorf("codex session could not be cleared: %v", clearErr))
+		}
+		if changed {
+			service.fire(listeners, snapshot)
+		}
+	} else {
+		for _, target := range targets {
+			release, lockErr := service.lockAccountDisk(ctx, target.id)
+			if lockErr != nil {
+				failures = append(failures, lockErr)
+				continue
+			}
+			service.mu.Lock()
+			current := service.accounts[target.id]
+			pending := current == target.entry && current.pendingDeletion
+			if pending {
+				target.session = current.session
+			}
+			service.mu.Unlock()
+			if !pending {
+				release()
+				continue
+			}
+			clearErr := service.store.Clear(ctx, target.session)
+			service.mu.Lock()
+			before = service.snapshotLocked()
+			if clearErr == nil && service.accounts[target.id] == target.entry {
+				delete(service.accounts, target.id)
+			}
+			snapshot, listeners, changed = service.diffLocked(before)
+			service.mu.Unlock()
+			release()
+			if clearErr != nil {
+				failures = append(failures, fmt.Errorf("codex session could not be cleared: %v", clearErr))
+			}
+			if changed {
+				service.fire(listeners, snapshot)
+			}
+		}
 	}
 	return errors.Join(failures...)
 }
@@ -1177,42 +1271,49 @@ func (service *Service) Logout(ctx context.Context, accountID string, removeEntr
 func (service *Service) Restore(ctx context.Context) error {
 	service.startRefreshLoop(ctx)
 
+	versions := service.captureImportVersions()
+	service.persistenceMu.Lock()
 	sessions, err := service.store.Load(ctx)
 	if err != nil {
+		service.persistenceMu.Unlock()
 		// A failed load is a failed restore: the state stays signed out
 		// and the caller hears the store's own error.
 		return err
 	}
 	if len(sessions) == 0 {
+		service.persistenceMu.Unlock()
 		// Nothing was ever stored: the zero state is already correct and
 		// announcing it would be noise, so there is no notification.
 		return nil
 	}
 
+	service.mu.Lock()
+	before := service.snapshotLocked()
+	restored := make(map[string]*account)
 	for _, stored := range sessions {
 		session := stored.Session
-		service.mu.Lock()
-		before := service.snapshotLocked()
-		entry, ok := service.accounts[session.Identity.AccountID]
-		if !ok {
-			entry = &account{}
-			service.accounts[session.Identity.AccountID] = entry
+		id := session.Identity.AccountID
+		// Restore never overwrites a newer live session or pending deletion.
+		if service.accounts[id] != nil || !service.versionMatchesLocked(id, versions.forAccount(id)) {
+			continue
 		}
-		entry.session = session
-		entry.connState = StateSignedIn
-		entry.invalidated = false
-		entry.providerID = ""
+		entry := &account{session: session, connState: StateSignedIn}
+		service.accounts[id] = entry
+		service.lifecycleLocked(id).generation++
+		restored[id] = entry
 		// The account facts the store recorded come back with the
 		// session: how this session was signed in and how many limit
 		// cycles it has been through survive a restart.
 		entry.loginMethod = stored.LoginMethod
 		entry.resets = stored.Resets
-		snapshot, listeners, changed := service.diffLocked(before)
-		service.mu.Unlock()
-		if changed {
-			service.fire(listeners, snapshot)
-		}
-
+	}
+	snapshot, listeners, changed := service.diffLocked(before)
+	service.mu.Unlock()
+	service.persistenceMu.Unlock()
+	if changed {
+		service.fire(listeners, snapshot)
+	}
+	for id, restoredEntry := range restored {
 		providerID, err := service.provisioner.EnsureCodexProvider(ctx)
 		if err != nil {
 			// A deleted or conflicting provider entry must not destroy the
@@ -1224,8 +1325,8 @@ func (service *Service) Restore(ctx context.Context) error {
 
 		service.mu.Lock()
 		before = service.snapshotLocked()
-		entry = service.accounts[session.Identity.AccountID]
-		if entry != nil {
+		entry := service.accounts[id]
+		if entry == restoredEntry && !entry.pendingDeletion {
 			// The account may have been logged out mid-restore; a missing
 			// entry means the provider id lands nowhere, which is correct.
 			entry.providerID = providerID
@@ -1281,7 +1382,7 @@ func (service *Service) AcquireAccessToken(ctx context.Context, accountID string
 	}
 	if report.session.RefreshToken == "" {
 		// The session cannot be renewed; only a fresh login fixes it.
-		service.markReauthNeeded(report.session.RefreshToken)
+		service.markReauthNeeded(accountID, report.version, report.session.RefreshToken)
 		return "", errNeedsSignIn
 	}
 
@@ -1296,13 +1397,13 @@ func (service *Service) AcquireAccessToken(ctx context.Context, accountID string
 			// The refresh token is dead: only a fresh login fixes it, and
 			// the UI needs to hear that immediately — unless a newer login
 			// already replaced the session this token belonged to.
-			service.markReauthNeeded(report.session.RefreshToken)
+			service.markReauthNeeded(accountID, report.version, report.session.RefreshToken)
 		}
 		// Any other failure leaves the state alone: the next acquire or
 		// the next tick retries, so a blip does not sign the user out.
 		return "", fmt.Errorf("codex access token could not be refreshed: %v", err)
 	}
-	committed, err := service.applyRefresh(accountID, report.session, refreshed)
+	committed, err := service.applyRefresh(accountID, report.version, report.session, refreshed)
 	if err != nil {
 		// The disk refused the rotation, but the token endpoint has
 		// already rotated: the fresh session is live in memory and the
@@ -1319,7 +1420,7 @@ func (service *Service) AcquireAccessToken(ctx context.Context, accountID string
 	service.mu.Lock()
 	entry := service.accounts[accountID]
 	token := ""
-	if entry != nil {
+	if entry != nil && entry.connState == StateSignedIn {
 		token = entry.session.AccessToken
 	}
 	service.mu.Unlock()
@@ -1376,7 +1477,7 @@ type QuotaSnapshot struct {
 func (service *Service) RefreshQuota(ctx context.Context, accountID string) QuotaSnapshot {
 	service.mu.Lock()
 	entry := service.accounts[accountID]
-	if entry == nil {
+	if entry == nil || entry.pendingDeletion {
 		service.mu.Unlock()
 		return QuotaSnapshot{Err: errNotSignedIn.Error()}
 	}
@@ -1395,7 +1496,7 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 
 	service.mu.Lock()
 	entry = service.accounts[accountID]
-	if entry == nil {
+	if entry == nil || entry.pendingDeletion {
 		service.mu.Unlock()
 		return snapshot
 	}
@@ -1408,6 +1509,9 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 	}
 	service.mu.Unlock()
 
+	service.mu.Lock()
+	version := service.versionLocked(accountID)
+	service.mu.Unlock()
 	usage, err := service.probeUsage(ctx, accountID)
 
 	if errors.Is(err, context.Canceled) {
@@ -1416,9 +1520,14 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 		return snapshot
 	}
 
+	release, lockErr := service.lockAccountDisk(ctx, accountID)
+	if lockErr != nil {
+		return snapshot
+	}
+	defer release()
 	service.mu.Lock()
 	entry = service.accounts[accountID]
-	if entry == nil {
+	if entry == nil || entry.pendingDeletion || !service.versionMatchesLocked(accountID, version) {
 		// The account disconnected while the probe was in flight; there
 		// is no card left to record.
 		service.mu.Unlock()
@@ -1457,11 +1566,6 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 	}
 	after, listeners, changed := service.diffLocked(before)
 	service.mu.Unlock()
-	if changed {
-		// The counter lives on the account's row, so a rotation is a
-		// state change the UI hears about — not a card-only detail.
-		service.fire(listeners, after)
-	}
 	if rotated {
 		// The counter is already live in memory; the disk copy is
 		// best-effort. A failing save keeps the in-memory value and the
@@ -1470,6 +1574,10 @@ func (service *Service) RefreshQuota(ctx context.Context, accountID string) Quot
 		saveCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		service.store.Save(saveCtx, persist)
 		cancel()
+	}
+	release()
+	if changed {
+		service.fire(listeners, after)
 	}
 	return snapshot
 }
@@ -1694,6 +1802,12 @@ func (service *Service) runLogin(loginCtx context.Context, cancel context.Cancel
 // checked against a racing logout and provisioned. The browser and device
 // flows differ only in how they got here.
 func (service *Service) settleExchange(loginCtx context.Context, method LoginMethod, session domain.Session, exchangeErr error) {
+	release, err := service.lockAccountDisk(loginCtx, session.Identity.AccountID)
+	if err != nil {
+		service.landLogin(PhaseIdle, "")
+		return
+	}
+	defer release()
 	if service.loginCancelled(loginCtx) {
 		// Cancellation outranks the exchange result: a completed exchange
 		// for a login the user abandoned is never persisted.
@@ -1744,7 +1858,7 @@ func (service *Service) settleExchange(loginCtx context.Context, method LoginMet
 	providerID, ensureErr := service.provisioner.EnsureCodexProvider(ensureCtx)
 	cancelEnsure()
 
-	service.completeLogin(loginCtx, method, session, providerID, ensureErr)
+	service.completeLogin(loginCtx, method, session, providerID, ensureErr, release)
 }
 
 // completeLogin commits a login whose session was stored: the tokens are
@@ -1755,19 +1869,21 @@ func (service *Service) settleExchange(loginCtx context.Context, method LoginMet
 // returned ("" on failure) is committed with the account; the row it
 // names is the one fleet entry, so a re-login of an existing account
 // relinks to the row the fleet already shares.
-func (service *Service) completeLogin(loginCtx context.Context, method LoginMethod, session domain.Session, providerID string, providerErr error) {
+func (service *Service) completeLogin(loginCtx context.Context, method LoginMethod, session domain.Session, providerID string, providerErr error, release func()) {
 	service.mu.Lock()
 	if service.cancelRequested || loginCtx.Err() == context.Canceled {
-		// A cancellation landed during provisioning: the login
-		// goroutine's post-save check already compensated the store for cancels up to the save,
-		// so this one arrived in the window after it. The sign-out wins by
-		// abandoning the login: the tokens stay where the save put them,
-		// but nothing is signed in and no notification resurrects the
-		// state. (A plain LoginCancel in this microsecond window leaves
-		// the saved session on disk for the next login or restore to
-		// settle — the pre-existing residual, accepted here.)
 		service.mu.Unlock()
-		service.landLogin(PhaseIdle, "")
+		// Still inside the account's disk gate: compensation cannot erase
+		// a newer login, and logout cannot return ahead of this cleanup.
+		clearCtx, cancel := context.WithTimeout(context.Background(), exchangeTimeout)
+		clearErr := service.store.Clear(clearCtx, session)
+		cancel()
+		release()
+		if clearErr != nil {
+			service.landLogin(PhaseError, "codex session could not be cleared")
+		} else {
+			service.landLogin(PhaseIdle, "")
+		}
 		return
 	}
 	before := service.snapshotLocked()
@@ -1782,6 +1898,7 @@ func (service *Service) completeLogin(loginCtx context.Context, method LoginMeth
 	service.clearLoginFlowLocked()
 	snapshot, listeners, changed := service.diffLocked(before)
 	service.mu.Unlock()
+	release()
 	if changed {
 		service.fire(listeners, snapshot)
 	}
@@ -1999,6 +2116,7 @@ func (service *Service) tickRefresh() {
 	type refreshTarget struct {
 		accountID string
 		session   domain.Session
+		version   lifecycleVersion
 	}
 	service.mu.Lock()
 	targets := make([]refreshTarget, 0, len(service.accounts))
@@ -2009,11 +2127,11 @@ func (service *Service) tickRefresh() {
 		if !entry.session.NeedsRefresh(service.now(), refreshSkew) {
 			continue
 		}
-		targets = append(targets, refreshTarget{accountID: accountID, session: entry.session})
+		targets = append(targets, refreshTarget{accountID: accountID, session: entry.session, version: service.versionLocked(accountID)})
 	}
 	service.mu.Unlock()
 	for _, target := range targets {
-		service.refreshWithRetries(target.accountID, target.session)
+		service.refreshWithRetries(target.accountID, target.version, target.session)
 	}
 }
 
@@ -2025,7 +2143,7 @@ func (service *Service) tickRefresh() {
 // invalidate the very cycle in flight — but the backoff sleeps run
 // outside it, so a caller waiting on the gate during a retry cycle holds
 // it only for one attempt's duration, never the whole cycle's.
-func (service *Service) refreshWithRetries(accountID string, session domain.Session) {
+func (service *Service) refreshWithRetries(accountID string, version lifecycleVersion, session domain.Session) {
 	if session.RefreshToken == "" {
 		// A session with no refresh token is an imported access-token
 		// login: it is renewed only by a fresh sign-in, and marking it
@@ -2037,7 +2155,7 @@ func (service *Service) refreshWithRetries(accountID string, session domain.Sess
 		if attempt > 0 {
 			time.Sleep(service.retryBackoff(attempt))
 		}
-		if service.gatedRefreshAttempt(accountID, session) {
+		if service.gatedRefreshAttempt(accountID, version, session) {
 			return
 		}
 	}
@@ -2048,7 +2166,7 @@ func (service *Service) refreshWithRetries(accountID string, session domain.Sess
 // succeeded, the account vanished, or the token was classified dead —
 // so the retry loop knows to stop. The gate is never held across the
 // backoff sleeps that separate attempts.
-func (service *Service) gatedRefreshAttempt(accountID string, session domain.Session) bool {
+func (service *Service) gatedRefreshAttempt(accountID string, version lifecycleVersion, session domain.Session) bool {
 	service.mu.Lock()
 	entry := service.accounts[accountID]
 	var gate *refreshGate
@@ -2070,6 +2188,13 @@ func (service *Service) gatedRefreshAttempt(accountID string, session domain.Ses
 	}
 	defer gate.release()
 
+	service.mu.Lock()
+	entry = service.accounts[accountID]
+	current := entry != nil && entry.connState == StateSignedIn && service.versionMatchesLocked(accountID, version) && entry.session.RefreshToken == session.RefreshToken
+	service.mu.Unlock()
+	if !current {
+		return true
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 	refreshed, err := service.authorizer.Refresh(ctx, session.RefreshToken)
 	cancel()
@@ -2079,12 +2204,12 @@ func (service *Service) gatedRefreshAttempt(accountID string, session domain.Ses
 		// serves it instead of presenting the old refresh token again.
 		// There is no logger at this layer — the observable answer to a
 		// store outage is that the acquire path surfaces the save error.
-		_, _ = service.applyRefresh(accountID, session, refreshed)
+		_, _ = service.applyRefresh(accountID, version, session, refreshed)
 		return true
 	}
 	if domain.IsReauthError(err.Error()) {
 		// The refresh token is dead; retrying cannot change that.
-		service.markReauthNeeded(session.RefreshToken)
+		service.markReauthNeeded(accountID, version, session.RefreshToken)
 		return true
 	}
 	// Transient: the gate opens before the caller retries, or the next
@@ -2120,10 +2245,15 @@ func (service *Service) retryBackoff(attempt int) time.Duration {
 // the acquire path, which is the seam that surfaces it. A refresh whose
 // account was logged out or re-logged-in mid-flight is dropped without
 // overwriting the newer state, and its unused save error is dropped too.
-func (service *Service) applyRefresh(accountID string, previous, refreshed domain.Session) (bool, error) {
+func (service *Service) applyRefresh(accountID string, version lifecycleVersion, previous, refreshed domain.Session) (bool, error) {
+	release, err := service.lockAccountDisk(context.Background(), accountID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	service.mu.Lock()
 	entry := service.accounts[accountID]
-	if entry == nil || entry.session.RefreshToken != previous.RefreshToken {
+	if entry == nil || entry.connState == StateSignedOut || !service.versionMatchesLocked(accountID, version) || entry.session.RefreshToken != previous.RefreshToken {
 		// The session this refresh renewed is gone; a login or logout has
 		// spoken since.
 		service.mu.Unlock()
@@ -2140,18 +2270,13 @@ func (service *Service) applyRefresh(accountID string, previous, refreshed domai
 	merged := mergeRefreshed(previous, refreshed)
 	stored := StoredAccount{Session: merged, LoginMethod: loginMethod, Resets: resets}
 	saveCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
-	err := service.store.Save(saveCtx, stored)
+	err = service.store.Save(saveCtx, stored)
 	cancel()
 
 	service.mu.Lock()
-	// The guard ran before the save; a login that lands in the sliver
-	// between the two can leave the store holding this refresh's result
-	// while memory holds the newer login. Memory is what guards all token
-	// use, and the next successful save or re-login rewrites the store,
-	// so the sliver self-heals; fully closing it would require saving
-	// under mu, which is forbidden.
+	// Logout marks the target nonservable before waiting for this save.
 	entry = service.accounts[accountID]
-	if entry == nil || entry.session.RefreshToken != previous.RefreshToken {
+	if entry == nil || entry.connState == StateSignedOut || !service.versionMatchesLocked(accountID, version) || entry.session.RefreshToken != previous.RefreshToken {
 		service.mu.Unlock()
 		return false, nil
 	}
@@ -2164,6 +2289,7 @@ func (service *Service) applyRefresh(accountID string, previous, refreshed domai
 	entry.invalidated = false
 	snapshot, listeners, changed := service.diffLocked(before)
 	service.mu.Unlock()
+	release()
 	if changed {
 		service.fire(listeners, snapshot)
 	}
@@ -2242,25 +2368,22 @@ func (service *Service) RejectAccessToken(rejectedAccessToken string) {
 // it. Accounts whose refresh tokens do not match are untouched. A
 // repeated call for the same dead token is a no-op: the diff does not
 // fire twice.
-func (service *Service) markReauthNeeded(failedRefreshToken string) {
+func (service *Service) markReauthNeeded(accountID string, version lifecycleVersion, failedRefreshToken string) {
 	service.mu.Lock()
-	for _, id := range accountIDsLocked(service.accounts) {
-		entry := service.accounts[id]
-		if entry.connState == StateSignedOut || entry.session.RefreshToken != failedRefreshToken {
-			// Signed out, or a newer session has spoken since this refresh
-			// started: the failure is stale for this account.
-			continue
-		}
-		before := service.snapshotLocked()
-		entry.connState = StateReauthNeeded
-		snapshot, listeners, changed := service.diffLocked(before)
+	entry := service.accounts[accountID]
+	if entry == nil || entry.connState == StateSignedOut || !service.versionMatchesLocked(accountID, version) || entry.session.RefreshToken != failedRefreshToken {
+		// Token equality is not a session identity: a later import can
+		// legitimately return the same token after logout or re-sign-in.
 		service.mu.Unlock()
-		if changed {
-			service.fire(listeners, snapshot)
-		}
 		return
 	}
+	before := service.snapshotLocked()
+	entry.connState = StateReauthNeeded
+	snapshot, listeners, changed := service.diffLocked(before)
 	service.mu.Unlock()
+	if changed {
+		service.fire(listeners, snapshot)
+	}
 }
 
 // tokenReport is the acquire path's read of one account under one lock.
@@ -2270,6 +2393,7 @@ type tokenReport struct {
 	signedIn    bool
 	refreshWork bool
 	refresh     *refreshGate
+	version     lifecycleVersion
 }
 
 // readAccountForAcquire decides whether the named account's token can
@@ -2290,6 +2414,7 @@ func (service *Service) readAccountForAcquire(accountID string) tokenReport {
 		session:   entry.session,
 		signedIn:  true,
 		refresh:   &entry.refreshGate,
+		version:   service.versionLocked(accountID),
 	}
 	if entry.invalidated || entry.session.NeedsRefresh(service.now(), refreshSkew) {
 		report.refreshWork = true
@@ -2353,12 +2478,16 @@ func aggregateStateLocked(accounts map[string]*account) ConnState {
 	if len(accounts) == 0 {
 		return StateSignedOut
 	}
+	state := StateSignedOut
 	for _, entry := range accounts {
 		if entry.connState == StateSignedIn {
 			return StateSignedIn
 		}
+		if entry.connState == StateReauthNeeded {
+			state = StateReauthNeeded
+		}
 	}
-	return StateReauthNeeded
+	return state
 }
 
 // commitAccountLocked lands a session as the (possibly new) entry for
@@ -2375,6 +2504,8 @@ func (service *Service) commitAccountLocked(session domain.Session, providerID s
 		entry = &account{}
 		service.accounts[session.Identity.AccountID] = entry
 	}
+	service.lifecycleLocked(session.Identity.AccountID).generation++
+	entry.pendingDeletion = false
 	entry.session = session
 	entry.connState = StateSignedIn
 	entry.invalidated = false

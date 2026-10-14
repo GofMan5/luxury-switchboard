@@ -6,8 +6,8 @@
 // document: token material exists in the clear only in memory, and the
 // write goes through the shared atomic replace, so a crash leaves either
 // the previous session or the new one — never a torn file. The file name
-// is the digest of the account's identity, so no email reaches the
-// directory listing and re-saving an identity overwrites its own file.
+// is the digest of its exact AccountID, so no email reaches the
+// directory listing and changing email/org overwrites the same file.
 //
 // Errors from this package carry the "codex session store" prefix and
 // never contain session material: the encrypted-file layer reports
@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/appdata"
 	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
@@ -76,10 +78,12 @@ func (value document) storedAccount() application.StoredAccount {
 }
 
 // Repository persists one Codex account per file inside a directory.
-// The directory and the legacy single-session path are fixed at
-// construction and the type holds no mutable state, so a single
-// instance can be shared for the lifetime of the process.
+// Operations on an instance are serialized so migration cannot race a
+// save or resurrect a file concurrently cleared by that instance.
+// ponytail: per-repository serialization; use per-ID locks only if
+// measured account-file contention warrants coordinating migration too.
 type Repository struct {
+	mu         sync.Mutex
 	dir        string
 	legacyPath string
 }
@@ -112,31 +116,22 @@ func DefaultPaths() (dir string, legacyPath string, err error) {
 	return filepath.Join(root, accountsDirName), filepath.Join(root, legacyFileName), nil
 }
 
-// accountPath returns the file that stores an account's session: the
-// identity digest, stable per account and carrying no readable
-// identity in the directory listing.
+// accountPath keys persistence by the same exact AccountID as the
+// application. Email and organization are mutable account metadata, not
+// separate identities. The existing digest keeps identity out of listings.
 func (repository *Repository) accountPath(session domain.Session) string {
-	storageID := domain.StorageID(
-		session.Identity.Email,
-		session.Identity.AccountID,
-		session.Identity.OrganizationID,
-	)
+	storageID := domain.StorageID("", session.Identity.AccountID, "")
 	return filepath.Join(repository.dir, storageID+".dpapi")
 }
 
-// Load returns every stored account, in file-name order. A missing
-// directory is not an error: it means no account exists and the caller
-// must sign in. A file that cannot be read, decrypted, decoded or
-// versioned is an error, and the error never carries session material.
-//
-// The single-session file this package used to write is migrated on the
-// first load: when the directory holds no account and the legacy file
-// exists, its session becomes the first account file and the legacy
-// file is removed. A legacy file that exists but cannot be read is an
-// error — silently dropping the user's sign-in would be worse than
-// refusing to start. Once the directory holds accounts, any leftover
-// legacy file is ignored.
+// Load migrates email/org-keyed files to exact AccountID filenames and
+// returns one whole record per ID, ordered by its stable filename. The
+// newest supported record with tokens and a nonempty AccountID wins by
+// file mtime, not token expiry; ties prefer stable file, then filename order.
+// Unreadable files remain an error rather than silently losing a sign-in.
 func (repository *Repository) Load(ctx context.Context) ([]application.StoredAccount, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
 	if repository.dir == "" {
 		return nil, errUnconfigured
 	}
@@ -150,20 +145,110 @@ func (repository *Repository) Load(ctx context.Context) ([]application.StoredAcc
 	if len(names) == 0 {
 		return repository.loadLegacyOrEmpty()
 	}
-	accounts := make([]application.StoredAccount, 0, len(names))
+	files, err := repository.accountFiles(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	latest := make(map[string]accountFile)
+	for _, file := range files {
+		if !validStoredAccount(file.stored) {
+			continue
+		}
+		path := repository.accountPath(file.stored.Session)
+		previous, exists := latest[path]
+		if !exists || file.modified.After(previous.modified) ||
+			(file.modified.Equal(previous.modified) && file.name == filepath.Base(path)) {
+			latest[path] = file
+		}
+	}
+	// An invalid record is removable only when a usable record for the
+	// same exact ID survives. Otherwise fail without deleting evidence.
+	for _, file := range files {
+		if _, exists := latest[repository.accountPath(file.stored.Session)]; !exists {
+			return nil, errors.New("codex session store account is invalid")
+		}
+	}
+	// A singleton is obsolete once plural storage exists. Leaving it
+	// ignored would reactivate it after the last specific logout.
+	if err := repository.removeFile(repository.legacyPath); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(latest))
+	for path := range latest {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	accounts := make([]application.StoredAccount, 0, len(paths))
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("codex session store could not be migrated: %w", err)
+		}
+		file := latest[path]
+		if file.name != filepath.Base(path) {
+			// Commit the complete winning record before removing any copy.
+			if err := encryptedfile.Save(path, fileMagic, encryptedfile.DefaultMaxPlaintext, documentFromStored(file.stored)); err != nil {
+				return nil, fmt.Errorf("codex session store could not be migrated: %w", err)
+			}
+		}
+		accounts = append(accounts, file.stored)
+	}
+	for _, file := range files {
+		if file.name != filepath.Base(repository.accountPath(file.stored.Session)) {
+			if err := repository.removeFile(filepath.Join(repository.dir, file.name)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return accounts, nil
+}
+
+// Validity does not depend on token expiry: a renewable expired session
+// is still a whole credential record. No upstream/network check is made.
+func validStoredAccount(stored application.StoredAccount) bool {
+	return stored.Session.Identity.AccountID != "" && !stored.Session.Empty()
+}
+
+// accountFile retains filesystem freshness only during an operation.
+// Legacy documents have no save timestamp, so mtime is the available
+// durable ordering; access expiry cannot order reauthentication/reset.
+type accountFile struct {
+	name     string
+	stored   application.StoredAccount
+	modified time.Time
+}
+
+func (repository *Repository) accountFiles(ctx context.Context, names []string) ([]accountFile, error) {
+	files := make([]accountFile, 0, len(names))
 	for _, name := range names {
-		stored, found, err := repository.loadFile(ctx, filepath.Join(repository.dir, name))
+		path := filepath.Join(repository.dir, name)
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, errors.New("codex session store could not be read")
+		}
+		stored, found, err := repository.loadFile(ctx, path)
 		if err != nil {
 			return nil, err
 		}
-		if !found {
-			// The file vanished between the listing and the read;
-			// the account simply does not exist.
-			continue
+		if found {
+			files = append(files, accountFile{name: name, stored: stored, modified: info.ModTime()})
 		}
-		accounts = append(accounts, stored)
 	}
-	return accounts, nil
+	return files, nil
+}
+
+// removeFile never includes a path (which may be legacy identity data)
+// in diagnostics. An unset optional legacy path is not a file.
+func (repository *Repository) removeFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("codex session store file could not be removed")
+	}
+	return nil
 }
 
 // loadLegacyOrEmpty migrates the legacy single-session file when the
@@ -183,11 +268,14 @@ func (repository *Repository) loadLegacyOrEmpty() ([]application.StoredAccount, 
 		return nil, fmt.Errorf("codex session store could not be migrated: version %d is not supported", value.Version)
 	}
 	stored := value.storedAccount()
+	if !validStoredAccount(stored) {
+		return nil, errors.New("codex session store account is invalid")
+	}
 	if err := encryptedfile.Save(repository.accountPath(stored.Session), fileMagic, encryptedfile.DefaultMaxPlaintext, documentFromStored(stored)); err != nil {
 		return nil, fmt.Errorf("codex session store could not be migrated: %w", err)
 	}
-	if err := os.Remove(repository.legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("codex session store could not be migrated: %w", err)
+	if err := repository.removeFile(repository.legacyPath); err != nil {
+		return nil, err
 	}
 	return []application.StoredAccount{stored}, nil
 }
@@ -261,42 +349,46 @@ func documentFromStored(stored application.StoredAccount) document {
 // file. The login method and reset counter are part of the record: a
 // caller that reconstructs only the session would erase them here.
 func (repository *Repository) Save(ctx context.Context, stored application.StoredAccount) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
 	if repository.dir == "" {
 		return errUnconfigured
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("codex session store could not be saved: %w", err)
 	}
-	value := documentFromStored(stored)
-	if err := encryptedfile.Save(repository.accountPath(stored.Session), fileMagic, encryptedfile.DefaultMaxPlaintext, value); err != nil {
+	if !validStoredAccount(stored) {
+		return errors.New("codex session store account is invalid")
+	}
+	names, err := repository.accountFileNames()
+	if err != nil {
+		return err
+	}
+	files, err := repository.accountFiles(ctx, names)
+	if err != nil {
+		return err
+	}
+	path := repository.accountPath(stored.Session)
+	if err := encryptedfile.Save(path, fileMagic, encryptedfile.DefaultMaxPlaintext, documentFromStored(stored)); err != nil {
 		return fmt.Errorf("codex session store could not be saved: %w", err)
 	}
-	return nil
-}
-
-// Clear removes one account's file. A missing file is a success: after
-// Clear that account is gone either way.
-func (repository *Repository) Clear(ctx context.Context, session domain.Session) error {
-	if repository.dir == "" {
-		return errUnconfigured
-	}
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("codex session store could not be cleared: %w", err)
-	}
-	if err := os.Remove(repository.accountPath(session)); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	for _, file := range files {
+		if file.stored.Session.Identity.AccountID == stored.Session.Identity.AccountID && file.name != filepath.Base(path) {
+			if err := repository.removeFile(filepath.Join(repository.dir, file.name)); err != nil {
+				return err
+			}
 		}
-		return fmt.Errorf("codex session store could not be cleared: %w", err)
 	}
-	return nil
+	return repository.removeFile(repository.legacyPath)
 }
 
-// ClearAll removes every account file plus any leftover legacy file.
-// Files it does not own — anything that is not a .dpapi account file
-// or the legacy path — are left in place. A missing directory or file
-// is a success: after ClearAll no account is stored either way.
-func (repository *Repository) ClearAll(ctx context.Context) error {
+// Clear removes every file for an exact AccountID, including unmigrated
+// email/org copies. It also retires an ignored singleton before deleting
+// plural files, so emptying the directory cannot resurrect that singleton.
+// With only a singleton present, a legitimate different ID is preserved.
+func (repository *Repository) Clear(ctx context.Context, session domain.Session) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
 	if repository.dir == "" {
 		return errUnconfigured
 	}
@@ -307,13 +399,62 @@ func (repository *Repository) ClearAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, name := range names {
-		if err := os.Remove(filepath.Join(repository.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("codex session store could not be cleared: %w", err)
+	files, err := repository.accountFiles(ctx, names)
+	if err != nil {
+		return err
+	}
+	if len(names) != 0 {
+		if err := repository.removeFile(repository.legacyPath); err != nil {
+			return err
+		}
+	} else if repository.legacyPath != "" {
+		legacy, found, err := repository.loadFile(ctx, repository.legacyPath)
+		if err != nil {
+			return err
+		}
+		if found && legacy.Session.Identity.AccountID == session.Identity.AccountID {
+			if err := repository.removeFile(repository.legacyPath); err != nil {
+				return err
+			}
 		}
 	}
-	if err := os.Remove(repository.legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	path := repository.accountPath(session)
+	for _, file := range files {
+		if file.stored.Session.Identity.AccountID == session.Identity.AccountID && file.name != filepath.Base(path) {
+			if err := repository.removeFile(filepath.Join(repository.dir, file.name)); err != nil {
+				return err
+			}
+		}
+	}
+	// Remove the stable record last: a failed legacy cleanup must not
+	// leave only an older credential available on the next load.
+	return repository.removeFile(path)
+}
+
+// ClearAll removes every account file plus any leftover legacy file.
+// Files it does not own — anything that is not a .dpapi account file
+// or the legacy path — are left in place. A missing directory or file
+// is a success: after ClearAll no account is stored either way.
+func (repository *Repository) ClearAll(ctx context.Context) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if repository.dir == "" {
+		return errUnconfigured
+	}
+	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("codex session store could not be cleared: %w", err)
+	}
+	names, err := repository.accountFileNames()
+	if err != nil {
+		return err
+	}
+	if err := repository.removeFile(repository.legacyPath); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := repository.removeFile(filepath.Join(repository.dir, name)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

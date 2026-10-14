@@ -80,7 +80,7 @@ export default function OverviewPage() {
           <Panel
             title="Recent activity"
             subtitle={activity.phase === 'loading' ? 'Connecting…' : `${activity.requests.length} requests in memory`}
-            actions={<button type="button" className={styles.linkButton} onClick={() => { window.location.hash = 'activity' }}>View all <ArrowRight size={13} aria-hidden="true" /></button>}
+            actions={<a className={styles.linkButton} href="#activity">View all <ArrowRight size={13} aria-hidden="true" /></a>}
           >
             <div className={styles.tableWrap}>
               <table className={styles.table}>
@@ -118,7 +118,7 @@ export default function OverviewPage() {
               title="Last 24 hours"
               label="Last 24 hours"
               subtitle={insightsState.phase === 'loading' || insightsState.phase === 'idle' ? 'Reading history…' : overview ? `Updated ${formatClock(insightsState.report!.generatedAt)} · auto-refresh every minute` : 'History is unavailable'}
-              actions={<button type="button" className={styles.linkButton} onClick={() => { window.location.hash = 'insights' }}>Insights <ArrowRight size={13} aria-hidden="true" /></button>}
+              actions={<a className={styles.linkButton} href="#insights">Insights <ArrowRight size={13} aria-hidden="true" /></a>}
             >
               <div className={styles.dailyGrid}>
                 <div className={styles.dailyMetric}><span>Requests</span><strong>{overview ? formatInteger(overview.volume.requests) : '—'}</strong></div>
@@ -133,7 +133,7 @@ export default function OverviewPage() {
             <Panel
               title="Provider routes"
               subtitle={`${providers.catalog.providers.length} configured · ${providers.catalog.providers.filter((provider) => provider.enabled && (provider.keyCount > 0 || provider.authMode === 'passthrough')).length} routable`}
-              actions={<button type="button" className={styles.linkButton} onClick={() => { window.location.hash = 'providers' }}>Providers <ArrowRight size={13} aria-hidden="true" /></button>}
+              actions={<a className={styles.linkButton} href="#providers">Providers <ArrowRight size={13} aria-hidden="true" /></a>}
             >
               <div className={styles.providerList}>
                 {/* The card answers "who serves traffic": the active provider
@@ -164,7 +164,7 @@ export default function OverviewPage() {
               {providers.catalog.providers.length > 5 ? (
                 <div className={styles.providerMore}>
                   <span>{providers.catalog.providers.length - 5} more</span>
-                  <button type="button" onClick={() => { window.location.hash = 'providers' }}>Open Providers</button>
+                  <a href="#providers">Open Providers</a>
                 </div>
               ) : null}
               <div className={styles.relayFoot}>

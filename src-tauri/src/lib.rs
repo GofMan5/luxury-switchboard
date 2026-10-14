@@ -1,4 +1,5 @@
 mod sidecar;
+mod sidecar_process;
 
 use std::path::{Path, PathBuf};
 

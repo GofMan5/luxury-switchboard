@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "1.0.58",
+  "version": "1.0.59",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,6 +28,6 @@
     "oxlint": "1.75.0",
     "typescript": "~6.0.2",
     "vite": "8.2.0",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   }
 }

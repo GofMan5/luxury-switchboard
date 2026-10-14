@@ -41,10 +41,13 @@ func TestALoginSavedDuringLogoutDoesNotResurrectTheSession(t *testing.T) {
 	}
 
 	// The disconnect lands while the save is still in flight.
-	if err := env.service.Logout(context.Background(), "", false); err != nil {
-		t.Fatalf("Logout() error = %v, want nil", err)
-	}
+	loggedOut := make(chan error, 1)
+	go func() { loggedOut <- env.service.Logout(context.Background(), "", false) }()
+	waitFor(t, "logout to cancel the saved login", func() bool { return env.redirects.stopCount() > 0 })
 	close(release)
+	if err := <-loggedOut; err != nil {
+		t.Fatal(err)
+	}
 
 	// The late save must not resurrect the session. Gate on the second
 	// clear — the compensation one — because Logout's own reset already

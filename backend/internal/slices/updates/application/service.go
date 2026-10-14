@@ -61,16 +61,15 @@ type Service struct {
 	// the refresher's pass and an operator's "Check now" are one request.
 	inFlight chan struct{}
 	result   CheckResult
-	// installMu serializes downloads: two "Update now" clicks are one
-	// download, not a race over the same .part file.
-	installMu sync.Mutex
+	// installGate serializes downloads without trapping cancelled waiters.
+	installGate chan struct{}
 }
 
 func NewService(current string, releases Releases) *Service {
 	// The verdict fields stay zero until a check completes; the running
 	// version is known without asking anyone, and a status reader in the
 	// first seconds deserves that much truth.
-	return &Service{current: current, releases: releases, now: time.Now, result: CheckResult{Current: current}}
+	return &Service{current: current, releases: releases, now: time.Now, result: CheckResult{Current: current}, installGate: make(chan struct{}, 1)}
 }
 
 // Check performs the round trip and answers it. The refresher owns
@@ -142,8 +141,15 @@ var (
 // release's own checksum file, and parks it for the shell to run. Every byte
 // is hashed on the way in; the file on disk is the file the release signed.
 func (service *Service) Install(ctx context.Context, progress func(InstallProgress)) (InstallResult, error) {
-	service.installMu.Lock()
-	defer service.installMu.Unlock()
+	select {
+	case service.installGate <- struct{}{}:
+		defer func() { <-service.installGate }()
+	case <-ctx.Done():
+		return InstallResult{}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return InstallResult{}, err
+	}
 
 	// The last known answer is a cheap early refuse, not the verdict — but
 	// only once there is one: a service that has never checked has nothing

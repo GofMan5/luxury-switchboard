@@ -58,6 +58,7 @@ func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 
 	requests, toApp := io.Pipe()
 	fromApp, responses := io.Pipe()
+	disableBackgroundChecks(t)
 	app, err := New(requests, responses, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -278,6 +279,7 @@ func TestLiveRelayOutlastsPreContentBreaksEndToEnd(t *testing.T) {
 
 	requests, toApp := io.Pipe()
 	fromApp, responses := io.Pipe()
+	disableBackgroundChecks(t)
 	app, err := New(requests, responses, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -479,6 +481,7 @@ func TestLiveRelayStreamDeliveryTiming(t *testing.T) {
 	}
 	requests, toApp := io.Pipe()
 	fromApp, responses := io.Pipe()
+	disableBackgroundChecks(t)
 	app, err := New(requests, responses, io.Discard)
 	if err != nil {
 		t.Fatal(err)

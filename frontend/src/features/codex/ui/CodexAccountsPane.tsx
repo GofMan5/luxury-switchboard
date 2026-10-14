@@ -253,10 +253,10 @@ function AccountRow({ row, selected, waking, canSignIn, onSignIn, onSignOut, mod
         </div>
         {signedIn && card !== undefined && card.error !== '' ? <p className={styles.rowError} role="alert">{card.error}</p> : null}
       </td>
-      <td className={styles.stateCell}>
+      <td><div className={styles.stateCell}>
         <Pill tone={pill.tone}>{pill.label}</Pill>
         {waking ? <span className={styles.wakingNote}>Waking…</span> : null}
-      </td>
+      </div></td>
       <td className={styles.planCell}>{row.plan !== '' ? <Pill tone="info">{row.plan}</Pill> : <span className={styles.absentValue}>—</span>}</td>
       <td className={styles.resetsCell}>{account.resets !== undefined ? account.resets : '—'}</td>
       {showWindows ? (
@@ -575,7 +575,8 @@ export default function CodexAccountsPane({ canSignIn, onAddAccount, onSignIn, o
       </div>
       {state.wakeError !== '' ? <p className={styles.paneError} role="alert">{state.wakeError}</p> : null}
       {view === 'table' ? (
-        <table className={styles.table}>
+        <div className={styles.tableWrap}>
+          <table className={styles.table}>
           <thead>
             <tr>
               <th className={styles.selectHead}>
@@ -614,7 +615,8 @@ export default function CodexAccountsPane({ canSignIn, onAddAccount, onSignIn, o
               ))
             )}
           </tbody>
-        </table>
+          </table>
+        </div>
       ) : (
         <ul className={styles.compactList} aria-label="Codex accounts and usage">
           {rows.length === 0 ? (

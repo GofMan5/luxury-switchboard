@@ -122,6 +122,15 @@ func (service *Service) Import(content string) (domain.ImportReport, error) {
 			report.ProvidersSkipped++
 		}
 	}
+	// Add appends at the next priority, so restore in recorded order rather
+	// than the export's alphabetical label order. Existing keys stay put;
+	// equal priorities (including legacy zeroes) retain document order.
+	sort.SliceStable(document.Keys, func(i, j int) bool {
+		if document.Keys[i].ProviderID != document.Keys[j].ProviderID {
+			return document.Keys[i].ProviderID < document.Keys[j].ProviderID
+		}
+		return document.Keys[i].Priority < document.Keys[j].Priority
+	})
 	for _, entry := range document.Keys {
 		if !service.sinks.ProviderExists(entry.ProviderID) {
 			// The key's provider is not part of this backup and not part of

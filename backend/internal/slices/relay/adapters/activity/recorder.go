@@ -38,6 +38,7 @@ func (recorder *Recorder) Retry(id string, value relayapp.ActivityRetry) {
 
 func (recorder *Recorder) Finish(id string, value relayapp.ActivityFinish) {
 	recorder.service.Finish(id, activitydomain.Finish{
+		ProviderID: value.ProviderID, ProviderName: value.ProviderName,
 		Status: value.Status, BytesOut: value.BytesOut,
 		Cancelled: value.Cancelled, ErrorCode: value.ErrorCode,
 		ErrorDetail: value.ErrorDetail,

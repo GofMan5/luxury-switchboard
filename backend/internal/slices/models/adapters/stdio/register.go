@@ -40,11 +40,19 @@ func Register(server *platform.Server, service *application.Service) {
 			ProviderID string   `json:"providerId"`
 			RunID      string   `json:"runId"`
 			Models     []string `json:"models"`
+			Profile    string   `json:"profile"`
 		}
 		if platform.DecodePayload(payload, &command) != nil {
 			return nil, invalid()
 		}
-		count, err := service.Test(ctx, command.ProviderID, command.RunID, command.Models)
+		profile := domain.TestProfileShort
+		if command.Profile != "" {
+			profile = domain.TestProfile(command.Profile)
+			if !profile.Valid() {
+				return nil, platform.MethodError{Code: "invalid_model_profile", Message: "Unknown model test profile"}
+			}
+		}
+		count, err := service.TestWithProfile(ctx, command.ProviderID, command.RunID, command.Models, profile)
 		if err != nil {
 			return nil, platform.MethodError{Code: "model_test_failed", Message: "Model tests could not complete"}
 		}

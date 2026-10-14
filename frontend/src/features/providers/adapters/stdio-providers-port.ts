@@ -35,7 +35,9 @@ export class StdioProvidersPort implements ProvidersPort {
   }
 
   subscribe(listener: () => void): () => void {
-    return this.#session.subscribe('providers.changed', listener)
+    const providers = this.#session.subscribe('providers.changed', listener)
+    const keys = this.#session.subscribe('keys.changed', listener)
+    return () => { providers(); keys() }
   }
 
   subscribeHealth(listener: (states: readonly ProviderHealth[]) => void): () => void {

@@ -1,6 +1,6 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import type { ModelsPort } from '../application/models-port'
-import type { ModelTestResult } from '../domain/model'
+import type { ModelTestProfile, ModelTestResult } from '../domain/model'
 
 export class StdioModelsPort implements ModelsPort {
   readonly #session: ControlPlaneSession
@@ -16,6 +16,11 @@ export class StdioModelsPort implements ModelsPort {
 
   async test(providerId: string, runId: string, models: readonly string[], signal?: AbortSignal) {
     const result = await this.#session.call<{ tested: number }>('models.test', { providerId, runId, models }, signal)
+    return result.tested
+  }
+
+  async testProfile(providerId: string, runId: string, models: readonly string[], profile: ModelTestProfile, signal?: AbortSignal) {
+    const result = await this.#session.call<{ tested: number }>('models.test', { providerId, runId, models, profile }, signal)
     return result.tested
   }
 

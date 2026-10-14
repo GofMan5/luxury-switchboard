@@ -18,13 +18,16 @@ type ActivityRetry struct {
 }
 
 type ActivityFinish struct {
-	Status      int
-	BytesOut    int64
-	Cancelled   bool
-	ErrorCode   string
-	ErrorDetail string
-	Usage       TokenUsage
-	Generation  time.Duration
+	// The final serving provider can differ from Begin after local failover.
+	ProviderID   string
+	ProviderName string
+	Status       int
+	BytesOut     int64
+	Cancelled    bool
+	ErrorCode    string
+	ErrorDetail  string
+	Usage        TokenUsage
+	Generation   time.Duration
 }
 
 type TokenUsage struct {

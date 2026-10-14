@@ -31,7 +31,7 @@
 .accountText { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; flex: 1 1 auto; }
 .accountText .email { flex: 0 1 auto; min-width: 0; }
 .plan { color: var(--text-muted); font-size: 12px; }
-.sectionLabel { margin: 0; color: var(--text-muted); font-size: 10.5px; font-weight: 640; letter-spacing: 0.05em; text-transform: uppercase; }
+.sectionLabel { margin: 0; color: var(--text-muted); font-size: 13px; font-weight: 500; }
 
 .cardActions { display: flex; justify-content: space-between; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
 
@@ -69,7 +69,7 @@
 .methodCard > svg { margin-top: 2px; color: var(--text-secondary); }
 .methodCard:hover:not(:disabled) { background: var(--bg-hover); }
 .methodCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.methodCard:active:not(:disabled) { transform: translateY(1px); }
+.methodCard:active:not(:disabled) { background: var(--bg-selected); }
 .methodCard:disabled { color: var(--text-disabled); cursor: default; }
 .methodCard[data-checked='true'] {
   border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border-subtle));

@@ -43,6 +43,8 @@ const (
 	// OAuth session, not in the form fields. The empty preset is a
 	// hand-configured provider, which is every provider that exists today.
 	PresetCodex Preset = "codex"
+	// CodexBaseURL binds managed OAuth credentials to their curated destination.
+	CodexBaseURL = "https://chatgpt.com/backend-api/codex"
 )
 
 // Preset names the curated provider list an entry came from. It is a marker,

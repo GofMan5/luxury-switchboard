@@ -89,6 +89,8 @@ func (prober *Prober) ProbeKey(ctx context.Context, providerID string, key domai
 
 func applyAuth(request *http.Request, provider providerdomain.Provider, secret string) {
 	switch provider.AuthMode {
+	case providerdomain.AuthBearer:
+		request.Header.Set("Authorization", "Bearer "+secret)
 	case providerdomain.AuthAPIKey:
 		request.Header.Set("X-Api-Key", secret)
 	case providerdomain.AuthCustom:
@@ -136,7 +138,7 @@ func (prober *Prober) clientForProxy(rawURL string) *http.Client {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
-	client := &http.Client{Timeout: 12 * time.Second, Transport: transport}
+	client := &http.Client{Timeout: 12 * time.Second, Transport: transport, CheckRedirect: useLastResponse}
 	prober.proxies[rawURL] = client
 	return client
 }

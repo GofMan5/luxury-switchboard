@@ -36,7 +36,7 @@ vi.mock('./useCodex', () => ({
 }))
 
 // Auto-cleanup needs vitest globals, which this project does not enable.
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.useRealTimers() })
 
 beforeEach(() => {
   mocks.refreshQuota.mockReset()
@@ -176,6 +176,8 @@ describe('CodexAccountsPane', () => {
   })
 
   it('counts a future reset down and carries the exact stamp as its title', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T12:00:00Z'))
     const now = Math.floor(Date.now() / 1000)
     renderPane(stateAt({
       accounts: [devAccount],

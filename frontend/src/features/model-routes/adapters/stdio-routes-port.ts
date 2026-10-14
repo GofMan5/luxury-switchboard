@@ -27,6 +27,10 @@ export class StdioRoutesPort implements RoutesPort {
     return result.saved
   }
 
+  async remove(target: RouteTarget, publicModel: string, providerId: string, signal?: AbortSignal): Promise<void> {
+    await this.#session.call('routes.remove', { target, publicModel, providerId }, signal)
+  }
+
   async delete(target: RouteTarget, publicModel: string, signal?: AbortSignal): Promise<void> {
     await this.#session.call('routes.delete', { target, publicModel }, signal)
   }

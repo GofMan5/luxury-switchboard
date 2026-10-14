@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ServicesContext, type AppServices } from '../../../app/services'
 import type { Settings } from '../domain/settings'
 import type { UpdateCheck } from '../../updates/domain/update'
 import type { UpdatesState } from '../../updates/application/updates-model'
-import { BackupPanel, SettingsForm, UpdateStatusPanel } from './SettingsPage'
+import SettingsPage, { BackupPanel, SettingsForm, UpdateStatusPanel } from './SettingsPage'
+import { SettingsModel } from '../application/settings-model'
+import type { SettingsPort } from '../application/settings-port'
 
 // Auto-cleanup needs vitest globals, which this project does not enable, so each
 // render is torn down explicitly. Without it a later query matches two forms.
@@ -35,6 +37,29 @@ const initial: Settings = {
   chainMode: 'balance',
   updateCheckInterval: '1m',
 }
+
+describe('SettingsPage initial recovery', () => {
+  it('shows an initial failure, then retries with loading feedback and the validated form', async () => {
+    let finish!: (settings: Settings) => void
+    const get = vi.fn<SettingsPort['get']>().mockRejectedValueOnce(new Error('offline'))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const port: SettingsPort = { get, update: async (settings) => ({ settings, restartRequired: false }), subscribe: vi.fn(() => () => {}) }
+    const model = new SettingsModel(port)
+    await model.connect()
+    render(<ServicesContext.Provider value={{ settings: model } as AppServices}><SettingsPage /></ServicesContext.Provider>)
+    expect(screen.getByRole('alert').textContent).toContain('Settings are unavailable')
+    expect(screen.queryByText(/Loading validated/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(screen.getByRole('status').textContent).toContain('Loading validated runtime configuration')
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    await act(async () => { finish(initial) })
+    expect(screen.getByLabelText('Listener port')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(port.subscribe).toHaveBeenCalledTimes(1)
+    model.dispose()
+  })
+})
 
 describe('SettingsForm', () => {
   it('carries the guardrail mode through a save it does not edit', async () => {

@@ -3,6 +3,8 @@ import type { Notification, NotificationsPort } from '../adapters/stdio-notifica
 export interface NotificationsState {
   readonly phase: 'loading' | 'ready' | 'error'
   readonly notifications: readonly Notification[]
+  /** The bounded live stack; expiry publishes a new external-store snapshot. */
+  readonly toasts: readonly Notification[]
   /** Notifications the operator has not seen yet; the badge counts these. */
   readonly unread: number
   readonly enabled: boolean
@@ -23,7 +25,7 @@ const MAX_VISIBLE_TOASTS = 4
 
 export class NotificationsModel {
   readonly #port: NotificationsPort
-  #state: NotificationsState = { phase: 'loading', notifications: [], unread: 0, enabled: true, error: '' }
+  #state: NotificationsState = { phase: 'loading', notifications: [], toasts: [], unread: 0, enabled: true, error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #timers = new Set<ReturnType<typeof setTimeout>>()
@@ -43,12 +45,8 @@ export class NotificationsModel {
    * lifetime through expiry, so a re-render does not reset any timer. */
   toasts(): readonly Notification[] {
     if (!this.#state.enabled) return []
-    return this.#state.notifications.slice(0, MAX_VISIBLE_TOASTS).filter((notification) => !this.#expired.has(notification.id))
+    return this.#state.toasts
   }
-
-  /** Whether the toast is still showing. The model drives this so the stack
-   * never duplicates a notification the timer already retired. */
-  #expired = new Set<string>()
 
   async connect(): Promise<void> {
     this.#unsubscribe ??= this.#port.subscribe((notification) => this.#accept(notification))
@@ -79,8 +77,9 @@ export class NotificationsModel {
   async clear(): Promise<void> {
     try {
       await this.#port.clear()
-      this.#expired.clear()
-      this.#set({ ...this.#state, notifications: [], unread: 0 })
+      for (const timer of this.#timers) clearTimeout(timer)
+      this.#timers.clear()
+      this.#set({ ...this.#state, notifications: [], toasts: [], unread: 0 })
     } catch {
       this.#set({ ...this.#state, error: 'The feed could not be cleared' })
     }
@@ -90,16 +89,17 @@ export class NotificationsModel {
     if (!notification?.id) return
     if (this.#state.notifications.some((existing) => existing.id === notification.id)) return
     const notifications = [notification, ...this.#state.notifications].slice(0, 200)
-    this.#set({ ...this.#state, phase: 'ready', notifications, error: '' })
+    this.#set({ ...this.#state, phase: 'ready', notifications, error: '',
+      toasts: this.#state.enabled ? [notification, ...this.#state.toasts].slice(0, MAX_VISIBLE_TOASTS) : this.#state.toasts,
+      unread: this.#state.unread + (this.#state.enabled ? 1 : 0),
+    })
     if (this.#state.enabled) {
-      this.#set({ ...this.#state, unread: this.#state.unread + 1 })
       // The toast retires itself; the notification itself stays in the feed.
       // The timer fires after the exit animation finished playing, so the row
       // leaves the stack only once it is visually gone.
       const timer = setTimeout(() => {
         this.#timers.delete(timer)
-        this.#expired.add(notification.id)
-        this.#notify()
+        this.#set({ ...this.#state, toasts: this.#state.toasts.filter((toast) => toast.id !== notification.id) })
       }, TOAST_TTL_MS + TOAST_EXIT_MS)
       this.#timers.add(timer)
     }

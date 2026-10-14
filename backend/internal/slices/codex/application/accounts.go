@@ -39,10 +39,11 @@ type StoredAccount struct {
 // lifetime of an account even across map lookups made from a pointer
 // taken before an edit.
 type account struct {
-	session     domain.Session
-	connState   ConnState
-	providerID  string
-	invalidated bool
+	session         domain.Session
+	connState       ConnState
+	providerID      string
+	invalidated     bool
+	pendingDeletion bool
 
 	loginMethod LoginMethod
 	resets      int

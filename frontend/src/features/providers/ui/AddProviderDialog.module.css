@@ -1,8 +1,10 @@
 .body {
   display: grid;
   gap: 12px;
-  padding: 18px;
+  padding: 24px;
 }
+
+.body > :global(.button) { justify-self: start; }
 
 /* A preset is one choice out of a list, so each option is a full-width
    selectable card, not a link. */
@@ -30,7 +32,7 @@
 
 .optionCard:hover:not(:disabled) { background: var(--bg-hover); }
 .optionCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.optionCard:active:not(:disabled) { transform: translateY(1px); }
+.optionCard:active:not(:disabled) { background: var(--bg-selected); }
 .optionCard:disabled { color: var(--text-disabled); cursor: default; }
 
 .optionText {

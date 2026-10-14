@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -109,6 +110,29 @@ func TestModelTestFallsBackWhenResponsesEndpointIsUnsupported(t *testing.T) {
 	result := gateway.Test(context.Background(), domain.Provider{ID: "provider", Dialect: "openai"}, "gpt-test")
 	if result.State != "available" || len(paths) != 2 || paths[0] != "/v1/responses" || paths[1] != "/v1/chat/completions" {
 		t.Fatalf("chat fallback was not used: result=%+v paths=%v", result, paths)
+	}
+}
+
+func TestFullModelTestSendsItsLargeContextBudget(t *testing.T) {
+	requests := make([]relayapp.DispatchRequest, 0, 2)
+	gateway := NewGateway(dispatcherFunc(func(_ context.Context, request relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
+		requests = append(requests, request)
+		return relayapp.DispatchResponse{Status: http.StatusOK, Body: []byte(`{"status":"completed"}`)}, nil
+	}), time.Second)
+	result := gateway.TestWithProfile(context.Background(), domain.Provider{ID: "provider", Dialect: "openai"}, "gpt-full", domain.TestProfileFull128K)
+	if result.State != "available" || len(requests) != 1 {
+		t.Fatalf("full model test failed: result=%+v requests=%d", result, len(requests))
+	}
+	var payload struct {
+		Input           string `json:"input"`
+		MaxOutputTokens int    `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal(requests[0].Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	expectedPrompt := relayapp.ProbeProfileFull128K.Prompt()
+	if payload.Input != expectedPrompt || strings.Count(payload.Input, "context ") < 127_000 || payload.MaxOutputTokens != fullProbeTokens {
+		t.Fatalf("full profile budget was shortened: context=%d output=%d", strings.Count(payload.Input, "context "), payload.MaxOutputTokens)
 	}
 }
 

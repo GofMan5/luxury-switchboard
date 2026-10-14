@@ -32,6 +32,10 @@ func NewService(runtime Runtime) *Service {
 func (service *Service) Start() (domain.Snapshot, error) {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	return service.start()
+}
+
+func (service *Service) start() (domain.Snapshot, error) {
 	service.mu.Lock()
 	if service.snapshot.State == domain.StateLive {
 		snapshot := service.snapshot
@@ -58,6 +62,10 @@ func (service *Service) Start() (domain.Snapshot, error) {
 func (service *Service) Stop(ctx context.Context) error {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	return service.stop(ctx)
+}
+
+func (service *Service) stop(ctx context.Context) error {
 	service.mu.Lock()
 	if service.snapshot.State == domain.StateStopped {
 		service.mu.Unlock()
@@ -78,6 +86,43 @@ func (service *Service) Stop(ctx context.Context) error {
 	service.mu.Unlock()
 	service.publish()
 	return err
+}
+
+// Rebind serializes the listener move with Start/Stop. A refused bind restores
+// the previous live listener before returning failure; a stopped relay stays stopped.
+func (service *Service) Rebind(ctx context.Context, address string) error {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	runtime, ok := service.runtime.(interface {
+		Address() string
+		SetAddress(string)
+	})
+	if !ok {
+		return errors.New("relay address cannot be changed")
+	}
+	previous := runtime.Address()
+	if previous == address {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	live := service.Snapshot().State == domain.StateLive
+	if live {
+		if err := service.stop(ctx); err != nil {
+			return err
+		}
+	}
+	runtime.SetAddress(address)
+	if !live {
+		return nil
+	}
+	if _, err := service.start(); err != nil {
+		runtime.SetAddress(previous)
+		_, restoreErr := service.start()
+		return errors.Join(err, restoreErr)
+	}
+	return nil
 }
 
 func (service *Service) Snapshot() domain.Snapshot {

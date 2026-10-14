@@ -16,7 +16,11 @@ import (
 
 // The probe asks for a little more than the availability test does: a handful
 // of tokens so the decode rate has something to measure.
-const probeOutputTokens = 32
+const (
+	shortProbeOutputTokens = 32
+	fullProbeOutputTokens  = 128
+	probeOutputTokens      = shortProbeOutputTokens
+)
 
 // Probe measures one provider+model with a real streaming request: when the
 // first content token arrived, when the answer finished, and how many tokens
@@ -24,6 +28,13 @@ const probeOutputTokens = 32
 // buffers every stream before returning it, and a buffered stream has no
 // first-token time left to measure. One attempt, one lease, one honest read.
 func (server *Server) Probe(ctx context.Context, providerID, model string) (relayapp.ProbeReport, error) {
+	return server.ProbeWithProfile(ctx, providerID, model, relayapp.ProbeProfileShort)
+}
+
+func (server *Server) ProbeWithProfile(ctx context.Context, providerID, model string, profile relayapp.ProbeProfile) (relayapp.ProbeReport, error) {
+	if !profile.Valid() {
+		return relayapp.ProbeReport{ErrorCode: "invalid_profile"}, errors.New("invalid probe profile")
+	}
 	ctx, cancel := server.requestContext(ctx)
 	defer cancel()
 	route, err := server.routes.Pinned(ctx, providerID, model)
@@ -37,7 +48,7 @@ func (server *Server) Probe(ctx context.Context, providerID, model string) (rela
 	if upstreamModel == "" {
 		upstreamModel = model
 	}
-	path, body, dialect := probeRequest(route, upstreamModel)
+	path, body, dialect := probeRequestWithProfile(route, upstreamModel, profile)
 	report, err := server.probeOnce(ctx, route, path, body, dialect, model)
 	// A provider without a Responses endpoint gets the same probe over chat —
 	// the answer the availability test would get, measured the same way.
@@ -46,7 +57,7 @@ func (server *Server) Probe(ctx context.Context, providerID, model string) (rela
 		if chatPath == "" {
 			chatPath = "/v1/chat/completions"
 		}
-		return server.probeOnce(ctx, route, chatPath, probeChatBody(upstreamModel), "chat", model)
+		return server.probeOnce(ctx, route, chatPath, probeChatBodyWithProfile(upstreamModel, profile), "chat", model)
 	}
 	return report, err
 }
@@ -65,10 +76,15 @@ func responsesFallbackStatus(status int) bool {
 // Responses. The measurement must read the dialect the provider speaks;
 // translating first would bill the translation into the provider's time.
 func probeRequest(route relayapp.Route, model string) (string, []byte, string) {
+	return probeRequestWithProfile(route, model, relayapp.ProbeProfileShort)
+}
+
+func probeRequestWithProfile(route relayapp.Route, model string, profile relayapp.ProbeProfile) (string, []byte, string) {
+	outputTokens, prompt := probeBudget(profile)
 	if route.Dialect == "anthropic" {
 		body, _ := json.Marshal(map[string]any{
-			"model": model, "max_tokens": probeOutputTokens, "stream": true,
-			"messages": []map[string]string{{"role": "user", "content": "Reply OK"}},
+			"model": model, "max_tokens": outputTokens, "stream": true,
+			"messages": []map[string]string{{"role": "user", "content": prompt}},
 		})
 		return "/v1/messages", body, "anthropic"
 	}
@@ -77,21 +93,33 @@ func probeRequest(route relayapp.Route, model string) (string, []byte, string) {
 		if path == "" {
 			path = "/v1/chat/completions"
 		}
-		return path, probeChatBody(model), "chat"
+		return path, probeChatBodyWithProfile(model, profile), "chat"
 	}
 	body, _ := json.Marshal(map[string]any{
-		"model": model, "input": "Reply OK", "max_output_tokens": probeOutputTokens, "stream": true,
+		"model": model, "input": prompt, "max_output_tokens": outputTokens, "stream": true,
 	})
 	return "/v1/responses", body, "responses"
 }
 
+func probeBudget(profile relayapp.ProbeProfile) (int, string) {
+	if profile == relayapp.ProbeProfileFull128K {
+		return fullProbeOutputTokens, profile.Prompt()
+	}
+	return shortProbeOutputTokens, profile.Prompt()
+}
+
 func probeChatBody(model string) []byte {
+	return probeChatBodyWithProfile(model, relayapp.ProbeProfileShort)
+}
+
+func probeChatBodyWithProfile(model string, profile relayapp.ProbeProfile) []byte {
+	outputTokens, prompt := probeBudget(profile)
 	body, _ := json.Marshal(map[string]any{
-		"model": model, "max_tokens": probeOutputTokens, "stream": true,
+		"model": model, "max_tokens": outputTokens, "stream": true,
 		// Usage on a chat stream arrives only when asked; the probe wants the
 		// provider's own count, not a guess from frames.
 		"stream_options": map[string]any{"include_usage": true},
-		"messages":       []map[string]string{{"role": "user", "content": "Reply OK"}},
+		"messages":       []map[string]string{{"role": "user", "content": prompt}},
 	})
 	return body
 }
@@ -101,16 +129,29 @@ func probeChatBody(model string) []byte {
 // earns its cooldown, and a balance verdict is the provider's, not the key's.
 // A probe that filed every refusal as a generic error would actively reset
 // dead-key detection and re-pick hot keys for the next real request.
-func probeOutcome(response *http.Response, config Config) relayapp.AttemptOutcome {
+func probeOutcome(response *http.Response, body []byte, model string, config Config) relayapp.AttemptOutcome {
+	status := response.StatusCode
+	rateLimited := rateLimitedBody(body)
 	switch {
-	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
-		return relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication}
-	case response.StatusCode == http.StatusPaymentRequired:
-		return relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted}
-	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode == 529:
+	case policyRefused(string(body)):
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
+	case status != http.StatusPaymentRequired && (rateLimited || status == http.StatusTooManyRequests || status == 529):
 		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRateLimited, RetryAfter: retryDelay(0, response, config)}
-	case response.StatusCode >= 500:
+	case status >= 500 || status == http.StatusRequestTimeout:
 		return relayapp.AttemptOutcome{Kind: relayapp.AttemptServerError}
+	case balanceUnavailable(status, body, rateLimited):
+		if sharedPoolExhausted(body) {
+			return relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
+		}
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptBalanceExhausted}
+	case (status == http.StatusNotFound || status == http.StatusForbidden) && modelMissing(body, model):
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
+	case (status == http.StatusUnauthorized || status == http.StatusForbidden) && clientBlocked(body):
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
+	case (status == http.StatusNotFound || status == http.StatusForbidden) && modelUnavailable(body, model, status):
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptModelUnavailable, Model: model}
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication}
 	default:
 		return relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
 	}
@@ -157,7 +198,7 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, Cancelled: errors.Is(err, context.Canceled),
-			ErrorCode: "transport", ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+			ErrorCode: "transport", ErrorDetail: transportErrorDetail(err),
 		})
 		return relayapp.ProbeReport{ErrorCode: "transport"}, err
 	}
@@ -169,8 +210,13 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		// an auth refusal's own code and message ride the outcome, and they
 		// live in this body — filing the verdict first would leave them
 		// unread.
-		detail, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
-		outcome := probeOutcome(response, server.configSnapshot())
+		detail, readErr := readErrorBody(ctx, response, server.configSnapshot().StreamIdleTimeout)
+		if readErr != nil {
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+			server.activity.Finish(activityID, relayapp.ActivityFinish{Status: response.StatusCode, Cancelled: true, ErrorCode: "cancelled"})
+			return report, readErr
+		}
+		outcome := probeOutcome(response, detail, model, server.configSnapshot())
 		if outcome.Kind == relayapp.AttemptAuthentication {
 			outcome.ErrorCode, outcome.ErrorMessage = authErrorDetail(detail)
 		}
@@ -183,13 +229,31 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		return report, nil
 	}
 	measured, collected, readErr := server.measureProbeStream(ctx, response.Body, sent, dialect)
+	usageInspector := sseInspector{path: path}
+	usageInspector.Feed(collected)
+	usageInspector.Finish()
+	usage := usageInspector.usage
+	if bytes.HasPrefix(bytes.TrimSpace(collected), []byte("{")) {
+		usage = usageFromJSON(collected)
+	}
+	generation := time.Duration(measured.total * float64(time.Millisecond))
 	report.TTFTMs = measured.ttft
 	report.TotalMs = measured.total
 	report.OutputTokens = measured.tokens
+	if usage.OutputTokens > 0 {
+		report.OutputTokens = int(usage.OutputTokens)
+	}
+	cancelled := readErr != nil && errors.Is(ctx.Err(), context.Canceled)
 	switch {
+	case cancelled:
+		report.ErrorCode = "cancelled"
 	case readErr != nil:
 		report.ErrorCode = "transport"
-		report.ErrorDetail = truncateErrorDetail(redactSecrets(readErr.Error(), markers))
+		report.ErrorDetail = transportErrorDetail(readErr)
+		if errors.Is(readErr, errResponseTooLarge) {
+			// This local sentinel names the safety cap, never upstream data.
+			report.ErrorDetail = errResponseTooLarge.Error()
+		}
 	case measured.terminal == probeTerminalFailed:
 		// HTTP 200 is the standard streaming failure mode: the verdict rides a
 		// terminal event, not the status line.
@@ -221,12 +285,14 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		report.ErrorCode = code
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, ErrorCode: code, ErrorDetail: code,
+			BytesOut: int64(len(collected)), Usage: usage, Generation: generation,
 		})
 		return report, nil
 	}
 	server.activity.Finish(activityID, relayapp.ActivityFinish{
 		Status: response.StatusCode, BytesOut: int64(len(collected)),
 		ErrorCode: report.ErrorCode, ErrorDetail: report.ErrorDetail,
+		Usage: usage, Generation: generation, Cancelled: cancelled,
 	})
 	return report, nil
 }
@@ -249,22 +315,30 @@ type probeMeasurement struct {
 // measureProbeStream reads the SSE frames as they arrive, under the same idle
 // budget a client stream gets: a provider that goes silent mid-probe is a
 // provider worth knowing about, not a hung test.
-func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, sent time.Time, dialect string) (probeMeasurement, []byte, error) {
+func (server *Server) measureProbeStream(ctx context.Context, body io.ReadCloser, sent time.Time, dialect string) (probeMeasurement, []byte, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer body.Close()
+	limit := responseBufferLimit(server.configSnapshot())
 	type line struct {
 		value []byte
 		err   error
 	}
-	lines := make(chan line, 128)
+	lines := make(chan line, 1)
 	go func() {
-		reader := bufio.NewReaderSize(body, 64*1024)
+		defer close(lines)
+		reader := bufio.NewReaderSize(io.LimitReader(body, limit+1), 64*1024)
 		for {
-			value, err := reader.ReadBytes('\n')
+			value, err := reader.ReadSlice('\n')
 			if len(value) > 0 {
 				select {
-				case lines <- line{value: value}:
+				case lines <- line{value: append([]byte(nil), value...)}:
 				case <-ctx.Done():
 					return
 				}
+			}
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
 			}
 			if err != nil {
 				select {
@@ -281,6 +355,7 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 	var measurement probeMeasurement
 	var collected bytes.Buffer
 	var frame bytes.Buffer
+	var pendingLine []byte
 	contentFrames := 0
 	finish := func(err error) (probeMeasurement, []byte, error) {
 		measurement.total = float64(time.Since(sent).Microseconds()) / 1000
@@ -298,18 +373,37 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 			return finish(ctx.Err())
 		case <-timer.C:
 			return finish(errors.New("stream idle timeout"))
-		case next := <-lines:
+		case next, open := <-lines:
+			if !open {
+				return finish(io.EOF)
+			}
 			if next.err != nil {
 				return finish(next.err)
 			}
+			if int64(collected.Len())+int64(len(next.value)) > limit {
+				return finish(errResponseTooLarge)
+			}
 			collected.Write(next.value)
-			trimmed := bytes.TrimRight(next.value, "\r\n")
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idle)
+			if int64(len(pendingLine))+int64(len(next.value)) > limit {
+				return finish(errResponseTooLarge)
+			}
+			pendingLine = append(pendingLine, next.value...)
+			if !bytes.HasSuffix(next.value, []byte{'\n'}) {
+				continue
+			}
+			value := pendingLine
+			pendingLine = nil
+			trimmed := bytes.TrimRight(value, "\r\n")
 			if len(trimmed) == 0 {
 				delta, tokens, terminal := probeFrameDelta(frame.Bytes(), dialect)
 				frame.Reset()
-				if terminal != probeTerminalMissing {
-					measurement.terminal = terminal
-				}
 				if delta != "" {
 					contentFrames++
 					if measurement.ttft == 0 {
@@ -319,16 +413,16 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 				if tokens > 0 {
 					measurement.tokens = tokens
 				}
-			} else {
-				frame.Write(next.value)
-			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+				if terminal != probeTerminalMissing {
+					measurement.terminal = terminal
+					return finish(nil)
 				}
+			} else {
+				if int64(frame.Len())+int64(len(value)) > limit {
+					return finish(errResponseTooLarge)
+				}
+				frame.Write(value)
 			}
-			timer.Reset(idle)
 		}
 	}
 }
@@ -337,87 +431,84 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.Reader, se
 // and the terminal verdict from one SSE frame, in the dialect the provider
 // speaks. The terminal is what makes an HTTP 200 failure a failure.
 func probeFrameDelta(frame []byte, dialect string) (string, int, probeTerminal) {
-	for _, raw := range bytes.Split(frame, []byte("\n")) {
-		line := bytes.TrimSpace(raw)
-		if !bytes.HasPrefix(line, []byte("data:")) {
-			continue
-		}
-		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-		if len(data) == 0 {
-			continue
-		}
-		if bytes.Equal(data, []byte("[DONE]")) {
+	data := sseData(frame)
+	if bytes.Equal(data, []byte("[DONE]")) {
+		if dialect == "chat" {
 			return "", 0, probeTerminalOK
 		}
-		var payload map[string]any
-		if json.Unmarshal(data, &payload) != nil {
-			continue
-		}
-		// Any dialect's error object ends the probe as a failure.
-		if payload["error"] != nil {
-			return "", 0, probeTerminalFailed
-		}
-		eventType, _ := payload["type"].(string)
-		switch dialect {
-		case "anthropic":
-			switch eventType {
-			case "content_block_delta":
-				if delta, ok := payload["delta"].(map[string]any); ok {
-					// Text and thinking both count: the first token the model
-					// spent on either is the latency the operator feels.
-					if text, _ := delta["text"].(string); text != "" {
-						return text, 0, probeTerminalMissing
-					}
-					if thinking, _ := delta["thinking"].(string); thinking != "" {
-						return thinking, 0, probeTerminalMissing
-					}
-				}
-			case "message_delta":
-				if usage, ok := payload["usage"].(map[string]any); ok {
-					return "", intNumber(usage["output_tokens"]), probeTerminalMissing
-				}
-			case "message_stop":
-				return "", 0, probeTerminalOK
-			case "error":
-				return "", 0, probeTerminalFailed
-			}
-		case "chat":
-			if usage, ok := payload["usage"].(map[string]any); ok {
-				if tokens := intNumber(usage["completion_tokens"]); tokens > 0 {
-					return "", tokens, probeTerminalMissing
-				}
-			}
-			choices, _ := payload["choices"].([]any)
-			for _, rawChoice := range choices {
-				choice, _ := rawChoice.(map[string]any)
-				if delta, ok := choice["delta"].(map[string]any); ok {
-					if text, _ := delta["content"].(string); text != "" {
-						return text, 0, probeTerminalMissing
-					}
-					// Reasoning models think out loud before they answer; that
-					// thinking is the first token the user waits for.
-					if reasoning, _ := delta["reasoning_content"].(string); reasoning != "" {
-						return reasoning, 0, probeTerminalMissing
-					}
-				}
-			}
-		default:
-			switch eventType {
-			case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-				if text, _ := payload["delta"].(string); text != "" {
+		return "", 0, probeTerminalMissing
+	}
+	var payload map[string]any
+	if json.Unmarshal(data, &payload) != nil {
+		return "", 0, probeTerminalMissing
+	}
+	// Any dialect's error object ends the probe as a failure.
+	if payload["error"] != nil {
+		return "", 0, probeTerminalFailed
+	}
+	eventType, _ := payload["type"].(string)
+	switch dialect {
+	case "anthropic":
+		switch eventType {
+		case "content_block_delta":
+			if delta, ok := payload["delta"].(map[string]any); ok {
+				// Text and thinking both count: the first token the model
+				// spent on either is the latency the operator feels.
+				if text, _ := delta["text"].(string); text != "" {
 					return text, 0, probeTerminalMissing
 				}
-			case "response.completed":
-				tokens := 0
-				if response, ok := payload["response"].(map[string]any); ok {
-					if usage, ok := response["usage"].(map[string]any); ok {
-						tokens = intNumber(usage["output_tokens"])
-					}
+				if thinking, _ := delta["thinking"].(string); thinking != "" {
+					return thinking, 0, probeTerminalMissing
 				}
-				return "", tokens, probeTerminalOK
-			case "response.failed", "response.incomplete", "error":
+			}
+		case "message_delta":
+			if usage, ok := payload["usage"].(map[string]any); ok {
+				return "", intNumber(usage["output_tokens"]), probeTerminalMissing
+			}
+		case "message_stop":
+			return "", 0, probeTerminalOK
+		case "error":
+			return "", 0, probeTerminalFailed
+		}
+	case "chat":
+		tokens := 0
+		if usage, ok := payload["usage"].(map[string]any); ok {
+			tokens = intNumber(usage["completion_tokens"])
+		}
+		choices, _ := payload["choices"].([]any)
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]any)
+			if delta, ok := choice["delta"].(map[string]any); ok {
+				if text, _ := delta["content"].(string); text != "" {
+					return text, tokens, probeTerminalMissing
+				}
+				// Reasoning models think out loud before they answer; that
+				// thinking is the first token the user waits for.
+				if reasoning, _ := delta["reasoning_content"].(string); reasoning != "" {
+					return reasoning, tokens, probeTerminalMissing
+				}
+			}
+		}
+		return "", tokens, probeTerminalMissing
+	default:
+		switch eventType {
+		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			if text, _ := payload["delta"].(string); text != "" {
+				return text, 0, probeTerminalMissing
+			}
+		case "response.completed":
+			response, ok := payload["response"].(map[string]any)
+			// Match sseInspector: an event name alone is not completion.
+			if !ok || response["status"] != "completed" || response["incomplete_details"] != nil || response["error"] != nil {
 				return "", 0, probeTerminalFailed
 			}
+			tokens := 0
+			if usage, ok := response["usage"].(map[string]any); ok {
+				tokens = intNumber(usage["output_tokens"])
+			}
+			return "", tokens, probeTerminalOK
+		case "response.failed", "response.incomplete", "error":
+			return "", 0, probeTerminalFailed
 		}
 	}
 	return "", 0, probeTerminalMissing

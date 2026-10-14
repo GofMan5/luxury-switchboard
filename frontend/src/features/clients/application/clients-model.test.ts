@@ -11,13 +11,13 @@ class FakeClientsPort implements ClientsPort {
   clients: readonly TunnelClient[] = [{ ip: '127.0.0.2', actualRpm: 1, count: 2, active: 0, queued: 0, refused: 0, lastSeen: new Date(0).toISOString(), state: 'idle', banned: false, note: '' }]
   savedProfiles: TunnelClientProfile[] = []
   profileFails = false
-  async list() { this.listCalls++; return this.clients }
+  async list() { this.listCalls++; return { clients: this.clients, available: this.clients.length } }
   async events(ip: string) { return this.eventPromises.get(ip) ?? this.eventsForClient }
   async saveProfile(profile: TunnelClientProfile) {
     if (this.profileFails) throw new Error('unavailable')
     this.savedProfiles.push(profile)
     this.clients = this.clients.map((client) => (client.ip === profile.ip ? { ...client, banned: profile.banned, note: profile.note } : client))
-    return this.clients
+    return { clients: this.clients, available: this.clients.length }
   }
   subscribe(listener: () => void) { this.listener = listener; return () => { this.listener = undefined } }
 }

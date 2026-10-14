@@ -33,6 +33,7 @@ type ProviderEntry struct {
 	ModelsPath  string `json:"modelsPath,omitempty"`
 	ImageCompat bool   `json:"imageCompat"`
 	RPM         int    `json:"rpm"`
+	RateUnit    string `json:"rateUnit,omitempty"`
 	CacheTTL    string `json:"cacheTtl,omitempty"`
 	Enabled     bool   `json:"enabled"`
 }

@@ -264,25 +264,35 @@ func (runtime *Runtime) supervise(ctx context.Context, binary, local string) {
 		if exited == nil {
 			return
 		}
-		<-exited
+		select {
+		case <-ctx.Done():
+			return
+		case <-exited:
+		}
 		if ctx.Err() != nil {
 			return
 		}
 		runtime.emit(domain.StateStarting, "", "The tunnel dropped; reconnecting")
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		backoff = min(backoff*2, restartBackoff)
-		address, err := runtime.serve(ctx, binary, local)
-		if err != nil {
+		// A failed serve reaps and clears its own process handle. Retry starts
+		// here, not in the exit-wait loop: there is no running process to await
+		// until a start succeeds.
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			address, err := runtime.serve(ctx, binary, local)
 			if ctx.Err() != nil {
 				return
 			}
-			continue
+			if err != nil {
+				backoff = min(backoff*2, restartBackoff)
+				continue
+			}
+			backoff = 2 * time.Second
+			runtime.emit(domain.StateOnline, address, "")
+			break
 		}
-		backoff = 2 * time.Second
-		runtime.emit(domain.StateOnline, address, "")
 	}
 }

@@ -901,11 +901,10 @@ func TestForbiddenModelEntitlementRotatesWithoutCoolingKeys(t *testing.T) {
 	}
 }
 
-// A bare 403 names no model, so the pool cannot tell a bad key from a refused
-// verdict. The first refusal still cools the key it came from, but a repeat
-// inside the same request is evidence about the verdict: every key answers the
-// same way, and re-cooling each one poisons the pool for every request behind.
-func TestRepeatedAuthFailureDoesNotRecoolTheKey(t *testing.T) {
+// Each selected credential receives its own auth verdict, so a priority
+// scheduler can rotate beyond the second key and later clients do not reuse
+// credentials already rejected by the configured provider.
+func TestEveryAuthFailureIsFiledForItsOwnCredential(t *testing.T) {
 	attempts := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		attempts++
@@ -932,9 +931,9 @@ func TestRepeatedAuthFailureDoesNotRecoolTheKey(t *testing.T) {
 	}
 	if len(credentials.outcomes) != 3 ||
 		credentials.outcomes[0].Kind != relayapp.AttemptAuthentication ||
-		credentials.outcomes[1].Kind != relayapp.AttemptRequestError ||
-		credentials.outcomes[2].Kind != relayapp.AttemptRequestError {
-		t.Fatalf("repeat refusal re-cooled the pool: %+v", credentials.outcomes)
+		credentials.outcomes[1].Kind != relayapp.AttemptAuthentication ||
+		credentials.outcomes[2].Kind != relayapp.AttemptAuthentication {
+		t.Fatalf("a rejected credential lost its authentication verdict: %+v", credentials.outcomes)
 	}
 }
 
@@ -974,16 +973,20 @@ func TestAuthErrorDetailReadsTheProvidersOwnVerdict(t *testing.T) {
 	}
 }
 
-// The provider's own code and message ride the first auth refusal only: a
-// second refusal inside the same request is evidence about the verdict, not
-// another chance to read the body — the rotated keys carry no code, so a
-// revoked-token verdict cannot be re-filed against a session it never saw.
-func TestTheFirstAuthRefusalCarriesTheProvidersCodeToThePool(t *testing.T) {
+// Each rotated credential receives the code and message from its own refusal,
+// never a verdict copied from the first key's response.
+func TestEachAuthRefusalCarriesItsOwnProvidersCodeToThePool(t *testing.T) {
+	verdicts := []struct{ code, message string }{
+		{"token_revoked", "Your token was revoked"},
+		{"invalid_api_key", "Incorrect API key provided"},
+		{"credential_expired", "Your credential expired"},
+	}
 	attempts := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		verdict := verdicts[min(attempts, len(verdicts)-1)]
 		attempts++
 		writer.WriteHeader(http.StatusUnauthorized)
-		_, _ = writer.Write([]byte(`{"error":{"code":"token_revoked","message":"Your token was revoked"}}`))
+		fmt.Fprintf(writer, `{"error":{"code":%q,"message":%q}}`, verdict.code, verdict.message)
 	}))
 	defer upstream.Close()
 	parsed, _ := url.Parse(upstream.URL)
@@ -1006,15 +1009,11 @@ func TestTheFirstAuthRefusalCarriesTheProvidersCodeToThePool(t *testing.T) {
 	if len(credentials.outcomes) != 3 {
 		t.Fatalf("expected one outcome per key, saw %+v", credentials.outcomes)
 	}
-	first := credentials.outcomes[0]
-	if first.Kind != relayapp.AttemptAuthentication ||
-		first.ErrorCode != "token_revoked" ||
-		first.ErrorMessage != "Your token was revoked" {
-		t.Fatalf("the first refusal lost the provider's own verdict: %+v", first)
-	}
-	for _, repeat := range credentials.outcomes[1:] {
-		if repeat.Kind != relayapp.AttemptRequestError || repeat.ErrorCode != "" || repeat.ErrorMessage != "" {
-			t.Fatalf("a repeat refusal re-read the body as a verdict: %+v", repeat)
+	for index, outcome := range credentials.outcomes {
+		if outcome.Kind != relayapp.AttemptAuthentication ||
+			outcome.ErrorCode != verdicts[index].code ||
+			outcome.ErrorMessage != verdicts[index].message {
+			t.Fatalf("credential %d lost its own refusal verdict: %+v", index, outcome)
 		}
 	}
 }
@@ -1717,8 +1716,8 @@ func TestARequestQuotedBackInAnErrorDoesNotBecomeHistory(t *testing.T) {
 	}
 }
 
-// A body that is not JSON at all still travels verbatim: plain prose is a
-// reason too, and dropping it would hide verdicts no extract understands.
+// Non-secret plain prose still travels verbatim: it is a reason too, and
+// dropping it would hide verdicts no extract understands.
 func TestTerminalFailureFilesPlainProseVerbatim(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusForbidden)
@@ -1729,7 +1728,7 @@ func TestTerminalFailureFilesPlainProseVerbatim(t *testing.T) {
 	activity := &recordingActivity{}
 	server := NewServer("127.0.0.1:0", Dependencies{
 		Routes:      credentialsRoute(parsed),
-		Credentials: &credentialSource{values: []string{"key"}},
+		Credentials: &credentialSource{values: []string{"fixture-credential-not-in-prose"}},
 		Activity:    activity,
 		Config:      Config{RetryBase: time.Millisecond, RetryMax: time.Millisecond, PermanentAttempts: 2},
 	})

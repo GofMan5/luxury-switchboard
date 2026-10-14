@@ -17,17 +17,19 @@ const defaultCapacity = 2_000
 const (
 	// Real relay codes (see relay/adapters/http/server.go and the guardrail
 	// verdict): dropping one stores StateFailed with an empty ErrorCode.
-	errCancelled           = "cancelled"
-	errProviderUnavailable = "provider_unavailable"
-	errTransport           = "transport"
-	errUpstreamStatus      = "upstream_status"
-	errStreamIncomplete    = "stream_incomplete"
-	errClientDisconnected  = "client_disconnected"
-	errRequestRejected     = "request_rejected"
-	errImageGeneration     = "image_generation"
-	errPolicyRefusal       = "policy_refusal"
-	errChatCompatibility   = "chat_compatibility"
-	errGuardrailBlocked    = "guardrail_blocked"
+	errCancelled              = "cancelled"
+	errProviderUnavailable    = "provider_unavailable"
+	errTransport              = "transport"
+	errUpstreamStatus         = "upstream_status"
+	errStreamIncomplete       = "stream_incomplete"
+	errClientDisconnected     = "client_disconnected"
+	errRequestRejected        = "request_rejected"
+	errImageGeneration        = "image_generation"
+	errPolicyRefusal          = "policy_refusal"
+	errChatCompatibility      = "chat_compatibility"
+	errResponsesCompatibility = "responses_compatibility"
+	errGuardrailBlocked       = "guardrail_blocked"
+	errPoolBusy               = "pool_busy"
 )
 
 var serviceSequence atomic.Uint64
@@ -91,7 +93,8 @@ func (service *Service) Retry(id string, value domain.Retry) {
 	service.update(id, func(request *domain.Request, now time.Time) {
 		request.State = domain.StateRetrying
 		request.Status = normalizedStatus(value.Status)
-		request.Retries = max(request.Retries, value.Attempt)
+		// Attempt is local to each relay retry ladder; every call is one retry.
+		request.Retries++
 		request.QueueMS += max(float64(value.Delay.Microseconds())/1_000, 0)
 		request.UpdatedAt = now
 	})
@@ -114,6 +117,10 @@ func (service *Service) Resume(id string, waited time.Duration) {
 
 func (service *Service) Finish(id string, value domain.Finish) {
 	service.update(id, func(request *domain.Request, now time.Time) {
+		if value.ProviderID != "" {
+			request.ProviderID = clean(value.ProviderID, 64)
+			request.ProviderName = clean(value.ProviderName, 80)
+		}
 		request.UpdatedAt = now
 		request.LatencyMS = max(float64(now.Sub(request.StartedAt).Microseconds())/1_000, 0)
 		request.Status = normalizedStatus(value.Status)
@@ -129,8 +136,11 @@ func (service *Service) Finish(id string, value domain.Finish) {
 		request.OutputTokens = max(value.OutputTokens, 0)
 		request.CachedTokens = min(max(value.CachedTokens, 0), request.InputTokens)
 		request.ReasoningTokens = min(max(value.ReasoningTokens, 0), request.OutputTokens)
-		request.ContextTokens = max(value.ContextTokens, request.InputTokens)
-		request.TotalTokens = max(value.TotalTokens, request.ContextTokens+request.OutputTokens)
+		request.ContextTokens = value.ContextTokens
+		if request.ContextTokens <= 0 {
+			request.ContextTokens = request.InputTokens
+		}
+		request.TotalTokens = max(value.TotalTokens, request.InputTokens+request.OutputTokens)
 		request.GenerationMS = max(float64(value.Generation.Microseconds())/1_000, 0)
 		if request.GenerationMS > 0 {
 			request.TokensPerSecond = float64(request.OutputTokens) * 1_000 / request.GenerationMS
@@ -166,17 +176,20 @@ func (service *Service) Summary(window time.Duration) domain.Summary {
 	completed := 0
 	failed := 0
 	summary := domain.Summary{}
-	for _, id := range service.order {
-		request := service.requests[id]
-		if request.StartedAt.Before(cutoff) {
-			continue
-		}
-		summary.Requests++
+	for _, request := range service.requests {
+		// Gauges describe current work, including inflight rows trimmed from
+		// visible history. Only throughput and terminal statistics use the window.
 		switch request.State {
 		case domain.StateActive:
 			summary.Active++
 		case domain.StateRetrying:
 			summary.Queued++
+		}
+		if request.StartedAt.Before(cutoff) {
+			continue
+		}
+		summary.Requests++
+		switch request.State {
 		case domain.StateCompleted:
 			completed++
 			latencies = append(latencies, request.LatencyMS)
@@ -284,7 +297,7 @@ func cleanError(value string) string {
 	switch value {
 	case errCancelled, errProviderUnavailable, errTransport, errUpstreamStatus, errStreamIncomplete,
 		errClientDisconnected, errRequestRejected, errImageGeneration,
-		errPolicyRefusal, errChatCompatibility, errGuardrailBlocked:
+		errPolicyRefusal, errChatCompatibility, errResponsesCompatibility, errGuardrailBlocked, errPoolBusy:
 		return value
 	default:
 		return ""

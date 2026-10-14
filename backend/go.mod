@@ -1,6 +1,6 @@
 module github.com/luxuryprivate/switchboard/backend
 
-go 1.25.12
+go 1.26.9
 
 require (
 	github.com/zalando/go-keyring v0.2.8

@@ -6,6 +6,20 @@ type Provider struct {
 	Dialect    string
 }
 
+// TestProfile is the only sizing choice exposed by model tests. Short keeps
+// routine checks cheap; Full128K deliberately exercises a large context so an
+// operator can distinguish reachability from context handling.
+type TestProfile string
+
+const (
+	TestProfileShort    TestProfile = "short"
+	TestProfileFull128K TestProfile = "full-128k"
+)
+
+func (profile TestProfile) Valid() bool {
+	return profile == TestProfileShort || profile == TestProfileFull128K
+}
+
 type TestResult struct {
 	RunID      string  `json:"runId"`
 	ProviderID string  `json:"providerId"`

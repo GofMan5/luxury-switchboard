@@ -8,7 +8,7 @@
  * instead of overflowing. The compact view is the same data in list form for
  * when the pane gets too narrow for the grid to breathe. */
 
-.pane { min-width: 0; }
+.pane { min-width: 0; container-type: inline-size; }
 
 /* Toolbar */
 .toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
@@ -24,9 +24,10 @@
 .paneError { margin: 0 0 12px; color: var(--text-danger); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
 
 /* Grid */
+.tableWrap { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; }
 .table { width: 100%; min-width: 1100px; border-collapse: collapse; table-layout: fixed; }
 .table th, .table td { height: 52px; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; vertical-align: middle; }
-.table th { position: sticky; z-index: 2; top: 0; height: 34px; color: var(--text-muted); background: var(--bg-chrome); font-size: 10.5px; font-weight: 640; letter-spacing: 0.05em; text-transform: uppercase; box-shadow: 0 1px 0 var(--border-subtle); }
+.table th { position: sticky; z-index: 2; top: 0; height: 38px; color: var(--text-muted); background: var(--bg-canvas); font-size: 12px; font-weight: 500; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--bg-hover) 72%, transparent); }
 .table th:nth-child(1) { width: 40px; }
 .table th:nth-child(2) { width: 230px; }
@@ -57,7 +58,7 @@
 
 .windowCell { padding-top: 11px; padding-bottom: 11px; }
 .meter { height: 6px; overflow: hidden; border-radius: 3px; background: var(--bg-raised); }
-.meterFill { height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--status-info) 62%, var(--bg-surface)); transition: width var(--motion-standard) var(--ease-standard); }
+.meterFill { height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--status-info) 62%, var(--bg-surface)); }
 .meterFill[data-tone='warning'] { background: color-mix(in srgb, var(--status-warning) 62%, var(--bg-surface)); }
 .meterFill[data-tone='danger'] { background: color-mix(in srgb, var(--status-danger) 70%, var(--bg-surface)); }
 .windowLine { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 6px; }
@@ -76,7 +77,7 @@
 .iconAction svg { width: 15px; height: 15px; }
 .iconAction:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-raised); }
 .iconAction:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.iconAction:active:not(:disabled) { transform: translateY(1px); }
+.iconAction:active:not(:disabled) { background: var(--bg-selected); }
 .iconAction[data-danger='true']:hover:not(:disabled) { color: var(--text-danger); }
 .iconAction:disabled { color: var(--text-disabled); cursor: not-allowed; }
 
@@ -98,16 +99,26 @@
 .spinning { animation: icon-spin 1s linear infinite; }
 [data-animations='off'] .spinning { animation: none; }
 
-@media (max-width: 959px) {
-  .table { min-width: 780px; }
-  .table th:nth-child(2) { width: 200px; }
-  .table th:nth-child(3) { width: 96px; }
-  .table th:nth-child(4) { width: 84px; }
-  .table th:nth-child(6), .table th:nth-child(7) { width: 150px; }
+@container (max-width: 1100px) {
+  .table { min-width: 0; }
+  .table th:nth-child(2) { width: 180px; }
+  .table th:nth-child(3) { width: 100px; }
+  .table th:nth-child(4) { width: 68px; }
+  .table th:nth-child(6), .table th:nth-child(7) { width: 132px; }
+  .table th:last-child { width: 88px; }
   .table th:nth-child(5), .resetsCell { display: none; }
   .updatedHead, .updatedCell { display: none; }
   .resets { display: none; }
   .iconAction { width: 28px; height: 28px; }
+}
+
+@container (max-width: 760px) {
+  .table th:nth-child(1) { width: 36px; }
+  .table th:nth-child(2) { width: 168px; }
+  .table th:nth-child(3) { width: 88px; }
+  .table th:nth-child(4) { width: 60px; }
+  .table th:nth-child(6), .table th:nth-child(7) { width: 96px; }
+  .table th:last-child { width: 84px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

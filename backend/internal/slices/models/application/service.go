@@ -31,6 +31,13 @@ type Gateway interface {
 	Test(context.Context, domain.Provider, string) domain.TestResult
 }
 
+// ProfiledGateway is an additive capability: gateways that understand the
+// larger context profile implement it, while older fakes and sidecars remain
+// valid and continue to run the short probe.
+type ProfiledGateway interface {
+	TestWithProfile(context.Context, domain.Provider, string, domain.TestProfile) domain.TestResult
+}
+
 type Service struct {
 	providers Providers
 	gateway   Gateway
@@ -60,12 +67,19 @@ func (service *Service) Discover(ctx context.Context, providerID string) ([]stri
 }
 
 func (service *Service) Test(ctx context.Context, providerID, runID string, models []string) (int, error) {
+	return service.TestWithProfile(ctx, providerID, runID, models, domain.TestProfileShort)
+}
+
+func (service *Service) TestWithProfile(ctx context.Context, providerID, runID string, models []string, profile domain.TestProfile) (int, error) {
 	provider, exists := service.providers.Get(strings.TrimSpace(providerID))
 	if !exists {
 		return 0, ErrProviderUnavailable
 	}
 	if !validRunID(runID) {
 		return 0, errors.New("invalid model test run")
+	}
+	if !profile.Valid() {
+		return 0, errors.New("invalid model test profile")
 	}
 	if len(models) > maxTestModels {
 		return 0, errors.New("too many models")
@@ -89,7 +103,7 @@ func (service *Service) Test(ctx context.Context, providerID, runID string, mode
 				if ctx.Err() != nil {
 					return
 				}
-				result := service.gateway.Test(ctx, provider, model)
+				result := service.testOne(ctx, provider, model, profile)
 				if ctx.Err() != nil {
 					return
 				}
@@ -110,6 +124,16 @@ func (service *Service) Test(ctx context.Context, providerID, runID string, mode
 	close(jobs)
 	workers.Wait()
 	return len(models), ctx.Err()
+}
+
+func (service *Service) testOne(ctx context.Context, provider domain.Provider, model string, profile domain.TestProfile) domain.TestResult {
+	if gateway, ok := service.gateway.(ProfiledGateway); ok {
+		return gateway.TestWithProfile(ctx, provider, model, profile)
+	}
+	if profile == domain.TestProfileFull128K {
+		return domain.TestResult{ProviderID: provider.ID, Model: model, State: "unavailable", ErrorCode: "profile_unsupported"}
+	}
+	return service.gateway.Test(ctx, provider, model)
 }
 
 func validRunID(value string) bool {

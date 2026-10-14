@@ -46,21 +46,28 @@ type HealthMonitor struct {
 	listeners []func(changed HealthState, snapshot []HealthState)
 
 	enabled atomic.Bool
+	wake    chan struct{}
 }
 
 func NewHealthMonitor(catalog *Catalog, prober ReachabilityProber) (*HealthMonitor, error) {
 	if catalog == nil || prober == nil {
 		return nil, errors.New("health monitor dependencies are invalid")
 	}
-	monitor := &HealthMonitor{catalog: catalog, prober: prober, states: map[string]HealthState{}, now: time.Now}
+	monitor := &HealthMonitor{catalog: catalog, prober: prober, states: map[string]HealthState{}, now: time.Now, wake: make(chan struct{}, 1)}
 	monitor.enabled.Store(true)
 	return monitor, nil
 }
 
-// SetEnabled gates the loop live: a settings change takes effect on the next
-// tick, not after a restart. Disabled leaves the last snapshot in place — the
-// sidebar shows configured state rather than pretending to know liveness.
-func (monitor *HealthMonitor) SetEnabled(enabled bool) { monitor.enabled.Store(enabled) }
+// SetEnabled gates the loop live. Enabling wakes an inert loop immediately;
+// disabling leaves the last snapshot rather than pretending to know liveness.
+func (monitor *HealthMonitor) SetEnabled(enabled bool) {
+	if previous := monitor.enabled.Swap(enabled); enabled && !previous {
+		select {
+		case monitor.wake <- struct{}{}:
+		default:
+		}
+	}
+}
 
 func (monitor *HealthMonitor) Enabled() bool { return monitor.enabled.Load() }
 
@@ -81,13 +88,19 @@ func (monitor *HealthMonitor) Run(ctx context.Context, interval time.Duration) {
 	if interval < 30*time.Second {
 		interval = 30 * time.Second
 	}
-	monitor.pass(ctx)
+	if monitor.enabled.Load() {
+		monitor.pass(ctx)
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-monitor.wake:
+			if monitor.enabled.Load() {
+				monitor.pass(ctx)
+			}
 		case <-ticker.C:
 			if monitor.enabled.Load() {
 				monitor.pass(ctx)

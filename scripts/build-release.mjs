@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { assertVersionsAgree, readVersion } from './version.mjs'
+import { collectBundle, removeStaleBundles } from './release-bundles.mjs'
 
 const workspace = dirname(dirname(fileURLToPath(import.meta.url)))
 const version = readVersion(workspace)
@@ -50,7 +51,7 @@ function buildEdition(edition) {
   // written with a future mtime sails through - so this version's leftovers are
   // deleted before the build and the collector has nothing to find but this run.
   for (const artifact of artifacts) {
-    removeStaleBundles(artifact)
+    removeStaleBundles(bundleDirectory(artifact), artifact, version)
   }
   const startedAt = Date.now()
   // On Linux the bundle step runs linuxdeploy, whose stderr tauri-bundler
@@ -68,37 +69,16 @@ function buildEdition(edition) {
   mkdirSync(edition.directory, { recursive: true })
 
   for (const artifact of artifacts) {
-    const sourceDirectory = join(workspace, 'src-tauri', 'target', 'release', 'bundle', artifact.bundle)
-    const candidates = readdirSync(sourceDirectory)
-      .filter((name) => name.endsWith(artifact.suffix) && name.includes(version))
-      .map((name) => join(sourceDirectory, name))
-      .filter((path) => {
-        const entry = statSync(path)
-        return entry.isFile() && entry.mtimeMs >= startedAt
-      })
-    if (candidates.length !== 1) {
-      throw new Error(`Expected one freshly built ${artifact.bundle} artifact for ${version}, found ${candidates.length}`)
-    }
+    const source = collectBundle(bundleDirectory(artifact), artifact, version, startedAt)
     const destination = join(edition.directory, artifact.name)
-    copyFileSync(candidates[0], destination)
+    copyFileSync(source, destination)
     if (artifact.executable) chmodSync(destination, 0o755)
     console.log(`Collected ${edition.id}: ${destination}`)
   }
 }
 
-// Removes every bundle output whose name the mtime collector could later claim
-// (this bundle type's suffix, the current version), so only files the upcoming
-// build writes can be found at all. The version is matched between dashes:
-// "1.0.3" must not claim "1.0.30" — both current and legacy product names put
-// the version there.
-function removeStaleBundles(artifact) {
-  const directory = join(workspace, 'src-tauri', 'target', 'release', 'bundle', artifact.bundle)
-  if (!existsSync(directory)) return
-  for (const name of readdirSync(directory)) {
-    if (name.endsWith(artifact.suffix) && name.includes(`-${version}-`)) {
-      unlinkSync(join(directory, name))
-    }
-  }
+function bundleDirectory(artifact) {
+  return join(workspace, 'src-tauri', 'target', 'release', 'bundle', artifact.bundle)
 }
 
 function writeChecksums(edition) {
@@ -118,6 +98,7 @@ function writeChecksums(edition) {
     return `${digest}  ${name}`
   })
   writeFileSync(join(edition.directory, 'SHA256SUMS.txt'), `${checksums.join('\n')}\n`, 'utf8')
+  copyFileSync(join(edition.directory, 'SHA256SUMS.txt'), join(workspace, 'SHA256SUMS.txt'))
   console.log(`Release folder (${edition.id}): ${edition.directory}`)
 }
 

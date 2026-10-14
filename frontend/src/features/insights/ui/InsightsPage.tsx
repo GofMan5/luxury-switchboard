@@ -132,7 +132,7 @@ export default function InsightsPage() {
             )}
         </div>
         {report && report.daily.length > 1 ? (
-          <Panel title="Daily usage" subtitle={report.generatedAt ? `Updated ${formatClock(report.generatedAt)} · auto-refresh every minute` : 'Requests and estimated cost per day'}>
+          <Panel title="Daily usage" subtitle={report.generatedAt ? `Updated ${formatClock(report.generatedAt)} · switch between volume, reliability, throughput and spend` : 'Switch between volume, reliability, throughput and spend'}>
             <DailyChart daily={report.daily} currency={state.pricesCurrency} />
           </Panel>
         ) : null}

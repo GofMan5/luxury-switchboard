@@ -51,6 +51,9 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 
 	inputReader, inputWriter := io.Pipe()
 	outputReader, outputWriter := io.Pipe()
+	if !liveStream {
+		disableBackgroundChecks(t)
+	}
 	app, err := New(inputReader, outputWriter, io.Discard)
 	if err != nil {
 		t.Fatal(err)

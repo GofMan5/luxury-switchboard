@@ -194,6 +194,280 @@ func TestRepositoryRoundTripIsEncryptedAndAtomic(t *testing.T) {
 	expectAccounts(t, loaded, ordered)
 }
 
+func TestRenamingAnAccountReplacesItsCredentialsAcrossRestartAndLogout(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	original := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 1}
+	if err := repository.Save(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	renamed := original
+	renamed.Session.Identity.Email = "renamed@example.invalid"
+	renamed.Session.Identity.OrganizationID = "renamed-fixture-organization"
+	renamed.Session.AccessToken = "renamed-fixture-access"
+	renamed.Session.RefreshToken = "renamed-fixture-refresh"
+	renamed.LoginMethod = application.LoginMethodDevice
+	renamed.Resets = 7
+	if err := repository.Save(ctx, renamed); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh repository uses only durable bytes, not a cached identity.
+	restarted := NewRepository(repository.dir, repository.legacyPath)
+	loaded, err := restarted.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{renamed})
+	// Even a caller still holding the old email/org must clear this ID.
+	if err := restarted.Clear(ctx, original.Session); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, nil)
+}
+
+// writeOldAccount recreates the email/account/org filename used before F19.
+// mtime is explicit: token expiry is not credential freshness.
+func writeOldAccount(t *testing.T, repository *Repository, stored application.StoredAccount, modified time.Time) string {
+	t.Helper()
+	prepareDir(t, repository)
+	path := filepath.Join(repository.dir, domain.StorageID(stored.Session.Identity.Email, stored.Session.Identity.AccountID, stored.Session.Identity.OrganizationID)+".dpapi")
+	plaintext, err := json.Marshal(documentFromStored(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProtected(t, path, plaintext)
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLegacyAccountCopiesMigrateToTheLatestRecordAndDoNotReturnAfterLogout(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	old := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 2}
+	latest := old
+	latest.Session.Identity.Email = "renamed@example.invalid"
+	latest.Session.Identity.OrganizationID = "renamed-fixture-org"
+	latest.Session.AccessToken = "latest-fixture-access"
+	latest.Session.RefreshToken = "latest-fixture-refresh"
+	latest.Session.AccessExpiry = old.Session.AccessExpiry.Add(-time.Hour)
+	latest.LoginMethod = application.LoginMethodDevice
+	latest.Resets = 9
+	modified := time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+	oldPath := writeOldAccount(t, repository, old, modified)
+	latestPath := writeOldAccount(t, repository, latest, modified.Add(time.Hour))
+	// The ignored pre-plural singleton must never become active when
+	// specific logout makes the account directory empty again.
+	writeLegacyDocument(t, repository, documentFromStored(old))
+	loaded, err := NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{latest})
+	for _, path := range []string{oldPath, latestPath, repository.legacyPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("migration retained a superseded credential file")
+		}
+	}
+	loaded, err = NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{latest})
+	if err := repository.Clear(ctx, latest.Session); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, nil)
+}
+
+func TestSaveRetiresOldFilenamesWithoutMergingDistinctAccountIDs(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	old := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser}
+	modified := time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+	oldPath := writeOldAccount(t, repository, old, modified)
+	variant := old
+	variant.Session.Identity.Email = "previous-name@example.invalid"
+	variantPath := writeOldAccount(t, repository, variant, modified.Add(time.Hour))
+	// Equal email, organization and user ID are not grounds to collapse
+	// two legitimate exact account IDs (including case differences).
+	other := old
+	other.Session.Identity.AccountID = "Fixture-account-id"
+	other.Session.RefreshToken = "distinct-fixture-refresh"
+	other.LoginMethod = application.LoginMethodDevice
+	writeOldAccount(t, repository, other, modified)
+	latest := variant
+	latest.Session.Identity.OrganizationID = "current-fixture-org"
+	latest.Session.RefreshToken = "current-fixture-refresh"
+	latest.Resets = 12
+	if err := repository.Save(ctx, latest); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{oldPath, variantPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("save retained an old credential filename")
+		}
+	}
+	loaded, err := NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []application.StoredAccount{latest, other}
+	sort.Slice(want, func(i, j int) bool { return accountPathOf(repository, want[i]) < accountPathOf(repository, want[j]) })
+	expectAccounts(t, loaded, want)
+	if err := repository.Clear(ctx, old.Session); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{other})
+}
+
+func TestClearBeforeMigrationRemovesEveryCopyButPreservesADistinctID(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	old := application.StoredAccount{Session: fixtureSession()}
+	modified := time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+	writeOldAccount(t, repository, old, modified)
+	variant := old
+	variant.Session.Identity.Email = "previous-name@example.invalid"
+	variant.Session.Identity.OrganizationID = "previous-fixture-org"
+	writeOldAccount(t, repository, variant, modified.Add(time.Hour))
+	other := application.StoredAccount{Session: fixtureSecondSession(), Resets: 3}
+	writeOldAccount(t, repository, other, modified)
+	writeLegacyDocument(t, repository, documentFromStored(old))
+	if err := NewRepository(repository.dir, repository.legacyPath).Clear(ctx, variant.Session); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{other})
+	if err := repository.ClearAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, nil)
+}
+
+func TestClearOfOnlyASingletonMatchesExactIDRegardlessOfEmail(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	stored := application.StoredAccount{Session: fixtureSession(), Resets: 4}
+	writeLegacyDocument(t, repository, documentFromStored(stored))
+	if err := repository.Clear(ctx, fixtureSecondSession()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(repository.legacyPath); err != nil {
+		t.Fatal("specific clear removed a distinct singleton identity")
+	}
+	renamed := stored.Session
+	renamed.Identity.Email = "renamed@example.invalid"
+	renamed.Identity.OrganizationID = "changed-fixture-org"
+	if err := repository.Clear(ctx, renamed); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, nil)
+}
+
+func TestEqualTimestampCopiesPreferTheAlreadyStableRecord(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	current := application.StoredAccount{Session: fixtureSession(), Resets: 8}
+	if err := repository.Save(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+	stablePath := repository.accountPath(current.Session)
+	if err := os.Chtimes(stablePath, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	old := current
+	old.Session.Identity.Email = "previous-name@example.invalid"
+	old.Session.RefreshToken = "old-fixture-refresh"
+	old.Resets = 1
+	writeOldAccount(t, repository, old, modified)
+	loaded, err := NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{current})
+}
+
+func TestAValidOlderCopySurvivesANewerEmptySessionCopy(t *testing.T) {
+	repository := storePaths(t)
+	ctx := context.Background()
+	valid := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 6}
+	modified := time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+	writeOldAccount(t, repository, valid, modified)
+	empty := valid
+	empty.Session.Identity.Email = "empty-copy@example.invalid"
+	empty.Session.AccessToken = ""
+	empty.Session.RefreshToken = ""
+	empty.Session.IDToken = ""
+	writeOldAccount(t, repository, empty, modified.Add(time.Hour))
+	loaded, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{valid})
+	loaded, err = NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectAccounts(t, loaded, []application.StoredAccount{valid})
+}
+
+func TestConcurrentLoadAndClearCannotRecreateALegacyAccount(t *testing.T) {
+	ctx := context.Background()
+	for range 8 {
+		repository := storePaths(t)
+		stored := application.StoredAccount{Session: fixtureSession()}
+		writeOldAccount(t, repository, stored, time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC))
+		start := make(chan struct{})
+		outcomes := make(chan error, 2)
+		go func() {
+			<-start
+			_, err := repository.Load(ctx)
+			outcomes <- err
+		}()
+		go func() {
+			<-start
+			outcomes <- repository.Clear(ctx, stored.Session)
+		}()
+		close(start)
+		for range 2 {
+			if err := <-outcomes; err != nil {
+				t.Fatal(err)
+			}
+		}
+		loaded, err := NewRepository(repository.dir, repository.legacyPath).Load(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectAccounts(t, loaded, nil)
+	}
+}
+
 func TestClearRemovesOnlyThatAccount(t *testing.T) {
 	repository := storePaths(t)
 	first, second := fixtureSession(), fixtureSecondSession()
@@ -354,7 +628,7 @@ func TestUnreadableLegacyFileIsAnError(t *testing.T) {
 	requireStoreError(t, err)
 }
 
-func TestLegacyFileIsIgnoredWhenAccountsExist(t *testing.T) {
+func TestLegacyFileIsRetiredWhenAccountsExist(t *testing.T) {
 	repository := storePaths(t)
 	want := application.StoredAccount{Session: fixtureSession(), LoginMethod: application.LoginMethodBrowser, Resets: 1}
 	if err := repository.Save(context.Background(), want); err != nil {
@@ -367,7 +641,7 @@ func TestLegacyFileIsIgnoredWhenAccountsExist(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectAccounts(t, loaded, []application.StoredAccount{want})
-	if _, err := os.Stat(repository.legacyPath); err != nil {
-		t.Fatalf("load must not touch the legacy file once accounts exist: %v", err)
+	if _, err := os.Stat(repository.legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("load must retire the legacy file once accounts exist: %v", err)
 	}
 }

@@ -12,6 +12,14 @@ export interface ActivityModelState {
   readonly error: string
 }
 
+function isTerminal(request: ActivityRequest): boolean {
+  return request.state === 'completed' || request.state === 'failed' || request.state === 'cancelled'
+}
+
+function isOlder(request: ActivityRequest, current: ActivityRequest): boolean {
+  return Date.parse(request.updatedAt) < Date.parse(current.updatedAt) || (isTerminal(current) && !isTerminal(request))
+}
+
 const emptySummary: ActivitySummary = {
   requests: 0,
   active: 0,
@@ -34,7 +42,10 @@ export class ActivityModel {
   #unsubscribe: (() => void) | null = null
   #summaryTimer = 0
   #pollTimer: ReturnType<typeof setInterval> | undefined
-  #summaryInFlight = false
+  #generation = 0
+  #active = false
+  #connectController: AbortController | null = null
+  #summaryController: AbortController | null = null
 
   constructor(port: ActivityPort) {
     this.#port = port
@@ -48,21 +59,41 @@ export class ActivityModel {
   }
 
   async connect(): Promise<void> {
+    const generation = ++this.#generation
+    this.#active = true
+    this.#connectController?.abort()
+    this.#summaryController?.abort()
+    this.#summaryController = null
+    const controller = new AbortController()
+    this.#connectController = controller
     const baseline = new Map(this.#state.requests.map((request) => [request.id, request.updatedAt]))
     this.#unsubscribe ??= this.#port.subscribe((request) => this.#accept(request))
     try {
-      const [listed, summary] = await Promise.all([this.#port.list(100), this.#port.summary()])
-      const live = this.#state.requests.filter((request) => baseline.get(request.id) !== request.updatedAt)
+      const [listed, summary] = await Promise.all([this.#port.list(100, controller.signal), this.#port.summary(controller.signal)])
+      if (generation !== this.#generation) return
+      const listedByID = new Map(listed.requests.map((request) => [request.id, request]))
+      const live = this.#state.requests.filter((request) => {
+        const listedRequest = listedByID.get(request.id)
+        return listedRequest ? !isOlder(request, listedRequest) : baseline.get(request.id) !== request.updatedAt
+      })
       const liveIDs = new Set(live.map((request) => request.id))
       const merged = [...live, ...listed.requests.filter((request) => !liveIDs.has(request.id))].slice(0, 100)
       this.#set({ phase: 'ready', requests: merged, available: Math.max(listed.available, merged.length), summary, error: '' })
       this.#pollTimer ??= setInterval(() => void this.#refreshSummary(), 1_000)
     } catch {
+      if (generation !== this.#generation) return
       this.#set({ ...this.#state, phase: 'error', error: 'Activity is unavailable' })
+    } finally {
+      if (this.#connectController === controller) this.#connectController = null
     }
   }
 
   dispose(): void {
+    this.#generation++
+    this.#active = false
+    this.#connectController?.abort()
+    this.#summaryController?.abort()
+    this.#summaryController = null
     this.#unsubscribe?.()
     this.#unsubscribe = null
     window.clearTimeout(this.#summaryTimer)
@@ -72,17 +103,23 @@ export class ActivityModel {
   }
 
   #accept(request: ActivityRequest): void {
+    if (!this.#active) return
+    const current = this.#state.requests.find((item) => item.id === request.id)
+    if (current && isOlder(request, current)) return
     const requests = [request, ...this.#state.requests.filter((item) => item.id !== request.id)].slice(0, 100)
-    this.#set({ ...this.#state, phase: 'ready', requests, error: '' })
+    this.#set({ ...this.#state, phase: 'ready', requests, available: Math.max(this.#state.available, requests.length), error: '' })
     window.clearTimeout(this.#summaryTimer)
     this.#summaryTimer = window.setTimeout(() => void this.#refreshSummary(), 250)
   }
 
   async #refreshSummary(): Promise<void> {
-    if (this.#summaryInFlight) return
-    this.#summaryInFlight = true
+    if (!this.#active || this.#summaryController || this.#connectController) return
+    const generation = this.#generation
+    const controller = new AbortController()
+    this.#summaryController = controller
     try {
-      const summary = await this.#port.summary()
+      const summary = await this.#port.summary(controller.signal)
+      if (generation !== this.#generation) return
       const current = this.#state.summary
       if (summary.requests !== current.requests || summary.active !== current.active || summary.queued !== current.queued || summary.successRate !== current.successRate || summary.p95Ms !== current.p95Ms || summary.rpm !== current.rpm) {
         this.#set({ ...this.#state, summary })
@@ -91,7 +128,7 @@ export class ActivityModel {
       // Live rows remain authoritative; a missed summary refresh is retried on
       // the next event and does not blank the surface.
     } finally {
-      this.#summaryInFlight = false
+      if (this.#summaryController === controller) this.#summaryController = null
     }
   }
 

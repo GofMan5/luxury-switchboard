@@ -77,6 +77,79 @@ describe('InsightsModel', () => {
     await loading
   })
 
+  it.each(['save', 'remove', 'currency'] as const)('keeps a global %s completion and saving state through period navigation', async (operation) => {
+    const initial: PriceCatalog = { prices: [{ model: 'm', input: 1, cachedInput: 0, output: 2, reasoning: 0, updatedAt: '' }], currency: 'USD' }
+    const committed: PriceCatalog = operation === 'remove'
+      ? { prices: [], currency: 'USD' }
+      : { prices: [{ ...initial.prices[0], input: 3 }], currency: operation === 'currency' ? 'EUR' : 'USD' }
+    port.prices.mockResolvedValue(initial)
+    await model.load('24h')
+    let finish!: (catalog: PriceCatalog) => void
+    const pending = new Promise<PriceCatalog>((resolve) => { finish = resolve })
+    port.setPrice.mockReturnValue(pending)
+    port.removePrice.mockReturnValue(pending)
+    port.setCurrency.mockReturnValue(pending)
+    const saving = operation === 'save' ? model.savePrice({ model: 'm', input: 3, cachedInput: 0, output: 2, reasoning: 0 })
+      : operation === 'remove' ? model.removePrice('m') : model.setCurrency('EUR')
+    await model.load('48h')
+    expect(model.snapshot()).toMatchObject({ period: '48h', pricesPhase: 'saving' })
+    finish(committed)
+    expect(await saving).toBe(true)
+    expect(model.snapshot()).toMatchObject({ period: '48h', prices: committed.prices, pricesCurrency: committed.currency, pricesPhase: 'ready' })
+    model.dispose()
+  })
+
+  it('invalidates old-price reports that finished during a currency commit, and discards a late refresh', async () => {
+    await model.load('24h')
+    let finish!: (catalog: PriceCatalog) => void
+    port.setCurrency.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    const saving = model.setCurrency('EUR')
+    await model.load('48h')
+    let finishRefresh!: (report: InsightsReport) => void
+    port.report.mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve }))
+    const refreshing = model.refresh()
+    finish({ prices: [], currency: 'EUR' })
+    expect(await saving).toBe(true)
+    finishRefresh({ ...emptyReport('48h'), generatedAt: 'old-price-read' })
+    await refreshing
+    port.report.mockImplementation(() => new Promise(() => {}))
+    void model.load('48h')
+    expect(model.snapshot()).toMatchObject({ phase: 'loading', pricesCurrency: 'EUR' })
+    expect(model.snapshot().report?.generatedAt).not.toBe('old-price-read')
+    model.dispose()
+  })
+
+  it('finishes a currency commit while a new period read is still in flight', async () => {
+    await model.load('24h')
+    let finish!: (catalog: PriceCatalog) => void
+    port.setCurrency.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    const saving = model.setCurrency('EUR')
+    let finishOldRead!: (report: InsightsReport) => void
+    port.report.mockReturnValueOnce(new Promise((resolve) => { finishOldRead = resolve }))
+    const loading = model.load('48h')
+    finish({ prices: [], currency: 'EUR' })
+    expect(await saving).toBe(true)
+    finishOldRead({ ...emptyReport('48h'), generatedAt: 'precommit' })
+    await loading
+    expect(model.snapshot()).toMatchObject({ phase: 'ready', period: '48h', pricesCurrency: 'EUR', pricesPhase: 'ready' })
+    expect(model.snapshot().report?.generatedAt).not.toBe('precommit')
+    model.dispose()
+  })
+
+  it('reports a failed global save after navigation without losing the saved catalog', async () => {
+    const initial: PriceCatalog = { prices: [{ model: 'm', input: 1, cachedInput: 0, output: 2, reasoning: 0, updatedAt: '' }], currency: 'USD' }
+    port.prices.mockResolvedValue(initial)
+    await model.load('24h')
+    let reject!: (error: Error) => void
+    port.setPrice.mockReturnValue(new Promise((_resolve, no) => { reject = no }))
+    const saving = model.savePrice({ model: 'm', input: 3, cachedInput: 0, output: 2, reasoning: 0 })
+    await model.load('48h')
+    reject(new Error('offline'))
+    expect(await saving).toBe(false)
+    expect(model.snapshot()).toMatchObject({ period: '48h', prices: initial.prices, pricesCurrency: 'USD', pricesPhase: 'error', error: 'The price was not saved' })
+    model.dispose()
+  })
+
   it('a price edit invalidates the cache instead of serving old costs', async () => {
     await model.load('24h')
     await model.savePrice({ model: 'm', input: 1, cachedInput: 0, output: 2, reasoning: 0 })

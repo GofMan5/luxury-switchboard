@@ -13,6 +13,7 @@ class Port implements RoutesPort {
   upsert = async (_value: ModelRoute) => new Promise<ModelRoute>((resolve) => { this.finishUpsert = resolve; this.listener?.('relay') })
   batches: number[] = []
   upsertMany = async (routes: readonly ModelRoute[]) => { this.batches.push(routes.length); return routes.length }
+  remove: RoutesPort['remove'] = async () => undefined
   delete: RoutesPort['delete'] = async () => undefined
   subscribe = (listener: (target: RouteTarget) => void) => { this.listener = listener; return () => undefined }
 }
@@ -71,7 +72,11 @@ describe('RoutesModel', () => {
     ]
     port.list = async (target) => (target === 'relay' ? published : [])
     const deleted: string[] = []
-    port.delete = async (_target: RouteTarget, publicModel: string) => { deleted.push(publicModel) }
+    port.delete = async () => { throw new Error('whole-chain deletion must not be used by provider selection') }
+    port.remove = async (_target: RouteTarget, publicModel: string, providerId: string) => {
+      expect(providerId).toBe('echo')
+      deleted.push(publicModel)
+    }
     const created: ModelRoute[] = []
     port.upsertMany = async (routes: readonly ModelRoute[]) => { created.push(...routes); return routes.length }
     const model = new RoutesModel(port)

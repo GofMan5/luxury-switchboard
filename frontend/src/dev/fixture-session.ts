@@ -5,6 +5,7 @@
  * only through a dynamic import behind `import.meta.env.DEV`; production builds
  * tree-shake the branch and never bundle it.
  */
+import { version as appVersion } from '../../package.json'
 import type { EventFrame } from '../shared/contracts/protocol'
 import type { ControlPlaneSession, EventListener } from '../platform/stdio/session'
 import type { ActivityRequest } from '../features/activity/domain/activity'
@@ -82,8 +83,8 @@ const tunnelRoutes: ModelRoute[] = [
 
 const settings: Settings = {
   listenerPort: 8787,
-  maxRequestMiB: 48,
-  headerTimeoutSeconds: 60,
+  maxRequestMiB: 128,
+  headerTimeoutSeconds: 300,
   streamIdleSeconds: 300,
   heartbeatSeconds: 30,
   retryBaseMilliseconds: 350,
@@ -108,11 +109,12 @@ const settings: Settings = {
 // The standing verdict of the refresher's last automatic pass: old enough that
 // the panel shows an honest "2 minutes ago", fresh enough that the pill is on
 // the moment the dev shell opens.
+const screenshotMode = new URLSearchParams(window.location.search).has('screenshots')
 const updateFeed = {
-  current: '1.0.40-fixture',
-  latest: '1.0.99',
-  url: 'https://github.com/GofMan5/luxury-switchboard/releases/tag/v1.0.99',
-  newer: true,
+  current: appVersion,
+  latest: screenshotMode ? appVersion : '1.0.99',
+  url: `https://github.com/GofMan5/luxury-switchboard/releases/tag/v${screenshotMode ? appVersion : '1.0.99'}`,
+  newer: !screenshotMode,
   reachable: true,
   checkedAt: iso(120_000),
 }
@@ -215,7 +217,7 @@ const prices: ModelPrice[] = [
 let catalogCurrency = 'USD'
 
 export class FixtureSession implements ControlPlaneSession {
-  readonly appVersion = '1.0.37-fixture'
+  readonly appVersion = appVersion
   /** The fixture advertises the Codex preset flow, its usage probes and the
    * fleet wake, like a current control plane. */
   readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake']
@@ -422,7 +424,9 @@ export class FixtureSession implements ControlPlaneSession {
         // shows nothing in the fixture either.
         const runId = String(body.runId ?? '')
         const providerId = String(body.providerId ?? '')
-        const models = Array.isArray(body.models) ? (body.models as readonly string[]) : []
+         const profile = String(body.profile ?? 'short')
+        const fullProfile = profile === 'full-128k'
+         const models = Array.isArray(body.models) ? (body.models as readonly string[]) : []
         // Per-provider seed: identical rows across providers would read as
         // copied data, and the page exists to compare them.
         const seed = providerId.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0)
@@ -430,22 +434,22 @@ export class FixtureSession implements ControlPlaneSession {
           const timer = window.setTimeout(() => {
             this.#runTimers.delete(timer)
             const failed = model.includes('flash') && providerId === 'sigma-llm'
-            const ttft = 380 + ((index * 211 + seed * 7) % 2_600)
-            const total = ttft + 700 + ((index * 503 + seed * 31) % 4_000)
+             const ttft = (fullProfile ? 1_200 : 380) + ((index * 211 + seed * 7) % (fullProfile ? 3_600 : 2_600))
+            const total = ttft + (fullProfile ? 2_400 : 700) + ((index * 503 + seed * 31) % (fullProfile ? 6_000 : 4_000))
             this.#emit('models.tested', {
               runId, providerId, model,
               state: failed ? 'unavailable' : 'available',
               status: failed ? 429 : 200,
               latencyMs: total,
               ttftMs: failed ? 0 : ttft,
-              outputTokens: failed ? 0 : 32,
+              outputTokens: failed ? 0 : (fullProfile ? 128 : 32),
               ...(failed ? { errorCode: 'rate_limited' } : {}),
             })
-          }, 320 * (index + 1))
+          }, (fullProfile ? 480 : 320) * (index + 1))
           this.#runTimers.add(timer)
         })
         const pending = new Promise<{ tested: number }>((resolve) => {
-          window.setTimeout(() => resolve({ tested: models.length }), 320 * (models.length + 1))
+          window.setTimeout(() => resolve({ tested: models.length }), (fullProfile ? 480 : 320) * (models.length + 1))
         })
         return pending
       }
@@ -454,8 +458,8 @@ export class FixtureSession implements ControlPlaneSession {
         { id: 'k2', providerId: body.providerId, label: 'backup-2', priority: 1, rpm: 40, pinned: false, proxyConfigured: true, cooldownMs: 42_000, blockedModels: 0, retries429: 14, startsInWindow: 4, authStreak: 1, lastOutcome: 'rate-limited' },
         { id: 'k3', providerId: body.providerId, label: 'old-reseller', priority: 2, rpm: 0, pinned: false, proxyConfigured: false, cooldownMs: 0, blockedModels: 2, retries429: 91, startsInWindow: 0, authStreak: 5, lastOutcome: 'authentication' },
         { id: 'k4', providerId: body.providerId, label: 'pinned-ip', priority: 3, rpm: 20, pinned: true, proxyConfigured: false, cooldownMs: 0, blockedModels: 0, retries429: 0, startsInWindow: 2, authStreak: 0, lastOutcome: 'success' },
-      ] }
-      case 'keys.check': return { checked: 4, rejected: 1, reachable: true }
+      ], available: 4 }
+      case 'keys.check': return new Promise((resolve) => window.setTimeout(() => resolve({ total: 3, checked: 2, answered: 2, accepted: 1, rejected: 1, inconclusive: 0, skipped: 1, reachable: true }), 900))
       case 'guardrails.status': return { mode: 'monitor', providerModes: { 'sigma-llm': 'block' }, ruleCount: 106, indicatorCount: 1_900, ruleSetVersion: 7, findingCount: 12 }
       case 'guardrails.findings': return { findings }
       case 'tunnel.get': case 'tunnel.configure': case 'tunnel.start': return { state: 'online', port: 8797, address: 'https://fresh-words-mild-orbit.trycloudflare.com/v1', rpmPerIp: 60, contextLimitKiB: 131_072, brandResponse: '', tokenConfigured: true }

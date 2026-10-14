@@ -98,6 +98,7 @@ function show(
   capabilities: readonly string[],
   accounts: readonly ReturnType<typeof codexAccount>[] = [codexAccount('acct-1', 'dev@example.com')],
   codexStateExtra: Record<string, unknown> = {},
+  apiKeysStateExtra: Record<string, unknown> = {},
 ) {
   mockUseAppServices.mockReturnValue({ capabilities } as never)
   mockUseProviders.mockReturnValue({ state: { catalog } } as never)
@@ -121,7 +122,7 @@ function show(
   } as never)
   mockUseApiKeys.mockReturnValue({
     model: { load: mockLoad },
-    state: { keys: [], phase: 'ready', checkingPool: false, error: '', poolReport: null, pendingId: null },
+    state: { keys: [], available: 0, phase: 'ready', checkingPool: false, error: '', poolReport: null, pendingId: null, ...apiKeysStateExtra },
   } as never)
   return render(<ApiKeysPage />)
 }
@@ -135,6 +136,31 @@ beforeEach(() => {
   mockStartLogin.mockReset()
   mockLogout.mockReset()
   mockLogout.mockResolvedValue(true)
+})
+
+describe('ApiKeysPage pool check verdicts', () => {
+  it('makes the skipped tail explicit when every dispatched key was accepted', () => {
+    show([], [], {}, { poolReport: { total: 3, checked: 1, skipped: 2, accepted: 1, answered: 1, rejected: 0, inconclusive: 0, reachable: true } })
+    expect(screen.getByRole('status').textContent).toContain('1 of 3 keys checked · 2 skipped')
+    expect(screen.getByRole('status').textContent).toContain('All 1 checked keys authenticate')
+  })
+
+  it('shows the full pool count when an older backend returned only visible keys', () => {
+    show([], [], {}, { available: 500 })
+    expect(screen.getByText('Showing 0 of 500 keys · lower number means higher priority')).toBeTruthy()
+  })
+
+  it.each([
+    { checked: 3, accepted: 0, answered: 3, rejected: 0, inconclusive: 3, reachable: true },
+    { checked: 0, accepted: 0, answered: 0, rejected: 0, inconclusive: 0, reachable: true },
+    { checked: 3, accepted: 2, answered: 2, rejected: 0, inconclusive: 1, reachable: true },
+  ])('never calls an inconclusive or empty check authenticated: %j', (poolReport) => {
+    show([], [], {}, { poolReport })
+    expect(screen.queryByText('Every credential still authenticates.')).toBeNull()
+    expect(screen.queryByText(/All .* keys answered/)).toBeNull()
+    expect(screen.getByRole('status').textContent).toContain(poolReport.checked === 0 ? 'No keys were checked' : `${poolReport.accepted} accepted`)
+    if (poolReport.inconclusive > 0) expect(screen.getByRole('status').textContent).toContain(`${poolReport.inconclusive} inconclusive`)
+  })
 })
 
 describe('ApiKeysPage codex accounts branch', () => {

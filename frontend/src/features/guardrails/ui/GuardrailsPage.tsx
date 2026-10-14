@@ -19,9 +19,12 @@ import {
 import { useGuardrails } from './useGuardrails'
 import styles from './GuardrailsPage.module.css'
 
+type FindingFilter = 'all' | 'high' | 'blocked'
+
 export default function GuardrailsPage() {
   const { model, state } = useGuardrails()
   const [openId, setOpenId] = useState('')
+  const [findingFilter, setFindingFilter] = useState<FindingFilter>('all')
   const status = state.status
   const mode = status?.mode ?? 'monitor'
   const { settings: settingsModel } = useAppServices()
@@ -38,8 +41,10 @@ export default function GuardrailsPage() {
     },
     { blocked: 0, high: 0, providers: new Set<string>() },
   )
+  const visibleFindings = state.findings.filter((record) => findingFilter === 'all' || (findingFilter === 'high' ? record.severity === 'high' : record.verdict === 'blocked'))
   const selected = state.findings.find((record) => record.id === openId)
-  const withheld = Math.max((status?.findingCount ?? 0) - state.findings.length, 0)
+  const totalFindings = status?.findingCount ?? state.findings.length
+  const withheld = Math.max(totalFindings - state.findings.length, 0)
 
   return (
     <section className={styles.page}>
@@ -103,6 +108,8 @@ export default function GuardrailsPage() {
                 type="button"
                 role="radio"
                 aria-checked={mode === choice}
+                aria-label={`${modeLabel(choice)}. ${modeDescription(choice)}`}
+                title={modeDescription(choice)}
                 data-active={mode === choice || undefined}
                 disabled={state.pending}
                 onClick={() => void model.setMode(choice)}
@@ -132,14 +139,30 @@ export default function GuardrailsPage() {
         <section className={styles.findings}>
           <header>
             <div><ShieldAlert size={17} aria-hidden="true" /><h2>Findings</h2></div>
-            {/* A shorter list than the metric is not a bug, but it must not read as the
-                whole journal either: the oldest are held back so one answer's evidence
-                cannot outgrow what the app can hand to this window. */}
-            <span>
-              {withheld > 0
-                ? `Newest ${state.findings.length.toLocaleString()} of ${(status?.findingCount ?? 0).toLocaleString()}. Kept in memory only, and never sent anywhere.`
-                : 'Newest first. Kept in memory only, and never sent anywhere.'}
-            </span>
+            <div className={styles.findingsMeta}>
+              <div className={styles.findingFilters} role="group" aria-label="Filter findings">
+                {([
+                  ['all', 'All'],
+                  ['high', `High · ${counts.high}`],
+                  ['blocked', `Refused · ${counts.blocked}`],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={findingFilter === value ? styles.findingFilterActive : styles.findingFilter}
+                    aria-pressed={findingFilter === value}
+                    onClick={() => setFindingFilter(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <span>
+                {withheld > 0
+                  ? `Newest ${visibleFindings.length.toLocaleString()} of ${totalFindings.toLocaleString()} · ${state.findings.length.toLocaleString()} loaded · ${withheld.toLocaleString()} older held back`
+                  : `${visibleFindings.length.toLocaleString()} shown of ${totalFindings.toLocaleString()} · newest first · kept in memory only`}
+              </span>
+            </div>
           </header>
           <div className={styles.tableWrap}>
             <table>
@@ -147,7 +170,7 @@ export default function GuardrailsPage() {
                 <tr><th>Verdict</th><th>Severity</th><th>Provider</th><th>Model</th><th>Detected</th><th>Evidence</th><th>Time</th></tr>
               </thead>
               <tbody>
-                {state.findings.map((record) => {
+                {visibleFindings.map((record) => {
                   // A high-severity finding delivered under monitor is exactly
                   // what block refuses; the hint names the mode that provider
                   // runs under, override included.
@@ -155,11 +178,13 @@ export default function GuardrailsPage() {
                   const wouldRefuse = record.verdict !== 'blocked' && record.severity === 'high' && providerMode === 'monitor'
                   return <FindingRow key={record.id} record={record} onOpen={() => setOpenId(record.id)} wouldRefuse={wouldRefuse} />
                 })}
-                {state.phase !== 'loading' && state.findings.length === 0 ? (
+                {state.phase !== 'loading' && visibleFindings.length === 0 ? (
                   <tr>
                     <td colSpan={7} className={styles.empty}>
                       <ShieldCheck size={20} aria-hidden="true" />
-                      {mode === 'off' ? 'Inspection is off. Nothing is being checked.' : 'No provider has sent anything suspicious.'}
+                      {state.findings.length === 0
+                        ? mode === 'off' ? 'Inspection is off. Nothing is being checked.' : 'No provider has sent anything suspicious.'
+                        : 'No findings match this filter.'}
                     </td>
                   </tr>
                 ) : null}

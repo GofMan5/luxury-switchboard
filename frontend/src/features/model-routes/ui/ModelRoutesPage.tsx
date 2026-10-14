@@ -10,6 +10,7 @@ import { useProviders } from '../../providers/ui/useProviders'
 import { publishedModels, selectionChanges, type ModelRoute, type RouteTarget } from '../domain/route'
 import { useRoutes } from './useRoutes'
 import { addChainEntry, moveChainEntry, patchChainEntry, removeChainEntry, seedChainEntries, type ChainEntry, type ChainEntryPatch } from './chain-entries'
+import { DeleteRouteDialog } from './DeleteRouteDialog'
 import styles from './ModelRoutesPage.module.css'
 
 const MODEL_RENDER_BATCH = 180
@@ -31,6 +32,7 @@ export default function ModelRoutesPage() {
   const { state: providers } = useProviders()
   const [editor, setEditor] = useState<ModelRoute | 'new' | null>(null)
   const [wizard, setWizard] = useState(false)
+  const [deleting, setDeleting] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<CatalogFilter>('all')
   const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase())
@@ -146,7 +148,7 @@ export default function ModelRoutesPage() {
         <Segmented
           label="Route target"
           value={state.target}
-          options={[{ id: 'relay' as const, label: 'Local Relay' }, { id: 'tunnel' as const, label: 'Public Tunnel' }]}
+          options={[{ id: 'relay' as const, label: 'Local relay' }, { id: 'tunnel' as const, label: 'Public tunnel' }]}
           onChange={(target) => void model.load(target)}
         />
         <span>{state.target === 'relay' ? 'Unassigned models use the active provider.' : 'Only enabled aliases in this list appear in /v1/models.'}</span>
@@ -154,7 +156,8 @@ export default function ModelRoutesPage() {
 
       {(state.error || models.error) ? <div className={styles.error} role="alert">{state.error || models.error}</div> : null}
 
-      <section className={styles.catalog}>
+      <div className={styles.workspaceGrid}>
+        <section className={styles.catalog}>
         <header>
           <div>
             <h2>Provider models</h2>
@@ -166,18 +169,24 @@ export default function ModelRoutesPage() {
           </div>
         </header>
         <div className={styles.catalogToolbar}>
-          <label className={styles.search}><Search size={15} /><input type="search" value={search} placeholder="Filter models" onChange={(event) => setSearch(event.currentTarget.value)} /></label>
-          <Segmented
-            label="Catalog filter"
-            value={filter}
-            options={FILTERS.map((entry) => ({ id: entry.id, label: entry.label }))}
-            onChange={setFilter}
-          />
-          <Button disabled={visibleModels.length === 0 || models.testing} onClick={() => visibleSelected === visibleModels.length ? clearShown() : selectShown()}>
-            <CheckCheck size={15} />{visibleSelected === visibleModels.length && visibleModels.length > 0 ? 'Clear shown' : 'Select shown'}
-          </Button>
-          <Button disabled={models.selected.length === 0 || models.testing} onClick={() => void modelsModel.test(models.selected)}><FlaskConical size={15} />Test selected</Button>
-          <Button disabled={models.models.length === 0} onClick={() => models.testing ? modelsModel.cancelTest() : void modelsModel.test(visibleModels)}>{models.testing ? 'Cancel tests' : 'Test shown'}</Button>
+          <div className={styles.catalogFilters}>
+            <label className={styles.search}><Search size={15} aria-hidden="true" /><input type="search" aria-label="Filter provider models" value={search} placeholder="Filter models" onChange={(event) => setSearch(event.currentTarget.value)} /></label>
+            <Segmented
+              label="Catalog filter"
+              value={filter}
+              options={FILTERS.map((entry) => ({ id: entry.id, label: entry.label }))}
+              onChange={setFilter}
+            />
+          </div>
+          <div className={styles.catalogBatch}>
+            <Button disabled={visibleModels.length === 0 || models.testing} onClick={() => visibleSelected === visibleModels.length ? clearShown() : selectShown()}>
+              <CheckCheck size={15} />{visibleSelected === visibleModels.length && visibleModels.length > 0 ? 'Clear shown' : 'Select shown'}
+            </Button>
+            <div className={styles.catalogTests}>
+              <Button disabled={models.selected.length === 0 || models.testing} onClick={() => void modelsModel.test(models.selected)}><FlaskConical size={15} />Test selected</Button>
+              <Button disabled={models.models.length === 0} onClick={() => models.testing ? modelsModel.cancelTest() : void modelsModel.test(visibleModels)}>{models.testing ? 'Cancel tests' : 'Test shown'}</Button>
+            </div>
+          </div>
         </div>
         <div className={styles.modelList}>
           {renderedModels.map((item) => (
@@ -216,13 +225,14 @@ export default function ModelRoutesPage() {
             const chained = state.target === 'relay' && sameModel.length > 1
             return (
               <tr key={`${route.publicModel}:${route.providerId}`} data-chain={chained || undefined}>
-                <td>
+                <td><div className={styles.routeName}>
                   <strong>{route.publicModel}</strong>
-                  {route.aliases && route.aliases.length > 0 ? <small className={styles.aliases}> · {route.aliases.join(' · ')}</small> : null}
-                  {chained ? <small className={styles.chainNote}>chain of {sameModel.length}</small> : null}
-                </td>
-                <td>{route.upstreamModel}</td>
-                <td>{providerNames.get(route.providerId) ?? route.providerId}</td>
+                  {route.aliases && route.aliases.length > 0 ? <small className={styles.aliases}>{route.aliases.join(' · ')}</small> : null}
+                  {chained ? <small className={styles.chainNote}>Chain of {sameModel.length}</small> : null}
+                  <span className={styles.compactSource}>{route.upstreamModel}</span>
+                </div></td>
+                <td><div className={styles.routeSource}><span>{route.upstreamModel}</span></div></td>
+                <td><div className={styles.routeName}><span>{providerNames.get(route.providerId) ?? route.providerId}</span><small className={styles.compactState}>{route.enabled ? 'Enabled' : 'Disabled'}</small></div></td>
                 <td>
                   {state.target === 'relay'
                     ? chained
@@ -235,15 +245,28 @@ export default function ModelRoutesPage() {
                     : route.contextLimitKiB === 0 ? 'Default' : `${Math.round(route.contextLimitKiB / 1024)} MiB`}
                 </td>
                 <td>{route.enabled ? 'Enabled' : 'Disabled'}</td>
-                <td><div className={styles.actions}><button type="button" aria-label={`Edit ${route.publicModel}`} onClick={() => { model.clearError(); setEditor(route) }}><Pencil /></button><button type="button" aria-label={`Delete ${route.publicModel}`} onClick={() => void model.delete(route.publicModel)}><Trash2 /></button></div></td>
+                <td><div className={styles.actions}><button type="button" aria-label={`Edit ${route.publicModel}`} onClick={() => { model.clearError(); setEditor(route) }}><Pencil /></button><button type="button" aria-label={`Delete ${route.publicModel} on ${providerNames.get(route.providerId) ?? route.providerId}`} disabled={Boolean(state.pending)} onClick={() => { model.clearError(); setDeleting(route.publicModel) }}><Trash2 aria-hidden="true" /></button></div></td>
               </tr>
             )
           })}
           {state.phase !== 'loading' && orderedRoutes.length === 0 ? <tr><td colSpan={6} className={styles.empty}>No {state.target === 'relay' ? 'relay assignments' : 'public tunnel models'} yet.</td></tr> : null}
         </tbody></table></div>
       </section>
+      </div>
 
       {editor ? <RouteEditor target={state.target} route={editor === 'new' ? undefined : editor} providers={providers.catalog.providers.filter((provider) => provider.enabled)} pending={Boolean(state.pending)} operationError={state.error} onClose={() => setEditor(null)} onSave={async route => { if (await model.upsert(route)) setEditor(null) }} /> : null}
+
+      {deleting ? (
+        <DeleteRouteDialog
+          publicModel={deleting}
+          routeCount={state.routes.filter(route => route.publicModel === deleting).length}
+          target={state.target}
+          pending={Boolean(state.pending)}
+          error={state.error}
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => { if (await model.delete(deleting)) setDeleting(null) }}
+        />
+      ) : null}
 
       {wizard ? (
         <ChainWizard

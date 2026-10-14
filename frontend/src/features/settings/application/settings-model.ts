@@ -22,6 +22,7 @@ export class SettingsModel {
 
   async connect(): Promise<void> {
     const generation = ++this.#generation
+    if (!this.#state.settings) this.#set({ ...this.#state, phase: 'loading', error: '' })
     this.#unsubscribe ??= this.#port.subscribe((result) => {
       this.#generation++
       this.#set({ phase: 'ready', settings: result.settings, pending: this.#state.pending, error: '' })

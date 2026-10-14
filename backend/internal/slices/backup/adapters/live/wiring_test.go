@@ -268,7 +268,7 @@ type catalogLookup struct {
 }
 
 func (lookup catalogLookup) Exists(id string) bool {
-	_, exists := lookup.catalog.Get(id)
+	_, exists := lookup.catalog.Lookup(id)
 	return exists
 }
 

@@ -1,7 +1,9 @@
-import type { ModelTestResult } from '../../models/domain/model'
+import type { ModelTestProfile, ModelTestResult } from '../../models/domain/model'
 import type { ModelsPort } from '../../models/application/models-port'
 
 const RUN_TIMEOUT_MS = 3 * 60_000
+const FULL_RUN_TIMEOUT_MS = 8 * 60_000
+const TEST_BATCH = 500
 
 export interface TestTarget {
   readonly providerId: string
@@ -15,6 +17,7 @@ export interface TestsState {
   /** Results keyed `${providerId}${model}` — one row per measured pair. */
   readonly results: Readonly<Record<string, ModelTestResult>>
   readonly running: boolean
+  readonly profile: ModelTestProfile
   /** Live run progress: settled probes of the current run's total. */
   readonly runDone: number
   readonly runTotal: number
@@ -38,7 +41,7 @@ const resultKey = testResultKey
  */
 export class TestsModel {
   readonly #port: ModelsPort
-  #state: TestsState = { catalogs: {}, results: {}, running: false, runDone: 0, runTotal: 0, runFailed: 0, lastRunAt: '', error: '' }
+  #state: TestsState = { catalogs: {}, results: {}, running: false, profile: 'short', runDone: 0, runTotal: 0, runFailed: 0, lastRunAt: '', error: '' }
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #controller: AbortController | null = null
@@ -93,8 +96,12 @@ export class TestsModel {
    * batch publishes per-model events as they land, and one provider's failure
    * never stops the rest of the run.
    */
-  async run(targets: readonly TestTarget[]): Promise<void> {
+  async run(targets: readonly TestTarget[], profile: ModelTestProfile = 'short'): Promise<void> {
     if (this.#state.running) return
+    if (profile === 'full-128k' && !this.#port.testProfile) {
+      this.#set({ ...this.#state, profile, error: 'Full · 128k is not supported by the connected tester. Choose Short or update the application.' })
+      return
+    }
     const planned = targets.filter((target) => target.models.length > 0)
     if (planned.length === 0) return
     const generation = ++this.#generation
@@ -103,29 +110,39 @@ export class TestsModel {
     const controller = new AbortController()
     this.#controller = controller
     let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; controller.abort() }, RUN_TIMEOUT_MS * planned.length)
-    this.#set({ ...this.#state, running: true, runDone: 0, runFailed: 0, runTotal: planned.reduce((sum, target) => sum + target.models.length, 0), error: '' })
-    let failedProviders = 0
+    const batchCount = planned.reduce((sum, target) => sum + Math.ceil(target.models.length / TEST_BATCH), 0)
+    const runTimeout = profile === 'full-128k' ? FULL_RUN_TIMEOUT_MS : RUN_TIMEOUT_MS
+    const timer = setTimeout(() => { timedOut = true; controller.abort() }, runTimeout * batchCount)
+    this.#set({ ...this.#state, running: true, profile, runDone: 0, runFailed: 0, runTotal: planned.reduce((sum, target) => sum + target.models.length, 0), error: '' })
+    const results = { ...this.#state.results }
     for (const target of planned) {
-      if (controller.signal.aborted || generation !== this.#generation) break
-      // Rows go testing as their batch starts, not all at once: mid-run the
-      // table shows what is actually being measured.
-      const results = { ...this.#state.results }
       for (const model of target.models) {
         results[resultKey(target.providerId, model)] = { runId, providerId: target.providerId, model, state: 'testing', status: 0, latencyMs: 0 }
       }
-      this.#set({ ...this.#state, results })
+    }
+    this.#set({ ...this.#state, results })
+    let failedProviders = 0
+    for (const target of planned) {
+      if (controller.signal.aborted || generation !== this.#generation) break
       try {
-        await this.#port.test(target.providerId, runId, target.models, controller.signal)
-        this.#settle([target], runId, 'result_missing')
+        for (let offset = 0; offset < target.models.length; offset += TEST_BATCH) {
+          if (controller.signal.aborted || generation !== this.#generation) break
+          const batch = { ...target, models: target.models.slice(offset, offset + TEST_BATCH) }
+          if (this.#port.testProfile) await this.#port.testProfile(target.providerId, runId, batch.models, profile, controller.signal)
+          else await this.#port.test(target.providerId, runId, batch.models, controller.signal)
+          if (generation !== this.#generation) break
+          this.#settle([batch], runId, controller.signal.aborted ? (timedOut ? 'timeout' : 'interrupted') : 'result_missing')
+        }
       } catch {
         // One provider down must not strand the rest of the scope.
+        if (generation !== this.#generation) break
         failedProviders++
         this.#settle([target], runId, controller.signal.aborted ? (timedOut ? 'timeout' : 'interrupted') : 'provider_failed')
       }
     }
     clearTimeout(timer)
     if (generation !== this.#generation) return
+    if (controller.signal.aborted) this.#settle(planned, runId, timedOut ? 'timeout' : 'interrupted')
     this.#set({
       ...this.#state,
       running: false,

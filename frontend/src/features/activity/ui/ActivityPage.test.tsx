@@ -76,6 +76,39 @@ describe('ActivityPage rows and inspector', () => {
     expect(selected[1].getAttribute('tabindex')).toBe('0')
   })
 
+  it('keeps a visible keyboard entry when selection is filtered out, including empty and unfiltered results', () => {
+    show({ phase: 'ready', available: 2, requests: [request('a'), request('b', 'completed')], summary, error: '' })
+    const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLElement>('tbody tr[data-row]')]
+    fireEvent.click(rows()[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+    expect(rows()).toHaveLength(1)
+    expect(rows()[0].tabIndex).toBe(0)
+    expect(screen.getByRole('complementary').textContent).toContain('b')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelled' }))
+    expect(rows()).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    expect(rows().map((row) => row.tabIndex)).toEqual([-1, 0])
+    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+    rows()[0].focus()
+    fireEvent.keyDown(rows()[0], { key: 'Enter' })
+    expect(rows()[0].getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('falls back to the first live row after the selected request is evicted', () => {
+    mockUseActivity.mockReturnValue({ phase: 'ready', available: 2, requests: [request('a'), request('b')], summary, error: '' })
+    const view = render(<ActivityPage />)
+    const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLElement>('tbody tr[data-row]')]
+    fireEvent.click(rows()[1])
+    mockUseActivity.mockReturnValue({ phase: 'ready', available: 2, requests: [request('c'), request('a')], summary, error: '' })
+    view.rerender(<ActivityPage />)
+    expect(rows().map((row) => row.tabIndex)).toEqual([0, -1])
+    rows()[0].focus()
+    fireEvent.keyDown(rows()[0], { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(rows()[1])
+    fireEvent.keyDown(rows()[1], { key: 'Enter' })
+    expect(rows()[1].getAttribute('aria-selected')).toBe('true')
+  })
+
   it('moves focus with arrows and returns it to the row when the inspector closes', async () => {
     show({ phase: 'ready', available: 2, requests: [request('a'), request('b')], summary, error: '' })
     const first = screen.getByRole('table').querySelectorAll('tbody tr[data-row]')[0] as HTMLElement

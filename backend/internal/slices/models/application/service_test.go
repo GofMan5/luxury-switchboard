@@ -43,6 +43,18 @@ func TestModelTestResultCarriesItsRunID(t *testing.T) {
 		t.Fatalf("model result lost its run id: %+v", result)
 	}
 }
+func TestFullProfileDoesNotFallbackToLegacyGateway(t *testing.T) {
+	service, _ := NewService(testProviders{}, testGateway{})
+	published := make(chan domain.TestResult, 1)
+	service.OnTested(func(result domain.TestResult) { published <- result })
+	if _, err := service.TestWithProfile(context.Background(), "provider", "run-full", []string{"model"}, domain.TestProfileFull128K); err != nil {
+		t.Fatal(err)
+	}
+	result := <-published
+	if result.State != "unavailable" || result.ErrorCode != "profile_unsupported" {
+		t.Fatalf("full profile used a legacy short gateway: %+v", result)
+	}
+}
 
 type cancelledGateway struct{ started chan struct{} }
 

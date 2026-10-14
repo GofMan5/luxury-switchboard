@@ -238,6 +238,7 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor,
 	terminal := false
 	finished := false
 	brandState := streamBrandState{choices: make(map[int]bool)}
+	var streams streamStrings
 	for _, block := range blocks {
 		data := eventData(block)
 		if len(data) == 0 {
@@ -262,6 +263,9 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor,
 		if containsSensitiveJSON(clean, redactor, path) {
 			return nil, errors.New("sensitive SSE marker remains")
 		}
+		if err := streams.collect(clean, path); err != nil {
+			return nil, err
+		}
 		prefixStreamBrand(clean, path, brand, &brandState)
 		object, _ := clean.(map[string]any)
 		eventType, _ := object["type"].(string)
@@ -281,6 +285,9 @@ func sanitizeSSE(body []byte, path, publicModel string, redactor markerRedactor,
 		output.WriteString("data: ")
 		output.Write(encoded)
 		output.WriteString("\n\n")
+	}
+	if streams.sensitive(redactor) {
+		return nil, errors.New("sensitive logical SSE marker remains")
 	}
 	if !terminal && finished {
 		output.WriteString("data: [DONE]\n\n")

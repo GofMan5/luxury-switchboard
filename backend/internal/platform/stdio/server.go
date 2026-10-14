@@ -86,7 +86,9 @@ func (server *Server) Serve(ctx context.Context) error {
 	serveCtx, cancelServe := context.WithCancel(ctx)
 	defer cancelServe()
 	scanner := bufio.NewScanner(server.reader)
-	scanner.Buffer(make([]byte, 64*1024), MaxFrameBytes)
+	// Reserve CRLF and one oversized payload byte, so the explicit guard
+	// rejects cap+1 rather than terminating on an accepted cap-byte frame.
+	scanner.Buffer(make([]byte, 64*1024), MaxFrameBytes+3)
 	jobs := make(chan job, server.maxWorkers*2)
 	var group sync.WaitGroup
 	for range server.maxWorkers {
@@ -99,7 +101,6 @@ func (server *Server) Serve(ctx context.Context) error {
 		}()
 	}
 	defer func() {
-		cancelServe()
 		close(jobs)
 		group.Wait()
 	}()
@@ -149,6 +150,7 @@ func (server *Server) Serve(ctx context.Context) error {
 				continue
 			}
 			if request.Method == "system.shutdown" {
+				cancelServe()
 				_ = server.write(Response{Version: ProtocolVersion, ID: request.ID, Type: "result", Method: request.Method, OK: true})
 				return nil
 			}
@@ -217,6 +219,12 @@ func (server *Server) handleRequest(pending job) {
 	}()
 	defer server.finishJob(pending)
 	request := pending.request
+	// Cancellation prevents work that has not started; running handlers retain
+	// their context and own any rollback semantics.
+	if pending.ctx.Err() != nil {
+		_ = server.write(Failure(request, "cancelled", "Command cancelled"))
+		return
+	}
 	handler := server.handlers[request.Method]
 	if handler == nil {
 		_ = server.write(Failure(request, "method_not_found", "Unknown command"))
@@ -306,6 +314,9 @@ func (server *Server) write(value any) error {
 
 func decodeRequest(line []byte) (Request, error) {
 	request := Request{}
+	if len(line) > MaxFrameBytes {
+		return request, errFrameTooLarge
+	}
 	if len(bytes.TrimSpace(line)) == 0 {
 		return request, errors.New("empty frame")
 	}

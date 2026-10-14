@@ -69,9 +69,9 @@ export interface SettingsUpdateResult {
  */
 export const SETTINGS_DEFAULTS: Settings = {
   listenerPort: 8798,
-  maxRequestMiB: 64,
-  headerTimeoutSeconds: 45,
-  streamIdleSeconds: 60,
+  maxRequestMiB: 128,
+  headerTimeoutSeconds: 300,
+  streamIdleSeconds: 300,
   heartbeatSeconds: 15,
   retryBaseMilliseconds: 500,
   retryMaxSeconds: 30,

@@ -21,6 +21,7 @@ export class TunnelModel {
 
   async connect() {
     const generation = ++this.#generation
+    if (!this.#state.snapshot) this.#set({ ...this.#state, phase: 'loading', error: '' })
     this.#unsubscribe ??= this.#port.subscribe((snapshot) => {
       this.#generation++
       this.#set({ phase: 'ready', snapshot, pending: this.#state.pending, error: snapshot.error ?? '' })

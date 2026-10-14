@@ -38,7 +38,8 @@ type fakeKeyPool struct {
 	drops map[string]int
 }
 
-func (keys *fakeKeyPool) Count(id string) int { return keys.count[id] }
+func (keys *fakeKeyPool) InvalidateProvider(string) {}
+func (keys *fakeKeyPool) Count(id string) int       { return keys.count[id] }
 func (keys *fakeKeyPool) EnsureProvider(id string, rpm int, _ time.Duration) error {
 	if keys.rates == nil {
 		keys.rates = make(map[string]int)

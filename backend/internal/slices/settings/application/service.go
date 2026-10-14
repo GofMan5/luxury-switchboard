@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/settings/domain"
 )
@@ -30,6 +31,9 @@ type Service struct {
 
 	listenersMu sync.RWMutex
 	listeners   []func(domain.Settings)
+	// liveApply performs fallible runtime changes before durable commit and
+	// returns their rollback. Set once by the composition root before serving.
+	liveApply func(context.Context, domain.Settings, domain.Settings) (func(context.Context) error, error)
 }
 
 type UpdateResult struct {
@@ -95,7 +99,20 @@ func (service *Service) Update(ctx context.Context, settings domain.Settings) (U
 	if err := settings.Validate(); err != nil {
 		return UpdateResult{}, err
 	}
+	var rollback func(context.Context) error
+	if service.liveApply != nil {
+		var err error
+		rollback, err = service.liveApply(ctx, service.Snapshot(), settings)
+		if err != nil {
+			return UpdateResult{}, fmt.Errorf("settings could not be applied: %w", err)
+		}
+	}
 	if err := service.repository.Save(ctx, settings); err != nil {
+		if rollback != nil {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = errors.Join(err, rollback(rollbackCtx))
+			cancel()
+		}
 		return UpdateResult{}, fmt.Errorf("settings could not be saved: %w", err)
 	}
 	service.mu.Lock()
@@ -105,6 +122,13 @@ func (service *Service) Update(ctx context.Context, settings domain.Settings) (U
 	// queues, the stores and the probe in place. Nothing asks for a restart.
 	service.notifyApplied(settings)
 	return UpdateResult{Settings: settings, RestartRequired: false}, nil
+}
+
+// SetLiveApply installs the transactional, fallible part of a settings change.
+func (service *Service) SetLiveApply(apply func(context.Context, domain.Settings, domain.Settings) (func(context.Context) error, error)) {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	service.liveApply = apply
 }
 
 // OnApplied registers a listener for settings that take effect without a restart.

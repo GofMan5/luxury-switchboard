@@ -4,6 +4,7 @@ export interface RoutesPort {
   list(target: RouteTarget, signal?: AbortSignal): Promise<readonly ModelRoute[]>
   upsert(route: ModelRoute, signal?: AbortSignal): Promise<ModelRoute>
   upsertMany(routes: readonly ModelRoute[], signal?: AbortSignal): Promise<number>
+  remove(target: RouteTarget, publicModel: string, providerId: string, signal?: AbortSignal): Promise<void>
   delete(target: RouteTarget, publicModel: string, signal?: AbortSignal): Promise<void>
   subscribe(listener: (target: RouteTarget) => void): () => void
 }

@@ -106,6 +106,16 @@ type Dependencies struct {
 	Config         Config
 }
 
+type attemptMetadata struct {
+	route     relayapp.Route
+	prepare   func(relayapp.Route) ([]byte, error)
+	wholeJSON bool
+	image     bool
+	// billed holds generated usage when this ladder ends without a response.
+	billed           relayapp.TokenUsage
+	billedGeneration time.Duration
+}
+
 type Config struct {
 	MaxRequestBytes       int64
 	ResponseHeaderTimeout time.Duration
@@ -185,6 +195,7 @@ func (server *Server) Start() (domain.Snapshot, error) {
 }
 
 func (server *Server) Stop(ctx context.Context) error {
+	server.CancelActive()
 	server.mu.Lock()
 	httpServer := server.server
 	server.mu.Unlock()
@@ -215,9 +226,17 @@ func (server *Server) CancelActive() {
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ctx, cancel := server.requestContext(request.Context())
 	defer cancel()
-	body, err := readRequestBody(request, server.configSnapshot().MaxRequestBytes)
+	config := server.configSnapshot()
+	body, err := readInboundBody(ctx, writer, request, config.MaxRequestBytes, config.ResponseHeaderTimeout)
 	if err != nil {
-		writeError(writer, http.StatusRequestEntityTooLarge, "Request body is too large")
+		switch {
+		case ctx.Err() != nil:
+			writeError(writer, http.StatusServiceUnavailable, "Request cancelled")
+		case errors.Is(err, context.DeadlineExceeded):
+			writeError(writer, http.StatusRequestTimeout, "Request body timed out")
+		default:
+			writeError(writer, http.StatusRequestEntityTooLarge, "Request body is too large")
+		}
 		return
 	}
 	body, clientTools := normalizeResponsesTools(request.Method, request.URL.Path, request.Header.Get("Content-Type"), body)
@@ -236,116 +255,20 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	streamRequested := requiresStreamTerminal(request, body)
-	dispatchPath, preparedBody, imageCompat, imageErr := prepareImageRequest(request.Method, request.URL.Path, body, request.Header.Get("Content-Type"), route.UpstreamModel, route.ImageCompat)
-	if imageErr != nil {
-		writeError(writer, http.StatusBadRequest, "Image generation request is invalid")
+	originalBody := body
+	entryPath, preparedBody, imageCompat, chatCompat, responsesCompat, statelessJSON, preparedHeaders, prepareErr := server.prepareLocalAttempt(request, originalBody, route)
+	if prepareErr != nil {
+		writeError(writer, http.StatusBadRequest, "Compatibility request is invalid")
 		return
 	}
-	chatMode := route.Format == "chat" || (route.Format == "auto" && server.chatOnlyLoaded(route.ProviderID))
-	chatPath, chatBody, chatCompat, chatErr := prepareChatCompletions(request.Method, request.URL.Path, body, request.Header.Get("Content-Type"), route.ChatPath, chatMode)
-	if chatErr != nil {
-		writeError(writer, http.StatusBadRequest, "Chat completions compatibility request is invalid")
-		return
-	}
-	// A responses-format route speaks the Responses dialect upstream. Two
-	// client dialects reach it, and both are handled here so the switch
-	// below stays the single place that decides what the wire carries:
-	// a chat client is translated wholesale (the answer is translated back
-	// by the conversion on the response path), and a native Responses
-	// client on a stateless preset gets the codex wire contract shaped
-	// onto its own body, with the SSE answer folded back into the one
-	// JSON object a non-streaming client asked for.
-	clientCanonical := canonicalPath(request.URL.Path)
-	responsesCompat := route.Format == "responses" && chatDialectPath(clientCanonical)
-	statelessJSON := route.ResponsesStateless && responsesDialectPath(clientCanonical) && !streamRequested
-	// Both translations are computed only for the requests that need them:
-	// every other request through the switch below pays neither parse.
-	var responsesBody, statelessBody []byte
-	if responsesCompat {
-		translated, wireErr := chatRequestToResponses(body, route.ResponsesStateless)
-		if wireErr != nil {
-			writeError(writer, http.StatusBadRequest, "Chat completions request is invalid")
-			return
-		}
-		responsesBody = translated
-	}
-	if statelessJSON {
-		shaped, wireErr := shapeStatelessResponsesRequest(body)
-		if wireErr != nil {
-			writeError(writer, http.StatusBadRequest, "Responses request is invalid")
-			return
-		}
-		statelessBody = shaped
-	}
-	// The upstream request always gets its own URL. requestWithRetry rewrites the
-	// path in place when a provider turns out to be chat-only, and everything below
-	// - the terminal stream frame, the heartbeat dialect, the tool-call restoration
-	// - keys off request.URL.Path to answer in the dialect the client opened.
-	// Sharing the URL would answer a Responses caller in chat dialect the moment
-	// that rewrite happened.
+	body = preparedBody
 	upstreamRequest := new(http.Request)
 	*upstreamRequest = *request
 	targetURL := *request.URL
 	upstreamRequest.URL = &targetURL
-	switch {
-	case imageCompat:
-		body = preparedBody
-		targetURL.Path = dispatchPath
-		targetURL.RawPath = ""
-	case chatCompat:
-		body = chatBody
-		if route.UpstreamModel != "" && route.UpstreamModel != model {
-			body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
-		}
-		targetURL.Path = chatPath
-		targetURL.RawPath = ""
-	case responsesCompat:
-		// The translated body speaks the Responses dialect, so the upstream
-		// path must name it: the preset owns where its Responses API lives
-		// (the default covers a route configured without one), and the
-		// client's own spelling described only the dialect it speaks.
-		body = responsesBody
-		if route.UpstreamModel != "" && route.UpstreamModel != model {
-			body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
-		}
-		if route.ResponsesPath != "" {
-			targetURL.Path = route.ResponsesPath
-		} else {
-			targetURL.Path = "/v1/responses"
-		}
-		targetURL.RawPath = ""
-	case statelessJSON:
-		body = statelessBody
-	case route.UpstreamModel != "" && route.UpstreamModel != model:
-		body = rewriteRequestModel(body, request.Header.Get("Content-Type"), route.UpstreamModel)
-	}
-	// A native chat caller (no translation — the client spoke the chat
-	// dialect itself) still has to be metered, and the meter needs the
-	// provider to report usage: an OpenAI-compatible chat stream carries
-	// tokens ONLY on request. The translated branch asks in
-	// prepareChatCompletions; this is the same ask for the body the client
-	// wrote itself. A client that already asked keeps its own options. The
-	// responses translations skip it on purpose: they carry no chat options,
-	// and the stateless contract sets its own usage accounting fields.
-	if !chatCompat && !imageCompat && !responsesCompat && !statelessJSON {
-		body = ensureStreamUsage(body, request.Header.Get("Content-Type"), request.URL.Path)
-	}
-	if route.CacheTTL >= time.Hour {
-		extended, carriesHour := extendCacheTTL(body, request.Header.Get("Content-Type"))
-		body = extended
-		if carriesHour {
-			// upstreamRequest was copied from the client's request and still shares its
-			// header map, so the declaration gets its own copy rather than being written
-			// into what the caller sent us.
-			upstreamRequest.Header = request.Header.Clone()
-			declareBetaFeature(upstreamRequest.Header, extendedCacheTTLBeta)
-		}
-	}
-	// The path this request starts on: whatever the entry translations above
-	// chose, before requestWithRetry rewrites it in place. A guardrail re-roll
-	// restores it, because the retry ladder can only re-derive a translation
-	// from the path it started on.
-	entryPath := upstreamRequest.URL.Path
+	upstreamRequest.URL.Path = entryPath
+	upstreamRequest.URL.RawPath = ""
+	upstreamRequest.Header = preparedHeaders
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Method: request.Method, Path: request.URL.Path, BytesIn: int64(len(body)),
@@ -357,11 +280,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	errorDetail := ""
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
+	serving := attemptMetadata{route: route}
 	defer func() {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: status, BytesOut: bytesOut, Cancelled: cancelled, ErrorCode: errorCode,
 			ErrorDetail: errorDetail,
-			Usage:       usage, Generation: generation,
+			ProviderID:  serving.route.ProviderID, ProviderName: serving.route.ProviderName,
+			Usage: usage, Generation: generation,
 		})
 	}()
 	committed := false
@@ -381,6 +306,22 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// The provider's own words for the terminal failure, filed into history
 	// below. The client body stays neutral; this travels out-of-band.
 	var upstreamDetail string
+	serving.prepare = func(next relayapp.Route) ([]byte, error) {
+		path, wire, image, chat, responses, stateless, headers, err := server.prepareLocalAttempt(request, originalBody, next)
+		if err != nil {
+			return nil, err
+		}
+		upstreamRequest.URL.Path = path
+		upstreamRequest.URL.RawPath = ""
+		upstreamRequest.Header = headers
+		imageCompat, chatCompat, responsesCompat, statelessJSON = image, chat, responses, stateless
+		serving.wholeJSON = stateless || (responses && !clientStream)
+		serving.image = image
+		chatActive, responsesActive = chat, responses
+		bufferTerminal = clientStream || image || chat || responses || stateless
+		entryPath = path
+		return wire, nil
+	}
 	if clientStream {
 		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
@@ -413,11 +354,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// that object may be taken at its word — a streaming caller is not
 		// that client and keeps its own ladder.
 		wholeJSONExpected := statelessJSON || (responsesCompat && !clientStream)
-		return server.requestWithRetry(requestCtx, upstreamRequest, body, route, activityID, &bufferTerminal, 0, func(credential relayapp.Credential) {
+		return server.requestWithRetry(requestCtx, upstreamRequest, body, serving.route, activityID, &bufferTerminal, 0, func(credential relayapp.Credential) {
 			// Kept so the answer's headers can be checked against it: a provider that
 			// echoes the key we sent it must not hand that key to the client.
 			secrets = sensitiveCredentialMarkers(credential)
-		}, &chatActive, &responsesActive, &upstreamDetail, publicModel, liveAllowed, wholeJSONExpected)
+		}, &chatActive, &responsesActive, &upstreamDetail, publicModel, liveAllowed, wholeJSONExpected, &serving)
 	}
 	var response *http.Response
 	// serveLiveStream copies one live answer to the client and reports
@@ -434,7 +375,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
 					cancelled = true
 					errorCode = "client_disconnected"
-					errorDetail = writeErr.Error()
+					errorDetail = "Client connection closed"
 					return false
 				}
 				bytesOut += int64(count)
@@ -454,11 +395,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				if errors.Is(readErr, context.Canceled) {
 					cancelled = true
 					errorCode = "client_disconnected"
-					errorDetail = readErr.Error()
+					errorDetail = transportErrorDetail(readErr)
 					return false
 				}
 				errorCode = "stream_incomplete"
-				errorDetail = readErr.Error()
+				errorDetail = transportErrorDetail(readErr)
 				return true
 			}
 		}
@@ -493,18 +434,29 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// chat path — a payload the chat endpoint can only refuse, on a path the
 		// discovery trigger no longer matches. Restoring the entry path lets the
 		// ladder re-derive the translation exactly as the first attempt did.
+		if attempt > 0 {
+			var prepareErr error
+			body, prepareErr = serving.prepare(serving.route)
+			if prepareErr != nil {
+				writeStreamFailure(writer, request.URL.Path, model)
+				return
+			}
+		}
 		bufferTerminal = clientStream || imageCompat || chatCompat || responsesCompat || statelessJSON
 		upstreamRequest.URL.Path = entryPath
 		upstreamRequest.URL.RawPath = ""
 		chatActive = chatCompat
 		responsesActive = responsesCompat
 		refusedUsage := usage
+		refusedGeneration := generation
 		if clientStream {
 			response, err = server.withHeartbeat(ctx, heartbeat, requestUpstream)
 		} else {
 			response, err = requestUpstream(ctx)
 		}
 		if err != nil {
+			usage = usageWith(refusedUsage, serving.billed)
+			generation = refusedGeneration + serving.billedGeneration
 			if committed {
 				cancelled = errors.Is(err, context.Canceled) || errors.Is(err, errClientDisconnected)
 				// A cancelled client is not a broken stream: the provider
@@ -516,7 +468,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				} else {
 					errorCode = "stream_incomplete"
 				}
-				errorDetail = err.Error()
+				errorDetail = transportErrorDetail(err)
 				writeStreamFailure(writer, request.URL.Path, model)
 				return
 			}
@@ -524,12 +476,12 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				status = http.StatusServiceUnavailable
 				cancelled = true
 				errorCode = "cancelled"
-				errorDetail = err.Error()
+				errorDetail = transportErrorDetail(err)
 				writeError(writer, http.StatusServiceUnavailable, "Request cancelled")
 			} else {
 				status = http.StatusBadGateway
 				errorCode = "transport"
-				errorDetail = err.Error()
+				errorDetail = transportErrorDetail(err)
 				writeError(writer, http.StatusBadGateway, "Provider is unavailable")
 			}
 			return
@@ -559,14 +511,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				errorDetail = filedErrorDetail(response, fmt.Sprintf("provider returned HTTP %d", status), secrets, body)
 			}
 		}
+		usage = usageWith(refusedUsage, usageFromHeaders(response.Header))
+		generation = refusedGeneration + durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
+		removeUsageHeaders(response.Header)
 		if status >= 400 && committed {
 			response.Body.Close()
 			writeStreamFailure(writer, request.URL.Path, model)
 			return
 		}
-		usage = usageWith(refusedUsage, usageFromHeaders(response.Header))
-		generation = durationHeader(response.Header, "X-Switchboard-Generation-Nanoseconds")
-		removeUsageHeaders(response.Header)
 		// A rejected request already carries a neutral error body; translating it
 		// would replace the reason with an empty "completed" response.
 		if chatActive && status < 400 {
@@ -576,7 +528,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if readErr != nil || int64(len(raw)) > limit {
 				status = http.StatusBadGateway
 				errorCode = "chat_compatibility"
-				errorDetail = errorText(readErr, "Chat completions stream could not be converted")
+				errorDetail = "Chat completions stream could not be converted"
 				if committed {
 					writeStreamFailure(writer, request.URL.Path, model)
 				} else {
@@ -596,6 +548,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				}
 				return
 			}
+			if finalTerminal := finalAnswerTerminal(converted, request.URL.Path); finalTerminal != "" {
+				errorCode, errorDetail = terminalActivityDetail(finalTerminal, converted, secrets, body)
+			}
 			response.Body = io.NopCloser(bytes.NewReader(converted))
 			response.ContentLength = int64(len(converted))
 			if clientStream {
@@ -613,14 +568,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// response.* events, whichever the wire carried) is converted into
 		// the client's own dialect — finish reasons, refusals and truncated
 		// answers ride as chat semantics, never dropped.
-		if responsesCompat && status < 400 {
+		if responsesActive && status < 400 {
 			limit := responseBufferLimit(server.configSnapshot())
 			raw, readErr := io.ReadAll(io.LimitReader(response.Body, limit+1))
 			response.Body.Close()
 			if readErr != nil || int64(len(raw)) > limit {
 				status = http.StatusBadGateway
 				errorCode = "responses_compatibility"
-				errorDetail = errorText(readErr, "Responses stream could not be converted")
+				errorDetail = "Responses stream could not be converted"
 				if committed {
 					writeStreamFailure(writer, request.URL.Path, model)
 				} else {
@@ -639,6 +594,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 					writeError(writer, http.StatusBadGateway, "Responses response could not be converted")
 				}
 				return
+			}
+			if finalTerminal := finalAnswerTerminal(converted, request.URL.Path); finalTerminal != "" {
+				errorCode, errorDetail = terminalActivityDetail(finalTerminal, converted, secrets, body)
 			}
 			response.Body = io.NopCloser(bytes.NewReader(converted))
 			response.ContentLength = int64(len(converted))
@@ -663,7 +621,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if readErr != nil || int64(len(raw)) > limit {
 				status = http.StatusBadGateway
 				errorCode = "responses_compatibility"
-				errorDetail = errorText(readErr, "Responses answer could not be folded")
+				errorDetail = "Responses answer could not be folded"
 				writeError(writer, http.StatusBadGateway, "Responses answer could not be folded")
 				return
 			}
@@ -688,7 +646,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if readErr != nil || len(raw) > maxImageResponse || convertErr != nil {
 				status = http.StatusBadGateway
 				errorCode = "image_generation"
-				errorDetail = errorText(convertErr, errorText(readErr, "Image generation response could not be converted"))
+				errorDetail = "Image generation response could not be converted"
 				writeError(writer, http.StatusBadGateway, "Image generation failed")
 				return
 			}
@@ -719,9 +677,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				// may have already reported usage, and a discarded
 				// generation is still billed.
 				usage = usageWith(usage, streamUsage)
-				generation = streamGeneration
+				generation += streamGeneration
 				server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
-					ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+					ProviderID: serving.route.ProviderID, ProviderName: serving.route.ProviderName, Model: model,
 					ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
 				})
 				// Only when nothing more specific was already filed: a client
@@ -793,7 +751,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		// still rewriting.
 		var blocked bool
 		code, blocked = server.reviewResponse(response, request.URL.Path, relayapp.GuardrailSubject{
-			ProviderID: route.ProviderID, ProviderName: route.ProviderName, Model: model,
+			ProviderID: serving.route.ProviderID, ProviderName: serving.route.ProviderName, Model: model,
 			ClientDeclaredTools: clientDeclaredTools,
 			// The markers of the credential in flight, so a provider that echoes
 			// the key it was sent does not get it recorded as evidence: the
@@ -854,7 +812,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
 				cancelled = true
 				errorCode = "client_disconnected"
-				errorDetail = writeErr.Error()
+				errorDetail = "Client connection closed"
 				return
 			}
 			bytesOut += int64(count)
@@ -867,7 +825,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		if readErr != nil {
 			errorCode = "stream_incomplete"
-			errorDetail = readErr.Error()
+			errorDetail = transportErrorDetail(readErr)
 			return
 		}
 	}
@@ -981,21 +939,24 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
 	var upstreamDetail string
+	serving := attemptMetadata{route: route}
 	// Same contract as ServeHTTP's dispatch: one JSON object is an answer
 	// only for the caller that asked for one.
 	wholeJSONExpected := statelessJSON || (responsesCompat && !streamRequested)
 	response, err := server.requestWithRetry(ctx, incoming, body, route, activityID, &terminalStream, request.AttemptLimit, func(credential relayapp.Credential) {
 		markers = sensitiveCredentialMarkers(credential)
-	}, &chatActive, &responsesActive, &upstreamDetail, "", false, wholeJSONExpected)
+	}, &chatActive, &responsesActive, &upstreamDetail, "", false, wholeJSONExpected, &serving)
 	// The empty public model above is deliberate: Dispatch is pinned routing —
 	// the tunnel and the model test ask for one provider by name, and the
 	// tunnel's privacy markers are computed for exactly that route. A chain
 	// switch mid-dispatch would serve a provider the public boundary never
 	// vetted, so terminal verdicts stay final here.
 	if err != nil {
+		usage = serving.billed
+		generation = serving.billedGeneration
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, Cancelled: errors.Is(err, context.Canceled),
-			ErrorCode: "transport", ErrorDetail: truncateErrorDetail(redactSecrets(err.Error(), markers)),
+			ErrorCode: "transport", ErrorDetail: transportErrorDetail(err),
 			Usage: usage, Generation: generation,
 		})
 		return relayapp.DispatchResponse{}, err
@@ -1008,7 +969,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	if err != nil || int64(len(responseBody)) > limit {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: response.StatusCode, ErrorCode: "stream_incomplete",
-			ErrorDetail: truncateErrorDetail(redactSecrets(errorText(err, "response exceeded the buffer limit"), markers)),
+			ErrorDetail: "Provider response could not be read within the buffer limit",
 			Usage:       usage, Generation: generation,
 		})
 		return relayapp.DispatchResponse{}, errIncompleteSSE
@@ -1085,6 +1046,9 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 		response.Header.Del("Content-Encoding")
 	}
 	terminal := response.Header.Get("X-Switchboard-Terminal")
+	if finalTerminal := finalAnswerTerminal(responseBody, request.Path); finalTerminal != "" {
+		terminal = finalTerminal
+	}
 	removeUsageHeaders(response.Header)
 	response.Header.Del("X-Switchboard-Terminal")
 	// The label is not evidence about the bytes (see bodyLooksLikeEventStream),
@@ -1114,6 +1078,17 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	}
 	dispatchError := ""
 	dispatchDetail := ""
+	switch terminal {
+	case terminalRefused:
+		dispatchError = "policy_refusal"
+		dispatchDetail = filedErrorDetail(response, "Provider response was refused", markers, body)
+	case "response.incomplete":
+		dispatchError = "stream_incomplete"
+		dispatchDetail = filedErrorDetail(response, "Provider stream ended incomplete", markers, body)
+	case "response.failed":
+		dispatchError = "upstream_status"
+		dispatchDetail = filedErrorDetail(response, "Provider reported a failed response", markers, body)
+	}
 	if response.StatusCode >= 400 {
 		dispatchError = "request_rejected"
 		// Same rule as the local path above: the provider's own words when it
@@ -1161,7 +1136,7 @@ func (server *Server) noteLearnedShape(providerID string, learned providerAdjust
 	_ = server.repairs.persist(server.memoPath)
 }
 
-func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, responsesActive *bool, upstreamDetail *string, publicModel string, liveAllowed bool, wholeJSONExpected bool) (*http.Response, error) {
+func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Request, body []byte, route relayapp.Route, activityID string, terminalStream *bool, attemptLimit int, onCredential func(relayapp.Credential), chatActive *bool, responsesActive *bool, upstreamDetail *string, publicModel string, liveAllowed bool, wholeJSONExpected bool, serving *attemptMetadata) (result *http.Response, resultErr error) {
 	// A retried call starts wordless: the detail below always describes the
 	// attempt this call ended on, never a previous call's verdict.
 	if upstreamDetail != nil {
@@ -1192,6 +1167,26 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	// What the attempts before this one cost. A retried answer was still generated and
 	// still billed, so its tokens belong to the request even though nobody read it.
 	discarded := relayapp.TokenUsage{}
+	generatedDuration := time.Duration(0)
+	if serving != nil {
+		serving.billed = relayapp.TokenUsage{}
+		serving.billedGeneration = 0
+	}
+	defer func() {
+		if resultErr != nil {
+			if serving != nil {
+				serving.billed = discarded
+				serving.billedGeneration = generatedDuration
+			}
+			return
+		}
+		// Generic errors, non-JSON bodies and live handoffs used to drop the
+		// cost accumulated before them. Prepared buffered responses already
+		// carry the total and must not be billed a second time.
+		if result != nil && result.Header.Get(usageHeaderNames[0]) == "" {
+			setUsageHeaders(result.Header, discarded, generatedDuration)
+		}
+	}()
 	model := requestModel(body, incoming.Header.Get("Content-Type"))
 	// rotateImmediate carries a credential rotation into the next iteration
 	// without queueing: the rotation takes over only from a key that is free
@@ -1224,10 +1219,22 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		if err != nil || !ok {
 			return false
 		}
-		if next.UpstreamModel != "" && next.UpstreamModel != requestModel(body, incoming.Header.Get("Content-Type")) {
+		if serving != nil && serving.prepare != nil {
+			prepared, prepareErr := serving.prepare(next)
+			if prepareErr != nil {
+				return false
+			}
+			body = prepared
+			wholeJSONExpected = serving.wholeJSON
+		} else if next.UpstreamModel != "" {
 			body = rewriteRequestModel(body, incoming.Header.Get("Content-Type"), next.UpstreamModel)
-			model = next.UpstreamModel
 		}
+		body = server.repairs.apply(next.ProviderID, body)
+		model = requestModel(body, incoming.Header.Get("Content-Type"))
+		fallbackPath = canonicalPath(incoming.URL.Path)
+		fallbackActive = false
+		streamFailures = 0
+		learned = providerAdjustments{}
 		if server.routeEvents != nil {
 			server.routeEvents.FailoverOccurred(route.ProviderName, next.ProviderName, publicModel)
 		}
@@ -1236,22 +1243,18 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		congestionAnswers = 0
 		serverFailures, credentialFailures, requestFailures = 0, 0, 0
 		rotateImmediate = false
-		// The new provider's dialect is unknown to the probe cache: let the
-		// endpoint-missing logic re-evaluate instead of trusting the old one.
-		if chatActive != nil {
-			*chatActive = false
-		}
-		// Same for the responses direction: the sibling was not configured
-		// for the translated dialect, and a conversion that runs on an
-		// answer the sibling produces in its own dialect is a silent
-		// mangling, not a compatibility.
-		if responsesActive != nil {
-			*responsesActive = false
-		}
 		server.observeRetry(activityID, attempt, status, 0)
 		return true
 	}
 	for ; ; attempt++ {
+		// Error prose belongs to this attempt. In particular, the bodyless
+		// 429 path must not retain a previous key's authentication message.
+		if upstreamDetail != nil {
+			*upstreamDetail = ""
+		}
+		if serving != nil {
+			serving.route = route
+		}
 		var lease relayapp.CredentialLease
 		var credential relayapp.Credential
 		if rotateImmediate {
@@ -1298,6 +1301,10 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			continue
 		}
+		// Accounting and terminal headers are relay-owned metadata, never
+		// provider evidence. Clear them before any untouched live/raw handoff.
+		removeUsageHeaders(response.Header)
+		response.Header.Del("X-Switchboard-Terminal")
 		status := response.StatusCode
 		if status >= 200 && status < 400 {
 			if status >= 300 {
@@ -1322,7 +1329,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				// flags — the path here is already rewritten), and the
 				// tunnel's dispatch reads the body back for sanitization.
 				liveAfter := time.Duration(0)
-				if liveAllowed && server.canStreamLive(incoming, body, chatActive, route.ProviderID) {
+				if liveAllowed && (serving == nil || !serving.image) && (responsesActive == nil || !*responsesActive) && !route.ResponsesStateless && server.canStreamLive(incoming, body, chatActive, route.ProviderID) {
 					liveAfter = server.liveStreamProbation()
 				}
 				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter)
@@ -1332,7 +1339,16 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					// concurrency accounting counts it for as long as it
 					// runs — exactly what the buffered path's hold bought.
 					liveBody.started = attemptStarted
-					liveBody.release = func() { finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess}) }
+					liveBody.release = func() {
+						kind := relayapp.AttemptSuccess
+						switch liveBody.terminal() {
+						case "":
+							kind = relayapp.AttemptTransport
+						case "response.failed", "response.incomplete", "response.invalid", terminalRefused:
+							kind = relayapp.AttemptRequestError
+						}
+						finishLease(lease, relayapp.AttemptOutcome{Kind: kind})
+					}
 					// The shape the provider accepted is worth learning here
 					// too: a probe 400 repaired into a live success teaches
 					// the next request, or it re-pays the probe the memo
@@ -1341,7 +1357,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					response.Body = liveBody
 					return response, nil
 				}
+				generatedDuration += time.Since(attemptStarted)
 				if bufferErr != nil {
+					addDiscardedUsage(&discarded, streamUsage)
 					outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport}
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
 						outcome.Kind = relayapp.AttemptRequestError
@@ -1378,12 +1396,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 							response.Header.Del("Content-Length")
 							response.Header.Del("Content-Encoding")
 							response.Header.Set("X-Switchboard-Terminal", terminal)
-							addDiscardedUsage(&discarded, streamUsage)
-							setUsageHeaders(response.Header, discarded, time.Since(attemptStarted))
+							setUsageHeaders(response.Header, discarded, generatedDuration)
 							return response, nil
 						}
-						// The half-stream is thrown away, but the provider generated it.
-						addDiscardedUsage(&discarded, streamUsage)
 						delay := retryDelay(attempt, nil, server.configSnapshot())
 						server.observeRetry(activityID, attempt, http.StatusOK, delay)
 						if err := waitRetry(ctx, delay); err != nil {
@@ -1429,13 +1444,17 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.Header.Del("Content-Encoding")
 				response.Header.Set("X-Switchboard-Terminal", terminal)
 				addDiscardedUsage(&discarded, streamUsage)
-				setUsageHeaders(response.Header, discarded, time.Since(attemptStarted))
+				setUsageHeaders(response.Header, discarded, generatedDuration)
 				server.noteLearnedShape(route.ProviderID, learned)
 				return response, nil
 			}
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") || expectsJSONResponse(incoming.URL.Path) {
 				buffered, bufferErr := bufferJSONResponse(ctx, response, server.configSnapshot())
+				generatedDuration += time.Since(attemptStarted)
 				if bufferErr != nil {
+					if json.Valid(buffered) {
+						addDiscardedUsage(&discarded, usageFromJSON(buffered))
+					}
 					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 					if errors.Is(bufferErr, errResponseTooLarge) {
 						return nil, bufferErr
@@ -1456,6 +1475,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if fallbackActive {
 					fallbackSSE, fallbackTerminal, bufferErr = responsesJSONToSSE(buffered)
 					if bufferErr != nil {
+						addDiscardedUsage(&discarded, usageFromJSON(buffered))
 						finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 						if !canRetry(attempt, attemptLimit) {
 							return nil, bufferErr
@@ -1510,7 +1530,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
 				}
 				response.Header.Del("Content-Encoding")
-				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), time.Since(attemptStarted))
+				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), generatedDuration)
 				server.noteLearnedShape(route.ProviderID, learned)
 				return response, nil
 			}
@@ -1519,9 +1539,8 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			return response, nil
 		}
 
-		// A 429 or 529 needs no prose: the status alone is the throttle verdict, so
-		// the key rotates without paying for a body read and scan. Draining (not
-		// reading) keeps the connection reusable without retaining the body.
+		// A 429 or 529 needs no prose: close immediately. Draining a silent
+		// error body would spend time without changing the throttle verdict.
 		if status == http.StatusTooManyRequests || status == 529 {
 			delay := retryDelay(attempt, response, server.configSnapshot())
 			finishLease(lease, relayapp.AttemptOutcome{
@@ -1541,7 +1560,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// lowered once for the classifiers below. A 402 never reaches the rate
 		// branch: the provider's billing verdict stays authoritative even when
 		// its prose mentions limits (see balanceUnavailable).
-		errorBody := readErrorBody(response)
+		errorBody, readErr := readErrorBody(ctx, response, server.configSnapshot().StreamIdleTimeout)
+		if readErr != nil {
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+			return nil, readErr
+		}
 		// The response that leaves the relay stays neutral by design; the
 		// provider's own words travel out-of-band instead, so history shows the
 		// reason ("Budget pool quota has been exhausted") rather than a bare
@@ -1781,20 +1804,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			return genericErrorResponse(status), nil
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
-			// The first refusal cools the key that produced it. A second refusal
-			// inside the same request is evidence about the verdict, not the key:
-			// every key answers the same way, so the key stays usable for other
-			// requests and only this one pays.
-			outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError}
-			if credentialFailures == 0 {
-				outcome.Kind = relayapp.AttemptAuthentication
-				// The provider's own code and message ride the first refusal
-				// only: interpreting them is the credential source's decision
-				// to make, not the relay's, and the second refusal's outcome
-				// is evidence about the verdict, not another chance to read
-				// the body.
-				outcome.ErrorCode, outcome.ErrorMessage = authErrorDetail(errorBody)
-			}
+			// Every selected credential owns its authentication verdict. Filing
+			// later refusals as request errors left the second priority key
+			// eligible, so the real scheduler retried it and never reached the
+			// third. Client/model-specific refusals were classified above.
+			outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptAuthentication}
+			outcome.ErrorCode, outcome.ErrorMessage = authErrorDetail(errorBody)
 			finishLease(lease, outcome)
 			credentialFailures++
 			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures, route.ProviderID) {
@@ -1828,7 +1843,8 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			// every request until someone notices — which is exactly how long the pool
 			// had to survive it.
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
-			if chatPathFallback(incoming.URL.Path, route.ChatPath) {
+			if chatPathFallback(incoming.URL.Path, route.ChatPath) && canRetry(attempt, attemptLimit) {
+				server.observeRetry(activityID, attempt, status, 0)
 				incoming.URL.Path = chatCompletionFallbackPath
 				incoming.URL.RawPath = ""
 				continue
@@ -1840,7 +1856,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		// 404 ladder here would translate it back down into a dialect the
 		// conversion on the response path no longer expects. A preset that
 		// names its Responses endpoint does not need endpoint discovery.
-		case status == http.StatusNotFound && route.Format == "auto" && (responsesActive == nil || !*responsesActive) && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && responsesDialectPath(canonicalPath(incoming.URL.Path)):
+		case status == http.StatusNotFound && route.Format == "auto" && canRetry(attempt, attemptLimit) && (responsesActive == nil || !*responsesActive) && !modelUnavailable(errorBody, model, status) && endpointMissing404(status, errorBody) && responsesDialectPath(canonicalPath(incoming.URL.Path)):
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 			server.chatOnly.Store(route.ProviderID, struct{}{})
 			chatPath, translated, ok, chatErr := prepareChatCompletions(incoming.Method, incoming.URL.Path, body, incoming.Header.Get("Content-Type"), route.ChatPath, true)
@@ -1857,6 +1873,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if chatActive != nil {
 				*chatActive = true
 			}
+			server.observeRetry(activityID, attempt, status, 0)
 			continue
 		}
 
@@ -2356,6 +2373,33 @@ func buildUpstreamRequest(ctx context.Context, incoming *http.Request, body []by
 	return request, nil
 }
 
+// The body belongs to net/http, whose Close may wait for a blocked read. A
+// socket read deadline interrupts that read before Close; context alone cannot.
+func readInboundBody(ctx context.Context, writer http.ResponseWriter, request *http.Request, maxBytes int64, timeout time.Duration) ([]byte, error) {
+	if request.Body == nil {
+		return nil, nil
+	}
+	controller := http.NewResponseController(writer)
+	_ = controller.SetReadDeadline(time.Now().Add(timeout))
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(readCtx, func() {
+		defer close(closed)
+		_ = controller.SetReadDeadline(time.Now())
+		_ = request.Body.Close()
+	})
+	body, err := readRequestBody(request, maxBytes)
+	if !stop() {
+		<-closed
+	}
+	_ = controller.SetReadDeadline(time.Time{})
+	if readCtx.Err() != nil {
+		return nil, readCtx.Err()
+	}
+	return body, err
+}
+
 func readRequestBody(request *http.Request, maxRequestBytes int64) ([]byte, error) {
 	if request.Body == nil {
 		return nil, nil
@@ -2518,12 +2562,21 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	idle := time.NewTimer(config.StreamIdleTimeout)
 	defer idle.Stop()
 	var probation <-chan time.Time
+	probationElapsed := false
 	if liveAfter > 0 {
 		probation = time.After(liveAfter)
 	}
 	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
-	inspector := &sseInspector{path: canonicalPath(path)}
+	inspector := &sseInspector{path: canonicalPath(path), limit: limit}
+	reportedUsage := func() relayapp.TokenUsage {
+		// Wrong framing can justify a retry, never erasing an already billed
+		// whole JSON answer. Invalid/truncated JSON is not usage evidence.
+		if json.Valid(buffered) {
+			return usageFromJSON(buffered)
+		}
+		return inspector.usage
+	}
 	// handoffLive transfers ownership of the reader goroutine, its channel
 	// and the provider's body to a live body built over the bytes read so
 	// far. Called from two places: the probation timer (a silent prefill —
@@ -2574,8 +2627,9 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 		select {
 		case <-ctx.Done():
 			response.Body.Close()
-			return "", nil, relayapp.TokenUsage{}, nil, ctx.Err()
+			return "", nil, reportedUsage(), nil, ctx.Err()
 		case <-probation:
+			probationElapsed = true
 			// The gate reads the prefix for positive evidence, not absence
 			// of triggers: chat-family dialects have no Responses item
 			// lifecycle to repair, so the window alone decides; a Responses
@@ -2585,39 +2639,47 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			// finished, is exactly what the repair exists to rewrite, and a
 			// client cannot read raw bytes the relay was going to fix.
 			if !livePrefixReady(canonicalPath(path), buffered) {
+				// A Responses stream whose lifecycle is not open yet keeps the
+				// prefix buffered, but the elapsed window remains eligible: a
+				// late output_item.added event can still prove that live delivery
+				// is safe. Only the timer channel is disabled, so this select does
+				// not repeatedly wake on the same deadline.
 				probation = nil
 				continue
 			}
-			// The stream has been silent for the whole window: a prefill.
 			// Go live with an empty prefix so the keep-alives start feeding
 			// the client while the provider thinks.
 			return handoffLive()
 		case <-idle.C:
 			response.Body.Close()
-			return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
+			return "", nil, reportedUsage(), nil, errIncompleteSSE
 		case result, open := <-reads:
 			// A closed channel without a pending value is the goroutine's
 			// exit. The zero bodyRead a bare receive yields here would
 			// busy-spin this loop against ctx.Done; the stashed reason
 			// settles it in one step.
 			if !open {
-				return "", nil, relayapp.TokenUsage{}, nil, abandonedStreamReason(&exit, readCtx)
+				return "", nil, reportedUsage(), nil, abandonedStreamReason(&exit, readCtx)
 			}
 			if len(result.chunk) > 0 {
 				if int64(len(buffered))+int64(len(result.chunk)) > limit {
 					response.Body.Close()
-					return "", nil, relayapp.TokenUsage{}, nil, errResponseTooLarge
+					return "", nil, reportedUsage(), nil, errResponseTooLarge
 				}
 				buffered = append(buffered, result.chunk...)
 				previousTerminal := inspector.terminal
 				if terminal := inspector.Feed(result.chunk); terminal != "" && previousTerminal == "" {
+					buffered = buffered[:len(buffered)-len(result.chunk)+inspector.consumed]
+					if inspector.overflow {
+						return "", nil, reportedUsage(), nil, errResponseTooLarge
+					}
 					if terminal == "response.invalid" {
-						return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
+						return "", nil, reportedUsage(), nil, errIncompleteSSE
 					}
 					if inspector.retryableFailure() {
-						return terminal, buffered, inspector.usage, nil, errRetryableSSEFailure
+						return terminal, buffered, reportedUsage(), nil, errRetryableSSEFailure
 					}
-					return inspector.reason(), buffered, inspector.usage, nil, nil
+					return inspector.reason(), buffered, reportedUsage(), nil, nil
 				}
 				// The first real content is the honest handoff moment: the
 				// provider has started generating, the client's wait ends
@@ -2629,7 +2691,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				// path: it is not an event stream, and delivering it raw
 				// into one is the lie the guards below exist to prevent.
 				// The gate itself refuses what the repair still owns.
-				if probation != nil && bodyLooksLikeEventStream(buffered) && livePrefixReady(canonicalPath(path), buffered) {
+				if (probation != nil || probationElapsed) && bodyLooksLikeEventStream(buffered) && livePrefixReady(canonicalPath(path), buffered) {
 					return handoffLive()
 				}
 				if !idle.Stop() {
@@ -2643,13 +2705,16 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 			if result.err != nil {
 				previousTerminal := inspector.terminal
 				if terminal := inspector.Finish(); terminal != "" && previousTerminal == "" {
+					if inspector.overflow {
+						return "", nil, reportedUsage(), nil, errResponseTooLarge
+					}
 					if terminal == "response.invalid" {
-						return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
+						return "", nil, reportedUsage(), nil, errIncompleteSSE
 					}
 					if inspector.retryableFailure() {
-						return terminal, buffered, inspector.usage, nil, errRetryableSSEFailure
+						return terminal, buffered, reportedUsage(), nil, errRetryableSSEFailure
 					}
-					return inspector.reason(), buffered, inspector.usage, nil, nil
+					return inspector.reason(), buffered, reportedUsage(), nil, nil
 				}
 				// An aggregator that ignores the stream flag answers the request
 				// as one JSON chat completion. That body is the answer, not a
@@ -2680,7 +2745,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 				if terminal, _, complete := responsesCompletionBody(buffered); complete && wholeJSONExpected {
 					return terminal, buffered, usageFromJSON(buffered), nil, nil
 				}
-				return "", nil, relayapp.TokenUsage{}, nil, errIncompleteSSE
+				return "", nil, reportedUsage(), nil, errIncompleteSSE
 			}
 		}
 	}
@@ -2740,10 +2805,10 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 		select {
 		case <-ctx.Done():
 			response.Body.Close()
-			return nil, ctx.Err()
+			return buffered, ctx.Err()
 		case <-idle.C:
 			response.Body.Close()
-			return nil, errIncompleteSSE
+			return buffered, errIncompleteSSE
 		case result := <-reads:
 			if int64(len(buffered))+int64(len(result.chunk)) > limit {
 				response.Body.Close()
@@ -2761,7 +2826,7 @@ func bufferJSONResponse(ctx context.Context, response *http.Response, config Con
 			}
 			if result.err != nil {
 				if !errors.Is(result.err, io.EOF) {
-					return nil, errIncompleteSSE
+					return buffered, errIncompleteSSE
 				}
 				if len(buffered) == 0 {
 					return buffered, nil
@@ -2785,23 +2850,54 @@ type sseInspector struct {
 	output    bool
 	refused   bool
 	usage     relayapp.TokenUsage
+	limit     int64
+	overflow  bool
+	consumed  int
 }
 
 func (inspector *sseInspector) Feed(chunk []byte) string {
-	inspector.line = append(inspector.line, chunk...)
-	for {
-		newline := bytes.IndexByte(inspector.line, '\n')
+	originalLen := len(chunk)
+	inspector.consumed = 0
+	if inspector.terminal != "" {
+		return inspector.terminal
+	}
+	for len(chunk) > 0 {
+		newline := bytes.IndexByte(chunk, '\n')
+		count := len(chunk)
+		if newline >= 0 {
+			count = newline
+		}
+		if int64(len(inspector.line))+int64(count) > inspector.parserLimit() {
+			return inspector.tooLarge()
+		}
+		inspector.line = append(inspector.line, chunk[:count]...)
 		if newline < 0 {
 			break
 		}
-		line := append([]byte(nil), inspector.line[:newline]...)
-		inspector.line = inspector.line[newline+1:]
-		inspector.consumeLine(bytes.TrimSuffix(line, []byte{'\r'}))
+		inspector.consumeLine(bytes.TrimSuffix(inspector.line, []byte{'\r'}))
+		inspector.line = inspector.line[:0]
+		chunk = chunk[newline+1:]
+		inspector.consumed = originalLen - len(chunk)
 		if inspector.terminal != "" {
 			return inspector.terminal
 		}
 	}
 	return ""
+}
+
+func (inspector *sseInspector) parserLimit() int64 {
+	if inspector.limit > 0 {
+		return min(inspector.limit, int64(maxBufferedResponseBytes))
+	}
+	return maxBufferedResponseBytes
+}
+
+func (inspector *sseInspector) tooLarge() string {
+	inspector.overflow = true
+	inspector.terminal = "response.invalid"
+	inspector.line, inspector.event = nil, nil
+	inspector.eventName = ""
+	return inspector.terminal
 }
 
 func (inspector *sseInspector) Finish() string {
@@ -2829,6 +2925,10 @@ func (inspector *sseInspector) consumeLine(line []byte) {
 	}
 	data := bytes.TrimPrefix(line, []byte("data:"))
 	data = bytes.TrimPrefix(data, []byte{' '})
+	if int64(len(inspector.event))+int64(len(data))+1 > inspector.parserLimit() {
+		inspector.tooLarge()
+		return
+	}
 	if len(inspector.event) > 0 {
 		inspector.event = append(inspector.event, '\n')
 	}
@@ -3115,11 +3215,11 @@ func copyResponseHeaders(target, source http.Header, secrets []string) {
 
 // containsSecret reports whether a header value quotes something the client must not
 // learn. Comparison is on the raw value: a credential travels verbatim in the header
-// that leaked it, and a marker short enough to appear in ordinary text is not a
-// credential worth protecting.
+// that leaked it. Actual credentials are protected at every nonzero width;
+// short identifying markers are filtered before entering this list.
 func containsSecret(value string, secrets []string) bool {
 	for _, secret := range secrets {
-		if len(secret) >= minSecretMatchBytes && strings.Contains(value, secret) {
+		if secret != "" && strings.Contains(value, secret) {
 			return true
 		}
 	}
@@ -3179,17 +3279,36 @@ func drainResponse(response *http.Response) {
 	if response == nil || response.Body == nil {
 		return
 	}
-	_, _ = io.CopyN(io.Discard, response.Body, 64*1024)
 	response.Body.Close()
 }
 
-func readErrorBody(response *http.Response) []byte {
+func readErrorBody(ctx context.Context, response *http.Response, idle time.Duration) ([]byte, error) {
 	if response == nil || response.Body == nil {
-		return nil
+		return nil, nil
 	}
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
-	response.Body.Close()
-	return body
+	defer response.Body.Close()
+	stop := context.AfterFunc(ctx, func() { _ = response.Body.Close() })
+	defer stop()
+	watchdog := time.AfterFunc(idle, func() { _ = response.Body.Close() })
+	defer watchdog.Stop()
+	body := make([]byte, 0, 4096)
+	buffer := make([]byte, 4096)
+	for len(body) < 64*1024 {
+		count, err := response.Body.Read(buffer[:min(len(buffer), 64*1024-len(body))])
+		if count > 0 {
+			body = append(body, buffer[:count]...)
+			watchdog.Reset(idle)
+		}
+		if ctx.Err() != nil {
+			return body, ctx.Err()
+		}
+		if err != nil {
+			// A partial error body still classifies by its HTTP status. The
+			// watchdog's close must not turn a refusal into transport retries.
+			return body, nil
+		}
+	}
+	return body, nil
 }
 
 // policyRefusalMarkers name a provider's content policy answering, as opposed to
@@ -3876,19 +3995,11 @@ func terminalErrorDetailUnbounded(body []byte, secrets []string) string {
 	return jsonErrorDetailUnbounded(body, secrets)
 }
 
-// maxErrorDetailRunes bounds the provider text filed in activity history. It
-// matches the activity store cap: the filed reason is the raw upstream body,
-// not an extract, so anything the provider answered travels. A history pull
-// that still exceeds the protocol frame degrades to response_too_large on that
-// command — it never takes the sidecar down.
+// maxErrorDetailRunes bounds the extracted, scrubbed terminal reason filed
+// into history. Structured bodies contribute only allowlisted scalar reasons.
 const maxErrorDetailRunes = 4096
 
 const redactedSecret = "[redacted]"
-
-// minSecretMatchBytes is the shortest credential fragment worth scrubbing out of
-// filed text. Shorter fragments also match ordinary prose, so editing those here
-// would mangle the reason; they stay for the public sanitizer to fail closed on.
-const minSecretMatchBytes = 8
 
 // noteUpstreamDetail keeps the terminal failure's raw upstream body for the
 // call that ends on it: a code, a message, a reseller envelope, plain prose —
@@ -3918,7 +4029,7 @@ func noteUpstreamDetail(into *string, body []byte) {
 // to stop.
 func upstreamErrorDetail(raw string, secrets []string, requestBody []byte) string {
 	detail := jsonErrorDetailUnbounded([]byte(raw), secrets)
-	if detail == "" {
+	if detail == "" && !json.Valid([]byte(raw)) && !strings.HasPrefix(strings.TrimSpace(raw), "{") && !strings.HasPrefix(strings.TrimSpace(raw), "[") {
 		detail = redactSecrets(raw, secrets)
 	}
 	detail = redactRequestEchoes(detail, requestBody)
@@ -4064,7 +4175,7 @@ func errorScalarText(value any) string {
 // that key persisted into history and rendered back in the UI.
 func redactSecrets(value string, secrets []string) string {
 	for _, secret := range secrets {
-		if len(secret) >= minSecretMatchBytes && strings.Contains(value, secret) {
+		if secret != "" && strings.Contains(value, secret) {
 			value = strings.ReplaceAll(value, secret, redactedSecret)
 		}
 	}
@@ -4156,7 +4267,12 @@ func retryDelay(attempt int, response *http.Response, config Config) time.Durati
 	if response != nil {
 		retryAfter := strings.TrimSpace(response.Header.Get("Retry-After"))
 		if seconds, err := strconv.ParseFloat(retryAfter, 64); err == nil && seconds > 0 && !math.IsInf(seconds, 0) && !math.IsNaN(seconds) {
-			return min(time.Duration(seconds*float64(time.Second)), config.RetryMax)
+			// Clamp in floating-point seconds BEFORE duration conversion: a
+			// finite header can still exceed int64 nanoseconds and wrap negative.
+			if seconds >= config.RetryMax.Seconds() {
+				return config.RetryMax
+			}
+			return time.Duration(seconds * float64(time.Second))
 		}
 		if when, err := http.ParseTime(retryAfter); err == nil {
 			if delay := time.Until(when); delay > 0 {

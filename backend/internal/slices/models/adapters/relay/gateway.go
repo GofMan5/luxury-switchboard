@@ -17,11 +17,16 @@ import (
 )
 
 const (
-	maxDiscoveredModels = 5_000
-	maxProbeTimeout     = 30 * time.Second
+	maxDiscoveredModels  = 5_000
+	maxShortProbeTimeout = 30 * time.Second
+	maxFullProbeTimeout  = 5 * time.Minute
 	// The Responses API refuses a budget under 16 tokens, so a smaller probe
 	// would report every reasoning model as unavailable.
-	probeTokens = 16
+	shortProbeTokens = 16
+	fullProbeTokens  = 128
+	// Compatibility names used by the existing short-probe tests.
+	maxProbeTimeout = maxShortProbeTimeout
+	probeTokens     = shortProbeTokens
 )
 
 type Gateway struct {
@@ -48,7 +53,22 @@ func (gateway *Gateway) SetTimeout(timeout time.Duration) {
 }
 
 func (gateway *Gateway) probeBudget() time.Duration {
-	return min(time.Duration(gateway.timeout.Load()), maxProbeTimeout)
+	return gateway.probeBudgetFor(domain.TestProfileShort)
+}
+
+func (gateway *Gateway) probeBudgetFor(profile domain.TestProfile) time.Duration {
+	cap := maxShortProbeTimeout
+	if profile == domain.TestProfileFull128K {
+		cap = maxFullProbeTimeout
+	}
+	return min(time.Duration(gateway.timeout.Load()), cap)
+}
+
+func relayProfile(profile domain.TestProfile) relayapp.ProbeProfile {
+	if profile == domain.TestProfileFull128K {
+		return relayapp.ProbeProfileFull128K
+	}
+	return relayapp.ProbeProfileShort
 }
 
 func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) ([]string, error) {
@@ -75,42 +95,27 @@ func (gateway *Gateway) Discover(ctx context.Context, provider domain.Provider) 
 }
 
 func (gateway *Gateway) Test(ctx context.Context, provider domain.Provider, model string) domain.TestResult {
+	return gateway.TestWithProfile(ctx, provider, model, domain.TestProfileShort)
+}
+
+func (gateway *Gateway) TestWithProfile(ctx context.Context, provider domain.Provider, model string, profile domain.TestProfile) domain.TestResult {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, gateway.probeBudget())
+	ctx, cancel := context.WithTimeout(ctx, gateway.probeBudgetFor(profile))
 	defer cancel()
 	// The streaming probe answers everything the plain request does and more:
 	// the first-token time and the token count. A dispatcher without it (a
 	// test double) takes the buffered path.
-	if prober, ok := gateway.dispatcher.(relayapp.StreamProber); ok {
-		report, err := prober.Probe(ctx, provider.ID, model)
-		result := domain.TestResult{
-			ProviderID: provider.ID, Model: model,
-			Status: report.Status, LatencyMS: report.TotalMs,
-			TTFTMS: report.TTFTMs, OutputTokens: report.OutputTokens,
-		}
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				result.State = "timeout"
-				result.ErrorCode = "timeout"
-			} else {
-				result.State = "unavailable"
-				result.ErrorCode = "transport"
-			}
-			return result
-		}
-		if report.Status >= 200 && report.Status < 300 && report.ErrorCode == "" {
-			result.State = "available"
-			return result
-		}
-		result.State = "unavailable"
-		if report.ErrorCode != "" {
-			result.ErrorCode = report.ErrorCode
-		} else {
-			result.ErrorCode = statusCode(report.Status)
-		}
-		return result
+	if prober, ok := gateway.dispatcher.(relayapp.ProfiledStreamProber); ok {
+		report, err := prober.ProbeWithProfile(ctx, provider.ID, model, relayProfile(profile))
+		return gateway.resultFromReport(ctx, provider.ID, model, report, err)
 	}
-	response, err := gateway.testRequest(ctx, provider, model)
+	if profile == domain.TestProfileShort {
+		if prober, ok := gateway.dispatcher.(relayapp.StreamProber); ok {
+			report, err := prober.Probe(ctx, provider.ID, model)
+			return gateway.resultFromReport(ctx, provider.ID, model, report, err)
+		}
+	}
+	response, err := gateway.testRequest(ctx, provider, model, profile)
 	result := domain.TestResult{ProviderID: provider.ID, Model: model, LatencyMS: float64(time.Since(started).Microseconds()) / 1000}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -137,6 +142,35 @@ func (gateway *Gateway) Test(ctx context.Context, provider domain.Provider, mode
 	return result
 }
 
+func (gateway *Gateway) resultFromReport(ctx context.Context, providerID, model string, report relayapp.ProbeReport, err error) domain.TestResult {
+	result := domain.TestResult{
+		ProviderID: providerID, Model: model,
+		Status: report.Status, LatencyMS: report.TotalMs,
+		TTFTMS: report.TTFTMs, OutputTokens: report.OutputTokens,
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			result.State = "timeout"
+			result.ErrorCode = "timeout"
+		} else {
+			result.State = "unavailable"
+			result.ErrorCode = "transport"
+		}
+		return result
+	}
+	if report.Status >= 200 && report.Status < 300 && report.ErrorCode == "" {
+		result.State = "available"
+		return result
+	}
+	result.State = "unavailable"
+	if report.ErrorCode != "" {
+		result.ErrorCode = report.ErrorCode
+	} else {
+		result.ErrorCode = statusCode(report.Status)
+	}
+	return result
+}
+
 func failedResponse(body []byte) bool {
 	var payload map[string]any
 	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
@@ -157,22 +191,27 @@ func mapValue(value any) map[string]any {
 	return result
 }
 
-func (gateway *Gateway) testRequest(ctx context.Context, provider domain.Provider, model string) (relayapp.DispatchResponse, error) {
+func (gateway *Gateway) testRequest(ctx context.Context, provider domain.Provider, model string, profile domain.TestProfile) (relayapp.DispatchResponse, error) {
+	outputTokens := shortProbeTokens
+	prompt := relayProfile(profile).Prompt()
+	if profile == domain.TestProfileFull128K {
+		outputTokens = fullProbeTokens
+	}
 	if provider.Dialect == "anthropic" {
 		return gateway.dispatch(ctx, provider.ID, model, "/v1/messages", map[string]any{
-			"model": model, "max_tokens": probeTokens,
-			"messages": []map[string]string{{"role": "user", "content": "Reply OK"}},
+			"model": model, "max_tokens": outputTokens,
+			"messages": []map[string]string{{"role": "user", "content": prompt}},
 		})
 	}
 	response, err := gateway.dispatch(ctx, provider.ID, model, "/v1/responses", map[string]any{
-		"model": model, "input": "Reply OK", "max_output_tokens": probeTokens,
+		"model": model, "input": prompt, "max_output_tokens": outputTokens,
 	})
 	if err == nil && !responsesFallback(response) {
 		return response, nil
 	}
 	return gateway.dispatch(ctx, provider.ID, model, "/v1/chat/completions", map[string]any{
-		"model": model, "max_tokens": probeTokens,
-		"messages": []map[string]string{{"role": "user", "content": "Reply OK"}},
+		"model": model, "max_tokens": outputTokens,
+		"messages": []map[string]string{{"role": "user", "content": prompt}},
 	})
 }
 

@@ -35,6 +35,7 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 
 	requests, toApp := io.Pipe()
 	fromApp, responses := io.Pipe()
+	disableBackgroundChecks(t)
 	app, err := New(requests, responses, io.Discard)
 	if err != nil {
 		t.Fatal(err)

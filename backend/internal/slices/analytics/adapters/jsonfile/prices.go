@@ -21,8 +21,9 @@ import (
 type Store struct{ path string }
 
 type document struct {
-	Version int            `json:"version"`
-	Prices  []domain.Price `json:"prices"`
+	Version  int             `json:"version"`
+	Currency json.RawMessage `json:"currency,omitempty"`
+	Prices   []domain.Price  `json:"prices"`
 }
 
 func New(path string) *Store { return &Store{path: path} }
@@ -48,6 +49,16 @@ func (store *Store) Load(_ context.Context) (domain.Catalog, error) {
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Version != 1 {
 		return domain.Catalog{}, fmt.Errorf("%w: invalid document", domain.ErrCatalogUnreadable)
 	}
+	if len(doc.Currency) != 0 {
+		var currency string
+		if err := json.Unmarshal(doc.Currency, &currency); err != nil {
+			return domain.Catalog{}, fmt.Errorf("%w: invalid currency", domain.ErrCatalogUnreadable)
+		}
+		catalog, err = catalog.SetCurrency(currency)
+		if err != nil {
+			return domain.Catalog{}, fmt.Errorf("%w: invalid currency", domain.ErrCatalogUnreadable)
+		}
+	}
 	for _, price := range doc.Prices {
 		if price.Validate() != nil {
 			return domain.Catalog{}, fmt.Errorf("%w: invalid entry", domain.ErrCatalogUnreadable)
@@ -58,7 +69,13 @@ func (store *Store) Load(_ context.Context) (domain.Catalog, error) {
 }
 
 func (store *Store) Save(_ context.Context, catalog domain.Catalog) error {
-	doc := document{Version: 1, Prices: make([]domain.Price, 0, len(catalog.Prices))}
+	validated, err := domain.NewCatalog().SetCurrency(catalog.Normalized().Currency)
+	if err != nil {
+		return fmt.Errorf("%w: invalid currency", domain.ErrCatalogUnreadable)
+	}
+	// A validated three-letter code cannot fail JSON encoding.
+	currency, _ := json.Marshal(validated.Currency)
+	doc := document{Version: 1, Currency: currency, Prices: make([]domain.Price, 0, len(catalog.Prices))}
 	for _, price := range catalog.Prices {
 		doc.Prices = append(doc.Prices, price)
 	}

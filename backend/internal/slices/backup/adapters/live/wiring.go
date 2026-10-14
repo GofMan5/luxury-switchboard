@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	analyticsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/domain"
@@ -65,7 +66,7 @@ func (sources *Sources) Providers() ([]backupdomain.ProviderEntry, error) {
 			AuthMode: string(provider.AuthMode), AuthHeader: provider.AuthHeader,
 			Dialect: string(provider.Dialect), Format: string(provider.Format),
 			ChatPath: provider.ChatPath, ModelsPath: provider.ModelsPath,
-			ImageCompat: provider.ImageCompat, RPM: provider.RPM,
+			ImageCompat: provider.ImageCompat, RPM: provider.RPM, RateUnit: string(provider.RateUnit),
 			CacheTTL: provider.CacheTTL.String(), Enabled: provider.Enabled,
 		})
 	}
@@ -146,7 +147,7 @@ func NewSinks(providers *providerapp.Manager, keys *keypoolapp.Manager, routes *
 }
 
 func (sinks *Sinks) ProviderExists(id string) bool {
-	_, exists := sinks.catalog.Get(id)
+	_, exists := sinks.catalog.Lookup(id)
 	return exists
 }
 
@@ -163,7 +164,7 @@ func (sinks *Sinks) AddProvider(entry backupdomain.ProviderEntry) (bool, error) 
 		AuthMode: providerdomain.AuthMode(entry.AuthMode), AuthHeader: entry.AuthHeader,
 		Dialect: providerdomain.Dialect(entry.Dialect), Format: providerdomain.APIFormat(entry.Format),
 		ChatPath: entry.ChatPath, ModelsPath: entry.ModelsPath,
-		ImageCompat: entry.ImageCompat, RPM: entry.RPM, CacheTTL: cacheTTL,
+		ImageCompat: entry.ImageCompat, RPM: entry.RPM, RateUnit: providerdomain.RateUnit(entry.RateUnit), CacheTTL: cacheTTL,
 		Enabled: entry.Enabled,
 	}); err != nil {
 		return false, err
@@ -172,6 +173,11 @@ func (sinks *Sinks) AddProvider(entry backupdomain.ProviderEntry) (bool, error) 
 }
 
 func (sinks *Sinks) AddKey(entry backupdomain.KeyEntry) (bool, error) {
+	// Add replaces Priority with the next append slot; validate the backup's
+	// ordering input here before the manager no longer sees it.
+	if entry.Priority < 0 || entry.Priority > keypooldomain.MaxRPM {
+		return false, errors.New("key priority is out of range")
+	}
 	_, err := sinks.keys.Add(context.Background(), keypooldomain.Params{
 		ProviderID: entry.ProviderID, Label: entry.Label, Secret: entry.Secret,
 		RPM: entry.RPM, ProxyURL: entry.ProxyURL,

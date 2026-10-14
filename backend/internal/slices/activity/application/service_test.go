@@ -39,13 +39,13 @@ func TestUnknownErrorTextIsNotPersisted(t *testing.T) {
 }
 
 func TestRelayErrorCodesSurviveFinish(t *testing.T) {
-	for _, code := range []string{"policy_refusal", "chat_compatibility", "guardrail_blocked"} {
+	for _, code := range []string{"policy_refusal", "chat_compatibility", "responses_compatibility", "guardrail_blocked", "pool_busy"} {
 		service := NewService(10)
 		id := service.Start(domain.Start{Path: "/v1/responses"})
 		service.Finish(id, domain.Finish{Status: 502, ErrorCode: code, ErrorDetail: "relay detail"})
 		request := service.List(1)[0]
 		if request.State != domain.StateFailed || request.ErrorCode != code || request.ErrorDetail != "relay detail" {
-			t.Fatalf("relay code %q was dropped: %+v", code, request)
+			t.Errorf("relay code %q was dropped: %+v", code, request)
 		}
 	}
 }

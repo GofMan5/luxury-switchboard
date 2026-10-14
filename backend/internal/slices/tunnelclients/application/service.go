@@ -22,6 +22,9 @@ const (
 var serviceSequence atomic.Uint64
 
 type Service struct {
+	// ponytail: profile operations share one lock; per-address ordering is only
+	// needed if concurrent owner writes measurably contend. Traffic uses mu.
+	profileMu      sync.Mutex
 	mu             sync.RWMutex
 	clients        map[string]*clientState
 	requests       map[string]domain.Start
@@ -61,6 +64,8 @@ func NewService(history History) *Service {
 // different cause — the operator should stop the tunnel and look, not trust a
 // silently partial list.
 func (service *Service) LoadProfiles(ctx context.Context) error {
+	service.profileMu.Lock()
+	defer service.profileMu.Unlock()
 	if service.store == nil {
 		return errors.New("client profiles cannot be read")
 	}
@@ -101,21 +106,35 @@ func (service *Service) SetProfile(ctx context.Context, profile domain.Profile) 
 	if service.store == nil {
 		return errors.New("client profiles cannot be stored")
 	}
-	if canonical.Empty() {
-		err = service.store.DeleteProfile(ctx, canonical.IP)
-	} else {
-		err = service.store.SaveProfile(ctx, canonical)
-	}
+	// One operation owns persistence through its live commit, so a delayed
+	// earlier store completion cannot replace a newer live owner decision.
+	// Publish after releasing the operation lock: listeners may re-enter.
+	err = func() error {
+		service.profileMu.Lock()
+		defer service.profileMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if canonical.Empty() {
+			err = service.store.DeleteProfile(ctx, canonical.IP)
+		} else {
+			err = service.store.SaveProfile(ctx, canonical)
+		}
+		if err != nil {
+			return err
+		}
+		service.mu.Lock()
+		if canonical.Empty() {
+			delete(service.profiles, canonical.IP)
+		} else {
+			service.profiles[canonical.IP] = canonical
+		}
+		service.mu.Unlock()
+		return nil
+	}()
 	if err != nil {
 		return err
 	}
-	service.mu.Lock()
-	if canonical.Empty() {
-		delete(service.profiles, canonical.IP)
-	} else {
-		service.profiles[canonical.IP] = canonical
-	}
-	service.mu.Unlock()
 	service.publish()
 	return nil
 }

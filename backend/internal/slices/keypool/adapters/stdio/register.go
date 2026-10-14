@@ -21,10 +21,12 @@ func Register(server *platform.Server, manager *application.Manager, prober appl
 			return nil, invalidPayload()
 		}
 		keys := manager.List(query.ProviderID)
-		return map[string]any{
-			"keys":      withinOneFrame(keys),
-			"available": len(keys),
-		}, nil
+		result := map[string]any{"keys": keys, "available": len(keys)}
+		encoded, err := json.Marshal(result)
+		if err != nil || len(encoded) > platform.MaxPayloadBytes {
+			return nil, platform.MethodError{Code: "key_pool_too_large", Message: "The key pool is too large to manage in one view. Split it across providers using backup export and restore."}
+		}
+		return result, nil
 	})
 	server.Handle("keys.add", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var command struct {
@@ -85,11 +87,14 @@ func Register(server *platform.Server, manager *application.Manager, prober appl
 			return nil, invalidPayload()
 		}
 		report, err := manager.CheckPool(ctx, command.ProviderID, prober)
+		// Cancellation does not erase verdicts already filed. Notify their
+		// observers before returning the terminal cancellation error.
+		if report.Accepted+report.Rejected > 0 {
+			_ = server.Emit("keys.changed", map[string]string{"providerId": command.ProviderID})
+		}
 		if err != nil {
 			return nil, managementError(err)
 		}
-		// Every filed answer changed a streak or a badge somewhere.
-		_ = server.Emit("keys.changed", map[string]string{"providerId": command.ProviderID})
 		return report, nil
 	})
 	server.Handle("keys.update", func(ctx context.Context, payload json.RawMessage) (any, error) {
@@ -168,17 +173,12 @@ func invalidPayload() platform.MethodError {
 	return platform.MethodError{Code: "invalid_payload", Message: "Invalid key settings"}
 }
 
-// withinOneFrame drops the lowest-priority keys until the answer fits one
-// protocol frame. Rows are bounded — labels, counters, milliseconds — so this
-// only bites a deliberately enormous pool, and `available` says so honestly
-// instead of a short list passing for the whole pool. List already orders by
-// priority, so what stays is what the scheduler would use first.
-func withinOneFrame(keys []domain.PublicKey) []domain.PublicKey {
-	return platform.TrimToPayloadBudget(keys)
-}
-
 func managementError(err error) platform.MethodError {
 	switch {
+	case errors.Is(err, context.Canceled):
+		return platform.MethodError{Code: "cancelled", Message: "Key pool check cancelled"}
+	case errors.Is(err, context.DeadlineExceeded):
+		return platform.MethodError{Code: "timeout", Message: "Key pool check timed out"}
 	case errors.Is(err, application.ErrStoreUnavailable), errors.Is(err, secretstore.ErrUnavailable):
 		return platform.MethodError{Code: "secure_storage_unavailable", Message: "Secure storage is unavailable. Start or unlock Linux Secret Service, run Switchboard without sudo, then restart it."}
 	case errors.Is(err, application.ErrKeyNotFound):

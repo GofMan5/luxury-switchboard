@@ -2,9 +2,11 @@
 
 # Luxury Switchboard
 
-**One local endpoint for every AI provider you use.**<br/>
-Fair key pools · honest costs · live model tests · a one-click public tunnel.<br/>
-No account. No cloud of ours. No restart after any setting.
+**One local endpoint for the AI providers you already use.**<br/>
+An open-source desktop app for provider routes, key pools, live request activity and cost estimates.<br/>
+No Luxury Switchboard account. No hosted control plane. Bring your own provider access.
+
+[Download](https://github.com/GofMan5/luxury-switchboard/releases/latest) · [First request](#make-your-first-request) · [FAQ](#faq) · [Report a bug](https://github.com/GofMan5/luxury-switchboard/issues/new/choose)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-7d8590?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/GofMan5/luxury-switchboard?style=flat-square&color=3fb950)](https://github.com/GofMan5/luxury-switchboard/releases/latest)
@@ -17,15 +19,55 @@ No account. No cloud of ours. No restart after any setting.
 
 </div>
 
+## Who it is for
+
+Use Luxury Switchboard when you have several AI clients or providers and want to change routes, keys and failover policy in one desktop app instead of editing every client. It manages access to models; it does not run models itself or include free API credits.
+
+Already happy with one client and one provider? You may not need an extra relay. Need a centrally operated multi-user server? Evaluate that requirement separately: this project is desktop-first.
+
 ## Install
 
 Grab the installer from the [latest release](https://github.com/GofMan5/luxury-switchboard/releases/latest): NSIS on Windows, AppImage/deb on Linux, dmg on macOS, in x64 and arm64 flavors. Then:
 
-1. **Providers**: add any OpenAI/Anthropic-compatible endpoint.
-2. **API Keys**: paste keys, one per line. Encrypted per OS user, write-only after saving.
-3. Point your client at `http://127.0.0.1:8798/v1`. Done.
+1. **Providers**: add your OpenAI/Anthropic-compatible endpoint and configure its authentication. Remote endpoints require HTTPS; HTTP is allowed for loopback providers.
+2. **API Keys**: add your provider's keys, one per line, if it uses API-key authentication. They are encrypted per OS user and write-only after saving.
+3. **Model Routes → Local relay → Add route**: choose the provider and an upstream model it actually supports. Set the public model name to `my-chat` and leave the route enabled.
+4. Point your client at `http://127.0.0.1:8798/v1` and select `my-chat`. If you changed the listener port, use the address shown in the app instead.
+
+Windows installers are not Authenticode-signed; Windows may show a SmartScreen warning. Verify the downloaded installer against the **release asset** `SHA256SUMS.txt` before running it. On Windows, `Get-FileHash -Algorithm SHA256 .\YourDownloadedInstaller.exe` prints the digest; the filename here is illustrative. Checksums detect a mismatch with the published release, not an independently verified publisher identity.
 
 Updates arrive in-app on every platform: the app downloads the installer for your OS and CPU, checks it against the release's own checksum, then Windows restarts into the setup, Linux swaps the running AppImage in place, and macOS replaces the app bundle from the dmg and relaunches. Where no self-update path exists — a deb install, or a platform without its installer — the dialog says so and points at the release page.
+
+### Make your first request
+
+With the app running, a valid provider credential saved and the `my-chat` route configured above, send a small Chat Completions request. This contacts your configured provider and may incur its normal charges. Use a model that supports Chat Completions or the app's dialect translation; an alias does not add model capabilities.
+
+**Windows PowerShell:**
+
+```powershell
+$body = @{
+    model = 'my-chat'
+    messages = @(@{ role = 'user'; content = 'Reply with one short greeting.' })
+    max_tokens = 32
+} | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod -Method Post `
+    -Uri 'http://127.0.0.1:8798/v1/chat/completions' `
+    -ContentType 'application/json' -Body $body -TimeoutSec 120
+```
+
+**macOS / Linux:**
+
+```sh
+curl --fail-with-body --max-time 120 \
+  http://127.0.0.1:8798/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"my-chat","messages":[{"role":"user","content":"Reply with one short greeting."}],"max_tokens":32}'
+```
+
+Open **Live Activity** to check status, queueing and retries. For a local client that insists on a non-empty API key, a dummy value such as `local-client` is sufficient when the provider credential is configured in the app. This is **not** authentication for the public tunnel: that uses the access key shown on the Tunnel page. Treat the loopback relay as accessible to other processes on your machine.
+
+If the request fails, check that the relay is running, the route and provider are enabled, the upstream model name is correct and a valid credential is available. A successful HTTP example does not establish compatibility with every client's tools, images or streaming behavior.
 
 ## What you get
 
@@ -65,7 +107,7 @@ Updates arrive in-app on every platform: the app downloads the installer for you
 <tr>
 <td width="50%" valign="top">
 
-**Guardrails**: every provider answer is inspected locally before your client sees a byte. Monitor by default; block when you say so.
+**Guardrails**: local inspection of provider answers after relay translation. Monitor by default; enable blocking deliberately. Rules are not a guarantee of safe content.
 
 ![Guardrails](docs/screenshots/guardrails.png)
 
@@ -94,7 +136,25 @@ Press **Start** on the Tunnel page and you get an HTTPS address plus a stable ac
 
 ## Private by construction
 
-Everything lives on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` on Windows, `~/.config/provider-switchboard` on Linux, `~/Library/Application Support/provider-switchboard` on macOS): config encrypted with DPAPI or the desktop keyring, no plaintext fallback, and the history in local SQLite. The app's only self-initiated outbound calls are the GitHub release check (`backend/internal/slices/updates`) and the OpenAI sign-in and token endpoints (`backend/internal/slices/codex`), and the latter only while a Codex account is connected. Delete the folder, nothing remains.
+Configuration is stored on your disk (`%LOCALAPPDATA%\ProviderSwitchboard` on Windows, `~/.config/provider-switchboard` on Linux, `~/Library/Application Support/provider-switchboard` on macOS), encrypted with DPAPI or the desktop keyring with no plaintext fallback. Request history uses local SQLite. The app has no hosted Luxury Switchboard control plane.
+
+**Local does not mean offline.** Requests and provider credentials are sent to the upstreams you configure. Catalog discovery and model tests also contact those providers. Release checks/downloads contact GitHub; connecting a Codex account contacts OpenAI sign-in/token endpoints. Starting the optional tunnel downloads its connector when needed and carries public traffic through Cloudflare. Choose providers and enable these features according to your own trust requirements.
+
+## FAQ
+
+**Does it include models or free API access?** No. Bring a provider account or compatible endpoint. Provider charges and account terms still apply. Cost views are estimates based on your configured prices and available usage, not a provider invoice.
+
+**Does it run local models?** It is a relay, not an inference engine. A compatible server on loopback can be an upstream; install and operate that server separately. Remote HTTP endpoints are not allowed.
+
+**Which clients work?** Clients need a configurable endpoint and a compatible request/response dialect. Chat Completions, Responses and Anthropic Messages have different semantics. A shared URL shape alone is not a compatibility guarantee; test streaming, tools, images and cancellation for your actual client/model combination. The first-request example above is a starting point, not a certified client matrix.
+
+**Does failover preserve model behavior?** No. A route can map one alias to different upstream model IDs; their capabilities, quality, context limits and prices can differ. Choose the chain deliberately.
+
+**Do guardrails guarantee safe answers?** No. Inspection is local and defaults to monitor mode. Rules can miss harmful content or flag legitimate content; review findings and use block mode intentionally.
+
+**Do I need the public tunnel?** No. Local relay and public tunnel routes are independent. Leave the tunnel stopped for a local-only workflow. Starting it exposes the explicitly published aliases to holders of the tunnel access key and may generate usage on your provider accounts. The quick-tunnel address changes on restart.
+
+**How can I help?** [Report a reproducible bug](https://github.com/GofMan5/luxury-switchboard/issues/new/choose), tell us which client, OS and app version you tried, or read [CONTRIBUTING.md](CONTRIBUTING.md). Never attach keys, sign-in JSON, exported backups or private prompts. If the project is useful to you, a GitHub star helps others discover it.
 
 ## Development
 

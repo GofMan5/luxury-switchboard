@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ControlPlaneSession, EventListener } from './platform/stdio/session'
 import type { Settings } from './features/settings/domain/settings'
@@ -384,7 +384,9 @@ describe('App navigation', () => {
       createSession.mockResolvedValue(fakeSession())
       const view = render(<App />)
       await screen.findByRole('button', { name: 'Overview' })
-      expect(ready).toHaveBeenCalledOnce()
+      // The call is a passive effect: the frame can already be in the DOM
+      // while React still holds the effect, so the call is awaited, not assumed.
+      await waitFor(() => expect(ready).toHaveBeenCalledOnce())
       view.unmount()
     } finally {
       delete (window as typeof window & { __dshBootReady?: () => void }).__dshBootReady

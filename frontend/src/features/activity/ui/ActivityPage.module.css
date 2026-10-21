@@ -51,7 +51,9 @@
 .table th:first-child { width: 110px; }
 .table th:nth-child(3) { width: 136px; }
 .table th:nth-child(4) { width: 58px; }
-.table th:nth-child(5), .table th:nth-child(6), .table th:nth-child(7), .table th:nth-child(8), .table th:nth-child(9), .table th:nth-child(10) { width: 88px; }
+.table th:nth-child(5), .table th:nth-child(6), .table th:nth-child(7), .table th:nth-child(8), .table th:nth-child(9) { width: 88px; }
+/* Wide enough for a 12-hour clock ("07:04:59 PM"), not only a 24-hour one. */
+.table th:nth-child(10) { width: 104px; }
 .table tbody tr[data-row] { cursor: pointer; }
 .table tbody tr[data-row]:hover { background: var(--bg-hover); }
 .table tbody tr:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }

@@ -2,6 +2,7 @@ package application
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -149,9 +150,7 @@ func (service *Service) Finish(id string, value domain.Finish) {
 		}
 		request.TotalTokens = max(value.TotalTokens, request.InputTokens+request.OutputTokens)
 		request.GenerationMS = max(float64(value.Generation.Microseconds())/1_000, 0)
-		if request.GenerationMS > 0 {
-			request.TokensPerSecond = float64(request.OutputTokens) * 1_000 / request.GenerationMS
-		}
+		request.TTFTMS = min(max(float64(value.FirstToken.Microseconds())/1_000, 0), request.LatencyMS)
 		switch {
 		case value.Cancelled:
 			request.State = domain.StateCancelled
@@ -159,6 +158,13 @@ func (service *Service) Finish(id string, value domain.Finish) {
 			request.State = domain.StateFailed
 		default:
 			request.State = domain.StateCompleted
+		}
+		// Only a completed answer has a decode rate worth showing: a broken
+		// or abandoned stream's tokens over its window is a number about the
+		// break, not the provider's speed.
+		request.TokensPerSecond = 0
+		if request.State == domain.StateCompleted && value.TokensPerSecond > 0 && !math.IsInf(value.TokensPerSecond, 0) && !math.IsNaN(value.TokensPerSecond) {
+			request.TokensPerSecond = value.TokensPerSecond
 		}
 	})
 }

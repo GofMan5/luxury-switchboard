@@ -156,6 +156,29 @@ describe('ActivityPage running time', () => {
   })
 })
 
+describe('ActivityPage pace', () => {
+  const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')]
+
+  it('shows the first token and the measured decode rate in the inspector', () => {
+    show({
+      phase: 'ready', available: 1, summary, error: '',
+      requests: [{ ...request('a', 'completed'), latencyMs: 3_000, ttftMs: 412, tokensPerSecond: 85.5 }],
+    })
+    fireEvent.click(rows()[0])
+    const inspector = screen.getByRole('complementary', { name: 'Request inspector' })
+    expect(inspector.textContent).toContain('First token412 ms')
+    expect(inspector.textContent).toMatch(/Generation85[.,]5 tok\/s/u)
+  })
+
+  it('shows a dash before the first token and for an older sidecar', () => {
+    show({ phase: 'ready', available: 1, summary, error: '', requests: [request('a')] })
+    fireEvent.click(rows()[0])
+    const inspector = screen.getByRole('complementary', { name: 'Request inspector' })
+    expect(inspector.textContent).toContain('First token—')
+    expect(inspector.textContent).toContain('Generation—')
+  })
+})
+
 describe('ActivityPage reasoning', () => {
   const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')]
 

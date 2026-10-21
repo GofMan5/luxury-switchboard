@@ -170,7 +170,8 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		t.Fatalf("legacy row was lost by migration: %+v %v", recent, err)
 	}
 	if recent[0].ProviderName != "" || recent[0].ErrorDetail != "" ||
-		recent[0].ReasoningEffort != "" || recent[0].ReasoningBudget != 0 || recent[0].ThinkingMS != 0 {
+		recent[0].ReasoningEffort != "" || recent[0].ReasoningBudget != 0 || recent[0].ThinkingMS != 0 ||
+		recent[0].TTFTMS != 0 {
 		t.Fatalf("migrated columns were not empty: %+v", recent[0])
 	}
 	// A migrated database must take the new columns on write too, not only
@@ -178,8 +179,22 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	migrated := recent[0]
 	migrated.ID = "req_after_migration"
 	migrated.ReasoningEffort = "low"
+	migrated.TTFTMS = 312.5
 	if err := store.writeBatch([]domain.Request{migrated}); err != nil {
 		t.Fatalf("migrated database refused a row with the new columns: %v", err)
+	}
+	recent, err = store.Recent(context.Background(), application.Period24H, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, request := range recent {
+		if request.ID == "req_after_migration" {
+			found = request.TTFTMS == 312.5
+		}
+	}
+	if !found {
+		t.Fatalf("first-token time did not survive the migrated write: %+v", recent)
 	}
 	if _, err := store.Stats(context.Background(), application.Period24H); err != nil {
 		t.Fatal(err)

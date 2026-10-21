@@ -17,12 +17,12 @@ type SortKey = 'model' | 'ttft' | 'total' | 'rate'
  * chat endpoints, which is not a failure worth a red row. */
 const IMAGE_MODEL = /image|dall-e|flux|seedream|imagen/i
 
+/** The relay's measurement, not a ratio of totals: dividing every token by
+ * the time after the first one counted the first token twice and turned a
+ * buffered burst into thousands of tok/s. */
 function tokensPerSecond(result: ModelTestResult): number {
-  if (!result.outputTokens || !result.latencyMs) return 0
-  // Decode rate: the generation proper starts at the first token.
-  const decodeMs = result.latencyMs - (result.ttftMs ?? 0)
-  if (decodeMs <= 0) return 0
-  return (result.outputTokens / decodeMs) * 1000
+  const rate = result.outputTps ?? 0
+  return Number.isFinite(rate) && rate > 0 ? rate : 0
 }
 
 export default function TestsPage() {

@@ -63,7 +63,10 @@ function fixtureRequest(index: number, offsetMs: number): ActivityRequest {
     totalTokens: input + output,
     contextTokens: input + cached,
     generationMs: 1_400 + ((index * 271) % 9_000),
-    tokensPerSecond: state === 'active' ? 41 + (index % 30) : 0,
+    // Like the relay: a rate only for a completed answer, a first token for
+    // any answer that streamed one.
+    tokensPerSecond: state === 'completed' ? 41 + (index % 30) + (index % 7) / 10 : 0,
+    ...(state === 'completed' || state === 'active' ? { ttftMs: 280 + ((index * 389) % 2_600) } : {}),
     // The level each client dialect sends: an effort name, a token budget,
     // or nothing at all (the provider's default).
     ...fixtureReasoning(index, state, output),
@@ -461,13 +464,16 @@ export class FixtureSession implements ControlPlaneSession {
             const failed = model.includes('flash') && providerId === 'sigma-llm'
              const ttft = (fullProfile ? 1_200 : 380) + ((index * 211 + seed * 7) % (fullProfile ? 3_600 : 2_600))
             const total = ttft + (fullProfile ? 2_400 : 700) + ((index * 503 + seed * 31) % (fullProfile ? 6_000 : 4_000))
+            // The counting task: ~120–170 tokens, rate measured after the first.
+            const tokens = 119 + ((index * 17 + seed) % 52)
             this.#emit('models.tested', {
               runId, providerId, model,
               state: failed ? 'unavailable' : 'available',
               status: failed ? 429 : 200,
               latencyMs: total,
               ttftMs: failed ? 0 : ttft,
-              outputTokens: failed ? 0 : (fullProfile ? 128 : 32),
+              outputTokens: failed ? 0 : tokens,
+              outputTps: failed ? 0 : ((tokens - 1) * 1_000) / (total - ttft),
               ...(failed ? { errorCode: 'rate_limited' } : {}),
             })
           }, (fullProfile ? 480 : 320) * (index + 1))

@@ -45,6 +45,10 @@ type Request struct {
 	ContextTokens   int64     `json:"contextTokens"`
 	GenerationMS    float64   `json:"generationMs"`
 	TokensPerSecond float64   `json:"tokensPerSecond"`
+	// TTFTMS is the time from the request's start to the first generated
+	// token (answer or reasoning) of the serving attempt; zero when none
+	// streamed.
+	TTFTMS float64 `json:"ttftMs,omitempty"`
 	// ReasoningEffort is the reasoning level the client asked for, one of
 	// the allowlisted names; ReasoningBudget is its thinking-token budget
 	// when the request set one. Both are request parameters, never content.
@@ -91,6 +95,10 @@ type Finish struct {
 	TotalTokens     int64
 	ContextTokens   int64
 	Generation      time.Duration
+	// FirstToken is measured from the request's start; TokensPerSecond is
+	// the serving attempt's decode rate, already guarded by the relay.
+	FirstToken      time.Duration
+	TokensPerSecond float64
 }
 
 type Summary struct {

@@ -20,7 +20,8 @@
 .table th:nth-child(3) { width: 130px; }
 .table th:nth-child(4) { width: 64px; }
 .table th:nth-child(5) { width: 90px; }
-.table th:nth-child(6) { width: 94px; }
+/* Wide enough for a 12-hour clock ("07:04:59 PM"), not only a 24-hour one. */
+.table th:nth-child(6) { width: 116px; }
 .table th:nth-child(n+4), .table td:nth-child(n+4) { text-align: right; }
 .numeric { font-variant-numeric: tabular-nums; }
 .state { display: inline-flex; align-items: center; gap: 8px; }
@@ -60,5 +61,5 @@
   .table th:nth-child(4), .table td:nth-child(4) { display: none; }
   .table th:first-child { width: 110px; }
   .table th:nth-child(5) { width: 85px; }
-  .table th:nth-child(6) { width: 85px; }
+  .table th:nth-child(6) { width: 108px; }
 }

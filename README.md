@@ -13,9 +13,9 @@ No Luxury Switchboard account. No hosted control plane. Bring your own provider 
 [![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-58a6ff?style=flat-square)](https://github.com/GofMan5/luxury-switchboard/releases/latest)
 [![Stars](https://img.shields.io/github/stars/GofMan5/luxury-switchboard?style=flat-square&color=e3b341)](https://github.com/GofMan5/luxury-switchboard/stargazers)
 
-![Overview](docs/screenshots/overview.png)
+<a href="docs/media/demo.mp4"><img src="docs/media/demo.webp" alt="Luxury Switchboard walkthrough: live request activity with the request inspector, streaming model tests, model routes, insights, guardrails and the public tunnel" width="100%"></a>
 
-<sub>Current interface · screenshots use fictional demo data, never real credentials or traffic.</sub>
+<sub>A 49-second tour of the current interface · <a href="docs/media/demo.mp4">MP4 version</a> · demo and screenshots use fictional data, never real credentials or traffic.</sub>
 
 </div>
 
@@ -75,7 +75,23 @@ If the request fails, check that the relay is running, the route and provider ar
 <tr>
 <td width="50%" valign="top">
 
-**Live Activity**: every request as it happens. Status, queue, retries, tokens, speed. A waiting request says why.
+**Overview**: relay health at a glance. Requests per minute, active and queued work, success rate, p95 latency and the last 24 hours.
+
+![Overview](docs/screenshots/overview.png)
+
+</td>
+<td width="50%" valign="top">
+
+**API Keys**: a priority-ordered pool per provider with rate limits, proxy routes and cooldowns. Check the pool in one click; dead keys say so.
+
+![API Keys](docs/screenshots/keys.png)
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+**Live Activity**: every request as it happens. Status, queue, retries, tokens, speed. The inspector shows time to first token and generation speed; a waiting request says why.
 
 ![Activity](docs/screenshots/activity.png)
 

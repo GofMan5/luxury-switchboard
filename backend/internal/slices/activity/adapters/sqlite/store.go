@@ -136,7 +136,7 @@ func (store *Store) Recent(ctx context.Context, period application.Period, limit
 	query := `SELECT request_id, started_at_ms, updated_at_ms, state, model_id, provider_id, provider_name,
 method, path, status_code, queue_ms, latency_ms, retries, bytes_in, bytes_out, error_code, error_detail,
 input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens, context_tokens,
-generation_ms, tokens_per_second, reasoning_effort, reasoning_budget, thinking_ms
+generation_ms, tokens_per_second, reasoning_effort, reasoning_budget, thinking_ms, ttft_ms
 FROM requests WHERE (? = 0 OR started_at_ms >= ?) ORDER BY started_at_ms DESC LIMIT ?`
 	rows, err := store.db.QueryContext(ctx, query, cutoff, cutoff, limit)
 	if err != nil {
@@ -154,7 +154,7 @@ FROM requests WHERE (? = 0 OR started_at_ms >= ?) ORDER BY started_at_ms DESC LI
 			&request.InputTokens, &request.OutputTokens, &request.CachedTokens,
 			&request.ReasoningTokens, &request.TotalTokens, &request.ContextTokens,
 			&request.GenerationMS, &request.TokensPerSecond,
-			&request.ReasoningEffort, &request.ReasoningBudget, &request.ThinkingMS,
+			&request.ReasoningEffort, &request.ReasoningBudget, &request.ThinkingMS, &request.TTFTMS,
 		); err != nil {
 			return nil, errors.New("history row is invalid")
 		}
@@ -235,8 +235,8 @@ func (store *Store) insertBatch(batch []domain.Request) error {
 request_id, started_at_ms, updated_at_ms, state, model_id, provider_id, provider_name, method, path,
 status_code, queue_ms, latency_ms, retries, bytes_in, bytes_out, error_code, error_detail,
 input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens, context_tokens,
-generation_ms, tokens_per_second, reasoning_effort, reasoning_budget, thinking_ms)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+generation_ms, tokens_per_second, reasoning_effort, reasoning_budget, thinking_ms, ttft_ms)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -250,7 +250,7 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 			request.ErrorCode, request.ErrorDetail, request.InputTokens, request.OutputTokens, request.CachedTokens,
 			request.ReasoningTokens, request.TotalTokens, request.ContextTokens,
 			request.GenerationMS, request.TokensPerSecond,
-			request.ReasoningEffort, request.ReasoningBudget, request.ThinkingMS,
+			request.ReasoningEffort, request.ReasoningBudget, request.ThinkingMS, request.TTFTMS,
 		); err != nil {
 			tx.Rollback()
 			return err
@@ -290,6 +290,7 @@ input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_tokens INT
 reasoning_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL, context_tokens INTEGER NOT NULL,
 generation_ms REAL NOT NULL, tokens_per_second REAL NOT NULL,
 reasoning_effort TEXT NOT NULL DEFAULT '', reasoning_budget INTEGER NOT NULL DEFAULT 0, thinking_ms REAL NOT NULL DEFAULT 0,
+ttft_ms REAL NOT NULL DEFAULT 0,
 CHECK(cached_tokens <= input_tokens), CHECK(reasoning_tokens <= output_tokens));
 CREATE INDEX IF NOT EXISTS requests_started ON requests(started_at_ms DESC);`
 	if _, err := db.Exec(schema); err != nil {
@@ -330,6 +331,7 @@ CREATE INDEX IF NOT EXISTS requests_started ON requests(started_at_ms DESC);`
 		{"reasoning_effort", `reasoning_effort TEXT NOT NULL DEFAULT ''`},
 		{"reasoning_budget", `reasoning_budget INTEGER NOT NULL DEFAULT 0`},
 		{"thinking_ms", `thinking_ms REAL NOT NULL DEFAULT 0`},
+		{"ttft_ms", `ttft_ms REAL NOT NULL DEFAULT 0`},
 	} {
 		if present[column.name] {
 			continue

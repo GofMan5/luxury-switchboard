@@ -273,6 +273,7 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
               : <Detail label="Latency" value={formatDuration(request.latencyMs)} />}
             <Detail label="Queue / retries" value={`${formatDuration(request.queueMs)} · ${request.retries}`} />
             <Detail label="Traffic" value={`${formatBytes(request.bytesIn)} in · ${formatBytes(request.bytesOut)} out`} />
+            <Detail label="First token" value={request.ttftMs && request.ttftMs > 0 ? formatDuration(request.ttftMs) : '—'} />
             <Detail label="Generation" value={request.tokensPerSecond > 0 ? `${formatDecimal(request.tokensPerSecond)} tok/s` : '—'} />
           </dl>
         </section>

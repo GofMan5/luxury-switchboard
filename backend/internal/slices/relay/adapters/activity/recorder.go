@@ -51,5 +51,6 @@ func (recorder *Recorder) Finish(id string, value relayapp.ActivityFinish) {
 		CachedTokens: value.Usage.CachedTokens, ReasoningTokens: value.Usage.ReasoningTokens,
 		TotalTokens: value.Usage.TotalTokens, ContextTokens: value.Usage.ContextTokens,
 		Generation: value.Generation,
+		FirstToken: value.Pace.FirstToken, TokensPerSecond: value.Pace.TokensPerSecond,
 	})
 }

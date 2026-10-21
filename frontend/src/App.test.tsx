@@ -110,6 +110,22 @@ describe('App navigation', () => {
     ])
   })
 
+  // Every page shares one scroll container: without the reset, a page opened
+  // after a long scrolled one starts somewhere in its middle.
+  it('opens every page at the top of the workspace', async () => {
+    window.location.hash = ''
+    createSession.mockResolvedValue(fakeSession())
+    const view = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Insights' }))
+    expect(await screen.findByRole('heading', { name: 'Insights', level: 1 })).toBeTruthy()
+    const workspace = document.getElementById('workspace')!
+    Object.defineProperty(workspace, 'scrollTop', { value: 520, writable: true, configurable: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardrails' }))
+    expect(await screen.findByRole('heading', { name: 'Guardrails', level: 1 })).toBeTruthy()
+    expect(workspace.scrollTop).toBe(0)
+    view.unmount()
+  })
+
   it('filters streaming probes through the provider scope selector', async () => {
     window.location.hash = ''
     createSession.mockResolvedValue(fakeSession(undefined, settings, {

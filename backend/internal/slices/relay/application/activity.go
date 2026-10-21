@@ -32,6 +32,18 @@ type ActivityFinish struct {
 	ErrorDetail  string
 	Usage        TokenUsage
 	Generation   time.Duration
+	// Pace is the serving attempt's streaming measurement; its zero value
+	// says the answer carried none.
+	Pace StreamPace
+}
+
+// StreamPace is one streamed answer's timing: when its first generated token
+// (answer or reasoning) arrived, measured from the request's start, and its
+// decode rate (domain.DecodeRate). The rate is zero unless the stream carried
+// enough evidence to make it a speed rather than a buffered burst.
+type StreamPace struct {
+	FirstToken      time.Duration
+	TokensPerSecond float64
 }
 
 type TokenUsage struct {

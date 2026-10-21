@@ -114,6 +114,10 @@ type attemptMetadata struct {
 	// billed holds generated usage when this ladder ends without a response.
 	billed           relayapp.TokenUsage
 	billedGeneration time.Duration
+	// firstToken and tokensPerSecond are the serving attempt's stream pace
+	// (paceMeter.settle); zero when the answer streamed no token.
+	firstToken      time.Time
+	tokensPerSecond float64
 }
 
 type Config struct {
@@ -273,6 +277,9 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// compatibility conversion and the repair memo may respell it for the
 	// provider, but the request's reasoning level is the caller's choice.
 	reasoningEffort, reasoningBudget := requestReasoning(originalBody, request.Header.Get("Content-Type"))
+	// The first token is reported as the client's wait: from here, queueing
+	// and retries included.
+	requestStarted := time.Now()
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Method: request.Method, Path: request.URL.Path, BytesIn: int64(len(body)),
@@ -291,7 +298,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			Status: status, BytesOut: bytesOut, Cancelled: cancelled, ErrorCode: errorCode,
 			ErrorDetail: errorDetail,
 			ProviderID:  serving.route.ProviderID, ProviderName: serving.route.ProviderName,
-			Usage: usage, Generation: generation,
+			Usage: usage, Generation: generation, Pace: serving.streamPace(requestStarted),
 		})
 	}()
 	committed := false
@@ -683,6 +690,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				// generation is still billed.
 				usage = usageWith(usage, streamUsage)
 				generation += streamGeneration
+				live.inspector.pace.settle(&serving, streamUsage.OutputTokens)
 				server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
 					ProviderID: serving.route.ProviderID, ProviderName: serving.route.ProviderName, Model: model,
 					ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
@@ -934,6 +942,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	chatActive := chatCompat
 	responsesActive := responsesCompat
 	reasoningEffort, reasoningBudget := requestReasoning(request.Body, request.Headers.Get("Content-Type"))
+	requestStarted := time.Now()
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: request.PublicModel, ProviderID: route.ProviderID,
 		ProviderName: route.ProviderName, Method: request.Method,
@@ -1115,7 +1124,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	server.activity.Finish(activityID, relayapp.ActivityFinish{
 		Status: response.StatusCode, BytesOut: int64(len(responseBody)),
 		Usage: usage, Generation: generation, ErrorCode: dispatchError,
-		ErrorDetail: dispatchDetail,
+		ErrorDetail: dispatchDetail, Pace: serving.streamPace(requestStarted),
 	})
 	return relayapp.DispatchResponse{
 		Status: response.StatusCode, Headers: response.Header.Clone(), Body: responseBody,
@@ -1178,6 +1187,10 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 	if serving != nil {
 		serving.billed = relayapp.TokenUsage{}
 		serving.billedGeneration = 0
+		// Only the attempt this call returns settles a pace: a ladder that
+		// ends on a JSON answer or an error has no stream to time.
+		serving.firstToken = time.Time{}
+		serving.tokensPerSecond = 0
 	}
 	defer func() {
 		if resultErr != nil {
@@ -1343,7 +1356,10 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				// buffered or live: the provider is thinking either way, and
 				// a retry closes the phase of the attempt it replaces.
 				onThinking := func(thinking bool) { server.activity.Thinking(activityID, thinking) }
-				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter, onThinking)
+				// A fresh meter per attempt: a retried answer's tokens never
+				// time the attempt that replaces it.
+				pace := &paceMeter{}
+				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter, onThinking, pace)
 				if liveBody != nil {
 					// A live generation is still generating: the lease rides
 					// the stream's end, not the handoff, so the key's
@@ -1454,6 +1470,9 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.Header.Del("Content-Length")
 				response.Header.Del("Content-Encoding")
 				response.Header.Set("X-Switchboard-Terminal", terminal)
+				// The served attempt's own tokens, not the ladder's sum: the
+				// rate describes the answer the client receives.
+				pace.settle(serving, streamUsage.OutputTokens)
 				addDiscardedUsage(&discarded, streamUsage)
 				setUsageHeaders(response.Header, discarded, generatedDuration)
 				server.noteLearnedShape(route.ProviderID, learned)
@@ -2514,7 +2533,10 @@ type bodyRead struct {
 // provider, so the handoff races nothing. A stream that ends or breaks
 // inside the window never leaves as live, and the flaky-provider repair
 // ladder keeps working exactly as it did before the window existed.
-func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, wholeJSONExpected bool, liveAfter time.Duration, onThinking func(bool)) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
+//
+// pace, when set, times the generated tokens as they arrive — buffered or
+// live, the clock reads the provider's own stream.
+func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, wholeJSONExpected bool, liveAfter time.Duration, onThinking func(bool), pace *paceMeter) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
 	handedLive := false
 	defer func() {
 		if !handedLive {
@@ -2581,7 +2603,7 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	buffered := make([]byte, 0, min(limit, 1024*1024))
 	// The same inspector rides into the live body, so the phase keeps
 	// reporting after the handoff without a second parser.
-	inspector := &sseInspector{path: canonicalPath(path), limit: limit, onThinking: onThinking}
+	inspector := &sseInspector{path: canonicalPath(path), limit: limit, onThinking: onThinking, pace: pace}
 	reportedUsage := func() relayapp.TokenUsage {
 		// Wrong framing can justify a retry, never erasing an already billed
 		// whole JSON answer. Invalid/truncated JSON is not usage evidence.
@@ -2871,6 +2893,9 @@ type sseInspector struct {
 	onThinking    func(bool)
 	thinking      bool
 	thinkingSpans int
+	// pace times the generated tokens as they arrive; nil for the same
+	// re-reading inspectors, whose clock says nothing about the provider.
+	pace *paceMeter
 }
 
 func (inspector *sseInspector) Feed(chunk []byte) string {
@@ -2979,6 +3004,7 @@ func (inspector *sseInspector) finishEvent() {
 		eventType = typelessEventType(eventName, payload)
 	}
 	inspector.notePhase(eventType, payload)
+	inspector.notePace(eventType, payload)
 	if responsesDialectPath(inspector.path) && (strings.HasSuffix(eventType, ".delta") || strings.HasSuffix(eventType, ".partial_image")) {
 		inspector.output = true
 	}

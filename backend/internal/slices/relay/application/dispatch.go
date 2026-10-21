@@ -39,13 +39,15 @@ type Dispatcher interface {
 
 // ProbeReport is one measured streaming request: when the first content token
 // arrived, when the answer finished, and how many tokens the provider reported
-// (or the probe counted). ErrorCode carries the failure class like a history
-// row does.
+// (or the probe counted). OutputTPS is the decode rate (domain.DecodeRate),
+// zero when the stream carried too little evidence to measure one. ErrorCode
+// carries the failure class like a history row does.
 type ProbeReport struct {
 	Status       int     `json:"status"`
 	TTFTMs       float64 `json:"ttftMs"`
 	TotalMs      float64 `json:"totalMs"`
 	OutputTokens int     `json:"outputTokens"`
+	OutputTPS    float64 `json:"outputTps"`
 	ErrorCode    string  `json:"errorCode"`
 	ErrorDetail  string  `json:"errorDetail"`
 }
@@ -71,15 +73,23 @@ func (profile ProbeProfile) Valid() bool {
 	return profile == ProbeProfileShort || profile == ProbeProfileFull128K
 }
 
+// probeTask asks for a steady run of short tokens: enough of them, in enough
+// chunks, for a decode rate to mean something — a two-token "OK" measures the
+// network, not the model. Sixty numbers stay inside the probe's output budget
+// even for tokenizers that split every digit (about 170 tokens), so the
+// answer ends on its own instead of hitting the cap, which the Responses
+// dialect reports as an incomplete — failed — answer.
+const probeTask = "Count from 1 to 60, separated by single spaces. Output only the numbers."
+
 // The shared input leaves headroom for output and protocol framing. Token counts
 // vary by provider tokenizer; this probes approximately 128k, not an exact limit.
-var fullProbeInput = strings.Repeat("context ", 127_500) + "\nReply with OK."
+var fullProbeInput = strings.Repeat("context ", 127_500) + "\n" + probeTask
 
 func (profile ProbeProfile) Prompt() string {
 	if profile == ProbeProfileFull128K {
 		return fullProbeInput
 	}
-	return "Reply OK"
+	return probeTask
 }
 
 // ProfiledStreamProber is optional so older test doubles and sidecars keep the

@@ -210,7 +210,12 @@ func TestProbeRecordsMeasuredUsageThroughRealActivityRecorder(t *testing.T) {
 	if row.State != activitydomain.StateCompleted || report.OutputTokens != 17 || row.InputTokens != 100 || row.OutputTokens != 17 || row.TotalTokens != 117 || row.ContextTokens != 100 || row.CachedTokens != 30 || row.ReasoningTokens != 7 {
 		t.Fatalf("real probe accounting lost provider usage: report=%+v row=%+v", report, row)
 	}
-	if row.GenerationMS <= 0 || math.Abs(row.GenerationMS-report.TotalMs) > .001 || row.TokensPerSecond <= 0 || row.BytesOut == 0 {
+	if row.GenerationMS <= 0 || math.Abs(row.GenerationMS-report.TotalMs) > .001 || row.BytesOut == 0 {
 		t.Fatalf("probe generation was not recorded from measurement: report=%+v row=%+v", report, row)
+	}
+	// Seventeen tokens in one chunk is a burst, not a speed: the old
+	// output-over-total ratio filed one anyway.
+	if row.TTFTMS <= 0 || math.Abs(row.TTFTMS-report.TTFTMs) > .001 || row.TokensPerSecond != 0 || report.OutputTPS != 0 {
+		t.Fatalf("probe pace was misreported: report=%+v row=%+v", report, row)
 	}
 }

@@ -25,7 +25,12 @@ export interface ActivityRequest {
   readonly totalTokens: number
   readonly contextTokens: number
   readonly generationMs: number
+  /** Decode rate: tokens after the first over the window that followed it;
+   * zero when the answer failed or streamed too little to measure. */
   readonly tokensPerSecond: number
+  /** The client's wait for the first generated token, answer or reasoning,
+   * from the request's arrival; absent before one arrived. */
+  readonly ttftMs?: number
   // Optional: older sidecars do not send them. The level is what the client
   // asked for; `thinking` is the provider's stream being in its reasoning
   // phase right now, and `thinkingMs` the reasoning spans already closed.

@@ -136,6 +136,30 @@ func TestFullModelTestSendsItsLargeContextBudget(t *testing.T) {
 	}
 }
 
+type profiledProber struct {
+	dispatcherFunc
+	report relayapp.ProbeReport
+}
+
+func (prober profiledProber) ProbeWithProfile(context.Context, string, string, relayapp.ProbeProfile) (relayapp.ProbeReport, error) {
+	return prober.report, nil
+}
+
+// The decode rate is the relay's measurement; the page must show that number,
+// not re-derive one from the total time and the token count.
+func TestModelTestCarriesTheMeasuredDecodeRate(t *testing.T) {
+	gateway := NewGateway(profiledProber{
+		dispatcherFunc: func(context.Context, relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {
+			return relayapp.DispatchResponse{}, errors.New("buffered path must not run")
+		},
+		report: relayapp.ProbeReport{Status: http.StatusOK, TTFTMs: 420, TotalMs: 2_420, OutputTokens: 121, OutputTPS: 60},
+	}, time.Second)
+	result := gateway.Test(context.Background(), domain.Provider{ID: "provider", Dialect: "openai"}, "gpt-test")
+	if result.State != "available" || result.OutputTPS != 60 || result.TTFTMS != 420 || result.OutputTokens != 121 {
+		t.Fatalf("probe measurement was not carried into the result: %+v", result)
+	}
+}
+
 func TestModelTestDoesNotRetryAnotherEndpointAfterAuthenticationFailure(t *testing.T) {
 	calls := 0
 	gateway := NewGateway(dispatcherFunc(func(context.Context, relayapp.DispatchRequest) (relayapp.DispatchResponse, error) {

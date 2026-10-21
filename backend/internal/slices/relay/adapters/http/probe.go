@@ -12,13 +12,14 @@ import (
 	"time"
 
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
+	relaydomain "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/domain"
 )
 
-// The probe asks for a little more than the availability test does: a handful
-// of tokens so the decode rate has something to measure.
+// The probe's counting task needs up to ~170 tokens; the budget leaves room
+// for a reasoning model's thinking on top, which shares the same cap.
 const (
-	shortProbeOutputTokens = 32
-	fullProbeOutputTokens  = 128
+	shortProbeOutputTokens = 256
+	fullProbeOutputTokens  = 256
 	probeOutputTokens      = shortProbeOutputTokens
 )
 
@@ -243,6 +244,12 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 	if usage.OutputTokens > 0 {
 		report.OutputTokens = int(usage.OutputTokens)
 	}
+	// The rate needs the provider's own count: frames counted in its place
+	// are chunks, not tokens, and dividing them would invent a speed.
+	pace := relayapp.StreamPace{FirstToken: millis(measured.ttft)}
+	if measured.ttft > 0 {
+		pace.TokensPerSecond = relaydomain.DecodeRate(usage.OutputTokens, measured.chunks, millis(measured.total-measured.ttft))
+	}
 	cancelled := readErr != nil && errors.Is(ctx.Err(), context.Canceled)
 	switch {
 	case cancelled:
@@ -268,6 +275,12 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 			report.ErrorCode = "stream_incomplete"
 		}
 	}
+	// Only an answer that completed has a speed: a broken stream's tokens
+	// over its window measure the break.
+	if report.ErrorCode != "" {
+		pace.TokensPerSecond = 0
+	}
+	report.OutputTPS = pace.TokensPerSecond
 	if readErr != nil {
 		finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 	} else if report.ErrorCode != "" {
@@ -283,18 +296,24 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		Secrets: markers,
 	}); blocked {
 		report.ErrorCode = code
+		report.OutputTPS = 0
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: http.StatusBadGateway, ErrorCode: code, ErrorDetail: code,
 			BytesOut: int64(len(collected)), Usage: usage, Generation: generation,
+			Pace: relayapp.StreamPace{FirstToken: pace.FirstToken},
 		})
 		return report, nil
 	}
 	server.activity.Finish(activityID, relayapp.ActivityFinish{
 		Status: response.StatusCode, BytesOut: int64(len(collected)),
 		ErrorCode: report.ErrorCode, ErrorDetail: report.ErrorDetail,
-		Usage: usage, Generation: generation, Cancelled: cancelled,
+		Usage: usage, Generation: generation, Cancelled: cancelled, Pace: pace,
 	})
 	return report, nil
+}
+
+func millis(value float64) time.Duration {
+	return time.Duration(value * float64(time.Millisecond))
 }
 
 type probeTerminal int
@@ -305,10 +324,14 @@ const (
 	probeTerminalFailed
 )
 
+// chunks counts the token-bearing frames: the decode rate refuses a stream
+// that delivered its tokens in a burst or two, the shape of a gateway that
+// buffers the answer and replays it.
 type probeMeasurement struct {
 	ttft     float64
 	total    float64
 	tokens   int
+	chunks   int
 	terminal probeTerminal
 }
 
@@ -356,11 +379,10 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.ReadCloser
 	var collected bytes.Buffer
 	var frame bytes.Buffer
 	var pendingLine []byte
-	contentFrames := 0
 	finish := func(err error) (probeMeasurement, []byte, error) {
 		measurement.total = float64(time.Since(sent).Microseconds()) / 1000
 		if measurement.tokens == 0 {
-			measurement.tokens = contentFrames
+			measurement.tokens = measurement.chunks
 		}
 		if err == io.EOF {
 			return measurement, collected.Bytes(), nil
@@ -404,8 +426,8 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.ReadCloser
 			if len(trimmed) == 0 {
 				delta, tokens, terminal := probeFrameDelta(frame.Bytes(), dialect)
 				frame.Reset()
-				if delta != "" {
-					contentFrames++
+				if delta {
+					measurement.chunks++
 					if measurement.ttft == 0 {
 						measurement.ttft = float64(time.Since(sent).Microseconds()) / 1000
 					}
@@ -427,91 +449,78 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.ReadCloser
 	}
 }
 
-// probeFrameDelta extracts the content delta, the reported output-token count
-// and the terminal verdict from one SSE frame, in the dialect the provider
-// speaks. The terminal is what makes an HTTP 200 failure a failure.
-func probeFrameDelta(frame []byte, dialect string) (string, int, probeTerminal) {
+// probeDialectPath names the canonical path whose stream shape a probe
+// dialect speaks, so the probe reads token events exactly the way the
+// relay's journal does (tokenEvent).
+var probeDialectPath = map[string]string{
+	"anthropic": "/v1/messages",
+	"chat":      "/v1/chat/completions",
+	"responses": "/v1/responses",
+}
+
+// probeFrameDelta reports whether one SSE frame carried a generated token
+// (answer or reasoning: the first of either is the latency the operator
+// feels), the reported output-token count and the terminal verdict, in the
+// dialect the provider speaks. The terminal is what makes an HTTP 200
+// failure a failure.
+func probeFrameDelta(frame []byte, dialect string) (bool, int, probeTerminal) {
 	data := sseData(frame)
 	if bytes.Equal(data, []byte("[DONE]")) {
 		if dialect == "chat" {
-			return "", 0, probeTerminalOK
+			return false, 0, probeTerminalOK
 		}
-		return "", 0, probeTerminalMissing
+		return false, 0, probeTerminalMissing
 	}
 	var payload map[string]any
 	if json.Unmarshal(data, &payload) != nil {
-		return "", 0, probeTerminalMissing
+		return false, 0, probeTerminalMissing
 	}
 	// Any dialect's error object ends the probe as a failure.
 	if payload["error"] != nil {
-		return "", 0, probeTerminalFailed
+		return false, 0, probeTerminalFailed
 	}
 	eventType, _ := payload["type"].(string)
+	path, known := probeDialectPath[dialect]
+	if !known {
+		path = probeDialectPath["responses"]
+	}
+	token := tokenEvent(path, eventType, payload)
 	switch dialect {
 	case "anthropic":
 		switch eventType {
-		case "content_block_delta":
-			if delta, ok := payload["delta"].(map[string]any); ok {
-				// Text and thinking both count: the first token the model
-				// spent on either is the latency the operator feels.
-				if text, _ := delta["text"].(string); text != "" {
-					return text, 0, probeTerminalMissing
-				}
-				if thinking, _ := delta["thinking"].(string); thinking != "" {
-					return thinking, 0, probeTerminalMissing
-				}
-			}
 		case "message_delta":
 			if usage, ok := payload["usage"].(map[string]any); ok {
-				return "", intNumber(usage["output_tokens"]), probeTerminalMissing
+				return token, intNumber(usage["output_tokens"]), probeTerminalMissing
 			}
 		case "message_stop":
-			return "", 0, probeTerminalOK
+			return token, 0, probeTerminalOK
 		case "error":
-			return "", 0, probeTerminalFailed
+			return token, 0, probeTerminalFailed
 		}
 	case "chat":
 		tokens := 0
 		if usage, ok := payload["usage"].(map[string]any); ok {
 			tokens = intNumber(usage["completion_tokens"])
 		}
-		choices, _ := payload["choices"].([]any)
-		for _, rawChoice := range choices {
-			choice, _ := rawChoice.(map[string]any)
-			if delta, ok := choice["delta"].(map[string]any); ok {
-				if text, _ := delta["content"].(string); text != "" {
-					return text, tokens, probeTerminalMissing
-				}
-				// Reasoning models think out loud before they answer; that
-				// thinking is the first token the user waits for.
-				if reasoning, _ := delta["reasoning_content"].(string); reasoning != "" {
-					return reasoning, tokens, probeTerminalMissing
-				}
-			}
-		}
-		return "", tokens, probeTerminalMissing
+		return token, tokens, probeTerminalMissing
 	default:
 		switch eventType {
-		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-			if text, _ := payload["delta"].(string); text != "" {
-				return text, 0, probeTerminalMissing
-			}
 		case "response.completed":
 			response, ok := payload["response"].(map[string]any)
 			// Match sseInspector: an event name alone is not completion.
 			if !ok || response["status"] != "completed" || response["incomplete_details"] != nil || response["error"] != nil {
-				return "", 0, probeTerminalFailed
+				return token, 0, probeTerminalFailed
 			}
 			tokens := 0
 			if usage, ok := response["usage"].(map[string]any); ok {
 				tokens = intNumber(usage["output_tokens"])
 			}
-			return "", tokens, probeTerminalOK
+			return token, tokens, probeTerminalOK
 		case "response.failed", "response.incomplete", "error":
-			return "", 0, probeTerminalFailed
+			return token, 0, probeTerminalFailed
 		}
 	}
-	return "", 0, probeTerminalMissing
+	return token, 0, probeTerminalMissing
 }
 
 // probeJSONFailure answers the non-stream shape: a gateway that replies to a

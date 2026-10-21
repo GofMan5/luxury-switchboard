@@ -1,5 +1,5 @@
 import type { PropsWithChildren } from 'react'
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ArrowUpCircle, PanelLeftClose, PanelLeftOpen, Play, Square, Waypoints } from 'lucide-react'
 import { useProviders } from '../features/providers/ui/useProviders'
 import { useRelay } from '../features/relay/ui/useRelay'
@@ -63,6 +63,12 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(() => {
     try { return window.localStorage.getItem('switchboard.sidebar') === 'collapsed' } catch { return false }
   })
+  // One scroll container serves every page, so a new page would otherwise open
+  // at the previous page's offset. Reset before paint, so no frame shows it.
+  const workspaceRef = useRef<HTMLElement>(null)
+  useLayoutEffect(() => {
+    if (workspaceRef.current) workspaceRef.current.scrollTop = 0
+  }, [route])
   const toggleSidebar = () => {
     setCollapsed((value) => {
       try { window.localStorage.setItem('switchboard.sidebar', value ? 'expanded' : 'collapsed') } catch { /* storage is a courtesy */ }
@@ -157,7 +163,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <NotificationsSurface />
           </div>
         </header>
-        <main id="workspace" tabIndex={-1} className={styles.content}>
+        <main id="workspace" ref={workspaceRef} tabIndex={-1} className={styles.content}>
           {/* Around the workspace, not the shell: a screen that throws must not
               take the sidebar with it, because navigating away is the recovery.
               Keyed on the route so that navigation discards a failed boundary. */}

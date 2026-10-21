@@ -89,8 +89,43 @@ func TestFinishDoesNotAddCachedOrReasoningTwice(t *testing.T) {
 		ContextTokens: 100, Generation: time.Second,
 	})
 	request := service.List(1)[0]
-	if request.TotalTokens != 140 || request.ContextTokens != 100 || request.TokensPerSecond != 40 {
+	if request.TotalTokens != 140 || request.ContextTokens != 100 {
 		t.Fatalf("token usage was inflated: %+v", request)
+	}
+}
+
+// The decode rate is the relay's measurement, not output over generation:
+// that ratio counted prefill and queueing as decode time and halved fast
+// providers. The service files the measured rate and the first-token time,
+// and only for a completed answer.
+func TestFinishFilesMeasuredRateAndFirstToken(t *testing.T) {
+	service := NewService(10)
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	id := service.Start(domain.Start{Path: "/v1/chat/completions"})
+	now = now.Add(3 * time.Second)
+	service.Finish(id, domain.Finish{
+		Status: 200, OutputTokens: 200, Generation: 3 * time.Second,
+		FirstToken: 250 * time.Millisecond, TokensPerSecond: 85.5,
+	})
+	request := service.List(1)[0]
+	if request.TokensPerSecond != 85.5 || request.TTFTMS != 250 || request.LatencyMS != 3_000 {
+		t.Fatalf("measured rate or first token was not filed: %+v", request)
+	}
+
+	failed := service.Start(domain.Start{Path: "/v1/chat/completions"})
+	service.Finish(failed, domain.Finish{
+		Status: 200, ErrorCode: "stream_incomplete", OutputTokens: 200,
+		FirstToken: time.Millisecond, TokensPerSecond: 85.5,
+	})
+	if request := service.List(1)[0]; request.TokensPerSecond != 0 {
+		t.Fatalf("a broken stream must not file a decode rate: %+v", request)
+	}
+
+	unmeasured := service.Start(domain.Start{Path: "/v1/responses"})
+	service.Finish(unmeasured, domain.Finish{Status: 200, OutputTokens: 40, Generation: time.Second})
+	if request := service.List(1)[0]; request.TokensPerSecond != 0 || request.TTFTMS != 0 {
+		t.Fatalf("an unmeasured answer must not invent a rate: %+v", request)
 	}
 }
 

@@ -20,10 +20,11 @@ const (
 	maxDiscoveredModels  = 5_000
 	maxShortProbeTimeout = 30 * time.Second
 	maxFullProbeTimeout  = 5 * time.Minute
-	// The Responses API refuses a budget under 16 tokens, so a smaller probe
-	// would report every reasoning model as unavailable.
-	shortProbeTokens = 16
-	fullProbeTokens  = 128
+	// The probe prompt is a counting task of up to ~170 tokens; a smaller
+	// budget would end it on the cap, which the Responses API reports as an
+	// incomplete answer. (It also refuses any budget under 16 tokens.)
+	shortProbeTokens = 256
+	fullProbeTokens  = 256
 	// Compatibility names used by the existing short-probe tests.
 	maxProbeTimeout = maxShortProbeTimeout
 	probeTokens     = shortProbeTokens
@@ -147,6 +148,7 @@ func (gateway *Gateway) resultFromReport(ctx context.Context, providerID, model 
 		ProviderID: providerID, Model: model,
 		Status: report.Status, LatencyMS: report.TotalMs,
 		TTFTMS: report.TTFTMs, OutputTokens: report.OutputTokens,
+		OutputTPS: report.OutputTPS,
 	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {

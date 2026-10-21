@@ -33,5 +33,9 @@ export interface ModelTestResult {
    * refusal. OutputTokens is the provider's own count. */
   readonly ttftMs?: number
   readonly outputTokens?: number
+  /** Decode rate the relay measured: tokens after the first over the window
+   * from the first token to the end. Absent when the stream was too short or
+   * too bursty to measure — never derived here from the totals. */
+  readonly outputTps?: number
   readonly errorCode?: string
 }

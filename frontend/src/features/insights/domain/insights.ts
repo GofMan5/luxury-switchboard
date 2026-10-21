@@ -103,4 +103,7 @@ export interface HistoryRequest {
   readonly updatedAt: string
   readonly errorCode: string
   readonly errorDetail: string
+  // Optional: rows persisted before the level was recorded carry none.
+  readonly reasoningEffort?: string
+  readonly reasoningBudget?: number
 }

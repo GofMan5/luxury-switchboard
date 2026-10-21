@@ -64,6 +64,29 @@ function fixtureRequest(index: number, offsetMs: number): ActivityRequest {
     contextTokens: input + cached,
     generationMs: 1_400 + ((index * 271) % 9_000),
     tokensPerSecond: state === 'active' ? 41 + (index % 30) : 0,
+    // The level each client dialect sends: an effort name, a token budget,
+    // or nothing at all (the provider's default).
+    ...fixtureReasoning(index, state, output),
+  }
+}
+
+function fixtureReasoning(index: number, state: ActivityRequest['state'], output: number): Partial<ActivityRequest> {
+  const levels: readonly Pick<ActivityRequest, 'reasoningEffort' | 'reasoningBudget'>[] = [
+    { reasoningEffort: 'high' },
+    {},
+    { reasoningEffort: 'medium' },
+    { reasoningEffort: 'on', reasoningBudget: 16_000 },
+    { reasoningEffort: 'xhigh' },
+    { reasoningEffort: 'low' },
+    {},
+  ]
+  const level = levels[index % levels.length]
+  if (!level.reasoningEffort) return level
+  return {
+    ...level,
+    // Live rows alternate between the reasoning phase and the answer.
+    thinking: state === 'active' && Math.floor(index / 10) % 2 === 0,
+    thinkingMs: state === 'failed' ? 0 : 600 + ((index * 389 + output) % 14_000),
   }
 }
 
@@ -206,6 +229,8 @@ const history: HistoryRequest[] = activity.slice(0, 30).map((request) => ({
   updatedAt: request.updatedAt,
   errorCode: request.errorCode ?? '',
   errorDetail: request.errorDetail ?? '',
+  reasoningEffort: request.reasoningEffort,
+  reasoningBudget: request.reasoningBudget,
 }))
 
 const prices: ModelPrice[] = [

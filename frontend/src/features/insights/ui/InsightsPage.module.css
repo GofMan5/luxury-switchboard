@@ -17,7 +17,9 @@
 .wideModels th:first-child { width: 29%; }
 .wideModels th:last-child { width: 120px; }
 .wideRecent th:first-child { width: 112px; }
-.wideRecent th:nth-child(2), .wideRecent th:nth-child(3) { width: 19%; }
+/* The model shares its cell with the reasoning badge; provider ids are short. */
+.wideRecent th:nth-child(2) { width: 27%; }
+.wideRecent th:nth-child(3) { width: 14%; }
 .wideProviders :is(th, td):first-child, .wideModels :is(th, td):first-child { position: sticky; z-index: 1; left: 0; background: var(--bg-surface); }
 .wideProviders tbody tr:hover td:first-child, .wideModels tbody tr:hover td:first-child { background: var(--bg-hover); }
 .page table td { font-size: 13px; }

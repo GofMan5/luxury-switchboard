@@ -1,4 +1,4 @@
-import type { ActivityRequest, ActivitySummary } from '../domain/activity'
+import { liveFirst, type ActivityRequest, type ActivitySummary } from '../domain/activity'
 import type { ActivityPort } from './activity-port'
 
 export interface ActivityModelState {
@@ -77,7 +77,7 @@ export class ActivityModel {
         return listedRequest ? !isOlder(request, listedRequest) : baseline.get(request.id) !== request.updatedAt
       })
       const liveIDs = new Set(live.map((request) => request.id))
-      const merged = [...live, ...listed.requests.filter((request) => !liveIDs.has(request.id))].slice(0, 100)
+      const merged = liveFirst([...live, ...listed.requests.filter((request) => !liveIDs.has(request.id))]).slice(0, 100)
       this.#set({ phase: 'ready', requests: merged, available: Math.max(listed.available, merged.length), summary, error: '' })
       this.#pollTimer ??= setInterval(() => void this.#refreshSummary(), 1_000)
     } catch {
@@ -106,7 +106,9 @@ export class ActivityModel {
     if (!this.#active) return
     const current = this.#state.requests.find((item) => item.id === request.id)
     if (current && isOlder(request, current)) return
-    const requests = [request, ...this.#state.requests.filter((item) => item.id !== request.id)].slice(0, 100)
+    // In-flight rows lead and are trimmed last: a long request that has gone
+    // quiet must not scroll out of the buffer behind a hundred quick ones.
+    const requests = liveFirst([request, ...this.#state.requests.filter((item) => item.id !== request.id)]).slice(0, 100)
     this.#set({ ...this.#state, phase: 'ready', requests, available: Math.max(this.#state.available, requests.length), error: '' })
     window.clearTimeout(this.#summaryTimer)
     this.#summaryTimer = window.setTimeout(() => void this.#refreshSummary(), 250)

@@ -27,7 +27,8 @@ func TestHistoryPersistsSanitizedRequestsAndNonOverlappingTokens(t *testing.T) {
 		InputTokens: 100, OutputTokens: 40, CachedTokens: 30,
 		ReasoningTokens: 10, TotalTokens: 140, ContextTokens: 100,
 		GenerationMS: 1000, TokensPerSecond: 40,
-		ErrorDetail: "provider returned HTTP 502",
+		ErrorDetail:     "provider returned HTTP 502",
+		ReasoningEffort: "high", ReasoningBudget: 8192, ThinkingMS: 420.5,
 	}
 	if !store.Record(request) {
 		t.Fatal("terminal request was not queued")
@@ -50,6 +51,9 @@ func TestHistoryPersistsSanitizedRequestsAndNonOverlappingTokens(t *testing.T) {
 	}
 	if recent[0].ProviderName != "Echo" {
 		t.Fatalf("provider name did not survive history: %q", recent[0].ProviderName)
+	}
+	if recent[0].ReasoningEffort != "high" || recent[0].ReasoningBudget != 8192 || recent[0].ThinkingMS != 420.5 {
+		t.Fatalf("reasoning level did not survive history: %+v", recent[0])
 	}
 	stats, err := store.Stats(context.Background(), application.Period24H)
 	if err != nil {
@@ -165,8 +169,17 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	if err != nil || len(recent) != 1 {
 		t.Fatalf("legacy row was lost by migration: %+v %v", recent, err)
 	}
-	if recent[0].ProviderName != "" || recent[0].ErrorDetail != "" {
+	if recent[0].ProviderName != "" || recent[0].ErrorDetail != "" ||
+		recent[0].ReasoningEffort != "" || recent[0].ReasoningBudget != 0 || recent[0].ThinkingMS != 0 {
 		t.Fatalf("migrated columns were not empty: %+v", recent[0])
+	}
+	// A migrated database must take the new columns on write too, not only
+	// read their defaults.
+	migrated := recent[0]
+	migrated.ID = "req_after_migration"
+	migrated.ReasoningEffort = "low"
+	if err := store.writeBatch([]domain.Request{migrated}); err != nil {
+		t.Fatalf("migrated database refused a row with the new columns: %v", err)
 	}
 	if _, err := store.Stats(context.Background(), application.Period24H); err != nil {
 		t.Fatal(err)

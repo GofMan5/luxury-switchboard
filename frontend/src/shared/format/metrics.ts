@@ -4,6 +4,16 @@ export function formatDuration(milliseconds: number): string {
   return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 2 : 1)} s`
 }
 
+/** A running clock in whole seconds: `7 s`, `2m 05s`, `1h 03m`. Whole units
+ * because it ticks once a second; a decimal would always be stale. */
+export function formatElapsed(milliseconds: number): string {
+  const seconds = Number.isFinite(milliseconds) ? Math.max(0, Math.floor(milliseconds / 1_000)) : 0
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
+}
+
 export function formatDecimal(value: number, digits = 1): string {
   if (!Number.isFinite(value)) return '—'
   return value.toLocaleString(undefined, {

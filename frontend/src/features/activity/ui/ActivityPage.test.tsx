@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ActivityRequest } from '../domain/activity'
 import type { ActivityModelState } from '../application/activity-model'
@@ -125,5 +125,74 @@ describe('ActivityPage rows and inspector', () => {
     fireEvent.keyDown(dialog, { key: 'Escape' })
     expect(screen.queryByRole('complementary', { name: 'Request inspector' })).toBeNull()
     expect(document.activeElement).toBe(rows[1])
+  })
+})
+
+describe('ActivityPage running time', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('ticks how long a live request has been running, and stops the clock on pause', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    vi.setSystemTime(Date.parse('2026-01-01T00:00:07.400Z'))
+    show({
+      phase: 'ready', available: 2, summary, error: '',
+      requests: [request('live'), { ...request('done', 'completed'), latencyMs: 3_210 }],
+    })
+    const cells = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')].map((row) => row.cells[5].textContent)
+    expect(cells()).toEqual(['7 s', '3.21 s'])
+    act(() => vi.advanceTimersByTime(600))
+    expect(cells()).toEqual(['8 s', '3.21 s'])
+    act(() => vi.advanceTimersByTime(65_000))
+    expect(cells()[0]).toBe('1m 13s')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    act(() => vi.advanceTimersByTime(10_000))
+    expect(cells()[0]).toBe('1m 13s')
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+    expect(cells()[0]).toBe('1m 23s')
+
+    fireEvent.click(screen.getAllByRole('row')[1])
+    expect(screen.getByRole('complementary').textContent).toContain('Running for1m 23s')
+  })
+})
+
+describe('ActivityPage reasoning', () => {
+  const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')]
+
+  it('shows a live request in its reasoning phase as thinking, with the level it asked for', () => {
+    show({
+      phase: 'ready', available: 3, summary, error: '',
+      requests: [
+        { ...request('a'), reasoningEffort: 'high', thinking: true, thinkingMs: 0 },
+        { ...request('b'), reasoningEffort: 'on', reasoningBudget: 16_000, thinking: false, thinkingMs: 2_400 },
+        request('c'),
+      ],
+    })
+    // No new column: the level rides beside the model.
+    expect(document.querySelectorAll('th[scope="col"]')).toHaveLength(10)
+    const [thinking, answering, plain] = rows()
+    expect(thinking.cells[0].textContent).toBe('Thinking')
+    expect(thinking.cells[1].textContent).toBe('modelReasoning High')
+    expect(answering.cells[0].textContent).toBe('Streaming')
+    expect(answering.cells[1].textContent).toBe('modelReasoning 16K')
+    expect(plain.cells[0].textContent).toBe('Streaming')
+    expect(plain.cells[1].textContent).toBe('model')
+
+    fireEvent.click(answering)
+    const inspector = screen.getByRole('complementary', { name: 'Request inspector' })
+    expect(inspector.textContent).toContain(`Reasoning${(16_000).toLocaleString()}-token budget · 2.40 s thinking`)
+  })
+
+  it('never shows a finished request as thinking, even if its last frame said so', () => {
+    show({ phase: 'ready', available: 1, summary, error: '', requests: [{ ...request('a', 'completed'), reasoningEffort: 'low', thinking: true, thinkingMs: 900 }] })
+    expect(rows()[0].cells[0].textContent).toBe('Complete')
+    fireEvent.click(rows()[0])
+    expect(screen.getByRole('complementary').textContent).toContain('ReasoningLow effort · 900 ms thinking')
+  })
+
+  it('reads a request from an older sidecar as the provider default', () => {
+    show({ phase: 'ready', available: 1, summary, error: '', requests: [request('a')] })
+    fireEvent.click(rows()[0])
+    expect(screen.getByRole('complementary').textContent).toContain('ReasoningProvider default')
   })
 })

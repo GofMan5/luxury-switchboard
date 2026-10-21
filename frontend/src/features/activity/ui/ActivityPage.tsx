@@ -1,12 +1,16 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Check, Copy, Pause, Play, Search, X } from 'lucide-react'
 import { useAppServices } from '../../../app/services'
 import { formatBytes, formatClock, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
+import { describeReasoningLevel } from '../../../shared/format/reasoning'
 import { Pill, Segmented } from '../../../shared/ui/chrome'
+import chrome from '../../../shared/ui/chrome.module.css'
+import { ReasoningLevel } from '../../../shared/ui/ReasoningLevel'
 import { StatusDot } from '../../../shared/ui/StatusDot'
-import type { ActivityRequest, ActivityState } from '../domain/activity'
-import { activityLabels } from './activity-view'
+import { isLive, type ActivityRequest, type ActivityState } from '../domain/activity'
+import { activityLabel } from './activity-view'
+import { Elapsed } from './Elapsed'
 import { useActivity } from './useActivity'
 import styles from './ActivityPage.module.css'
 
@@ -30,6 +34,7 @@ export default function ActivityPage() {
   const [stateFilter, setStateFilter] = useState<StateFilter>('all')
   const [paused, setPaused] = useState(false)
   const [frozen, setFrozen] = useState<readonly ActivityRequest[]>([])
+  const [frozenAt, setFrozenAt] = useState(0)
   const [selectedID, setSelectedID] = useState('')
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const source = paused ? frozen : activity.requests
@@ -48,7 +53,11 @@ export default function ActivityPage() {
   const failed = activity.phase === 'error'
 
   const togglePause = () => {
-    if (!paused) setFrozen(activity.requests)
+    if (!paused) {
+      setFrozen(activity.requests)
+      // Running clocks stop with the rows: a paused table is one moment.
+      setFrozenAt(Date.now())
+    }
     setPaused((value) => !value)
   }
 
@@ -164,12 +173,19 @@ export default function ActivityPage() {
                         }
                       }}
                     >
-                      <td><Pill tone={statePillTone[request.state]}>{activityLabels[request.state]}</Pill></td>
-                      <td title={request.model}>{request.model || '—'}</td>
+                      <td><Pill tone={statePillTone[request.state]}>{activityLabel(request)}</Pill></td>
+                      <td title={request.model}>
+                        <span className={chrome.labelWithBadge}>
+                          <span>{request.model || '—'}</span>
+                          <ReasoningLevel effort={request.reasoningEffort} budget={request.reasoningBudget} />
+                        </span>
+                      </td>
                       <td>{request.providerName || '—'}</td>
                       <td>{request.status || '—'}</td>
                       <td>{request.queueMs > 0 ? formatDuration(request.queueMs) : '0 ms'}</td>
-                      <td>{formatDuration(request.latencyMs)}</td>
+                      <td title={isLive(request) ? 'Running for' : undefined}>
+                        {isLive(request) ? <Elapsed request={request} frozenAt={paused ? frozenAt : undefined} /> : formatDuration(request.latencyMs)}
+                      </td>
                       <td>{request.tokensPerSecond > 0 ? formatDecimal(request.tokensPerSecond) : '—'}</td>
                       <td>{request.contextTokens > 0 ? request.contextTokens.toLocaleString() : '—'}</td>
                       <td>{formatBytes(request.bytesIn + request.bytesOut)}</td>
@@ -192,13 +208,13 @@ export default function ActivityPage() {
             <span>Live buffer · 100 visible</span>
           </footer>
         </div>
-        {selected && inspectorOpen ? <RequestInspector request={selected} onClose={() => setInspectorOpen(false)} /> : null}
+        {selected && inspectorOpen ? <RequestInspector request={selected} frozenAt={paused ? frozenAt : undefined} onClose={() => setInspectorOpen(false)} /> : null}
       </div>
     </section>
   )
 }
 
-function RequestInspector({ request, onClose }: { request: ActivityRequest; onClose: () => void }) {
+function RequestInspector({ request, frozenAt, onClose }: { request: ActivityRequest; frozenAt?: number; onClose: () => void }) {
   // Non-modal side panel: no autofocus, no Tab trap — those would be modal
   // semantics over a workspace that keeps running behind the panel. Escape
   // closes it from anywhere inside.
@@ -243,15 +259,18 @@ function RequestInspector({ request, onClose }: { request: ActivityRequest; onCl
 
       <div className={styles.inspectorScroll}>
         <div className={styles.inspectorStatus}>
-          <Pill tone={statePillTone[request.state]}>{activityLabels[request.state]}</Pill>
+          <Pill tone={statePillTone[request.state]}>{activityLabel(request)}</Pill>
           <span className={styles.inspectorMeta}>{request.method} {request.path}{request.status ? ` · HTTP ${request.status}` : ''}</span>
         </div>
 
         <section className={styles.inspectorSection} aria-label="Timing">
           <dl className={styles.details}>
             <Detail label="Model" value={request.model || '—'} />
+            <Detail label="Reasoning" value={reasoningDetail(request)} />
             <Detail label="Route" value={request.providerName || '—'} />
-            <Detail label="Latency" value={formatDuration(request.latencyMs)} />
+            {isLive(request)
+              ? <Detail label="Running for" value={<Elapsed request={request} frozenAt={frozenAt} />} />
+              : <Detail label="Latency" value={formatDuration(request.latencyMs)} />}
             <Detail label="Queue / retries" value={`${formatDuration(request.queueMs)} · ${request.retries}`} />
             <Detail label="Traffic" value={`${formatBytes(request.bytesIn)} in · ${formatBytes(request.bytesOut)} out`} />
             <Detail label="Generation" value={request.tokensPerSecond > 0 ? `${formatDecimal(request.tokensPerSecond)} tok/s` : '—'} />
@@ -274,7 +293,7 @@ function RequestInspector({ request, onClose }: { request: ActivityRequest; onCl
           <TimelineRow label="Received" value={formatClock(request.startedAt)} done />
           <TimelineRow label="Routed" value={request.providerName || '—'} done />
           {request.retries > 0 ? <TimelineRow label="Retried" value={`${request.retries} attempts`} warning /> : null}
-          <TimelineRow label={activityLabels[request.state]} value={formatClock(request.updatedAt)} state={request.state} />
+          <TimelineRow label={activityLabel(request)} value={formatClock(request.updatedAt)} state={request.state} />
         </section>
 
         {request.errorCode || request.errorDetail ? (
@@ -290,6 +309,15 @@ function RequestInspector({ request, onClose }: { request: ActivityRequest; onCl
       </div>
     </aside>
   )
+}
+
+/** What was asked for and what the provider spent, in one line: the level the
+ * client set, the time already spent reasoning, and whether it still is. */
+function reasoningDetail(request: ActivityRequest): string {
+  const level = describeReasoningLevel(request.reasoningEffort, request.reasoningBudget)
+  const spent = request.thinkingMs && request.thinkingMs > 0 ? `${formatDuration(request.thinkingMs)} thinking` : ''
+  const now = request.state === 'active' && request.thinking ? 'thinking now' : ''
+  return [level || (spent || now ? '' : 'Provider default'), spent, now].filter(Boolean).join(' · ')
 }
 
 function TokenStat({ label, value }: { label: string; value: number }) {
@@ -310,7 +338,7 @@ async function copyDetail(value: string): Promise<void> {
   }
 }
 
-function Detail({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function Detail({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
   return <><dt>{label}</dt><dd className={mono ? styles.mono : undefined}>{value}</dd></>
 }
 

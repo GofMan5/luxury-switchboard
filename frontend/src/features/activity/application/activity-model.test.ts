@@ -126,6 +126,28 @@ describe('ActivityModel', () => {
     model.dispose()
   })
 
+  it('keeps requests in flight on top while finished ones arrive, and trims finished ones first', async () => {
+    const port = new FakeActivityPort()
+    const slow = request('slow', '2026-01-01T00:00:00Z')
+    port.listPromise = Promise.resolve({ requests: [slow], available: 1 })
+    const model = new ActivityModel(port)
+    await model.connect()
+    for (let index = 1; index <= 120; index++) {
+      const at = new Date(Date.parse('2026-01-01T00:00:00Z') + index * 1_000).toISOString()
+      port.listener?.({ ...request(`quick-${index}`, at), state: 'completed' })
+    }
+    const rows = model.snapshot().requests
+    expect(rows).toHaveLength(100)
+    expect(rows[0].id).toBe('slow')
+    expect(rows[1].id).toBe('quick-120')
+    // A finished request falls back among the finished ones, newest first.
+    port.listener?.({ ...slow, state: 'completed', updatedAt: '2026-01-01T00:05:00Z' })
+    expect(model.snapshot().requests[0].id).toBe('slow')
+    port.listener?.({ ...request('next', '2026-01-01T00:05:01Z') })
+    expect(model.snapshot().requests.map((row) => row.id).slice(0, 2)).toEqual(['next', 'slow'])
+    model.dispose()
+  })
+
   it('carries the available count so a truncated list reads as a short list', async () => {
     // The frame budget drops the oldest rows during a provider incident; the
     // footer must say "Newest N of M" instead of passing a short list off as

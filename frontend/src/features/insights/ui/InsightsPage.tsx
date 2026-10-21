@@ -7,6 +7,7 @@ import { PriceEditor } from './PriceEditor'
 import { DailyChart } from './DailyChart'
 import { formatClock, formatCost, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { Metric, MetricStrip, Panel, Segmented } from '../../../shared/ui/chrome'
+import { ReasoningLevel } from '../../../shared/ui/ReasoningLevel'
 import { StatusDot } from '../../../shared/ui/StatusDot'
 import chrome from '../../../shared/ui/chrome.module.css'
 import styles from './InsightsPage.module.css'
@@ -226,7 +227,12 @@ export default function InsightsPage() {
                 : state.recent.map((request) => (
                   <tr key={request.id} data-failed={request.state === 'failed' || undefined}>
                     <td><span className={styles.state}><StatusDot state={request.state} />{stateLabels[request.state]}</span></td>
-                    <td title={request.model}>{request.model || '—'}</td>
+                    <td title={request.model}>
+                      <span className={chrome.labelWithBadge}>
+                        <span>{request.model || '—'}</span>
+                        <ReasoningLevel effort={request.reasoningEffort} budget={request.reasoningBudget} />
+                      </span>
+                    </td>
                     <td>{request.providerId || '—'}</td>
                     <td className={styles.num}>{request.status || '—'}</td>
                     <td className={styles.num}>{formatDuration(request.latencyMs)}</td>

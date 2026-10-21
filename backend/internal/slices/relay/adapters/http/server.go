@@ -269,9 +269,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	upstreamRequest.URL.Path = entryPath
 	upstreamRequest.URL.RawPath = ""
 	upstreamRequest.Header = preparedHeaders
+	// The level the client asked for, read from its own body: the
+	// compatibility conversion and the repair memo may respell it for the
+	// provider, but the request's reasoning level is the caller's choice.
+	reasoningEffort, reasoningBudget := requestReasoning(originalBody, request.Header.Get("Content-Type"))
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Method: request.Method, Path: request.URL.Path, BytesIn: int64(len(body)),
+		ReasoningEffort: reasoningEffort, ReasoningBudget: reasoningBudget,
 	})
 	status := 0
 	bytesOut := int64(0)
@@ -928,10 +933,12 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	terminalStream := streamRequested || imageCompat || chatCompat || responsesCompat || statelessJSON
 	chatActive := chatCompat
 	responsesActive := responsesCompat
+	reasoningEffort, reasoningBudget := requestReasoning(request.Body, request.Headers.Get("Content-Type"))
 	activityID := server.activity.Begin(relayapp.ActivityStart{
 		Model: request.PublicModel, ProviderID: route.ProviderID,
 		ProviderName: route.ProviderName, Method: request.Method,
 		Path: urlValue.Path, BytesIn: int64(len(body)),
+		ReasoningEffort: reasoningEffort, ReasoningBudget: reasoningBudget,
 	})
 	markers := make([]string, 0, 4)
 	// Usage and generation live here so every Finish below files the same
@@ -1332,7 +1339,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				if liveAllowed && (serving == nil || !serving.image) && (responsesActive == nil || !*responsesActive) && !route.ResponsesStateless && server.canStreamLive(incoming, body, chatActive, route.ProviderID) {
 					liveAfter = server.liveStreamProbation()
 				}
-				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter)
+				// The provider's reasoning phase is reported as it streams,
+				// buffered or live: the provider is thinking either way, and
+				// a retry closes the phase of the attempt it replaces.
+				onThinking := func(thinking bool) { server.activity.Thinking(activityID, thinking) }
+				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter, onThinking)
 				if liveBody != nil {
 					// A live generation is still generating: the lease rides
 					// the stream's end, not the handoff, so the key's
@@ -2503,7 +2514,7 @@ type bodyRead struct {
 // provider, so the handoff races nothing. A stream that ends or breaks
 // inside the window never leaves as live, and the flaky-provider repair
 // ladder keeps working exactly as it did before the window existed.
-func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, wholeJSONExpected bool, liveAfter time.Duration) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
+func bufferTerminalSSE(ctx context.Context, response *http.Response, path string, config Config, chatDialect bool, wholeJSONExpected bool, liveAfter time.Duration, onThinking func(bool)) (string, []byte, relayapp.TokenUsage, *liveStreamBody, error) {
 	handedLive := false
 	defer func() {
 		if !handedLive {
@@ -2568,7 +2579,9 @@ func bufferTerminalSSE(ctx context.Context, response *http.Response, path string
 	}
 	limit := responseBufferLimit(config)
 	buffered := make([]byte, 0, min(limit, 1024*1024))
-	inspector := &sseInspector{path: canonicalPath(path), limit: limit}
+	// The same inspector rides into the live body, so the phase keeps
+	// reporting after the handoff without a second parser.
+	inspector := &sseInspector{path: canonicalPath(path), limit: limit, onThinking: onThinking}
 	reportedUsage := func() relayapp.TokenUsage {
 		// Wrong framing can justify a retry, never erasing an already billed
 		// whole JSON answer. Invalid/truncated JSON is not usage evidence.
@@ -2853,6 +2866,11 @@ type sseInspector struct {
 	limit     int64
 	overflow  bool
 	consumed  int
+	// onThinking receives the stream's reasoning-phase transitions; nil
+	// for the inspectors that only re-read a finished body.
+	onThinking    func(bool)
+	thinking      bool
+	thinkingSpans int
 }
 
 func (inspector *sseInspector) Feed(chunk []byte) string {
@@ -2960,6 +2978,7 @@ func (inspector *sseInspector) finishEvent() {
 	if eventType == "" {
 		eventType = typelessEventType(eventName, payload)
 	}
+	inspector.notePhase(eventType, payload)
 	if responsesDialectPath(inspector.path) && (strings.HasSuffix(eventType, ".delta") || strings.HasSuffix(eventType, ".partial_image")) {
 		inspector.output = true
 	}

@@ -79,6 +79,8 @@ func (service *Service) Start(value domain.Start) string {
 		Model: clean(value.Model, 128), ProviderID: clean(value.ProviderID, 64),
 		ProviderName: clean(value.ProviderName, 80), Method: clean(value.Method, 16),
 		Path: safePath(value.Path), BytesIn: max(value.BytesIn, 0),
+		ReasoningEffort: cleanReasoningEffort(value.ReasoningEffort),
+		ReasoningBudget: min(max(value.ReasoningBudget, 0), maxReasoningBudget),
 	}
 	service.mu.Lock()
 	service.requests[id] = request
@@ -91,6 +93,9 @@ func (service *Service) Start(value domain.Start) string {
 
 func (service *Service) Retry(id string, value domain.Retry) {
 	service.update(id, func(request *domain.Request, now time.Time) {
+		// The attempt that was reasoning is over; the next one reports its
+		// own phase from its own stream.
+		endThinking(request, now)
 		request.State = domain.StateRetrying
 		request.Status = normalizedStatus(value.Status)
 		// Attempt is local to each relay retry ladder; every call is one retry.
@@ -102,6 +107,7 @@ func (service *Service) Retry(id string, value domain.Retry) {
 
 func (service *Service) Waiting(id string) {
 	service.update(id, func(request *domain.Request, now time.Time) {
+		endThinking(request, now)
 		request.State = domain.StateRetrying
 		request.UpdatedAt = now
 	})
@@ -121,6 +127,7 @@ func (service *Service) Finish(id string, value domain.Finish) {
 			request.ProviderID = clean(value.ProviderID, 64)
 			request.ProviderName = clean(value.ProviderName, 80)
 		}
+		endThinking(request, now)
 		request.UpdatedAt = now
 		request.LatencyMS = max(float64(now.Sub(request.StartedAt).Microseconds())/1_000, 0)
 		request.Status = normalizedStatus(value.Status)
@@ -154,6 +161,31 @@ func (service *Service) Finish(id string, value domain.Finish) {
 			request.State = domain.StateCompleted
 		}
 	})
+}
+
+// Thinking records whether the provider's stream is in its reasoning phase.
+// Only a transition is an event: a stream reports its phase per SSE event, and
+// a thousand reasoning deltas must not become a thousand activity frames. A
+// finished request is history — a late report from a stream still draining
+// must not reopen it.
+func (service *Service) Thinking(id string, thinking bool) {
+	service.mu.Lock()
+	request, exists := service.requests[id]
+	if !exists || domain.IsTerminal(request.State) || request.Thinking == thinking {
+		service.mu.Unlock()
+		return
+	}
+	now := service.now().UTC()
+	if thinking {
+		request.Thinking = true
+		request.ThinkingSince = now
+	} else {
+		endThinking(&request, now)
+	}
+	request.UpdatedAt = now
+	service.requests[id] = request
+	service.mu.Unlock()
+	service.publish(request)
 }
 
 func (service *Service) List(limit int) []domain.Request {
@@ -302,6 +334,33 @@ func cleanError(value string) string {
 	default:
 		return ""
 	}
+}
+
+// maxReasoningBudget bounds a client-supplied thinking budget to a plausible
+// token count: the number is display metadata, not something to trust.
+const maxReasoningBudget = 10_000_000
+
+// cleanReasoningEffort keeps only the reasoning levels the dialects define.
+// The value is client-controlled text; anything outside the allowlist would
+// carry it into the activity feed and history unvetted.
+func cleanReasoningEffort(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max", "auto", "on":
+		return value
+	default:
+		return ""
+	}
+}
+
+// endThinking closes an open reasoning span into the request's total.
+func endThinking(request *domain.Request, now time.Time) {
+	if !request.Thinking {
+		return
+	}
+	request.ThinkingMS += max(float64(now.Sub(request.ThinkingSince).Microseconds())/1_000, 0)
+	request.Thinking = false
+	request.ThinkingSince = time.Time{}
 }
 
 func cleanErrorDetail(value string) string {

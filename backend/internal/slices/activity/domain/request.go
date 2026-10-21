@@ -45,15 +45,29 @@ type Request struct {
 	ContextTokens   int64     `json:"contextTokens"`
 	GenerationMS    float64   `json:"generationMs"`
 	TokensPerSecond float64   `json:"tokensPerSecond"`
+	// ReasoningEffort is the reasoning level the client asked for, one of
+	// the allowlisted names; ReasoningBudget is its thinking-token budget
+	// when the request set one. Both are request parameters, never content.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	ReasoningBudget int64  `json:"reasoningBudget,omitempty"`
+	// Thinking is true while the provider's stream is in its reasoning
+	// phase; ThinkingMS accumulates the closed reasoning spans.
+	Thinking   bool    `json:"thinking,omitempty"`
+	ThinkingMS float64 `json:"thinkingMs,omitempty"`
+	// ThinkingSince opens the current reasoning span. Internal: the span's
+	// length lands in ThinkingMS when it closes.
+	ThinkingSince time.Time `json:"-"`
 }
 
 type Start struct {
-	Model        string
-	ProviderID   string
-	ProviderName string
-	Method       string
-	Path         string
-	BytesIn      int64
+	Model           string
+	ProviderID      string
+	ProviderName    string
+	Method          string
+	Path            string
+	BytesIn         int64
+	ReasoningEffort string
+	ReasoningBudget int64
 }
 
 type Retry struct {

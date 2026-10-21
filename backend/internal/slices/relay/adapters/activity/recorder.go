@@ -19,7 +19,12 @@ func (recorder *Recorder) Begin(value relayapp.ActivityStart) string {
 	return recorder.service.Start(activitydomain.Start{
 		Model: value.Model, ProviderID: value.ProviderID, ProviderName: value.ProviderName,
 		Method: value.Method, Path: value.Path, BytesIn: value.BytesIn,
+		ReasoningEffort: value.ReasoningEffort, ReasoningBudget: value.ReasoningBudget,
 	})
+}
+
+func (recorder *Recorder) Thinking(id string, thinking bool) {
+	recorder.service.Thinking(id, thinking)
 }
 
 func (recorder *Recorder) Waiting(id string) {

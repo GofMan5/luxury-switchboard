@@ -9,6 +9,10 @@ type ActivityStart struct {
 	Method       string
 	Path         string
 	BytesIn      int64
+	// The reasoning level the client requested: the effort name, and the
+	// thinking-token budget where the dialect speaks in budgets instead.
+	ReasoningEffort string
+	ReasoningBudget int64
 }
 
 type ActivityRetry struct {
@@ -44,6 +48,9 @@ type ActivitySink interface {
 	Waiting(string)
 	Resume(string, time.Duration)
 	Retry(string, ActivityRetry)
+	// Thinking reports the stream's phase: true while the provider streams
+	// reasoning, false once the answer itself starts.
+	Thinking(string, bool)
 	Finish(string, ActivityFinish)
 }
 
@@ -53,4 +60,5 @@ func (NoopActivity) Begin(ActivityStart) string    { return "" }
 func (NoopActivity) Waiting(string)                {}
 func (NoopActivity) Resume(string, time.Duration)  {}
 func (NoopActivity) Retry(string, ActivityRetry)   {}
+func (NoopActivity) Thinking(string, bool)         {}
 func (NoopActivity) Finish(string, ActivityFinish) {}

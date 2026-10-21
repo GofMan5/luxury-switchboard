@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { ArrowRight, Check, Clock3, Copy } from 'lucide-react'
 import { useActivity } from '../../activity/ui/useActivity'
-import { activityLabels } from '../../activity/ui/activity-view'
+import { isLive } from '../../activity/domain/activity'
+import { activityLabel } from '../../activity/ui/activity-view'
+import { Elapsed } from '../../activity/ui/Elapsed'
 import { useProviders } from '../../providers/ui/useProviders'
 import { useRelay } from '../../relay/ui/useRelay'
 import { useInsights } from '../../insights/ui/useInsights'
@@ -97,11 +99,11 @@ export default function OverviewPage() {
                 <tbody>
                   {recent.map((request) => (
                     <tr key={request.id}>
-                      <td><span className={styles.state}><StatusDot state={request.state} />{activityLabels[request.state]}</span></td>
+                      <td><span className={styles.state}><StatusDot state={request.state} />{activityLabel(request)}</span></td>
                       <td title={request.model}>{request.model || '—'}</td>
                       <td>{request.providerName || '—'}</td>
                       <td className={styles.numeric}>{request.status || '—'}</td>
-                      <td className={styles.numeric}>{formatDuration(request.latencyMs)}</td>
+                      <td className={styles.numeric}>{isLive(request) ? <Elapsed request={request} /> : formatDuration(request.latencyMs)}</td>
                       <td className={styles.numeric}>{formatClock(request.updatedAt)}</td>
                     </tr>
                   ))}

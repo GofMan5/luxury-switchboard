@@ -26,6 +26,12 @@
 .pill[data-tone='info'] { color: var(--text-primary); background: var(--bg-raised); }
 .pill[data-tone='warning'] { border-color: color-mix(in srgb, var(--status-warning) 30%, var(--border-subtle)); color: var(--status-warning); }
 .pill[data-tone='danger'] { border-color: color-mix(in srgb, var(--status-danger) 30%, var(--border-subtle)); color: var(--text-danger); }
+/* A badge beside a truncating label: the label gives way, the badge does not. */
+.reasoningLevel { display: inline-flex; flex: none; }
+.reasoningLevel svg { flex: none; }
+/* A table cell holding a truncating label and a fixed badge. */
+.labelWithBadge { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.labelWithBadge > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .emptyState { display: grid; min-height: 160px; place-content: center; justify-items: center; gap: 10px; padding: 32px 24px; color: var(--text-muted); text-align: center; }
 .emptyState svg { color: var(--text-muted); }
 .emptyState strong { color: var(--text-secondary); font-size: 14px; font-weight: 500; }

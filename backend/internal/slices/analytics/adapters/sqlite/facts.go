@@ -54,12 +54,28 @@ func (facts *Facts) DB() *sql.DB { return facts.db }
 // something upstream is wrong, and cutting it off is safer than shipping it.
 const maxGroupRows = 20_000
 
-func (facts *Facts) Grouped(ctx context.Context, since int64) ([]domain.GroupedRow, error) {
-	query := `SELECT provider_id, MAX(provider_name), model_id,
-COUNT(*), COALESCE(SUM(state='completed'),0), COALESCE(SUM(state='failed'),0), COALESCE(SUM(state='cancelled'),0),
+// volumeColumns are one group's TokenVolume, in scanVolume's order. The
+// decode pair sums only the requests whose decode rate was measured: a row
+// without a first token predates the measurement, and its stored rate
+// divided by the whole generation time, the wait for the first token
+// included.
+const volumeColumns = `COUNT(*), COALESCE(SUM(state='completed'),0), COALESCE(SUM(state='failed'),0), COALESCE(SUM(state='cancelled'),0),
 COALESCE(SUM(retries),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 COALESCE(SUM(cached_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
-COALESCE(SUM(generation_ms),0)
+COALESCE(SUM(generation_ms),0),
+COALESCE(SUM(CASE WHEN tokens_per_second > 0 AND ttft_ms > 0 THEN output_tokens END),0),
+COALESCE(SUM(CASE WHEN tokens_per_second > 0 AND ttft_ms > 0 THEN output_tokens * 1000.0 / tokens_per_second END),0)`
+
+func volumeTargets(volume *domain.TokenVolume) []any {
+	return []any{
+		&volume.Requests, &volume.Completed, &volume.Failed, &volume.Cancelled, &volume.Retries,
+		&volume.InputTokens, &volume.OutputTokens, &volume.CachedTokens, &volume.ReasoningToken,
+		&volume.TotalTokens, &volume.GenerationMS, &volume.DecodeTokens, &volume.DecodeMS,
+	}
+}
+
+func (facts *Facts) Grouped(ctx context.Context, since int64) ([]domain.GroupedRow, error) {
+	query := `SELECT provider_id, MAX(provider_name), model_id, ` + volumeColumns + `
 FROM requests WHERE (? = 0 OR started_at_ms >= ?)
 GROUP BY provider_id, model_id LIMIT ?`
 	rows, err := facts.db.QueryContext(ctx, query, since, since, maxGroupRows)
@@ -70,10 +86,7 @@ GROUP BY provider_id, model_id LIMIT ?`
 	result := make([]domain.GroupedRow, 0)
 	for rows.Next() {
 		var row domain.GroupedRow
-		if err := rows.Scan(&row.ProviderID, &row.ProviderName, &row.Model,
-			&row.Requests, &row.Completed, &row.Failed, &row.Cancelled, &row.Retries,
-			&row.InputTokens, &row.OutputTokens, &row.CachedTokens, &row.ReasoningToken,
-			&row.TotalTokens, &row.GenerationMS); err != nil {
+		if err := rows.Scan(append([]any{&row.ProviderID, &row.ProviderName, &row.Model}, volumeTargets(&row.TokenVolume)...)...); err != nil {
 			return nil, errors.New("analytics grouping row is invalid")
 		}
 		result = append(result, row)
@@ -107,11 +120,7 @@ WHERE state='completed' AND (? = 0 OR started_at_ms >= ?) ORDER BY started_at_ms
 // a UTC split would call an evening burst two days; the machine's local zone
 // is the zone the numbers are lived in.
 func (facts *Facts) Daily(ctx context.Context, since int64) ([]domain.DailyRow, error) {
-	query := `SELECT date(started_at_ms / 1000, 'unixepoch', 'localtime'), model_id,
-COUNT(*), COALESCE(SUM(state='completed'),0), COALESCE(SUM(state='failed'),0), COALESCE(SUM(state='cancelled'),0),
-COALESCE(SUM(retries),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-COALESCE(SUM(cached_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
-COALESCE(SUM(generation_ms),0)
+	query := `SELECT date(started_at_ms / 1000, 'unixepoch', 'localtime'), model_id, ` + volumeColumns + `
 FROM requests WHERE (? = 0 OR started_at_ms >= ?)
 GROUP BY 1, model_id LIMIT ?`
 	rows, err := facts.db.QueryContext(ctx, query, since, since, maxGroupRows)
@@ -122,10 +131,7 @@ GROUP BY 1, model_id LIMIT ?`
 	result := make([]domain.DailyRow, 0)
 	for rows.Next() {
 		var row domain.DailyRow
-		if err := rows.Scan(&row.Date, &row.Model,
-			&row.Requests, &row.Completed, &row.Failed, &row.Cancelled, &row.Retries,
-			&row.InputTokens, &row.OutputTokens, &row.CachedTokens, &row.ReasoningToken,
-			&row.TotalTokens, &row.GenerationMS); err != nil {
+		if err := rows.Scan(append([]any{&row.Date, &row.Model}, volumeTargets(&row.TokenVolume)...)...); err != nil {
 			return nil, errors.New("analytics daily row is invalid")
 		}
 		result = append(result, row)

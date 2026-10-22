@@ -248,6 +248,8 @@ func (state *accumulator) add(volume domain.TokenVolume) {
 	state.volume.ReasoningToken += volume.ReasoningToken
 	state.volume.TotalTokens += volume.TotalTokens
 	state.volume.GenerationMS += volume.GenerationMS
+	state.volume.DecodeTokens += volume.DecodeTokens
+	state.volume.DecodeMS += volume.DecodeMS
 }
 
 func (state *accumulator) addLatency(latencyMS float64) {
@@ -355,6 +357,8 @@ func addVolumes(left, right domain.TokenVolume) domain.TokenVolume {
 	left.ReasoningToken += right.ReasoningToken
 	left.TotalTokens += right.TotalTokens
 	left.GenerationMS += right.GenerationMS
+	left.DecodeTokens += right.DecodeTokens
+	left.DecodeMS += right.DecodeMS
 	return left
 }
 

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -26,7 +27,7 @@ func TestHistoryPersistsSanitizedRequestsAndNonOverlappingTokens(t *testing.T) {
 		LatencyMS: 1000, Retries: 1, BytesIn: 100, BytesOut: 200,
 		InputTokens: 100, OutputTokens: 40, CachedTokens: 30,
 		ReasoningTokens: 10, TotalTokens: 140, ContextTokens: 100,
-		GenerationMS: 1000, TokensPerSecond: 40,
+		GenerationMS: 1000, TokensPerSecond: 40, TTFTMS: 250,
 		ErrorDetail:     "provider returned HTTP 502",
 		ReasoningEffort: "high", ReasoningBudget: 8192, ThinkingMS: 420.5,
 	}
@@ -61,6 +62,53 @@ func TestHistoryPersistsSanitizedRequestsAndNonOverlappingTokens(t *testing.T) {
 	}
 	if stats.ProcessedTokens != 140 || stats.NonCachedTokens != 110 || stats.ReasoningTokens != 10 || stats.TokensPerSecond != 40 {
 		t.Fatalf("token subsets were double counted: %+v", stats)
+	}
+}
+
+func TestHistorySpeedWeighsMeasuredRequestsByTheirOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	store, err := Open(path, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	row := func(id string, output int64, rate, ttft, generation float64) domain.Request {
+		return domain.Request{
+			ID: id, StartedAt: now.Add(-time.Minute), UpdatedAt: now, State: domain.StateCompleted,
+			Model: "m", ProviderID: "p", Method: "POST", Path: "/v1/responses", Status: 200,
+			LatencyMS: generation, OutputTokens: output, TotalTokens: output,
+			GenerationMS: generation, TokensPerSecond: rate, TTFTMS: ttft,
+		}
+	}
+	for _, request := range []domain.Request{
+		// 3000 tokens at 100 tok/s take 30s, 1000 at 50 take 20s: 4000
+		// tokens over 50s of decoding is 80 tok/s, whatever the waits.
+		row("long", 3_000, 100, 9_000, 39_000),
+		row("short", 1_000, 50, 1_000, 21_000),
+		// No measured rate: billed, but no evidence of speed.
+		row("buffered", 500, 0, 800, 900),
+		// A row from before the first-token measurement, its rate divided
+		// by the whole generation time: ignored.
+		row("legacy", 5_000, 400, 0, 12_500),
+	} {
+		if !store.Record(request) {
+			t.Fatalf("history store refused %s", request.ID)
+		}
+	}
+	if err := store.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background()) //nolint:errcheck
+	stats, err := store.Stats(context.Background(), application.Period24H)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(stats.TokensPerSecond-80) > 1e-9 || stats.OutputTokens != 9_500 {
+		t.Fatalf("history speed is not the output-weighted decode rate: %+v", stats)
 	}
 }
 

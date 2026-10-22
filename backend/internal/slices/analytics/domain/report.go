@@ -19,10 +19,14 @@ type TokenVolume struct {
 	CachedTokens   int64 `json:"cachedTokens"`
 	ReasoningToken int64 `json:"reasoningTokens"`
 	TotalTokens    int64 `json:"totalTokens"`
-	// GenerationMS is the summed generation time of completed requests; the
-	// tokens-per-second figure is derived from it, exactly as the history
-	// slice computes it, so the two workspaces agree.
+	// GenerationMS is the summed generation time of completed requests.
 	GenerationMS float64 `json:"generationMs"`
+	// DecodeTokens and DecodeMS are the output of the requests whose decode
+	// rate was measured, and the time that output took at those rates: the
+	// tokens-per-second figure divides them, exactly as the history slice
+	// does, so the two workspaces agree.
+	DecodeTokens int64   `json:"-"`
+	DecodeMS     float64 `json:"-"`
 	// Cost is set only when every token kind this row consumed has a price;
 	// an unpriced row keeps Cost zero and IsPriced false so the gap is
 	// visible rather than silently understated.
@@ -30,13 +34,16 @@ type TokenVolume struct {
 	IsPriced bool    `json:"isPriced"`
 }
 
-// TokensPerSecond is output tokens per second of generation, or 0 when
-// nothing was generated in the period.
+// TokensPerSecond is the decode speed of the period: its measured requests'
+// output over the time it took at their measured rates, so a long answer
+// weighs as much as the tokens it streamed and the time to first token —
+// queueing, prefill, hidden reasoning — never counts as decoding. Zero when
+// no request in the period had a measured rate.
 func (volume TokenVolume) TokensPerSecond() float64 {
-	if volume.GenerationMS <= 0 {
+	if volume.DecodeTokens <= 0 || volume.DecodeMS <= 0 {
 		return 0
 	}
-	return float64(volume.OutputTokens) * 1000 / volume.GenerationMS
+	return float64(volume.DecodeTokens) * 1000 / volume.DecodeMS
 }
 
 // SuccessRate is completed requests over all requests, 0..1, with zero

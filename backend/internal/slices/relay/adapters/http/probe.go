@@ -12,7 +12,6 @@ import (
 	"time"
 
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
-	relaydomain "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/domain"
 )
 
 // The probe's counting task needs up to ~170 tokens; the budget leaves room
@@ -245,10 +244,11 @@ func (server *Server) probeOnce(ctx context.Context, route relayapp.Route, path 
 		report.OutputTokens = int(usage.OutputTokens)
 	}
 	// The rate needs the provider's own count: frames counted in its place
-	// are chunks, not tokens, and dividing them would invent a speed.
+	// are chunks, not tokens, and dividing them would invent a speed. The
+	// journal's own meter reads the stream, so the two screens agree.
 	pace := relayapp.StreamPace{FirstToken: millis(measured.ttft)}
 	if measured.ttft > 0 {
-		pace.TokensPerSecond = relaydomain.DecodeRate(usage.OutputTokens, measured.chunks, millis(measured.total-measured.ttft))
+		pace.TokensPerSecond = measured.pace.rate(usage)
 	}
 	cancelled := readErr != nil && errors.Is(ctx.Err(), context.Canceled)
 	switch {
@@ -326,13 +326,15 @@ const (
 
 // chunks counts the token-bearing frames: the decode rate refuses a stream
 // that delivered its tokens in a burst or two, the shape of a gateway that
-// buffers the answer and replays it.
+// buffers the answer and replays it. pace is the same meter the journal
+// runs on a relayed stream.
 type probeMeasurement struct {
 	ttft     float64
 	total    float64
 	tokens   int
 	chunks   int
 	terminal probeTerminal
+	pace     *paceMeter
 }
 
 // measureProbeStream reads the SSE frames as they arrive, under the same idle
@@ -375,7 +377,7 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.ReadCloser
 	idle := server.configSnapshot().StreamIdleTimeout
 	timer := time.NewTimer(idle)
 	defer timer.Stop()
-	var measurement probeMeasurement
+	measurement := probeMeasurement{pace: newPaceMeter(sent)}
 	var collected bytes.Buffer
 	var frame bytes.Buffer
 	var pendingLine []byte
@@ -424,12 +426,14 @@ func (server *Server) measureProbeStream(ctx context.Context, body io.ReadCloser
 			pendingLine = nil
 			trimmed := bytes.TrimRight(value, "\r\n")
 			if len(trimmed) == 0 {
-				delta, tokens, terminal := probeFrameDelta(frame.Bytes(), dialect)
+				signal, tokens, terminal := probeFrameDelta(frame.Bytes(), dialect)
 				frame.Reset()
-				if delta {
+				if signal.any() {
+					now := time.Now()
+					measurement.pace.note(now, signal)
 					measurement.chunks++
 					if measurement.ttft == 0 {
-						measurement.ttft = float64(time.Since(sent).Microseconds()) / 1000
+						measurement.ttft = float64(now.Sub(sent).Microseconds()) / 1000
 					}
 				}
 				if tokens > 0 {
@@ -458,26 +462,26 @@ var probeDialectPath = map[string]string{
 	"responses": "/v1/responses",
 }
 
-// probeFrameDelta reports whether one SSE frame carried a generated token
-// (answer or reasoning: the first of either is the latency the operator
+// probeFrameDelta reports what one SSE frame showed of the generation (the
+// first generated token — answer or reasoning — is the latency the operator
 // feels), the reported output-token count and the terminal verdict, in the
 // dialect the provider speaks. The terminal is what makes an HTTP 200
 // failure a failure.
-func probeFrameDelta(frame []byte, dialect string) (bool, int, probeTerminal) {
+func probeFrameDelta(frame []byte, dialect string) (tokenSignal, int, probeTerminal) {
 	data := sseData(frame)
 	if bytes.Equal(data, []byte("[DONE]")) {
 		if dialect == "chat" {
-			return false, 0, probeTerminalOK
+			return tokenSignal{}, 0, probeTerminalOK
 		}
-		return false, 0, probeTerminalMissing
+		return tokenSignal{}, 0, probeTerminalMissing
 	}
 	var payload map[string]any
 	if json.Unmarshal(data, &payload) != nil {
-		return false, 0, probeTerminalMissing
+		return tokenSignal{}, 0, probeTerminalMissing
 	}
 	// Any dialect's error object ends the probe as a failure.
 	if payload["error"] != nil {
-		return false, 0, probeTerminalFailed
+		return tokenSignal{}, 0, probeTerminalFailed
 	}
 	eventType, _ := payload["type"].(string)
 	path, known := probeDialectPath[dialect]

@@ -690,7 +690,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				// generation is still billed.
 				usage = usageWith(usage, streamUsage)
 				generation += streamGeneration
-				live.inspector.pace.settle(&serving, streamUsage.OutputTokens)
+				live.inspector.pace.settle(&serving, streamUsage)
 				server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
 					ProviderID: serving.route.ProviderID, ProviderName: serving.route.ProviderName, Model: model,
 					ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
@@ -1358,7 +1358,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				onThinking := func(thinking bool) { server.activity.Thinking(activityID, thinking) }
 				// A fresh meter per attempt: a retried answer's tokens never
 				// time the attempt that replaces it.
-				pace := &paceMeter{}
+				pace := newPaceMeter(attemptStarted)
 				terminal, buffered, streamUsage, liveBody, bufferErr := bufferTerminalSSE(ctx, response, ssePath, server.configSnapshot(), chatActive != nil && *chatActive, wholeJSONExpected, liveAfter, onThinking, pace)
 				if liveBody != nil {
 					// A live generation is still generating: the lease rides
@@ -1472,7 +1472,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 				response.Header.Set("X-Switchboard-Terminal", terminal)
 				// The served attempt's own tokens, not the ladder's sum: the
 				// rate describes the answer the client receives.
-				pace.settle(serving, streamUsage.OutputTokens)
+				pace.settle(serving, streamUsage)
 				addDiscardedUsage(&discarded, streamUsage)
 				setUsageHeaders(response.Header, discarded, generatedDuration)
 				server.noteLearnedShape(route.ProviderID, learned)
@@ -3099,6 +3099,15 @@ func (inspector *sseInspector) mergeUsage(payload map[string]any) {
 	for _, field := range []string{"response", "message", "delta"} {
 		if value, ok := payload[field].(map[string]any); ok {
 			candidates = append(candidates, value)
+		}
+	}
+	// Some chat gateways file the final chunk's usage under its choice
+	// instead of beside it.
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, choice := range choices {
+			if value, ok := choice.(map[string]any); ok && value["usage"] != nil {
+				candidates = append(candidates, value)
+			}
 		}
 	}
 	for _, candidate := range candidates {

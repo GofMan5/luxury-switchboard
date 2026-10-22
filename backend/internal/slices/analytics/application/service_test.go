@@ -271,11 +271,32 @@ func TestDailyPointsArePricedPerModelThenFolded(t *testing.T) {
 }
 
 func TestTokensPerSecondMatchesTheHistorySlice(t *testing.T) {
-	// 1M output tokens over 1000 seconds of generation = 1000 tok/s, the
-	// same formula history.stats answers with.
-	row := domain.TokenVolume{OutputTokens: 1_000_000, GenerationMS: 1_000_000}
+	// 1M measured output tokens over 1000 seconds of decoding = 1000 tok/s,
+	// the same formula history.stats answers with. Generation time — the
+	// wait for the first token included — is not decoding.
+	row := domain.TokenVolume{OutputTokens: 1_200_000, GenerationMS: 4_000_000, DecodeTokens: 1_000_000, DecodeMS: 1_000_000}
 	if got := row.TokensPerSecond(); got != 1000 {
 		t.Fatalf("tokens per second is wrong: %v", got)
+	}
+	if got := (domain.TokenVolume{OutputTokens: 500, GenerationMS: 1_000}).TokensPerSecond(); got != 0 {
+		t.Fatalf("a period without a measured rate reported %v tok/s", got)
+	}
+}
+
+func TestTokensPerSecondFoldsAcrossModelsByOutput(t *testing.T) {
+	// 3000 tokens at 100 tok/s and 1000 at 50 tok/s: 4000 tokens over 50s.
+	service := newService(&fakeFacts{
+		grouped: []domain.GroupedRow{
+			{ProviderID: "p1", Model: "fast", TokenVolume: domain.TokenVolume{Requests: 1, Completed: 1, OutputTokens: 3_000, DecodeTokens: 3_000, DecodeMS: 30_000}},
+			{ProviderID: "p1", Model: "slow", TokenVolume: domain.TokenVolume{Requests: 1, Completed: 1, OutputTokens: 1_000, DecodeTokens: 1_000, DecodeMS: 20_000}},
+		},
+	}, &fakePrices{})
+	report, err := service.Report(context.Background(), application.PeriodAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Overview.TokensPerSecond != 80 || len(report.Providers) != 1 || report.Providers[0].TokensPerSecond != 80 {
+		t.Fatalf("speed did not fold by output: overview=%v providers=%+v", report.Overview.TokensPerSecond, report.Providers)
 	}
 }
 

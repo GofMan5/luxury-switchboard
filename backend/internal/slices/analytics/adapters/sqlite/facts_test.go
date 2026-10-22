@@ -26,7 +26,14 @@ func TestFactsAggregateWhatTheHistoryStoreRecords(t *testing.T) {
 			ID: "a", StartedAt: base, UpdatedAt: base, State: activitydomain.StateCompleted,
 			ProviderID: "p1", ProviderName: "Alpha", Model: "m1", Status: 200,
 			LatencyMS: 100, InputTokens: 1_000, OutputTokens: 500, CachedTokens: 200, ReasoningTokens: 100,
-			TotalTokens: 1_500, GenerationMS: 1_000,
+			TotalTokens: 1_500, GenerationMS: 1_000, TTFTMS: 50, TokensPerSecond: 1_000,
+		},
+		{
+			// From before the first-token measurement: its rate divided
+			// by the whole generation time, so it is not decode evidence.
+			ID: "legacy", StartedAt: base.Add(time.Minute), UpdatedAt: base, State: activitydomain.StateCompleted,
+			ProviderID: "p1", Model: "m1", Status: 200,
+			LatencyMS: 100, OutputTokens: 300, TotalTokens: 300, GenerationMS: 1_000, TokensPerSecond: 300,
 		},
 		{
 			ID: "b", StartedAt: base.Add(time.Hour), UpdatedAt: base, State: activitydomain.StateFailed,
@@ -62,11 +69,15 @@ func TestFactsAggregateWhatTheHistoryStoreRecords(t *testing.T) {
 	}
 	for _, row := range grouped {
 		if row.ProviderID == "p1" && row.Model == "m1" {
-			if row.Requests != 2 || row.Completed != 1 || row.Failed != 1 {
+			if row.Requests != 3 || row.Completed != 2 || row.Failed != 1 {
 				t.Fatalf("p1/m1 counts are wrong: %+v", row.TokenVolume)
 			}
-			if row.InputTokens != 1_000 || row.CachedTokens != 200 || row.ReasoningToken != 100 || row.GenerationMS != 1_000 {
+			if row.InputTokens != 1_000 || row.CachedTokens != 200 || row.ReasoningToken != 100 || row.GenerationMS != 2_000 {
 				t.Fatalf("p1/m1 sums are wrong: %+v", row.TokenVolume)
+			}
+			// Only the measured row decodes: 500 tokens at 1000 tok/s.
+			if row.DecodeTokens != 500 || row.DecodeMS != 500 || row.TokensPerSecond() != 1_000 {
+				t.Fatalf("p1/m1 decode sums are wrong: %+v", row.TokenVolume)
 			}
 			if row.ProviderName != "Alpha" {
 				t.Fatalf("provider name did not travel: %q", row.ProviderName)
@@ -79,7 +90,7 @@ func TestFactsAggregateWhatTheHistoryStoreRecords(t *testing.T) {
 	}
 	// The failed row contributes no latency sample: failed latencies are
 	// diagnostics, not measurements.
-	if len(latencies) != 2 {
+	if len(latencies) != 3 {
 		t.Fatalf("latency samples are wrong: %+v", latencies)
 	}
 	errorRows, err := facts.Errors(context.Background(), since)

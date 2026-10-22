@@ -2812,6 +2812,16 @@ func TestSSEUsageKeepsCacheAndReasoningAsSubsets(t *testing.T) {
 	}
 }
 
+func TestSSEUsageReadsAChoiceScopedChatUsage(t *testing.T) {
+	inspector := &sseInspector{path: "/v1/chat/completions"}
+	event := `data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop","usage":{"prompt_tokens":120,"completion_tokens":48,"completion_tokens_details":{"reasoning_tokens":16}}}]}` + "\n\n"
+	inspector.Feed([]byte(event))
+	usage := inspector.usage
+	if usage.InputTokens != 120 || usage.OutputTokens != 48 || usage.ReasoningTokens != 16 {
+		t.Fatalf("choice-scoped usage was dropped: %+v", usage)
+	}
+}
+
 func TestSSEUsageNormalizesAnthropicCacheFields(t *testing.T) {
 	inspector := &sseInspector{}
 	event := `data: {"type":"message_delta","usage":{"input_tokens":10,"cache_read_input_tokens":50,"cache_creation_input_tokens":20,"output_tokens":5}}` + "\n\n"

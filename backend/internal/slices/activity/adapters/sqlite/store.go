@@ -171,13 +171,18 @@ func (store *Store) Stats(ctx context.Context, period application.Period) (appli
 		return application.HistoryStats{}, err
 	}
 	var stats application.HistoryStats
+	// The period's speed is its measured requests' output over the time it
+	// took at their rates — decode time, never the wait for the first token.
+	// A row without a first token predates the measurement: its stored rate
+	// divided by the whole generation time and does not count.
 	query := `SELECT COUNT(*),
 COALESCE(SUM(state='completed'),0), COALESCE(SUM(state='failed'),0), COALESCE(SUM(state='cancelled'),0),
 COALESCE(SUM(retries),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 COALESCE(SUM(cached_tokens),0), COALESCE(SUM(reasoning_tokens),0),
 COALESCE(SUM(input_tokens + output_tokens),0),
 COALESCE(SUM(MAX(input_tokens - cached_tokens, 0) + output_tokens),0),
-CASE WHEN SUM(generation_ms) > 0 THEN SUM(output_tokens) * 1000.0 / SUM(generation_ms) ELSE 0 END
+COALESCE(SUM(CASE WHEN tokens_per_second > 0 AND ttft_ms > 0 THEN output_tokens END) * 1000.0
+	/ SUM(CASE WHEN tokens_per_second > 0 AND ttft_ms > 0 THEN output_tokens * 1000.0 / tokens_per_second END), 0)
 FROM requests WHERE (? = 0 OR started_at_ms >= ?)`
 	if err := store.db.QueryRowContext(ctx, query, cutoff, cutoff).Scan(
 		&stats.Requests, &stats.Completed, &stats.Failed, &stats.Cancelled,

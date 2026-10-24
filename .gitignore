@@ -47,6 +47,8 @@ Luxury-Switchboard-backup-*.json
 *.log
 *.dpapi
 runtime/
+# Local runtime state, not the frontend's shared runtime helpers.
+!frontend/src/shared/runtime/
 logs/
 artifacts/
 tui-*.png

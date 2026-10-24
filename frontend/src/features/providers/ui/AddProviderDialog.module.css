@@ -1,7 +1,7 @@
 .body {
   display: grid;
-  gap: 12px;
-  padding: 24px;
+  gap: 8px;
+  padding: var(--pad) 18px;
 }
 
 .body > :global(.button) { justify-self: start; }
@@ -12,42 +12,52 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
-  gap: 4px 12px;
+  gap: 2px 12px;
   width: 100%;
-  padding: 14px 16px;
-  border: 1px solid var(--border-strong);
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-control);
   color: inherit;
   background: var(--bg-surface);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast);
+  transition: color var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast);
 }
 
 .optionCard > svg {
-  margin-top: 2px;
-  color: var(--text-secondary);
+  margin-top: 1px;
+  color: var(--text-muted);
+  transition: color var(--motion-fast);
 }
 
-.optionCard:hover:not(:disabled) { background: var(--bg-hover); }
-.optionCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.optionCard:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); }
+.optionCard:hover:not(:disabled) > svg { color: var(--accent); }
 .optionCard:active:not(:disabled) { background: var(--bg-selected); }
-.optionCard:disabled { color: var(--text-disabled); cursor: default; }
+.optionCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.optionCard:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.optionCard:disabled > svg,
+.optionCard:disabled .optionText strong,
+.optionCard:disabled .optionText small { color: var(--text-disabled); }
 
 .optionText {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
-.optionText strong { color: var(--text-primary); font-size: 13.5px; font-weight: 600; }
-.optionText small { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.optionText strong { color: var(--text-primary); font-size: var(--fs-base); font-weight: 600; line-height: 1.35; }
+.optionText small { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.45; }
 
 /* The chooser freezes while the codex account is being linked; this is the
    one line that says why. */
 .blockedNote {
   margin: 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .body { padding: 12px 14px; }
 }

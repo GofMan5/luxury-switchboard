@@ -1,1 +1,7 @@
-.body { display: grid; gap: 12px; padding: 24px; }
+/* The pane sits flush with the modal's header and footer: 18px inline,
+ * 14px under 600px, the same insets index.css gives .ui-modal. */
+.body { display: grid; gap: 10px; padding: var(--gap) calc(var(--pad) + 4px); }
+
+@media (max-width: 600px) {
+  .body { padding: var(--pad); }
+}

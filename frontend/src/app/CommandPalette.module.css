@@ -1,0 +1,19 @@
+.scrim { position: fixed; z-index: 120; inset: 0; display: flex; justify-content: center; padding: min(14vh, 120px) 16px 16px; background: var(--scrim); animation: fade var(--motion-fast) ease-out both; }
+.palette { display: flex; width: min(620px, 100%); max-height: min(520px, 100%); min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-modal); background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: rise var(--motion-standard) var(--ease-standard) both; }
+.search { display: flex; min-height: 46px; flex-shrink: 0; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 0 14px; color: var(--text-muted); }
+.search input { min-width: 0; height: 44px; flex: 1; border: 0; padding: 0; color: var(--text-primary); background: transparent; font-size: var(--fs-md); }
+.search input:focus-visible { outline: 0; }
+.results { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: 4px 6px 6px; list-style: none; }
+.group { display: block; padding: 10px 10px 4px; color: var(--text-muted); font-size: var(--fs-xs); font-weight: 500; }
+.option { display: flex; min-height: 32px; align-items: center; gap: 10px; border-radius: var(--radius-control); padding: 0 10px; color: var(--text-secondary); font-size: var(--fs-base); cursor: pointer; }
+.option[aria-selected='true'] { color: var(--text-primary); background: var(--bg-selected); }
+.title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shortcut { flex: 0 0 auto; }
+.enter { flex: 0 0 auto; color: var(--text-muted); }
+.none { padding: 22px 10px; color: var(--text-muted); font-size: var(--fs-sm); text-align: center; }
+.footer { display: flex; min-height: 32px; flex-shrink: 0; align-items: center; gap: 14px; border-top: 1px solid var(--border-subtle); padding: 0 14px; color: var(--text-muted); font-size: var(--fs-xs); }
+.footer span { display: inline-flex; align-items: center; gap: 4px; }
+.count { margin-left: auto; font-variant-numeric: tabular-nums; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
+@media (max-width: 600px) { .scrim { padding-top: 24px; } }

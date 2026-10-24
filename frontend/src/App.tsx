@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { AppShell } from './app/AppShell'
 import { ServicesProvider } from './app/ServicesProvider'
-import { navigation, type AppRoute } from './app/navigation'
+import { isPluginRoute, routeFromHash, type AppRoute } from './app/navigation'
+import { AppearanceRuntime } from './features/appearance/ui/AppearanceRuntime'
 
 const OverviewPage = lazy(() => import('./features/overview/ui/OverviewPage'))
 const ActivityPage = lazy(() => import('./features/activity/ui/ActivityPage'))
@@ -12,6 +13,9 @@ const InsightsPage = lazy(() => import('./features/insights/ui/InsightsPage'))
 const ModelRoutesPage = lazy(() => import('./features/model-routes/ui/ModelRoutesPage'))
 const TestsPage = lazy(() => import('./features/tests/ui/TestsPage'))
 const GuardrailsPage = lazy(() => import('./features/guardrails/ui/GuardrailsPage'))
+const AppearancePage = lazy(() => import('./features/appearance/ui/AppearancePage'))
+const PluginsPage = lazy(() => import('./features/plugins/ui/PluginsPage'))
+const PluginPageView = lazy(() => import('./features/plugins/ui/PluginPageView'))
 
 // The public build never references these modules, so the bundler drops the
 // publishing workspaces instead of shipping unreachable code.
@@ -21,16 +25,17 @@ const ClientsPage = lazy(() => import('./features/clients/ui/ClientsPage'))
 export default function App() {
   return (
     <ServicesProvider>
+      <AppearanceRuntime />
       <Switchboard />
     </ServicesProvider>
   )
 }
 
 function Switchboard() {
-  const [route, setRoute] = useState<AppRoute>(() => routeFromHash())
+  const [route, setRoute] = useState<AppRoute>(() => routeFromHash(window.location.hash))
 
   useEffect(() => {
-    const update = () => setRoute(routeFromHash())
+    const update = () => setRoute(routeFromHash(window.location.hash))
     window.addEventListener('hashchange', update)
     return () => window.removeEventListener('hashchange', update)
   }, [])
@@ -54,12 +59,10 @@ function Switchboard() {
         {route === 'guardrails' ? <GuardrailsPage /> : null}
         {route === 'tunnel' ? <TunnelPage /> : null}
         {route === 'clients' ? <ClientsPage /> : null}
+        {route === 'appearance' ? <AppearancePage /> : null}
+        {route === 'plugins' ? <PluginsPage /> : null}
+        {isPluginRoute(route) ? <PluginPageView pageId={route.slice('plugin/'.length)} /> : null}
       </Suspense>
     </AppShell>
   )
-}
-
-function routeFromHash(): AppRoute {
-  const value = window.location.hash.replace(/^#\/?/u, '') as AppRoute
-  return navigation.some((section) => section.items.some((item) => item.id === value)) ? value : 'overview'
 }

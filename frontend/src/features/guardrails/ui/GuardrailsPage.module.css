@@ -1,94 +1,145 @@
 .page { min-width: 0; min-height: 100%; }
-.error { border-bottom: 1px solid var(--border-subtle); padding: 12px 32px; color: var(--text-danger); background: var(--bg-surface); }
-.headerActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
+.headerActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* A full-bleed band under the page header, aligned to the page gutter. */
+.error { border-bottom: 1px solid var(--border-subtle); padding: 8px var(--gutter); color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+
+/* Both sections speak the shared Panel vocabulary: 44px header, --pad inset, hairlines. */
 .mode, .findings { min-width: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
-.mode > header, .findings > header { display: flex; min-height: 68px; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 16px 20px; }
-.mode > header div, .findings > header div { display: flex; align-items: center; gap: 9px; color: var(--text-secondary); }
-.mode h2, .findings h2 { color: var(--text-primary); font-size: 14px; font-weight: 600; }
-.mode > header span, .findings > header span { color: var(--text-muted); font-size: 12px; }
-.modeChoices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 12px 20px; }
-.modeChoices button { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 8px 12px; background: transparent; cursor: pointer; transition: border-color var(--motion-fast), background var(--motion-fast); }
-.modeIcon { display: grid; place-items: center; color: var(--text-muted); grid-row: 1 / 3; margin-top: 2px; }
-.modeChoices button:hover:not(:disabled) { background: var(--bg-hover); }
-.modeChoices button:active:not(:disabled) { background: var(--bg-raised); }
-.modeChoices button:disabled { color: var(--text-disabled); cursor: default; }
-.modeChoices button[data-active] { border-color: var(--border-focus); background: var(--bg-selected); }
-.modeChoices button[data-active] .modeIcon { color: var(--text-primary); }
-.modeChoices strong { color: var(--text-primary); font-size: 13px; font-weight: 500; }
+.mode > header, .findings > header { display: flex; min-width: 0; min-height: 44px; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); }
+.mode > header > div:first-child, .findings > header > div:first-child { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; color: var(--text-muted); }
+.mode h2, .findings h2 { color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; line-height: 1.35; }
+/* The mode header's caption is a subtitle beside the title, as in Panel. */
+.mode > header { justify-content: flex-start; column-gap: 10px; }
+.mode > header > span { min-width: 0; flex: 1 1 240px; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.45; }
+
+/* Switch and rule-set readout share one row; the overrides span below. */
+.mode { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+.mode > header, .overrides { grid-column: 1 / -1; }
+
+/* The global mode is a segmented track: three exclusive states, one lit. Each
+   choice's long description travels in its title/aria-label, so the track
+   stays a single compact row. */
+.modeChoices { display: grid; width: 336px; max-width: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; margin: 10px 0 10px var(--pad); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 2px; background: var(--bg-field); }
+.modeChoices button { display: flex; min-width: 0; min-height: var(--control-height); align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: calc(var(--radius-control) - 2px); padding: 0 10px; color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.modeChoices button:hover:not(:disabled):not([data-active]) { color: var(--text-primary); background: var(--bg-hover); }
+.modeChoices button:active:not(:disabled) { background: var(--bg-selected); }
+.modeChoices button[data-active] { color: var(--text-primary); background: var(--bg-selected); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.modeChoices button:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.modeChoices button:focus-visible { outline-offset: 0; }
+.modeIcon { display: grid; flex: 0 0 auto; place-items: center; color: inherit; transition: color var(--motion-fast); }
+.modeChoices button[data-active]:not(:disabled) .modeIcon { color: var(--accent); }
+.modeChoices strong { min-width: 0; overflow: hidden; color: inherit; font-size: var(--fs-base); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .modeChoices small { display: none; }
-.modeChoices button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.modeNote { border-top: 1px solid var(--border-subtle); padding: 14px 20px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.overrides { border-top: 1px solid var(--border-subtle); padding: 20px; }
-.overrides header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; margin-bottom: 12px; }
-.overrides h3 { color: var(--text-primary); font-size: 13px; font-weight: 500; }
-.overrides header span { color: var(--text-muted); font-size: 12px; }
-.overrideRow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 0; }
-.overrideRow > span { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.wouldRefuse { display: block; margin-top: 4px; color: var(--status-warning); font-size: 11px; white-space: normal; }
-.findingsMeta { display: grid !important; justify-items: end; gap: 7px; min-width: 0; }
-.findingsMeta > span { max-width: 520px; color: var(--text-muted); font-size: 11px; text-align: right; }
-.findingFilters { display: flex !important; align-items: center; gap: 3px; }
-.findingFilter, .findingFilterActive { min-height: 28px; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; color: var(--text-muted); background: transparent; font-size: 11px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.modeNote { min-width: 0; max-width: 88ch; padding: 8px var(--pad) 8px 16px; color: var(--text-muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; line-height: 1.5; text-wrap: pretty; }
+
+/* Per-provider overrides: a sub-list under the global mode, name left, switch right. */
+.overrides { border-top: 1px solid var(--border-subtle); }
+.overrides header { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 10px var(--pad) 7px; }
+.overrides h3 { color: var(--text-primary); font-size: var(--fs-sm); font-weight: 600; line-height: 1.4; }
+.overrides header span { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.4; }
+.overrideRow { display: flex; min-width: 0; min-height: var(--row-height); align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border-subtle); padding: 3px var(--pad); }
+.overrideRow > span { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: var(--fs-base); text-overflow: ellipsis; white-space: nowrap; }
+.overrideRow > div { flex: 0 0 auto; }
+
+/* Findings header: the count caption sits beside the filters and wraps rather
+   than ellipsising — it is where truncation of the list is reported. */
+.findingsMeta { display: flex; min-width: 0; flex: 1 1 320px; align-items: center; justify-content: flex-end; gap: 12px; }
+.findingsMeta > span { order: -1; min-width: 0; max-width: 64ch; color: var(--text-muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; line-height: 1.35; text-align: right; }
+.findingFilters { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 2px; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 2px; background: var(--bg-field); }
+.findingFilter, .findingFilterActive { min-height: var(--control-height-sm); border: 0; border-radius: calc(var(--radius-control) - 2px); padding: 0 8px; color: var(--text-muted); background: transparent; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; font-weight: 500; white-space: nowrap; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
 .findingFilter:hover { color: var(--text-primary); background: var(--bg-hover); }
-.findingFilterActive { border-color: var(--border-strong); color: var(--text-primary); background: var(--bg-selected); }
-.findingFilter:focus-visible, .findingFilterActive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.findingFilter:active, .findingFilterActive:active { background: var(--bg-selected); }
+.findingFilterActive { color: var(--text-primary); background: var(--bg-selected); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.findingFilter:focus-visible, .findingFilterActive:focus-visible { outline-offset: 0; }
 
 .tableWrap { min-width: 0; overflow: auto; container: findings-table / inline-size; }
-.findings table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
-.findings th, .findings td { height: 54px; overflow: hidden; border-bottom: 1px solid var(--border-subtle); padding: 8px 16px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.findings th { height: 38px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+.findings table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: var(--fs-base); }
+.findings th, .findings td { height: var(--row-height); overflow: hidden; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.findings th:first-child, .findings td:first-child { padding-left: var(--pad); }
+.findings th:last-child, .findings td:last-child { padding-right: var(--pad); }
+.findings th { position: sticky; z-index: 1; top: 0; height: 30px; color: var(--text-muted); background: var(--bg-surface); font-size: var(--fs-sm); font-weight: 500; }
+.findings td { color: var(--text-secondary); }
+/* The verdict cell may carry the Block hint on a second line; both lines are set
+   tight so the row keeps its height at default density instead of clipping. */
+.findings td:first-child { padding-block: 2px; line-height: 1.2; }
+.findings tbody tr { cursor: default; }
 .findings tbody tr:hover { background: var(--bg-hover); }
 .findings tbody tr:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-.findings th:nth-child(1) { width: 128px; }
-.findings th:nth-child(2) { width: 110px; }
+.findings tbody tr:last-child td { border-bottom: 0; }
+.findings th:nth-child(1) { width: 156px; }
+.findings th:nth-child(2) { width: 92px; }
 .findings th:nth-child(3) { width: 140px; }
-.findings th:nth-child(4) { width: 150px; }
+.findings th:nth-child(4) { width: 160px; }
 .findings th:nth-child(5) { width: auto; }
 .findings th:nth-child(6) { width: 180px; }
-.findings th:nth-child(7) { width: 104px; }
-.state { display: inline-flex; min-width: 0; align-items: center; gap: 7px; }
-.mono { font-family: var(--font-mono); font-size: 12px; }
+.findings th:nth-child(7) { width: 120px; }
+/* Model names and matched evidence are data. */
+.findings td:nth-child(4), .mono { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.state { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 6px; }
+.wouldRefuse { display: block; overflow: hidden; color: var(--status-warning); font-size: var(--fs-xs); line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .muted { color: var(--text-muted); }
-.repeat { margin-right: 7px; border: 1px solid var(--border-subtle); border-radius: 5px; padding: 2px 5px; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.repeat { display: inline-block; margin-right: 6px; border: 1px solid var(--border-strong); border-radius: calc(var(--radius-control) - 2px); padding: 0 4px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; line-height: 16px; }
 .truncate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.open { min-height: 32px; max-width: 100%; overflow: hidden; border: 0; padding: 4px 0; color: var(--text-secondary); background: transparent; cursor: pointer; font: inherit; text-overflow: ellipsis; }
-.open:hover { color: var(--text-primary); }
-.empty { height: 170px !important; color: var(--text-muted); text-align: center !important; }
-.empty svg { display: block; margin: 0 auto 8px; color: var(--text-muted); }
-.severity { display: inline-block; border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 7px; font-size: 11px; }
-.severity[data-severity='high'] { color: var(--text-danger); }
-.severity[data-severity='medium'] { color: var(--status-warning); }
-.severity[data-severity='low'] { color: var(--text-muted); }
-.backdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 65%); animation: scrim-in var(--motion-fast) ease-out both; }
-.dialog { display: flex; width: min(880px, 100%); max-height: min(760px, calc(100dvh - 48px)); min-height: min(320px, calc(100dvh - 48px)); overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-modal); flex-direction: column; background: var(--bg-surface); box-shadow: var(--shadow-float); animation: dialog-in 180ms var(--ease-standard) both; }
-@keyframes dialog-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-.dialog > header { display: flex; min-height: 76px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border-subtle); padding: 16px 24px; }
-.dialog h2 { margin-top: 6px; color: var(--text-primary); font-size: 18px; }
-.close { display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 7px; color: var(--text-secondary); background: transparent; cursor: pointer; }
+/* The time doubles as the row's open button; the negative inset keeps its text
+   on the column edge while the hover well stays inside the cell padding. */
+.open { display: inline-block; max-width: calc(100% + 6px); height: var(--control-height-sm); margin-left: -6px; overflow: hidden; border: 0; border-radius: var(--radius-control); padding: 0 6px; color: var(--text-secondary); background: transparent; font: inherit; font-family: var(--font-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; line-height: var(--control-height-sm); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), transform var(--motion-fast) var(--ease-standard); }
+/* The row is already --bg-hover under the pointer, so the button steps one higher. */
+.open:hover { color: var(--text-primary); background: var(--bg-selected); }
+.open:active { background: var(--bg-selected); transform: translateY(.5px); }
+.open:focus-visible { outline-offset: 0; }
+.findings td.empty { height: 132px; color: var(--text-muted); background: var(--bg-surface); font-size: var(--fs-sm); line-height: 1.5; text-align: center; white-space: normal; }
+.empty svg { display: block; margin: 0 auto 8px; color: var(--text-disabled); }
+
+/* Severity is a tinted tag: the hue carries the level, the word carries it for everyone. */
+.severity { display: inline-flex; height: 18px; align-items: center; border: 1px solid var(--border-strong); border-radius: calc(var(--radius-control) - 2px); padding: 0 6px; color: var(--text-muted); font-family: var(--font-ui); font-size: var(--fs-xs); font-weight: 500; line-height: 1; text-transform: capitalize; white-space: nowrap; vertical-align: middle; }
+.severity[data-severity='high'] { border-color: color-mix(in srgb, var(--status-danger) 34%, transparent); color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 9%, transparent); }
+.severity[data-severity='medium'] { border-color: color-mix(in srgb, var(--status-warning) 32%, transparent); color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 8%, transparent); }
+
+/* Finding dialog: a floating layer, so its elevation is the shadow alone. */
+.backdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 24px; background: var(--scrim); animation: backdrop-in var(--motion-fast) ease-out both; }
+.dialog { display: flex; width: min(880px, 100%); min-height: min(320px, calc(100dvh - 48px)); max-height: min(760px, calc(100dvh - 48px)); flex-direction: column; overflow: hidden; border-radius: var(--radius-modal); background: var(--bg-surface); box-shadow: var(--shadow-float); animation: dialog-in var(--motion-standard) var(--ease-standard) both; }
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(4px) scale(.99); } to { opacity: 1; transform: none; } }
+.dialog > header { display: flex; min-height: 56px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 10px var(--pad); }
+.dialog > header > div { min-width: 0; }
+.dialog > header .state { color: var(--text-muted); font-size: var(--fs-sm); }
+.dialog h2 { margin-top: 2px; color: var(--text-primary); font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.015em; line-height: 1.3; overflow-wrap: anywhere; }
+.close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
 .close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.close:active { background: var(--bg-selected); }
+/* The record's readouts, in the metric-strip vocabulary. */
 .summary { display: grid; flex: 0 0 auto; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border-subtle); }
-.summary > span { min-width: 0; border-right: 1px solid var(--border-subtle); padding: 16px 24px; }
-.summary > span:last-child { border-right: 0; }
+.summary > span { min-width: 0; border-left: 1px solid var(--border-subtle); padding: 9px var(--pad) 10px; }
+.summary > span:first-child { border-left: 0; }
 .summary small, .summary strong { display: block; }
-.summary small { color: var(--text-muted); font-size: 12px; }
-.summary strong { margin-top: 6px; color: var(--text-primary); font-size: 14px; font-variant-numeric: tabular-nums; font-weight: 500; overflow-wrap: anywhere; }
-.detections { display: grid; min-height: 0; align-content: start; gap: 16px; overflow: auto; flex: 1; padding: 20px 24px; }
-.detection { border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-canvas); }
-.detection > header { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; border-bottom: 1px solid var(--border-subtle); padding: 12px; }
-.detection > header:last-child { border-bottom: 0; }
-.detection strong { min-width: 0; flex: 1; color: var(--text-primary); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
-.detection small { color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; }
-.detection code { display: block; padding: 12px; color: var(--text-danger); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
-.detection p { border-top: 1px solid var(--border-subtle); padding: 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.summary small { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.4; }
+.summary strong { margin-top: 3px; color: var(--text-primary); font-family: var(--font-mono); font-size: var(--fs-md); font-variant-numeric: tabular-nums; font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+.detections { display: grid; min-height: 0; flex: 1; align-content: start; overflow: auto; overscroll-behavior: contain; }
+.detection { display: grid; min-width: 0; gap: 8px; border-bottom: 1px solid var(--border-subtle); padding: 12px var(--pad); }
+.detection:last-child { border-bottom: 0; }
+.detection > header { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.detection strong { min-width: 0; flex: 1 1 200px; color: var(--text-primary); font-size: var(--fs-base); font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
+.detection small { color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); }
+/* The matched bytes, verbatim, in an inset well. */
+.detection code { display: block; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 8px 10px; color: var(--text-danger); background: var(--bg-raised); font-size: var(--fs-sm); line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.detection p { color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.55; overflow-wrap: anywhere; text-wrap: pretty; }
+
 @container findings-table (max-width: 1100px) { .findings th:nth-child(6), .findings td:nth-child(6) { display: none; } }
 @container findings-table (max-width: 850px) { .findings th:nth-child(4), .findings td:nth-child(4) { display: none; } .findings th:nth-child(3) { width: 120px; } }
 @media (max-width: 959px) {
   .page :global(.page-header) { align-items: flex-start; flex-direction: column; }
-  .error { padding-inline: 20px; }
-  .modeChoices { grid-template-columns: 1fr; }
+  .error { padding-inline: min(var(--gutter), 18px); }
+  /* The rule-set readout drops under the switch instead of squeezing beside it. */
+  .mode { grid-template-columns: minmax(0, 1fr); }
+  .modeNote { padding: 0 var(--pad) 10px; }
   .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .summary > span:nth-child(even) { border-right: 0; }
+  .summary > span:nth-child(odd) { border-left: 0; }
   .summary > span:nth-child(n+3) { border-top: 1px solid var(--border-subtle); }
-  .findingsMeta { width: 100%; justify-items: start; }
-  .findingsMeta > span { max-width: none; text-align: left; }
+  .findingsMeta { flex-basis: 100%; justify-content: space-between; }
+  .findingsMeta > span { text-align: left; }
+}
+@media (max-width: 600px) {
+  .error { padding-inline: 14px; }
+  .backdrop { padding: 12px; }
+  .dialog { min-height: min(320px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); }
 }

@@ -1,21 +1,31 @@
-.dialog { display: grid; gap: 20px; --dialog-width: 480px; padding: 24px; }
-.dialog > header { position: static; min-height: 0; padding: 0 0 20px; align-items: flex-start; }
-.dialog h2 { color: var(--text-primary); font-size: 18px; font-weight: 600; }
-.dialog header p { margin-top: 8px; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
-.dialog header > svg { color: var(--text-secondary); flex: 0 0 auto; margin-top: 2px; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.progress { display: flex; align-items: center; gap: 12px; color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
-.track { position: relative; height: 5px; flex: 1; border-radius: 3px; background: var(--bg-raised); overflow: hidden; }
-.fill { height: 100%; border-radius: 3px; background: var(--text-primary); }
-.ready > div:first-child { display: flex; align-items: center; gap: 8px; color: var(--status-success); font-size: 13px; }
-.ready { display: grid; gap: 16px; }
-.error p { margin: 0 0 4px; color: var(--text-danger); font-size: 13px; line-height: 1.5; }
-.error { display: grid; gap: 8px; }
-.launchError { margin: 0; color: var(--text-danger); font-size: 13px; line-height: 1.5; }
-.path { color: var(--text-secondary); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
-.dialog > footer { position: static; min-height: 0; justify-content: flex-end; padding: 16px 0 0; }
-.close { min-height: 36px; border: 0; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; padding: 7px 12px; border-radius: var(--radius-control); }
+/* The modal's own header and footer, held in place: the body is short, so
+ * nothing needs to stick. Body blocks share the header's inline inset. */
+.dialog { --dialog-width: 480px; display: grid; gap: 14px; }
+.dialog > header { position: static; align-items: flex-start; }
+.dialog > :not(header, footer) { margin-inline: 18px; }
+.dialog header > svg { flex: 0 0 auto; width: 20px; height: 20px; margin-top: 1px; color: var(--accent); }
+.dialog > footer { position: static; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.progress { display: flex; align-items: center; gap: 10px; color: var(--text-secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.progress > span { min-width: 4ch; white-space: nowrap; }
+.track { position: relative; height: 4px; flex: 1; overflow: hidden; border-radius: 2px; background: var(--bg-raised); }
+.fill { height: 100%; border-radius: inherit; background: var(--accent); }
+.ready { display: grid; gap: 12px; }
+.ready > div:first-child { display: flex; align-items: center; gap: 8px; color: var(--status-success); font-size: var(--fs-base); font-weight: 500; }
+.error { display: grid; gap: 10px; }
+.error p { margin: 0; color: var(--text-danger); font-size: var(--fs-base); line-height: 1.5; overflow-wrap: anywhere; }
+.launchError { margin: 0; color: var(--text-danger); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.path { display: block; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 6px 8px; color: var(--text-secondary); background: var(--bg-field); font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; user-select: all; }
+
+/* "Not now": a quiet text button; it stays inert while a download runs. */
+.close { min-height: var(--control-height); border: 0; border-radius: var(--radius-control); padding: 0 10px; color: var(--text-secondary); background: transparent; font: inherit; font-size: var(--fs-sm); cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
 .close:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
 .close:active:not(:disabled) { background: var(--bg-selected); }
-.close:disabled { color: var(--text-disabled); cursor: default; }
+.close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.close:disabled { color: var(--text-disabled); cursor: not-allowed; }
+
+@media (max-width: 600px) {
+  .dialog > :not(header, footer) { margin-inline: 14px; }
+}
 @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }

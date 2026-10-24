@@ -10,7 +10,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const maxPlaintextBytes = 4 * 1024 * 1024
+// maxPlaintextBytes is the absolute cap on one protected payload. Callers bound
+// their own documents below it (encryptedfile takes a per-file limit); the
+// largest today is the 8 MiB plugins document.
+const maxPlaintextBytes = 8 * 1024 * 1024
 
 var entropy = sha256.Sum256([]byte("LuxuryPrivate.Switchboard.KeyPool.v2"))
 

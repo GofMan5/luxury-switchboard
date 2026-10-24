@@ -1,78 +1,102 @@
 .page { position: relative; display: flex; min-width: 0; height: 100%; overflow: hidden; flex-direction: column; }
-.headerActions, .inspectorActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.inspectorActions { border-bottom: 1px solid var(--border-subtle); padding: 12px 20px; }
-.error { border-bottom: 1px solid var(--border-subtle); padding: 12px 32px; color: var(--text-danger); background: var(--bg-surface); }
-.layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: minmax(0, 1fr) 400px; }
+.headerActions, .inspectorActions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* Full-bleed band under the page header; the layout's top hairline closes it. */
+.error { padding: 8px var(--gutter); color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+
+/* Master list on the canvas, inspector on a surface: one hairline between. */
+.layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: minmax(0, 1fr) 380px; border-top: 1px solid var(--border-subtle); }
 .listPane { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border-subtle); }
-.listHeader, .providerRow { display: grid; grid-template-columns: minmax(120px, 1fr) 108px 68px 72px; align-items: center; gap: 12px; }
-.listHeader { min-height: 38px; flex: 0 0 auto; border-bottom: 1px solid var(--border-subtle); padding: 0 24px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+/* --row-inset is the list's own gutter; the selection dot sits centred in it. */
+.listHeader, .providerRow { --row-inset: var(--gutter); display: grid; grid-template-columns: minmax(120px, 1fr) 112px 64px 68px; align-items: center; gap: 12px; padding-inline: var(--row-inset); }
+.listHeader { min-height: 30px; flex: 0 0 auto; border-bottom: 1px solid var(--border-subtle); color: var(--text-muted); font-size: var(--fs-sm); font-weight: 500; }
 .listHeader span:nth-child(3) { text-align: right; }
 .listScroll { min-height: 0; flex: 1; overflow: auto; }
-.providerRow { width: 100%; min-height: 70px; border: 0; border-bottom: 1px solid var(--border-subtle); padding: 12px 24px; color: var(--text-secondary); background: transparent; text-align: left; cursor: pointer; transition: background var(--motion-fast); }
-.providerRow:hover { background: var(--bg-hover); }
+.providerRow { position: relative; width: 100%; min-height: calc(var(--row-height) + 12px); border: 0; border-bottom: 1px solid var(--border-subtle); padding-block: 6px; color: var(--text-secondary); background: transparent; font: inherit; text-align: left; cursor: pointer; transition: background var(--motion-fast), color var(--motion-fast); }
+.providerRow:hover:not(:disabled, [data-selected='true']) { background: var(--bg-hover); }
+.providerRow:active:not(:disabled) { background: var(--bg-selected); }
 .providerRow:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-.providerRow:active, .providerRow[data-selected='true'] { background: var(--bg-selected); }
+.providerRow:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.providerRow[data-selected='true'] { background: var(--bg-selected); }
+/* Selection is an accent dot in the gutter, not a bar: state at a glance
+   without competing with the health dot. Out of flow, so no grid cell. */
+.providerRow[data-selected='true']::before { position: absolute; top: 50%; left: calc(var(--row-inset) / 2 - 2.5px); width: 5px; height: 5px; border-radius: 50%; background: var(--accent); content: ''; transform: translateY(-50%); }
 .providerRow > span:last-child { justify-self: start; }
 .providerName { min-width: 0; }
 .providerName strong, .providerName small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.providerName strong { color: var(--text-primary); font-size: 14px; font-weight: 500; }
-.providerName small { margin-top: 5px; color: var(--text-muted); font-size: 12px; }
-.health { display: inline-flex; min-width: 0; align-items: center; gap: 7px; font-size: 12px; white-space: nowrap; }
-.rpm { font-variant-numeric: tabular-nums; text-align: right; font-size: 13px; }
+.providerName strong { color: var(--text-primary); font-size: var(--fs-base); font-weight: 500; line-height: 1.35; }
+.providerName small { margin-top: 1px; color: var(--text-muted); font-size: var(--fs-xs); line-height: 1.35; }
+.health { display: inline-flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; font-size: var(--fs-sm); white-space: nowrap; }
+.rpm { color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .noSelection { display: grid; min-width: 0; min-height: 0; place-items: center; }
+
+/* Inspector: same vocabulary as Panel — 44px-class header, --pad inset. */
 .inspector { display: flex; min-width: 0; min-height: 0; flex-direction: column; background: var(--bg-surface); }
 .inspectorScroll { min-height: 0; flex: 1; overflow: auto; }
-.inspectorHeader { display: flex; min-height: 82px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 16px 20px; }
+.inspectorHeader { display: flex; min-height: 52px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); }
 .inspectorHeader > div:first-child { min-width: 0; }
-.inspectorHeaderActions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
-.closeInspector { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); color: var(--text-muted); background: transparent; cursor: pointer; }
-.closeInspector:hover { color: var(--text-primary); background: var(--bg-hover); }
-.closeInspector:active { background: var(--bg-selected); }
-.inspectorHeader h2 { overflow: hidden; color: var(--text-primary); font-size: 17px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.inspectorHeader span { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: var(--text-muted); font-size: 12px; }
-.section { border-bottom: 1px solid var(--border-subtle); padding: 20px; }
-.section h3 { margin-bottom: 16px; color: var(--text-primary); font-size: 13px; font-weight: 600; }
-.section dl { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; margin: 0; }
-.section dt { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.section dd { min-width: 0; margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
-.endpoint { font-family: var(--font-mono); font-size: 12px !important; }
-.authRow { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; color: var(--text-muted); }
-.authRow strong { display: block; color: var(--text-secondary); font-size: 13px; font-weight: 500; }
-.authRow span { display: block; margin-top: 5px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.inspectorHeader h2 { overflow: hidden; color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.inspectorHeader > div:first-child > span { display: flex; align-items: center; gap: 6px; margin-top: 1px; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.4; }
+.inspectorHeaderActions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.closeInspector { display: grid; width: var(--control-height); height: var(--control-height); flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.closeInspector:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.closeInspector:active:not(:disabled) { background: var(--bg-selected); }
+.closeInspector:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.closeInspector:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.inspectorActions { border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); }
+/* A managed built-in (Codex) can have no actions; drop the empty strip. */
+.inspectorActions:empty { display: none; }
+.section { border-bottom: 1px solid var(--border-subtle); padding: 12px var(--pad) var(--pad); }
+.section h3 { margin-bottom: 8px; color: var(--text-secondary); font-size: var(--fs-sm); font-weight: 600; line-height: 1.4; }
+/* Baseline alignment keeps the smaller terms level with their values. */
+.section dl { display: grid; grid-template-columns: 104px minmax(0, 1fr); align-items: baseline; gap: 6px 12px; margin: 0; }
+.section dt { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
+.section dd { min-width: 0; margin: 0; color: var(--text-secondary); font-size: var(--fs-base); line-height: 1.5; overflow-wrap: anywhere; }
+.section dd.endpoint { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.authRow { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; color: var(--text-muted); }
+.authRow strong { display: block; color: var(--text-secondary); font-size: var(--fs-base); font-weight: 500; line-height: 1.4; }
+.authRow span { display: block; margin-top: 2px; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
 .accountEmail { overflow-wrap: anywhere; }
 .accountState { display: inline-flex; align-items: center; gap: 6px; }
-.accountEmpty { color: var(--text-muted); font-size: 13px; }
-.accountList { display: grid; gap: 16px; }
-.accountRow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-.accountRow + .accountRow { padding-top: 16px; border-top: 1px solid var(--border-subtle); }
-.accountRow dl { flex: 1 1 220px; min-width: 0; }
-.providerModal { --dialog-width: 600px; }
-.formBody { display: grid; gap: 18px; padding: 24px; }
-.formBody > label:not(.check), .ratePair label { display: grid; gap: 8px; color: var(--text-secondary); font-size: 13px; }
-.formBody input:not([type='checkbox']), .formBody select { width: 100%; height: 40px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding: 0 12px; color: var(--text-primary); background: var(--bg-field); transition: border-color var(--motion-fast), background var(--motion-fast); }
-.formBody input:not([type='checkbox']):hover, .formBody select:hover { border-color: var(--border-field); }
-.formBody input:not([type='checkbox']):focus-visible, .formBody select:focus-visible { border-color: var(--border-focus); outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.formBody small { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.monoInput { font-family: var(--font-mono); font-size: 13px; }
-.ratePair { display: grid; gap: 8px 12px; grid-template-columns: minmax(0, 1fr) 150px; }
+.accountEmpty { color: var(--text-muted); font-size: var(--fs-base); }
+.accountList { display: grid; gap: 12px; }
+.accountRow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 12px; }
+.accountRow + .accountRow { border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+.accountRow dl { min-width: 0; flex: 1 1 220px; }
+
+/* Editor dialog: .ui-modal owns the frame; fields inherit the global baseline. */
+.providerModal { --dialog-width: 580px; }
+.formBody { display: grid; gap: 12px; padding: var(--pad) 18px; }
+.formBody > label:not(.check), .ratePair label { display: grid; min-width: 0; gap: 5px; color: var(--text-secondary); font-size: var(--fs-base); }
+.formBody label > span { font-size: var(--fs-sm); font-weight: 500; }
+.formBody input:not([type='checkbox']), .formBody select { width: 100%; }
+.formBody small { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.45; }
+.monoInput { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.ratePair { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 5px 12px; }
 .ratePair small { grid-column: 1 / -1; }
-.check { display: flex; align-items: center; gap: 10px; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
-.check input { width: 16px; height: 16px; flex: 0 0 auto; }
-.formError { color: var(--text-danger); font-size: 13px; }
-.confirm { --dialog-width: 460px; }
-.confirmError { padding: 16px 24px; color: var(--text-danger); }
-@media (max-width: 1199px) {
+.check { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: var(--fs-base); line-height: 1.45; cursor: pointer; transition: color var(--motion-fast); }
+.check:hover { color: var(--text-primary); }
+.check:has(input:disabled) { color: var(--text-disabled); cursor: not-allowed; }
+.check input { width: 14px; height: 14px; flex: 0 0 auto; margin: 0; cursor: inherit; }
+.formError { border: 1px solid color-mix(in srgb, var(--status-danger) 34%, transparent); border-radius: var(--radius-control); padding: 7px 10px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 8%, transparent); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.confirm { --dialog-width: 440px; }
+.confirmError { padding: var(--pad) 18px; color: var(--text-danger); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+
+/* Matches useMediaQuery('(max-width: 1120px)') in the page: the inspector
+   becomes a sheet exactly when the page stops opening it by default. */
+@media (max-width: 1120px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
   .listPane { border-right: 0; }
-  .inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; width: min(420px, 100%); border-left: 1px solid var(--border-strong); }
+  .inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; width: min(400px, 100%); border-left: 1px solid var(--border-strong); }
 }
 @media (max-width: 959px) {
-  .listHeader, .providerRow { padding-inline: 20px; }
-  .error { padding-inline: 20px; }
+  .listHeader, .providerRow { --row-inset: min(var(--gutter), 18px); }
+  .error { padding-inline: min(var(--gutter), 18px); }
 }
 @media (max-width: 600px) {
-  .listHeader, .providerRow { grid-template-columns: minmax(100px, 1fr) 90px 65px; gap: 8px; padding-inline: 16px; }
+  .listHeader, .providerRow { --row-inset: 14px; grid-template-columns: minmax(100px, 1fr) 96px 64px; gap: 8px; }
   .listHeader span:nth-child(3), .providerRow .rpm { display: none; }
-  .ratePair { grid-template-columns: 1fr; }
-  .formBody { padding: 18px; }
+  .error { padding-inline: 14px; }
+  .ratePair { grid-template-columns: minmax(0, 1fr); }
+  .formBody { padding: 12px 14px; }
+  .confirmError { padding-inline: 14px; }
 }

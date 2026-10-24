@@ -1,0 +1,231 @@
+import type { ColorToken } from '../../../shared/contracts/tokens'
+
+export interface ThemeDefinition {
+  readonly id: string
+  readonly name: string
+  readonly scheme: 'dark' | 'light'
+  /** A builtin theme sets every color token; a contributed one may set fewer
+   * and inherits the rest from the builtin of its scheme. */
+  readonly tokens: Readonly<Partial<Record<ColorToken, string>>> & Readonly<Record<string, string>>
+  readonly builtin: boolean
+}
+
+/**
+ * The builtin themes. Each is one hue family carried through every surface —
+ * the tint lives in the greys, not in decoration — plus one signal accent and
+ * status colours tuned for that ground. Muted text clears 4.5:1 on the canvas
+ * and on the surface in every theme.
+ */
+export const BUILTIN_THEMES: readonly ThemeDefinition[] = [
+  {
+    id: 'graphite',
+    name: 'Graphite',
+    scheme: 'dark',
+    builtin: true,
+    tokens: {
+      '--bg-chrome': '#0f1012',
+      '--bg-canvas': '#141518',
+      '--bg-surface': '#191a1e',
+      '--bg-elevated': '#202227',
+      '--bg-raised': '#1d1f23',
+      '--bg-hover': '#22242a',
+      '--bg-selected': '#292c33',
+      '--bg-nav-selected': '#1f2126',
+      '--bg-field': '#111215',
+      '--border-subtle': '#26282e',
+      '--border-strong': '#353840',
+      '--border-field': '#3a3e46',
+      '--text-primary': '#eceef2',
+      '--text-secondary': '#c2c6ce',
+      '--text-muted': '#8b909b',
+      '--text-disabled': '#575b64',
+      '--text-danger': '#f4a39a',
+      '--accent': '#ff8a3d',
+      '--status-info': '#8fb2e0',
+      '--status-success': '#7cc495',
+      '--status-warning': '#e3c25e',
+      '--status-danger': '#f0857b',
+      '--status-neutral': '#7d828c',
+      '--shadow-float': '0 12px 32px -8px rgb(0 0 0 / 55%), 0 2px 6px rgb(0 0 0 / 35%)',
+      '--scrim': 'rgb(6 7 9 / 68%)',
+    },
+  },
+  {
+    id: 'carbon',
+    name: 'Carbon',
+    scheme: 'dark',
+    builtin: true,
+    tokens: {
+      '--bg-chrome': '#000000',
+      '--bg-canvas': '#0a0a0a',
+      '--bg-surface': '#111111',
+      '--bg-elevated': '#191919',
+      '--bg-raised': '#151515',
+      '--bg-hover': '#1a1a1a',
+      '--bg-selected': '#222222',
+      '--bg-nav-selected': '#161616',
+      '--bg-field': '#070707',
+      '--border-subtle': '#1f1f1f',
+      '--border-strong': '#2e2e2e',
+      '--border-field': '#363636',
+      '--text-primary': '#f2f2f2',
+      '--text-secondary': '#c6c6c6',
+      '--text-muted': '#8a8a8a',
+      '--text-disabled': '#525252',
+      '--text-danger': '#f3a097',
+      '--accent': '#f2f2f2',
+      '--status-info': '#a6b8cc',
+      '--status-success': '#86c79c',
+      '--status-warning': '#e2c46a',
+      '--status-danger': '#ef8a80',
+      '--status-neutral': '#7a7a7a',
+      '--shadow-float': '0 12px 32px -8px rgb(0 0 0 / 70%), 0 2px 6px rgb(0 0 0 / 45%)',
+      '--scrim': 'rgb(0 0 0 / 72%)',
+    },
+  },
+  {
+    id: 'ink',
+    name: 'Ink',
+    scheme: 'dark',
+    builtin: true,
+    tokens: {
+      '--bg-chrome': '#0b0f16',
+      '--bg-canvas': '#0f141c',
+      '--bg-surface': '#141a23',
+      '--bg-elevated': '#1a212c',
+      '--bg-raised': '#171e28',
+      '--bg-hover': '#1b2230',
+      '--bg-selected': '#222b3a',
+      '--bg-nav-selected': '#18202b',
+      '--bg-field': '#0c1118',
+      '--border-subtle': '#1f2733',
+      '--border-strong': '#2d3746',
+      '--border-field': '#334051',
+      '--text-primary': '#e8eef7',
+      '--text-secondary': '#bdc7d6',
+      '--text-muted': '#8592a6',
+      '--text-disabled': '#4f5a6b',
+      '--text-danger': '#f5a49c',
+      '--accent': '#5cc8ff',
+      '--status-info': '#8cb6f0',
+      '--status-success': '#72c9a0',
+      '--status-warning': '#e6c46a',
+      '--status-danger': '#f2877e',
+      '--status-neutral': '#7a8596',
+      '--shadow-float': '0 12px 32px -8px rgb(0 3 10 / 60%), 0 2px 6px rgb(0 3 10 / 40%)',
+      '--scrim': 'rgb(3 6 12 / 70%)',
+    },
+  },
+  {
+    id: 'moss',
+    name: 'Moss',
+    scheme: 'dark',
+    builtin: true,
+    tokens: {
+      '--bg-chrome': '#0e100c',
+      '--bg-canvas': '#121510',
+      '--bg-surface': '#171a14',
+      '--bg-elevated': '#1e221a',
+      '--bg-raised': '#1b1e17',
+      '--bg-hover': '#20241b',
+      '--bg-selected': '#282d22',
+      '--bg-nav-selected': '#1d2119',
+      '--bg-field': '#0f110d',
+      '--border-subtle': '#252a20',
+      '--border-strong': '#343a2d',
+      '--border-field': '#3b4233',
+      '--text-primary': '#eaeee2',
+      '--text-secondary': '#c3c9b8',
+      '--text-muted': '#8d9582',
+      '--text-disabled': '#565d4d',
+      '--text-danger': '#f2a596',
+      '--accent': '#b7e35a',
+      '--status-info': '#9fb8cf',
+      '--status-success': '#86c98a',
+      '--status-warning': '#e4c260',
+      '--status-danger': '#ee8a77',
+      '--status-neutral': '#7f8774',
+      '--shadow-float': '0 12px 32px -8px rgb(0 0 0 / 58%), 0 2px 6px rgb(0 0 0 / 38%)',
+      '--scrim': 'rgb(5 6 4 / 70%)',
+    },
+  },
+  {
+    id: 'paper',
+    name: 'Paper',
+    scheme: 'light',
+    builtin: true,
+    tokens: {
+      '--bg-chrome': '#efede8',
+      '--bg-canvas': '#f7f6f3',
+      '--bg-surface': '#fdfcfa',
+      '--bg-elevated': '#ffffff',
+      '--bg-raised': '#f3f1ed',
+      '--bg-hover': '#efede8',
+      '--bg-selected': '#e7e4de',
+      '--bg-nav-selected': '#e5e2db',
+      '--bg-field': '#ffffff',
+      '--border-subtle': '#e5e2dc',
+      '--border-strong': '#d3cfc7',
+      '--border-field': '#c6c1b8',
+      '--text-primary': '#1c1b19',
+      '--text-secondary': '#3f3c37',
+      '--text-muted': '#6c675f',
+      '--text-disabled': '#a6a199',
+      '--text-danger': '#b3261e',
+      '--accent': '#d4570f',
+      '--status-info': '#3d6fb0',
+      '--status-success': '#2f8a53',
+      '--status-warning': '#a66f00',
+      '--status-danger': '#c4382d',
+      '--status-neutral': '#857f76',
+      '--shadow-float': '0 12px 32px -10px rgb(40 32 20 / 22%), 0 2px 6px rgb(40 32 20 / 10%)',
+      '--scrim': 'rgb(30 26 20 / 28%)',
+    },
+  },
+  {
+    id: 'porcelain',
+    name: 'Porcelain',
+    scheme: 'light',
+    builtin: true,
+    tokens: {
+      '--bg-chrome': '#eceef2',
+      '--bg-canvas': '#f5f6f8',
+      '--bg-surface': '#fcfcfd',
+      '--bg-elevated': '#ffffff',
+      '--bg-raised': '#f1f2f5',
+      '--bg-hover': '#eceef2',
+      '--bg-selected': '#e3e6ec',
+      '--bg-nav-selected': '#e1e4ea',
+      '--bg-field': '#ffffff',
+      '--border-subtle': '#e2e5ea',
+      '--border-strong': '#cfd3db',
+      '--border-field': '#c0c5cf',
+      '--text-primary': '#16181d',
+      '--text-secondary': '#3a3e47',
+      '--text-muted': '#646a76',
+      '--text-disabled': '#a2a7b1',
+      '--text-danger': '#b42318',
+      '--accent': '#2d62d8',
+      '--status-info': '#2d62d8',
+      '--status-success': '#24804c',
+      '--status-warning': '#9a6700',
+      '--status-danger': '#c2372c',
+      '--status-neutral': '#7c8290',
+      '--shadow-float': '0 12px 32px -10px rgb(20 28 45 / 22%), 0 2px 6px rgb(20 28 45 / 10%)',
+      '--scrim': 'rgb(18 22 32 / 28%)',
+    },
+  },
+]
+
+/** Follows the operating system: Graphite at night, Paper by day. */
+export const SYSTEM_THEME_ID = 'system'
+export const DEFAULT_THEME_ID = 'graphite'
+
+export function builtinTheme(id: string): ThemeDefinition | undefined {
+  return BUILTIN_THEMES.find((theme) => theme.id === id)
+}
+
+/** The builtin a partial theme of this scheme inherits from. */
+export function baseTheme(scheme: 'dark' | 'light'): ThemeDefinition {
+  return builtinTheme(scheme === 'light' ? 'paper' : DEFAULT_THEME_ID) as ThemeDefinition
+}

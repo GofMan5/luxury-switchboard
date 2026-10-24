@@ -13,9 +13,9 @@ No Luxury Switchboard account. No hosted control plane. Bring your own provider 
 [![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-58a6ff?style=flat-square)](https://github.com/GofMan5/luxury-switchboard/releases/latest)
 [![Stars](https://img.shields.io/github/stars/GofMan5/luxury-switchboard?style=flat-square&color=e3b341)](https://github.com/GofMan5/luxury-switchboard/stargazers)
 
-<a href="docs/media/demo.mp4"><img src="docs/media/demo.webp" alt="Luxury Switchboard walkthrough: live request activity with the request inspector, streaming model tests, model routes, insights, guardrails and the public tunnel" width="100%"></a>
+<a href="docs/media/demo.mp4"><img src="docs/media/demo.webp" alt="Luxury Switchboard walkthrough: live request activity with the request inspector, the command palette, insights, streaming model tests, live theme switching, installing a plugin and its page, and the public tunnel" width="100%"></a>
 
-<sub>A 49-second tour of the current interface · <a href="docs/media/demo.mp4">MP4 version</a> · demo and screenshots use fictional data, never real credentials or traffic.</sub>
+<sub>A 51-second tour of the current interface · <a href="docs/media/demo.mp4">MP4 version</a> · demo and screenshots use fictional data, never real credentials or traffic.</sub>
 
 </div>
 
@@ -149,6 +149,29 @@ Press **Start** on the Tunnel page and you get an HTTPS address plus a stable ac
 - **Clients get their own page**: per-address history, bans, notes. Stored locally, never published.
 
 ![Tunnel](docs/screenshots/tunnel.png)
+
+## Make it yours
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Appearance**: four dark themes, two light ones, or follow the system. Accent, density, text size, interface and data fonts, corners, any single design token and your own stylesheet. Every change applies as you make it and is saved, encrypted, with the rest of your configuration.
+
+![Appearance](docs/screenshots/appearance.png)
+
+</td>
+<td width="50%" valign="top">
+
+**Plugins**: one JSON file adds themes, stylesheets, sidebar pages, palette commands, status items and automations. Each plugin runs in its own sealed worker with only the permissions you tick at install; managing plugins, backups and updates is never on offer. The guide is [docs/PLUGINS.md](docs/PLUGINS.md).
+
+![Plugins](docs/screenshots/plugins.png)
+
+</td>
+</tr>
+</table>
+
+Ctrl+K opens a command palette for every page and action, Alt+1…9 jumps between pages. If a theme or plugin ever leaves the window unusable, Ctrl+Alt+Shift+S restarts it in safe mode with plugins and custom styles off.
 
 ## Private by construction
 

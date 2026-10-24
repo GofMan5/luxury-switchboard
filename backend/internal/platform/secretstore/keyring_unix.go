@@ -22,7 +22,10 @@ const (
 	linuxPayloadFormat = 1
 	linuxKeyService    = "one.luxuryprivate.switchboard"
 	linuxKeyUser       = "encrypted-files-v1"
-	maxPlaintextBytes  = 4 * 1024 * 1024
+	// maxPlaintextBytes is the absolute cap on one protected payload. Callers
+	// bound their own documents below it (encryptedfile takes a per-file
+	// limit); the largest today is the 8 MiB plugins document.
+	maxPlaintextBytes = 8 * 1024 * 1024
 )
 
 const linuxAdditionalData = "LuxuryPrivate.Switchboard.SecretStore.v1"

@@ -19,6 +19,9 @@ import (
 	analyticssqlite "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/adapters/sqlite"
 	analyticsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/adapters/stdio"
 	analyticsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/analytics/application"
+	appearancedpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/appearance/adapters/dpapi"
+	appearancestdio "github.com/luxuryprivate/switchboard/backend/internal/slices/appearance/adapters/stdio"
+	appearanceapp "github.com/luxuryprivate/switchboard/backend/internal/slices/appearance/application"
 	backuplive "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/live"
 	backupstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/adapters/stdio"
 	backupapp "github.com/luxuryprivate/switchboard/backend/internal/slices/backup/application"
@@ -47,6 +50,9 @@ import (
 	notificationsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/adapters/stdio"
 	notificationsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/application"
 	notificationsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/domain"
+	pluginsdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/adapters/dpapi"
+	pluginsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/adapters/stdio"
+	pluginsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/application"
 	providerdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/dpapi"
 	providerhealth "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/health"
 	providerstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/stdio"
@@ -317,6 +323,25 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	}
 	backupstdio.Register(protocol, backupService)
 	settingsstdio.Register(protocol, settingsService)
+	// Appearance and plugins are the owner's own presentation choices. A store
+	// that cannot be read leaves the app running on defaults and refuses
+	// writes until a restart reads it; it never stops the relay.
+	appearanceService, err := defaultAppearanceService()
+	if err != nil {
+		return nil, err
+	}
+	if loadErr := appearanceService.Load(context.Background()); loadErr != nil {
+		logger.Printf("encrypted appearance could not be loaded; using defaults and refusing changes")
+	}
+	appearancestdio.Register(protocol, appearanceService)
+	pluginService, err := defaultPluginService()
+	if err != nil {
+		return nil, err
+	}
+	if loadErr := pluginService.Load(context.Background()); loadErr != nil {
+		logger.Printf("encrypted plugins could not be loaded; plugin commands are unavailable")
+	}
+	pluginsstdio.Register(protocol, pluginService)
 	guardrailstdio.Register(protocol, guardrails)
 	notificationsstdio.Register(protocol, notifications)
 	// A dead key is the one failure the relay absorbs silently — the pool
@@ -615,6 +640,41 @@ func defaultSettingsService() (*settingsapp.Service, error, error) {
 		loadErr = service.Load(context.Background())
 	}
 	return service, loadErr, nil
+}
+
+func defaultAppearanceService() (*appearanceapp.Service, error) {
+	path, err := storePath("SWITCHBOARD_APPEARANCE_PATH", appearancedpapi.DefaultPath)
+	if err != nil {
+		return nil, err
+	}
+	return appearanceapp.NewService(appearancedpapi.New(path))
+}
+
+func defaultPluginService() (*pluginsapp.Service, error) {
+	path, err := storePath("SWITCHBOARD_PLUGINS_PATH", pluginsdpapi.DefaultPath)
+	if err != nil {
+		return nil, err
+	}
+	return pluginsapp.NewService(pluginsdpapi.New(path), platform.MaxPayloadBytes)
+}
+
+// storePath reads an absolute override from name, or falls back to the
+// default. An unresolvable default becomes an empty path, which the
+// repositories refuse to load — so the service reports storage unavailable
+// rather than the app failing to start.
+func storePath(name string, fallback func() (string, error)) (string, error) {
+	path := os.Getenv(name)
+	if path == "" {
+		resolved, err := fallback()
+		if err != nil {
+			return "", nil
+		}
+		return resolved, nil
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New(name + " must be an absolute path")
+	}
+	return path, nil
 }
 
 func defaultHistory(retentionDays int, onDrop func(cause string)) (activityapp.History, string, error) {

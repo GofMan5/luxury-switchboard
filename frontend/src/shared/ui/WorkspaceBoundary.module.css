@@ -1,29 +1,40 @@
+/* A failed screen: one framed, neutral notice where the workspace was. */
 .failure {
   display: grid;
-  min-height: 320px;
+  min-height: 240px;
   align-content: center;
   justify-items: center;
-  gap: 10px;
-  margin: 18px 28px;
+  gap: 6px;
+  margin: var(--gap) var(--gutter);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-panel);
-  padding: 40px 24px;
+  padding: 32px var(--gutter);
   text-align: center;
   background: var(--bg-surface);
 }
 
 .failure h2 {
   color: var(--text-primary);
-  font-size: 16px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: -.01em;
 }
 
 .failure p {
   max-width: 46ch;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.5;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  text-wrap: pretty;
 }
 
 .failure button {
-  margin-top: 6px;
+  margin-top: 8px;
+}
+
+@media (max-width: 959px) {
+  .failure { margin-inline: min(var(--gutter), 18px); }
+}
+@media (max-width: 600px) {
+  .failure { margin-inline: 14px; padding-inline: var(--pad); }
 }

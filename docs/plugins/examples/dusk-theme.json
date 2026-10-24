@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "example.dusk-theme",
+  "name": "Dusk theme",
+  "version": "1.0.0",
+  "author": "Switchboard examples",
+  "description": "A violet-grey dark theme and a stylesheet that only applies while the theme is selected. No script.",
+  "permissions": [
+    "ui:theme",
+    "ui:css"
+  ],
+  "theme": {
+    "name": "Dusk",
+    "scheme": "dark",
+    "tokens": {
+      "--bg-chrome": "#121019",
+      "--bg-canvas": "#17141f",
+      "--bg-surface": "#1c1926",
+      "--bg-elevated": "#24202f",
+      "--bg-raised": "#211d2b",
+      "--bg-hover": "#272233",
+      "--bg-selected": "#2f293d",
+      "--bg-nav-selected": "#251f31",
+      "--bg-field": "#14111b",
+      "--border-subtle": "#2a2536",
+      "--border-strong": "#3a3449",
+      "--border-field": "#433c53",
+      "--text-primary": "#efeaf7",
+      "--text-secondary": "#c9c2d6",
+      "--text-muted": "#968ea6",
+      "--text-disabled": "#5c5568",
+      "--text-danger": "#f4a3b0",
+      "--accent": "#b99cf5",
+      "--status-info": "#9db4f0",
+      "--status-success": "#86c9a0",
+      "--status-warning": "#e6c36d",
+      "--status-danger": "#ef8a96",
+      "--status-neutral": "#857e92"
+    }
+  },
+  "css": "/* Scoped to the theme: picking another theme turns these off too. */\n:root[data-theme=\"plugin:example.dusk-theme\"] .page-header h1 { letter-spacing: -0.025em; }\n:root[data-theme=\"plugin:example.dusk-theme\"] .status-dot[data-tone=\"success\"] {\n  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-success) 22%, transparent);\n}\n"
+}

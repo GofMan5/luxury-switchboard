@@ -29,6 +29,7 @@ export class NotificationsModel {
   #listeners = new Set<() => void>()
   #unsubscribe: (() => void) | null = null
   #timers = new Set<ReturnType<typeof setTimeout>>()
+  #localSeq = 0
 
   constructor(port: NotificationsPort) {
     this.#port = port
@@ -72,6 +73,16 @@ export class NotificationsModel {
 
   setEnabled(enabled: boolean): void {
     if (this.#state.enabled !== enabled) this.#set({ ...this.#state, enabled })
+  }
+
+  /** Raises a notification that originates in this window (a plugin's
+   * `notify`, for one) rather than in the control plane. It takes the same
+   * path as a sidecar notification: the feed, the badge, the master switch
+   * and the toast lifetime all apply. Window-local: it is not persisted, and
+   * a reload forgets it. */
+  announce(input: Omit<Notification, 'id' | 'at'>): void {
+    this.#localSeq += 1
+    this.#accept({ ...input, id: `local-${Date.now().toString(36)}-${this.#localSeq}`, at: new Date().toISOString() })
   }
 
   async clear(): Promise<void> {

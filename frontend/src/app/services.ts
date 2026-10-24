@@ -15,6 +15,9 @@ import type { UpdatesModel } from '../features/updates/application/updates-model
 import type { NotificationsModel } from '../features/notifications/application/notifications-model'
 import type { BackupModel } from '../features/backup/application/backup-model'
 import type { CodexModel } from '../features/codex/application/codex-model'
+import type { AppearanceModel } from '../features/appearance/application/appearance-model'
+import type { PluginsModel } from '../features/plugins/application/plugins-model'
+import type { ExtensionPoints } from '../shared/contracts/extensions'
 
 export interface AppServices {
   readonly relay: RelayModel
@@ -34,6 +37,13 @@ export interface AppServices {
   /** One build serves every workspace, publishing included. */
   readonly tunnel: TunnelModel
   readonly clients: ClientsModel
+  /** Themes, density, type, tokens and custom CSS. */
+  readonly appearance: AppearanceModel
+  /** Installed plugins and the sandboxed runtime that hosts their scripts. */
+  readonly plugins: PluginsModel
+  /** What slices contribute to the shell: themes, styles, palette commands,
+   * runtime-bar readouts and plugin pages. */
+  readonly extensions: ExtensionPoints
   /** Version the control plane reported during the handshake. */
   readonly appVersion: string
   /** Capabilities the control plane reported during the handshake. */

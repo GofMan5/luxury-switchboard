@@ -1,4 +1,4 @@
-import { useContext, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type KeyboardEvent as UIKeyboardEvent, type ReactNode } from 'react'
+﻿import { useContext, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type KeyboardEvent as UIKeyboardEvent, type ReactNode } from 'react'
 import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RefreshCw, RotateCcw, Save, ShieldCheck } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
 import { useMediaQuery } from '../../../shared/ui/useMediaQuery'
@@ -149,7 +149,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
           {tab === 'relay' ? (
             <div className={styles.fields}>
               <NumberField
-                label="Listener port" min={1} max={65535} presets={[8798, 8787]} {...field('listenerPort')}
+                label="Listener port" min={1} max={65535} presets={[8798, 8787]} grouping={false} {...field('listenerPort')}
                 note="The loopback address your clients call: http://127.0.0.1:port. Remote binding is never allowed — only this machine can talk to the relay. Changing the port rebinds the listener in place; requests in flight are cancelled."
               />
               <NumberField
@@ -478,7 +478,7 @@ function FieldReset({ show, label, onReset }: { show: boolean; label: string; on
  * and a way back: to the saved value per field, to the shipped defaults per
  * tab. The input holds raw text while typing — a field you can empty — and the
  * value commits parsed and clamped into the valid range on blur. */
-function NumberField({ label, value, saved, fallback, min, max, step, suffix, note, presets, disabled, onChange }: {
+function NumberField({ label, value, saved, fallback, min, max, step, suffix, note, presets, grouping = true, disabled, onChange }: {
   label: string
   value: number
   saved: number
@@ -490,10 +490,13 @@ function NumberField({ label, value, saved, fallback, min, max, step, suffix, no
   suffix?: string
   note?: string
   presets?: readonly number[]
+  /** False for identifiers such as ports: 8787 is a name, not a quantity. */
+  grouping?: boolean
   disabled?: boolean
   onChange: (value: number) => void
 }) {
   const dirty = value !== saved
+  const figure = (number: number) => number.toLocaleString(undefined, { useGrouping: grouping })
   const [draft, setDraft] = useState<string | null>(null)
   const change = (raw: string) => {
     setDraft(raw)
@@ -533,10 +536,10 @@ function NumberField({ label, value, saved, fallback, min, max, step, suffix, no
               disabled={disabled}
               onClick={() => { setDraft(null); onChange(preset) }}
             >
-              {preset.toLocaleString('en-US')}
+              {figure(preset)}
             </button>
           ))}
-          <span className={styles.presetDefault} title="The shipped default — the tab's Defaults button restores them all">auto · {fallback.toLocaleString('en-US')}{suffix ? ` ${suffix}` : ''}</span>
+          <span className={styles.presetDefault} title="The shipped default — the tab's Defaults button restores them all">auto · {figure(fallback)}{suffix ? ` ${suffix}` : ''}</span>
         </span>
       ) : null}
     </div>

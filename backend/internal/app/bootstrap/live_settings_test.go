@@ -30,6 +30,7 @@ func liveSettingsApp(t *testing.T, monitor ...*providerapp.HealthMonitor) (func(
 	t.Setenv("SWITCHBOARD_PORT", "")
 	for name, file := range map[string]string{
 		"SWITCHBOARD_SETTINGS_PATH": "settings.dpapi", "SWITCHBOARD_PROVIDERS_PATH": "providers.dpapi", "SWITCHBOARD_KEYS_PATH": "keys.dpapi", "SWITCHBOARD_CODEX_PATH": "codex.dpapi", "SWITCHBOARD_ROUTES_PATH": "routes.dpapi", "SWITCHBOARD_TUNNEL_PATH": "tunnel.dpapi", "SWITCHBOARD_HISTORY_PATH": "history.db", "SWITCHBOARD_TUNNEL_HISTORY_PATH": "clients.db",
+		"SWITCHBOARD_APPEARANCE_PATH": "appearance.dpapi", "SWITCHBOARD_PLUGINS_PATH": "plugins.dpapi",
 	} {
 		t.Setenv(name, filepath.Join(root, file))
 	}

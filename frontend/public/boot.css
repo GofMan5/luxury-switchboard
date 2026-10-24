@@ -8,14 +8,14 @@
   place-items: center;
   box-sizing: border-box;
   padding: 24px;
-  background: #212121;
-  color: #c7c7c7;
+  background: #141518;
+  color: #8b909b;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.6;
   text-align: center;
 }
 
 #boot-sentinel[data-state='failed'] {
-  color: #e2a8ad;
+  color: #f4a39a;
 }

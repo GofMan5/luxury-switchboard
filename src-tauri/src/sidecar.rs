@@ -390,6 +390,15 @@ fn allowed_method(method: &str) -> bool {
             | "analytics.prices.remove"
             | "settings.get"
             | "settings.update"
+            | "appearance.get"
+            | "appearance.update"
+            | "plugins.list"
+            | "plugins.get"
+            | "plugins.install"
+            | "plugins.update"
+            | "plugins.remove"
+            | "plugins.storage.get"
+            | "plugins.storage.set"
             | "guardrails.status"
             | "guardrails.findings"
             | "guardrails.clear"
@@ -470,6 +479,24 @@ mod tests {
             validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"keys.addMany"}"#)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_plugin_install_frame_may_use_the_whole_frame_budget() {
+        // A plugin package rides one command frame: the shell carries it up to
+        // the shared byte cap, envelope and JSON escaping included, and refuses
+        // one byte more before it can reach the sidecar.
+        let prefix = r#"{"v":1,"id":"plugin_install_1","type":"command","method":"plugins.install","payload":{"package":{"schema":1,"id":"fixture.plugin","name":"Fixture","version":"1.0.0","permissions":["ui:pages"],"script":""#;
+        let suffix = r#""},"granted":["ui:pages"]}}"#;
+        for size in [MAX_FRAME_BYTES, MAX_FRAME_BYTES + 1] {
+            let frame = format!(
+                "{prefix}{}{suffix}",
+                "\\n".repeat((size - prefix.len() - suffix.len()) / 2)
+                    + &"x".repeat((size - prefix.len() - suffix.len()) % 2)
+            );
+            assert_eq!(frame.len(), size);
+            assert_eq!(validate_outgoing(&frame).is_ok(), size <= MAX_FRAME_BYTES);
+        }
     }
 
     #[test]

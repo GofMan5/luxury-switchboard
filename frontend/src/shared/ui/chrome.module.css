@@ -1,59 +1,73 @@
+/* Panel: the one framed shape in the workspace. Elevation is the hairline;
+   no shadow, no tint — the content carries the weight. */
 .panel { min-width: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
-.panelHeader { display: flex; min-width: 0; min-height: 68px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border-subtle); padding: 16px 20px; }
-.panelTitle { min-width: 0; }
-.panelTitle h2 { color: var(--text-primary); font-size: 15px; font-weight: 600; letter-spacing: -.01em; line-height: 1.4; }
-.panelTitle p { margin-top: 4px; color: var(--text-muted); font-size: 12px; line-height: 1.5; text-wrap: pretty; }
-.panelActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-/* Metrics are a readout, not a row of decorative cards. */
-.metricStrip { display: grid; min-width: 0; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border-bottom: 1px solid var(--border-subtle); padding: 8px 0 24px; }
-.metric { min-width: 0; border-left: 1px solid var(--border-subtle); padding: 0 20px; }
-.metric:first-child { border-left: 0; padding-left: 0; }
-.metricLabel { display: block; color: var(--text-muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
-.metricValue { display: block; margin-top: 8px; color: var(--text-primary); font-size: 26px; font-variant-numeric: tabular-nums; font-weight: 500; letter-spacing: -.03em; line-height: 1.2; overflow-wrap: anywhere; }
-.metricDetail { display: block; margin-top: 6px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.panelHeader { display: flex; min-width: 0; min-height: 44px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); }
+.panelTitle { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 1px; }
+.panelTitle h2 { flex: 0 0 auto; color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; line-height: 1.35; }
+.panelTitle p { min-width: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.45; text-wrap: pretty; }
+.panelActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+
+/* Metrics: one instrument readout divided by hairlines — never a row of cards. */
+.metricStrip { display: grid; min-width: 0; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
+.metric { position: relative; min-width: 0; border-left: 1px solid var(--border-subtle); padding: 9px var(--pad) 10px; }
+.metric:first-child { border-left: 0; }
+.metricLabel { display: block; overflow: hidden; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.metricValue { display: block; margin-top: 3px; color: var(--text-primary); font-family: var(--font-mono); font-size: var(--fs-2xl); font-variant-numeric: tabular-nums slashed-zero; font-weight: 500; letter-spacing: -.02em; line-height: 1.2; overflow-wrap: anywhere; }
+.metricDetail { display: block; margin-top: 3px; color: var(--text-muted); font-size: var(--fs-xs); line-height: 1.45; }
 .metric[data-tone='success'] .metricValue { color: var(--status-success); }
 .metric[data-tone='warning'] .metricValue { color: var(--status-warning); }
 .metric[data-tone='danger'] .metricValue { color: var(--text-danger); }
-.segmented { display: inline-flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 3px; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 3px; background: var(--bg-chrome); }
-.segmented button { min-width: 40px; min-height: 30px; border: 0; border-radius: 6px; padding: 5px 11px; color: var(--text-muted); background: transparent; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+
+.segmented { display: inline-flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 2px; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 2px; background: var(--bg-field); }
+.segmented button { min-width: 32px; min-height: var(--control-height-sm); border: 0; border-radius: calc(var(--radius-control) - 2px); padding: 0 9px; color: var(--text-muted); background: transparent; font: inherit; font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
 .segmented button:hover:not(:disabled):not([data-active='true']) { color: var(--text-primary); background: var(--bg-hover); }
 .segmented button:active:not(:disabled) { background: var(--bg-selected); }
-.segmented button[data-active='true'] { color: var(--text-primary); background: var(--bg-selected); }
+.segmented button[data-active='true'] { color: var(--text-primary); background: var(--bg-selected); box-shadow: inset 0 0 0 1px var(--border-strong); }
 .segmented button:disabled { color: var(--text-disabled); cursor: not-allowed; }
-.segmented button:focus-visible { outline-offset: 1px; }
-.pill { display: inline-flex; min-width: 0; align-items: center; gap: 6px; border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 7px; color: var(--text-muted); font-size: 11px; font-weight: 500; line-height: 1.5; white-space: nowrap; }
-.pill[data-tone='success'] { border-color: color-mix(in srgb, var(--status-success) 30%, var(--border-subtle)); color: var(--status-success); }
-.pill[data-tone='info'] { color: var(--text-primary); background: var(--bg-raised); }
-.pill[data-tone='warning'] { border-color: color-mix(in srgb, var(--status-warning) 30%, var(--border-subtle)); color: var(--status-warning); }
-.pill[data-tone='danger'] { border-color: color-mix(in srgb, var(--status-danger) 30%, var(--border-subtle)); color: var(--text-danger); }
+.segmented button:focus-visible { outline-offset: 0; }
+
+.pill { display: inline-flex; min-width: 0; height: 18px; align-items: center; gap: 5px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 6px; color: var(--text-muted); font-size: var(--fs-xs); font-weight: 500; line-height: 1; white-space: nowrap; }
+.pill[data-tone='success'] { border-color: color-mix(in srgb, var(--status-success) 32%, transparent); color: var(--status-success); background: color-mix(in srgb, var(--status-success) 8%, transparent); }
+.pill[data-tone='info'] { border-color: color-mix(in srgb, var(--status-info) 32%, transparent); color: var(--status-info); background: color-mix(in srgb, var(--status-info) 8%, transparent); }
+.pill[data-tone='warning'] { border-color: color-mix(in srgb, var(--status-warning) 32%, transparent); color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 8%, transparent); }
+.pill[data-tone='danger'] { border-color: color-mix(in srgb, var(--status-danger) 34%, transparent); color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 9%, transparent); }
 /* A badge beside a truncating label: the label gives way, the badge does not. */
 .reasoningLevel { display: inline-flex; flex: none; }
 .reasoningLevel svg { flex: none; }
 /* A table cell holding a truncating label and a fixed badge. */
 .labelWithBadge { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .labelWithBadge > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.emptyState { display: grid; min-height: 160px; place-content: center; justify-items: center; gap: 10px; padding: 32px 24px; color: var(--text-muted); text-align: center; }
-.emptyState svg { color: var(--text-muted); }
-.emptyState strong { color: var(--text-secondary); font-size: 14px; font-weight: 500; }
-.emptyState p { max-width: 42ch; font-size: 13px; line-height: 1.6; text-wrap: pretty; }
+
+.emptyState { display: grid; min-height: 120px; place-content: center; justify-items: center; gap: 6px; padding: 24px; color: var(--text-muted); text-align: center; }
+.emptyState svg { margin-bottom: 2px; color: var(--text-disabled); }
+.emptyState strong { color: var(--text-secondary); font-size: var(--fs-base); font-weight: 500; }
+.emptyState p { max-width: 46ch; font-size: var(--fs-sm); line-height: 1.55; text-wrap: pretty; }
+
 .tableWrap { min-width: 0; overflow: auto; }
-.dataTable { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.dataTable th, .dataTable td { height: 46px; overflow: hidden; border-bottom: 1px solid var(--border-subtle); padding: 0 16px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.dataTable th { height: 38px; color: var(--text-muted); background: var(--bg-surface); font-size: 12px; font-weight: 500; }
+.dataTable { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: var(--fs-base); }
+.dataTable th, .dataTable td { height: var(--row-height); overflow: hidden; border-bottom: 1px solid var(--border-subtle); padding: 0 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.dataTable th:first-child, .dataTable td:first-child { padding-left: var(--pad); }
+.dataTable th:last-child, .dataTable td:last-child { padding-right: var(--pad); }
+.dataTable th { position: sticky; z-index: 1; top: 0; height: 30px; color: var(--text-muted); background: var(--bg-surface); font-size: var(--fs-sm); font-weight: 500; }
+.dataTable td { color: var(--text-secondary); }
 .dataTable tbody tr:hover { background: var(--bg-hover); }
 .dataTable tbody tr:last-child td { border-bottom: 0; }
+
+/* The strip stays one instrument row down to the smallest supported window and
+   gets denser instead: a 3 + 2 wrap leaves a hole that reads as a missing
+   reading. Only below the supported size does it fold into pairs. */
+@media (max-width: 1099px) {
+  .metricValue { font-size: var(--fs-xl); }
+}
 @media (max-width: 959px) {
-  .metricStrip { grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 0; }
-  .metric { border-left: 0; padding: 0 16px; }
-  .metric:nth-child(3n+1) { padding-left: 0; }
-  .metric:nth-child(3n+2), .metric:nth-child(3n+3) { border-left: 1px solid var(--border-subtle); }
-  .metricValue { font-size: 24px; }
-  .panelHeader { padding: 14px 16px; }
+  .metric { padding-inline: 12px; }
+  .metricValue { font-size: var(--fs-lg); letter-spacing: -.01em; }
 }
 @media (max-width: 600px) {
-  .metricStrip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metric { padding: 0 12px; border-left: 0 !important; }
-  .metric:nth-child(odd) { padding-left: 0; }
-  .metric:nth-child(even) { border-left: 1px solid var(--border-subtle) !important; }
+  .metricStrip { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric { border-top: 1px solid var(--border-subtle); border-left: 0; }
+  .metric:nth-child(-n+2) { border-top: 0; }
+  .metric:nth-child(even) { border-left: 1px solid var(--border-subtle); }
+  .metric:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .panelHeader { flex-wrap: wrap; }
 }

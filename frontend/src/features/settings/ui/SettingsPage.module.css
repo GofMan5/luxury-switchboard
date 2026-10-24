@@ -1,80 +1,124 @@
 /* The section rail stays visible; only the active settings section scrolls. */
 .page { display: flex; min-width: 0; height: 100%; overflow: hidden; flex-direction: column; }
 .page :global(.page-header) { flex: 0 0 auto; }
-.page :global(.page-header h1) { font-size: 24px; }
-.error { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 12px 24px; color: var(--text-danger); background: var(--bg-surface); overflow-wrap: anywhere; }
-.layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: 196px minmax(0, 1fr); }
-.tabRail { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 4px; overflow-y: auto; border-right: 1px solid var(--border-subtle); padding: 16px 12px; background: var(--bg-canvas); }
-.tabRail button { display: flex; min-height: 36px; flex: 0 0 auto; align-items: center; gap: 10px; border: 0; border-radius: 8px; padding: 0 10px; color: var(--text-secondary); background: transparent; font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
-.tabRail button:hover { color: var(--text-primary); background: var(--bg-hover); }
-.tabRail button:active { background: var(--bg-raised); }
+/* Page-level failure: a full-bleed strip under the header. */
+.error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border-bottom: 1px solid color-mix(in srgb, var(--status-danger) 30%, transparent); padding: 8px var(--gutter); color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 8%, transparent); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+/* The same class inside a tab is an inline notice, framed like its siblings. */
+.fields .error { margin-top: 12px; border: 1px solid color-mix(in srgb, var(--status-danger) 34%, transparent); border-radius: var(--radius-control); padding: 7px 10px; }
+
+.layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: 188px minmax(0, 1fr); }
+
+/* Tab rail: the app sidebar's nav grammar, one level down. */
+.tabRail { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 1px; overflow-y: auto; border-right: 1px solid var(--border-subtle); padding: 10px 8px; background: var(--bg-canvas); }
+.tabRail button { display: flex; min-height: var(--nav-item); flex: 0 0 auto; align-items: center; gap: 10px; border: 0; border-radius: var(--radius-control); padding: 0 10px; color: var(--text-secondary); background: transparent; font: inherit; font-size: var(--fs-base); text-align: left; white-space: nowrap; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.tabRail button:hover:not(:disabled):not([data-active='true']) { color: var(--text-primary); background: var(--bg-hover); }
+.tabRail button:active:not(:disabled) { background: var(--bg-selected); }
 .tabRail button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-.tabRail button[data-active='true'] { color: var(--text-primary); background: var(--bg-selected); }
-.tabIcon { display: grid; width: 18px; place-items: center; color: inherit; }
-.railNote { display: flex; align-items: flex-start; gap: 8px; margin-top: auto; border-top: 1px solid var(--border-subtle); padding: 16px 6px 0; color: var(--text-muted); }
+.tabRail button[data-active='true'] { color: var(--text-primary); background: var(--bg-selected); font-weight: 500; }
+.tabRail button:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.tabIcon { display: grid; width: 16px; flex: 0 0 auto; place-items: center; color: var(--text-muted); transition: color var(--motion-fast); }
+.tabRail button:hover:not(:disabled):not([data-active='true']) .tabIcon { color: var(--text-secondary); }
+.tabRail button[data-active='true'] .tabIcon { color: var(--accent); }
+.railNote { display: flex; align-items: flex-start; gap: 8px; margin-top: auto; border-top: 1px solid var(--border-subtle); padding: 12px 4px 2px; color: var(--text-muted); }
 .railNote svg { flex: 0 0 auto; margin-top: 2px; }
-.railNote p { font-size: 12px; line-height: 1.5; }
-.tabContent { min-width: 0; min-height: 0; overflow: auto; padding: 24px 28px; scrollbar-gutter: stable; }
-.tabHeader { display: flex; max-width: 800px; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
-.tabHeader h2 { color: var(--text-primary); font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
-.tabHeader p { margin-top: 6px; max-width: 65ch; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.railNote p { font-size: var(--fs-xs); line-height: 1.5; text-wrap: pretty; }
+
+.tabContent { min-width: 0; min-height: 0; overflow: auto; padding: 18px var(--gutter) var(--gutter); scrollbar-gutter: stable; }
+.tabHeader { display: flex; max-width: 800px; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 4px; }
+.tabHeader h2 { color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; line-height: 1.35; }
+.tabHeader p { max-width: 65ch; margin-top: 2px; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; text-wrap: pretty; }
 .tabHeader > button { flex: 0 0 auto; }
+
+/* One setting per hairline-divided row: label left, control right, the
+ * explanation and presets underneath. */
 .fields { max-width: 800px; }
-.field { border-bottom: 1px solid var(--border-subtle); padding: 18px 0; }
-.fieldHead { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.fieldLabel { color: var(--text-primary); font-size: 13px; font-weight: 500; }
-.field[data-dirty] .fieldLabel::after { display: inline-block; width: 5px; height: 5px; border-radius: 50%; margin-left: 7px; vertical-align: 2px; background: var(--text-secondary); content: ''; }
-.fieldControl { display: flex; min-width: 0; align-items: center; gap: 8px; }
-.fieldReset { display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-subtle); border-radius: 8px; color: var(--text-secondary); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
-.fieldReset:hover { color: var(--text-primary); background: var(--bg-hover); }
-.fieldReset:active { background: var(--bg-raised); }
-.fieldReset:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.field em { display: block; max-width: 68ch; margin-top: 8px; color: var(--text-muted); font-size: 12px; font-style: normal; line-height: 1.55; }
-.presets { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
-.preset { min-height: 36px; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 0 11px; color: var(--text-secondary); background: transparent; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast); }
-.preset:hover:not(:disabled) { color: var(--text-primary); border-color: var(--border-strong); background: var(--bg-hover); }
-.preset:active:not(:disabled) { background: var(--bg-raised); }
-.preset:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.field { border-bottom: 1px solid var(--border-subtle); padding: 12px 0; }
+.fieldHead { display: flex; min-height: var(--control-height); align-items: center; justify-content: space-between; gap: 16px; }
+.fieldLabel { color: var(--text-primary); font-size: var(--fs-base); font-weight: 500; }
+/* Unsaved: a dot beside the label, in the accent the save action uses. */
+.field[data-dirty] .fieldLabel::after { display: inline-block; width: 5px; height: 5px; margin-left: 7px; border-radius: 50%; background: var(--accent); content: ''; vertical-align: 2px; }
+.fieldControl { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.fieldReset { display: grid; width: var(--control-height-sm); height: var(--control-height-sm); flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.fieldReset:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.fieldReset:active:not(:disabled) { background: var(--bg-selected); }
+.fieldReset:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.fieldReset:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.field em { display: block; max-width: 72ch; margin-top: 4px; color: var(--text-muted); font-size: var(--fs-sm); font-style: normal; line-height: 1.5; text-wrap: pretty; }
+
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+.preset { min-height: var(--control-height-sm); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 0 8px; color: var(--text-secondary); background: transparent; font: inherit; font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast); }
+.preset:hover:not(:disabled):not([data-active]) { border-color: var(--border-strong); color: var(--text-primary); background: var(--bg-hover); }
+.preset:active:not(:disabled) { background: var(--bg-selected); }
+.preset:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .preset[data-active] { border-color: var(--border-strong); color: var(--text-primary); background: var(--bg-selected); }
-.preset:disabled { opacity: .5; cursor: not-allowed; }
-.presetDefault { margin-left: 4px; color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.tabNote { margin-top: 16px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.inputWrap { display: flex; width: 220px; max-width: 100%; align-items: center; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-surface); transition: border-color var(--motion-fast), background var(--motion-fast); }
-.inputWrap:hover { background: var(--bg-raised); }
-.inputWrap:focus-within { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.inputWrap input, .inputWrap select { min-width: 0; width: 100%; height: 36px; flex: 1; border: 0; border-radius: inherit; outline: 0; padding: 0 10px; color: var(--text-primary); background: transparent; font-size: 14px; font-variant-numeric: tabular-nums; }
+.preset:disabled { border-color: var(--border-subtle); color: var(--text-disabled); background: transparent; cursor: not-allowed; }
+.presetDefault { margin-left: 6px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tabNote { margin-top: 12px; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
+
+/* A field with an inline unit: the wrapper is the field, the input inside
+ * is bare. Hover and focus mirror the global field recipe. */
+.inputWrap { display: flex; width: 200px; max-width: 100%; height: var(--control-height); align-items: center; border: 1px solid var(--border-field); border-radius: var(--radius-control); background: var(--bg-field); transition: border-color var(--motion-fast), background var(--motion-fast); }
+.inputWrap:hover:not(:focus-within) { border-color: color-mix(in srgb, var(--border-field) 60%, var(--text-muted)); }
+.inputWrap:focus-within { border-color: var(--accent-line); outline: 2px solid var(--accent-soft); outline-offset: 0; }
+.inputWrap:has(:disabled) { border-color: var(--border-subtle); background: transparent; }
+.inputWrap input, .inputWrap select { min-width: 0; width: 100%; height: 100%; flex: 1; border: 0; border-radius: inherit; outline: 0; padding: 0 9px; color: var(--text-primary); background: transparent; font-size: var(--fs-base); }
+.inputWrap input { font-family: var(--font-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.inputWrap input:focus-visible, .inputWrap select:focus-visible { outline: 0; }
 .inputWrap select { cursor: pointer; }
-.inputWrap select option { color: var(--text-primary); background: var(--bg-surface); }
-.inputWrap input:disabled, .inputWrap select:disabled { opacity: .5; cursor: not-allowed; }
-.inputWrap small { padding-right: 10px; color: var(--text-muted); font-size: 12px; }
-.switch { position: relative; display: inline-block; width: 52px; height: 36px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-raised); cursor: pointer; transition: background var(--motion-fast), border-color var(--motion-fast); }
-.switch:hover:not(:disabled) { background: var(--bg-hover); }
-.switch[aria-checked='true'] { border-color: var(--text-secondary); background: var(--bg-selected); }
+.inputWrap select option { color: var(--text-primary); background: var(--bg-elevated); }
+.inputWrap input:disabled, .inputWrap select:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.inputWrap small { flex: 0 0 auto; padding-right: 9px; color: var(--text-muted); font-size: var(--fs-xs); }
+
+/* Switch: a compact track; on is the accent, the knob slides. */
+.switch { position: relative; display: inline-block; width: 32px; height: 18px; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 9px; padding: 0; background: var(--bg-raised); cursor: pointer; transition: background var(--motion-fast), border-color var(--motion-fast); }
+.switch:hover:not(:disabled) { border-color: var(--border-field); background: var(--bg-hover); }
+.switch:active:not(:disabled) { background: var(--bg-selected); }
 .switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.switch:disabled { opacity: .5; cursor: not-allowed; }
-.knob { position: absolute; top: 5px; left: 5px; width: 24px; height: 24px; border-radius: 50%; background: var(--text-muted); transition: transform var(--motion-fast) var(--ease-standard); }
-.switch[aria-checked='true'] .knob { background: var(--text-primary); transform: translateX(16px); }
-.explainer, .backupNote, .backupOutcome, .updateOutcome { border: 1px solid var(--border-subtle); border-radius: 8px; margin-top: 16px; padding: 14px 16px; background: var(--bg-surface); }
-.explainer strong, .backupNote strong, .updateOutcome strong { color: var(--text-primary); font-size: 13px; font-weight: 600; }
-.explainer p, .backupNote p, .updateOutcome p { max-width: 70ch; margin-top: 6px; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
-.backupRow { display: flex; gap: 8px; flex-wrap: wrap; }
-.backupOutcome { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-secondary); font-size: 13px; }
+.switch[aria-checked='true'] { border-color: transparent; background: var(--action-primary); }
+.switch[aria-checked='true']:hover:not(:disabled) { border-color: transparent; background: var(--action-hover); }
+.switch[aria-checked='true']:active:not(:disabled) { background: var(--action-pressed); }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+.knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--text-muted); transition: background var(--motion-fast), transform var(--motion-fast) var(--ease-standard); }
+.switch:hover:not(:disabled) .knob { background: var(--text-secondary); }
+.switch[aria-checked='true'] .knob, .switch[aria-checked='true']:hover:not(:disabled) .knob { background: var(--text-on-action); transform: translateX(14px); }
+
+/* Notes and outcomes: one framed block recipe. */
+.explainer, .backupNote, .backupOutcome, .updateOutcome { margin-top: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); padding: 10px var(--pad); background: var(--bg-surface); }
+.explainer strong, .backupNote strong, .updateOutcome strong { display: block; color: var(--text-primary); font-size: var(--fs-base); font-weight: 600; }
+.explainer p, .backupNote p, .updateOutcome p { max-width: 72ch; margin-top: 3px; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.55; text-wrap: pretty; }
+/* The verdict's state is a dot, not a coloured frame. */
+.updateOutcome strong::before { display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--status-neutral); content: ''; vertical-align: 2px; }
+.updateOutcome[data-state='newer'] strong::before { background: var(--accent); }
+.updateOutcome[data-state='current'] strong::before { background: var(--status-success); }
+.updateOutcome[data-state='unreachable'] strong::before { background: var(--status-warning); }
+.backupRow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.backupOutcome { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-secondary); font-size: var(--fs-base); font-variant-numeric: tabular-nums; }
 .backupOutcome > span { min-width: 0; overflow-wrap: anywhere; }
 .backupOutcome > button { flex: 0 0 auto; }
-.backupOutcome code { color: var(--text-primary); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
-/* Opaque and in the flow: the save action never covers the last field. */
-.saveBar { position: sticky; bottom: 0; z-index: 2; display: flex; max-width: 800px; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 12px; color: var(--text-secondary); background: var(--bg-surface); font-size: 13px; }
-.saveBarActions { display: flex; align-items: center; gap: 8px; }
+.backupOutcome code { color: var(--text-primary); font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+
+/* Opaque and in the flow: the save action never covers the last field. It
+ * is the page's one floating layer, so it lifts by shadow, not a border. */
+.saveBar { position: sticky; z-index: 2; bottom: 12px; display: flex; max-width: 800px; align-items: center; justify-content: space-between; gap: 12px; margin-top: var(--gap); border-radius: var(--radius-panel); padding: 6px 6px 6px var(--pad); color: var(--text-secondary); background: var(--bg-elevated); box-shadow: var(--shadow-float); font-size: var(--fs-base); font-variant-numeric: tabular-nums; animation: save-bar-enter var(--motion-standard) var(--ease-standard) both; }
+.saveBarActions { display: flex; align-items: center; gap: 6px; }
+
+@keyframes save-bar-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* Under 1200px the rail folds into a horizontal strip above the section.
+ * Insets track the page header's, so the first icon lines up with the h1. */
 @media (max-width: 1199px) {
-  .layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
-  .tabRail { flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border-subtle); padding: 10px 16px; }
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .tabRail { flex-direction: row; gap: 2px; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border-subtle); padding: 5px calc(var(--gutter) - 9px); }
   .tabRail button { gap: 6px; padding-inline: 9px; }
   .railNote { display: none; }
-  .tabContent { padding: 20px 16px; }
-  .error { padding-inline: 16px; }
+  .tabContent { padding-top: 16px; }
+}
+@media (max-width: 959px) {
+  .error, .tabContent { padding-inline: min(var(--gutter), 18px); }
+  .tabRail { padding-inline: calc(min(var(--gutter), 18px) - 9px); }
 }
 @media (max-width: 620px) {
-  .fieldHead { flex-wrap: wrap; gap: 8px; }
+  .fieldHead { flex-wrap: wrap; gap: 6px; }
   .fieldControl { width: 100%; justify-content: flex-end; }
   .inputWrap { width: 100%; }
   .tabHeader { gap: 10px; }
@@ -82,5 +126,10 @@
   .saveBarActions { margin-left: auto; }
   .backupOutcome { flex-wrap: wrap; }
 }
-@media (prefers-reduced-motion: reduce) { .knob { transition: none; } }
+@media (max-width: 600px) {
+  .error, .tabContent { padding-inline: 14px; }
+  .tabRail { padding-inline: 5px; }
+}
+@media (prefers-reduced-motion: reduce) { .knob { transition: none; } .saveBar { animation: none; } }
 :global([data-animations='off']) .knob { transition: none; }
+:global([data-animations='off']) .saveBar { animation: none; }

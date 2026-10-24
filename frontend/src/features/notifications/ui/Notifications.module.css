@@ -1,31 +1,47 @@
-.bell { position: relative; display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
-.bell:hover { color: var(--text-primary); background: var(--bg-hover); }
-.bell:active { background: var(--bg-selected); }
-.badge { position: absolute; top: -2px; right: -2px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; border: 2px solid var(--bg-canvas); color: var(--text-on-action); background: var(--text-primary); font-size: 10px; font-weight: 600; line-height: 13px; text-align: center; }
-.toasts { position: fixed; z-index: 200; top: 72px; right: 20px; display: flex; width: min(360px, calc(100vw - 40px)); flex-direction: column; gap: 8px; pointer-events: none; }
-.toast { position: relative; display: flex; min-width: 0; gap: 10px; align-items: flex-start; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; padding: 16px 16px 20px; background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: toast-enter 180ms var(--ease-standard) both, toast-leave 120ms ease-in 5.18s forwards; }
-.toast svg, .row svg { flex: 0 0 auto; margin-top: 2px; color: var(--text-muted); }
+/* Bell: a ghost icon button in the 44px runtime bar. */
+.bell { position: relative; display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); padding: 0; color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.bell:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.bell:active:not(:disabled) { background: var(--bg-selected); }
+.bell:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.bell:disabled { color: var(--text-disabled); cursor: not-allowed; }
+/* Unread count: the accent, cut out of the chrome it sits on. */
+.badge { position: absolute; top: -3px; right: -4px; min-width: 16px; height: 16px; border: 2px solid var(--bg-chrome); border-radius: 8px; padding: 0 3px; color: var(--text-on-action); background: var(--accent); font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; font-weight: 600; line-height: 12px; text-align: center; pointer-events: none; }
+
+/* Floating layers: elevated surface and shadow, no border. */
+.toasts { position: fixed; z-index: 200; top: 52px; right: 12px; display: flex; width: min(340px, calc(100vw - 24px)); flex-direction: column; gap: 6px; pointer-events: none; }
+.toast { position: relative; display: flex; min-width: 0; align-items: flex-start; gap: 10px; overflow: hidden; border-radius: var(--radius-panel); padding: 10px var(--pad) 12px 12px; background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: toast-enter 180ms var(--ease-standard) both, toast-leave 120ms ease-in 5.18s forwards; }
+.toast svg, .row svg { flex: 0 0 auto; margin-top: 2px; color: var(--status-info); }
 .toast svg[data-severity='danger'], .row svg[data-severity='danger'] { color: var(--status-danger); }
 .toast svg[data-severity='warning'], .row svg[data-severity='warning'] { color: var(--status-warning); }
 .toast svg[data-severity='success'], .row svg[data-severity='success'] { color: var(--status-success); }
 .toastBody, .row > div { min-width: 0; }
-.toastBody strong, .row strong { display: block; color: var(--text-primary); font-size: 13px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
-.toastBody p, .row p { margin-top: 4px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.toastTimer { position: absolute; right: 16px; bottom: 8px; left: 16px; height: 2px; background: var(--text-muted); transform-origin: left; animation: toast-drain 5s linear 180ms forwards; }
-.panel { position: fixed; z-index: 150; top: 68px; right: 20px; display: flex; max-height: min(600px, calc(100dvh - 88px)); width: min(420px, calc(100vw - 40px)); flex-direction: column; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-surface); box-shadow: var(--shadow-float); animation: panel-enter 180ms var(--ease-standard) both; }
-.panel header { display: flex; min-height: 64px; flex: 0 0 auto; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-subtle); padding: 12px 16px 12px 20px; }
-.panel h2 { flex: 1; color: var(--text-primary); font-size: 14px; font-weight: 600; }
-.close { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 7px; color: var(--text-muted); background: transparent; cursor: pointer; }
-.close:hover { color: var(--text-primary); background: var(--bg-hover); }
-.close:active { background: var(--bg-selected); }
-.panelBody { min-height: 0; overflow-y: auto; padding: 8px; }
-.empty { padding: 28px 16px; color: var(--text-muted); font-size: 13px; line-height: 1.6; text-align: center; }
-.row { display: flex; min-width: 0; gap: 10px; border-radius: 8px; padding: 12px; }
-.row:hover { background: var(--bg-hover); }
-.row time { display: block; margin-top: 6px; color: var(--text-muted); font-size: 12px; }
+.toastBody strong, .row strong { display: block; color: var(--text-primary); font-size: var(--fs-base); font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
+.toastBody p, .row p { margin-top: 2px; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+/* Lifetime readout along the bottom edge, in the severity's hue. */
+.toastTimer { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: color-mix(in srgb, var(--status-info) 70%, transparent); transform-origin: left; animation: toast-drain 5s linear 180ms forwards; }
+.toast[data-severity='danger'] .toastTimer { background: color-mix(in srgb, var(--status-danger) 70%, transparent); }
+.toast[data-severity='warning'] .toastTimer { background: color-mix(in srgb, var(--status-warning) 70%, transparent); }
+.toast[data-severity='success'] .toastTimer { background: color-mix(in srgb, var(--status-success) 70%, transparent); }
+
+.panel { position: fixed; z-index: 150; top: 52px; right: 12px; display: flex; width: min(400px, calc(100vw - 24px)); max-height: min(560px, calc(100dvh - 64px)); flex-direction: column; overflow: hidden; border-radius: var(--radius-modal); background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: panel-enter 180ms var(--ease-standard) both; }
+.panel header { display: flex; min-height: 44px; flex: 0 0 auto; align-items: center; gap: 4px; border-bottom: 1px solid var(--border-subtle); padding: 6px 8px 6px var(--pad); }
+.panel h2 { flex: 1; color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
+.panel header :global(.button) { min-height: 28px; padding-inline: 8px; }
+.close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border: 0; border-radius: var(--radius-control); padding: 0; color: var(--text-muted); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.close:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.close:active:not(:disabled) { background: var(--bg-selected); }
+.close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 0; }
+.close:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.panelBody { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.empty { padding: 24px var(--pad); color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.55; text-align: center; text-wrap: pretty; }
+/* Feed rows are read-only: hairline-divided, no hover. */
+.row { display: flex; min-width: 0; gap: 10px; padding: 10px var(--pad) 10px 12px; }
+.row + .row { border-top: 1px solid var(--border-subtle); }
+.row time { display: block; margin-top: 4px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); }
+
 @keyframes toast-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toast-leave { to { opacity: 0; transform: translateY(-4px); } }
 @keyframes toast-drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 @keyframes panel-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-@media (max-width: 959px) { .toasts, .panel { top: 62px; right: 16px; } }
+@media (max-width: 959px) { .toasts, .panel { right: 8px; } .toasts { width: min(340px, calc(100vw - 16px)); } .panel { width: min(400px, calc(100vw - 16px)); } }
 [data-animations='off'] .toastTimer { animation: none; transform: scaleX(0); }

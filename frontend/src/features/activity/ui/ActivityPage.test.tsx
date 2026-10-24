@@ -139,9 +139,10 @@ describe('ActivityPage running time', () => {
       requests: [request('live'), { ...request('done', 'completed'), latencyMs: 3_210 }],
     })
     const cells = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')].map((row) => row.cells[5].textContent)
-    expect(cells()).toEqual(['7 s', '3.21 s'])
+    const finished = `${(3.21).toLocaleString(undefined, { minimumFractionDigits: 2 })} s`
+    expect(cells()).toEqual(['7 s', finished])
     act(() => vi.advanceTimersByTime(600))
-    expect(cells()).toEqual(['8 s', '3.21 s'])
+    expect(cells()).toEqual(['8 s', finished])
     act(() => vi.advanceTimersByTime(65_000))
     expect(cells()[0]).toBe('1m 13s')
 
@@ -203,7 +204,7 @@ describe('ActivityPage reasoning', () => {
 
     fireEvent.click(answering)
     const inspector = screen.getByRole('complementary', { name: 'Request inspector' })
-    expect(inspector.textContent).toContain(`Reasoning${(16_000).toLocaleString()}-token budget · 2.40 s thinking`)
+    expect(inspector.textContent).toContain(`Reasoning${(16_000).toLocaleString()}-token budget · ${(2.4).toLocaleString(undefined, { minimumFractionDigits: 2 })} s thinking`)
   })
 
   it('never shows a finished request as thinking, even if its last frame said so', () => {

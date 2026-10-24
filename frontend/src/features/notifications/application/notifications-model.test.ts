@@ -45,6 +45,25 @@ describe('NotificationsModel', () => {
     model.dispose()
   })
 
+  it('announces window-local notifications through the same feed, badge and toasts', async () => {
+    const port = new FakeNotificationsPort()
+    const model = new NotificationsModel(port)
+    await model.connect()
+    model.announce({ kind: 'plugin', severity: 'success', title: 'Relay started', body: 'from Quick switch' })
+    model.announce({ kind: 'plugin', severity: 'info', title: 'Second', body: '' })
+    const state = model.snapshot()
+    expect(state.notifications.map((item) => item.title)).toEqual(['Second', 'Relay started'])
+    expect(new Set(state.notifications.map((item) => item.id)).size).toBe(2)
+    expect(state.notifications[0]?.at).toMatch(/^\d{4}-\d{2}-\d{2}T/u)
+    expect(state.unread).toBe(2)
+    expect(model.toasts()).toHaveLength(2)
+    model.setEnabled(false)
+    model.announce({ kind: 'plugin', severity: 'info', title: 'Muted', body: '' })
+    expect(model.toasts()).toHaveLength(0)
+    expect(model.snapshot().notifications).toHaveLength(3)
+    model.dispose()
+  })
+
   it('clears through the port', async () => {
     const port = new FakeNotificationsPort()
     const model = new NotificationsModel(port)

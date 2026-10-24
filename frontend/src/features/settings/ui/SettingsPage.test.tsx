@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -112,7 +112,7 @@ describe('SettingsForm', () => {
     )
     // The saved value differs from the shipped default: a preset click makes the
     // field dirty, its reset button must return the saved value, not the default.
-    fireEvent.click(screen.getByRole('button', { name: '8,787' }))
+    fireEvent.click(screen.getByRole('button', { name: '8787' }))
     expect((screen.getByLabelText(/^Listener port$/u) as HTMLInputElement).valueAsNumber).toBe(8787)
     fireEvent.click(screen.getByRole('button', { name: /Reset Listener port/i }))
     expect((screen.getByLabelText(/^Listener port$/u) as HTMLInputElement).valueAsNumber).toBe(8898)

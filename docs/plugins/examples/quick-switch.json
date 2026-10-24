@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "example.quick-switch",
+  "name": "Quick switch",
+  "version": "1.0.0",
+  "author": "Switchboard examples",
+  "description": "Palette commands to switch the active provider and start or stop the relay, with a notification for each.",
+  "permissions": [
+    "ui:commands",
+    "ui:notify",
+    "control:read",
+    "control:write"
+  ],
+  "script": "// Quick switch: palette commands that change relay state.\n// One command per provider, kept in step with the provider list.\nconst registered = new Map(); // command id -> provider id\n\nfunction commandId(providerId) {\n  return 'use.' + providerId.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').slice(0, 40);\n}\n\nasync function syncProviders() {\n  const { providers, activeId } = await switchboard.control.call('providers.list');\n  const wanted = new Map();\n  for (const provider of providers) {\n    if (!provider.enabled) continue;\n    wanted.set(commandId(provider.id), provider);\n  }\n  for (const id of registered.keys()) {\n    if (!wanted.has(id)) { registered.delete(id); await switchboard.commands.unregister(id); }\n  }\n  for (const [id, provider] of wanted) {\n    registered.set(id, provider.id);\n    await switchboard.commands.register({\n      id,\n      title: (provider.id === activeId ? 'Active provider: ' : 'Switch to ') + provider.name,\n      group: 'Providers',\n      keywords: ['provider', 'switch', 'activate'],\n    }, () => activate(provider));\n  }\n}\n\nasync function activate(provider) {\n  try {\n    await switchboard.control.call('providers.activate', { id: provider.id });\n    await switchboard.notify({ title: 'Switched to ' + provider.name, tone: 'success' });\n  } catch (error) {\n    await switchboard.notify({ title: 'Could not switch to ' + provider.name, body: error.message, tone: 'danger' });\n  }\n}\n\nasync function relay(action) {\n  try {\n    await switchboard.control.call('relay.' + action);\n    await switchboard.notify({ title: action === 'start' ? 'Relay started' : 'Relay stopped', tone: action === 'start' ? 'success' : 'info' });\n  } catch (error) {\n    await switchboard.notify({ title: 'Relay ' + action + ' failed', body: error.message, tone: 'danger' });\n  }\n}\n\nawait switchboard.commands.register({ id: 'relay.start', title: 'Start the relay', group: 'Relay', keywords: ['relay', 'start', 'on'] }, () => relay('start'));\nawait switchboard.commands.register({ id: 'relay.stop', title: 'Stop the relay', group: 'Relay', keywords: ['relay', 'stop', 'off'] }, () => relay('stop'));\nawait syncProviders();\nawait switchboard.events.on('providers.changed', () => syncProviders());\n"
+}

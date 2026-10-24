@@ -14,6 +14,31 @@ import type { ModelRoute } from '../features/model-routes/domain/route'
 import type { Settings } from '../features/settings/domain/settings'
 import type { GuardrailRecord } from '../features/guardrails/domain/guardrail'
 import type { InsightsReport, HistoryRequest, ModelPrice } from '../features/insights/domain/insights'
+import { ControlPlaneError } from '../shared/contracts/protocol'
+import { PLUGIN_LIMIT, checkPackage, type PluginPackage } from '../features/plugins/domain/manifest'
+
+interface FixturePlugin {
+  package: PluginPackage
+  granted: string[]
+  enabled: boolean
+  installedAt: string
+  updatedAt: string
+  storage: Record<string, string>
+}
+
+const FIXTURE_PLUGINS_KEY = 'switchboard.fixture.plugins'
+
+function loadFixturePlugins(): Map<string, FixturePlugin> {
+  const plugins = new Map<string, FixturePlugin>()
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(FIXTURE_PLUGINS_KEY) ?? '[]') as unknown
+    for (const record of Array.isArray(stored) ? stored as FixturePlugin[] : []) {
+      const checked = checkPackage(record?.package)
+      if (checked.ok) plugins.set(checked.package.id, { ...record, package: checked.package })
+    }
+  } catch { /* a damaged dev record starts empty */ }
+  return plugins
+}
 
 const now = Date.now()
 const iso = (offsetMs: number): string => new Date(now - offsetMs).toISOString()
@@ -248,8 +273,13 @@ export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = appVersion
   /** The fixture advertises the Codex preset flow, its usage probes and the
    * fleet wake, like a current control plane. */
-  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake']
+  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage']
   readonly #listeners = new Map<string, Set<EventListener>>()
+  // The appearance store survives a dev reload in browser storage, like the
+  // encrypted record survives a restart of the real control plane.
+  #appearance: Record<string, unknown> = (() => {
+    try { return JSON.parse(window.localStorage.getItem('switchboard.fixture.appearance') ?? '{}') as Record<string, unknown> } catch { return {} }
+  })()
   readonly #runTimers = new Set<number>()
   #tick = 0
   #seq = 0
@@ -401,9 +431,108 @@ export class FixtureSession implements ControlPlaneSession {
     return this.#codexStatus()
   }
 
+  // ── Plugins ──────────────────────────────────────────────────────────────
+  // Installed packages and their storage survive a dev reload in browser
+  // storage, like the encrypted records survive a control-plane restart. The
+  // checks mirror the Go slice: same id rule, limits and error codes.
+  #plugins: Map<string, FixturePlugin> = loadFixturePlugins()
+  #activeProvider = 'north-relay'
+
+  #pluginSave(): void {
+    try { window.localStorage.setItem(FIXTURE_PLUGINS_KEY, JSON.stringify([...this.#plugins.values()])) } catch { /* dev only */ }
+  }
+
+  #pluginSummary(record: FixturePlugin) {
+    const pkg = record.package
+    return {
+      id: pkg.id, name: pkg.name, version: pkg.version, author: pkg.author ?? '', description: pkg.description ?? '',
+      permissions: [...pkg.permissions], granted: record.granted.filter((permission) => pkg.permissions.includes(permission as never)),
+      enabled: record.enabled, installedAt: record.installedAt, updatedAt: record.updatedAt,
+      sizeBytes: new TextEncoder().encode(JSON.stringify(pkg)).length,
+      hasScript: Boolean(pkg.script?.trim()), hasCss: Boolean(pkg.css?.trim()), hasTheme: pkg.theme !== undefined,
+    }
+  }
+
+  #pluginList() {
+    return [...this.#plugins.values()].sort((a, b) => a.package.name.localeCompare(b.package.name)).map((record) => this.#pluginSummary(record))
+  }
+
+  #pluginChanged(): void {
+    this.#pluginSave()
+    this.#emit('plugins.changed', { plugins: this.#pluginList() })
+  }
+
+  #pluginFind(id: unknown): FixturePlugin {
+    const record = typeof id === 'string' ? this.#plugins.get(id) : undefined
+    if (!record) throw new ControlPlaneError('plugin_not_found', 'Plugin is not installed')
+    return record
+  }
+
+  #pluginAnswer(method: string, body: Record<string, unknown>): unknown {
+    switch (method) {
+      case 'plugins.list': return { plugins: this.#pluginList() }
+      case 'plugins.get': {
+        const record = this.#pluginFind(body.id)
+        return { plugin: this.#pluginSummary(record), script: record.package.script ?? '', css: record.package.css ?? '', theme: record.package.theme ?? null }
+      }
+      case 'plugins.install': {
+        const checked = checkPackage(body.package)
+        if (!checked.ok) throw new ControlPlaneError('invalid_plugin', `Plugin ${checked.problems[0] ?? 'package is invalid'}`)
+        const pkg = checked.package
+        const existing = this.#plugins.get(pkg.id)
+        if (!existing && this.#plugins.size >= PLUGIN_LIMIT) throw new ControlPlaneError('plugin_limit', `At most ${PLUGIN_LIMIT} plugins can be installed`)
+        const granted = Array.isArray(body.granted) ? body.granted.filter((permission): permission is string => typeof permission === 'string' && pkg.permissions.includes(permission as never)) : []
+        // Whole seconds, like the control plane; a same-second reinstall still
+        // gets a new revision so the runtime restarts it.
+        let stamp = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace('.000Z', 'Z')
+        if (existing && existing.updatedAt === stamp) stamp = new Date(Date.parse(stamp) + 1000).toISOString().replace('.000Z', 'Z')
+        const record: FixturePlugin = { package: pkg, granted, enabled: true, installedAt: existing?.installedAt ?? stamp, updatedAt: stamp, storage: existing?.storage ?? {} }
+        this.#plugins.set(pkg.id, record)
+        this.#pluginChanged()
+        return { plugin: this.#pluginSummary(record) }
+      }
+      case 'plugins.update': {
+        const record = this.#pluginFind(body.id)
+        if (typeof body.enabled === 'boolean') record.enabled = body.enabled
+        if (Array.isArray(body.granted)) record.granted = body.granted.filter((permission): permission is string => typeof permission === 'string' && record.package.permissions.includes(permission as never))
+        this.#pluginChanged()
+        return { plugin: this.#pluginSummary(record) }
+      }
+      case 'plugins.remove': {
+        this.#pluginFind(body.id)
+        this.#plugins.delete(body.id as string)
+        this.#pluginChanged()
+        return { removed: true }
+      }
+      case 'plugins.storage.get': return { values: { ...this.#pluginFind(body.id).storage } }
+      case 'plugins.storage.set': {
+        const record = this.#pluginFind(body.id)
+        const key = typeof body.key === 'string' ? body.key : ''
+        if (!/^[A-Za-z0-9._:-]{1,64}$/u.test(key)) throw new ControlPlaneError('invalid_plugin', 'Plugin storage key is invalid')
+        const next = { ...record.storage }
+        if (typeof body.value === 'string') next[key] = body.value
+        else delete next[key]
+        if (Object.keys(next).length > 64 || new TextEncoder().encode(JSON.stringify(next)).length > 65_536) throw new ControlPlaneError('plugin_storage_full', 'Plugin storage is full')
+        record.storage = next
+        this.#pluginSave()
+        return { values: { ...next } }
+      }
+      default: throw new Error(`fixture session has no answer for ${method}`)
+    }
+  }
+  // ── End plugins ──────────────────────────────────────────────────────────
+
   #answer(method: string, payload?: unknown): unknown {
     const body = (payload ?? {}) as Record<string, never>
+    if (method.startsWith('plugins.')) return this.#pluginAnswer(method, body)
     switch (method) {
+      case 'appearance.get': return { ...this.#appearance }
+      case 'appearance.update': {
+        this.#appearance = { ...body }
+        try { window.localStorage.setItem('switchboard.fixture.appearance', JSON.stringify(this.#appearance)) } catch { /* dev only */ }
+        this.#emit('appearance.changed', { ...this.#appearance })
+        return { ...this.#appearance }
+      }
       case 'relay.status': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
       case 'updates.status': return { ...updateFeed }
       case 'updates.check': return (async () => {
@@ -432,7 +561,14 @@ export class FixtureSession implements ControlPlaneSession {
         })()
       }
       case 'relay.start': case 'relay.stop': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
-      case 'providers.list': return { activeId: 'north-relay', providers }
+      case 'providers.list': return { activeId: this.#activeProvider, providers }
+      case 'providers.activate': {
+        const provider = providers.find((candidate) => candidate.id === (body as { id?: unknown }).id)
+        if (!provider) throw new ControlPlaneError('provider_not_found', 'Provider not found')
+        this.#activeProvider = provider.id
+        this.#emit('providers.changed', {})
+        return provider
+      }
       case 'providers.health': return { states: providers.map((provider) => ({ providerId: provider.id, up: provider.enabled, reason: provider.enabled ? '' : 'Disabled' })) }
       case 'activity.list': return { requests: activity, available: activity.length }
       case 'activity.summary': return { requests: 486, active: 2, queued: 1, successRate: 96.2, p95Ms: 18_600, rpm: 12.4 }

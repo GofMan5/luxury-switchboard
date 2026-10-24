@@ -31,9 +31,18 @@ import { BackupModel } from '../features/backup/application/backup-model'
 import { StdioCodexPort } from '../features/codex/adapters/stdio-codex-port'
 import { CodexModel } from '../features/codex/application/codex-model'
 import { hasCodexLogin } from '../features/codex/application/codex-capability'
+import { StdioAppearancePort } from '../features/appearance/adapters/stdio-appearance-port'
+import { LocalAppearancePort, localAppearanceCache } from '../features/appearance/adapters/local-appearance'
+import { AppearanceModel } from '../features/appearance/application/appearance-model'
+import { SessionControlPort, StdioPluginsPort } from '../features/plugins/adapters/stdio-plugins-port'
+import { BlobWorkerFactory } from '../features/plugins/adapters/blob-worker-factory'
+import { PluginsModel } from '../features/plugins/application/plugins-model'
+import { ExtensionPoints } from '../shared/contracts/extensions'
+import { safeMode } from '../shared/runtime/safe-mode'
 import { createControlPlaneSession } from '../platform/stdio/create-session'
 import type { ControlPlaneSession } from '../platform/stdio/session'
 import { Button } from '../shared/ui/Button'
+import { isPluginRoute, visibleNavigation } from './navigation'
 import { ServicesContext, type AppServices } from './services'
 
 type BootstrapState =
@@ -70,10 +79,13 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         current.settings.connect(),
         current.guardrails.connect(),
         current.notifications.connect(),
+        current.appearance.connect(),
         current.tunnel?.connect() ?? Promise.resolve(),
         current.clients?.connect() ?? Promise.resolve(),
         // The Codex flow only exists when the control plane advertises it.
         session?.capabilities && hasCodexLogin(session.capabilities) ? current.codex.connect() : Promise.resolve(),
+        // Plugins only exist when the control plane stores them.
+        session?.capabilities?.includes('plugins.manage') ? current.plugins.connect() : Promise.resolve(),
         keys.providerId ? current.apiKeys.load(keys.providerId) : Promise.resolve(),
         routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
         models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
@@ -99,6 +111,9 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.models.dispose()
       services?.tests.dispose()
       services?.updates.dispose()
+      services?.appearance.dispose()
+      // Stops every plugin worker and takes back what they contributed.
+      services?.plugins.dispose()
       if (session && !sessionStopped) {
         sessionStopped = true
         void session.stop().catch(() => undefined)
@@ -109,6 +124,25 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       try {
         session = await createControlPlaneSession()
         await session.start()
+        // Built first: other slices are handed narrow callbacks into these
+        // rather than the models themselves.
+        const extensions = new ExtensionPoints()
+        const notifications = new NotificationsModel(new StdioNotificationsPort(session))
+        const capabilities = session.capabilities ?? []
+        const routes = new Set(visibleNavigation(capabilities).flatMap((section) => section.items.map((item) => item.id as string)))
+        const plugins = new PluginsModel({
+          port: new StdioPluginsPort(session),
+          control: new SessionControlPort(session),
+          workers: new BlobWorkerFactory(),
+          extensions,
+          notify: (announcement) => notifications.announce(announcement),
+          navigate: (route) => { window.location.hash = route },
+          // Pages this window shows, so a plugin cannot navigate to a page
+          // the control plane did not advertise.
+          isRoute: (route) => routes.has(route) || isPluginRoute(route),
+          app: { version: session.appVersion ?? '', capabilities },
+          safeMode,
+        })
         services = {
           relay: new RelayModel(new StdioRelayPort(session)),
           providers: new ProvidersModel(new StdioProvidersPort(session)),
@@ -122,13 +156,21 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           tests: new TestsModel(new StdioModelsPort(session)),
           updates: new UpdatesModel(new StdioUpdatesPort(session)),
           guardrails: new GuardrailsModel(new StdioGuardrailsPort(session)),
-          notifications: new NotificationsModel(new StdioNotificationsPort(session)),
+          notifications,
           backup: new BackupModel(new StdioBackupPort(session)),
           appVersion: session.appVersion ?? '',
           capabilities: session.capabilities ?? [],
           // One build serves every workspace.
           tunnel: new TunnelModel(new StdioTunnelPort(session)),
           clients: new ClientsModel(new StdioClientsPort(session)),
+          // An older control plane without the appearance store keeps the
+          // record in the browser profile rather than losing personalization.
+          appearance: new AppearanceModel(
+            session.capabilities?.includes('appearance.manage') ? new StdioAppearancePort(session) : new LocalAppearancePort(),
+            localAppearanceCache,
+          ),
+          plugins,
+          extensions,
         }
         if (disposed) { shutdown(); return }
         setState({ phase: 'ready', services })

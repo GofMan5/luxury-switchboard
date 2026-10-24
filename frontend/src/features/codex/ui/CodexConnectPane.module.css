@@ -1,126 +1,116 @@
-.card { display: grid; gap: 12px; }
+.card { display: grid; gap: 10px; }
 
-.cardHead { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 12px; }
-.cardHead > svg { color: var(--text-secondary); margin-top: 2px; }
-.cardText { display: grid; gap: 3px; min-width: 0; }
-.cardText strong { color: var(--text-primary); font-size: 14px; font-weight: 640; }
-.cardText small { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.cardHead { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; }
+.cardHead > svg { margin-top: 1px; color: var(--text-secondary); }
+.cardText { display: grid; gap: 2px; min-width: 0; }
+.cardText strong { color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
+.cardText small { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
 
 /* The Pill above already carries the warning tone; the note stays neutral
  * so a stacked red/yellow block does not shout over the card. */
-.reauthNote { margin: 0; color: var(--text-secondary); font-size: 12.5px; line-height: 1.5; }
+.reauthNote { margin: 0; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; }
 
-.rows { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; margin: 0; font-size: 12.5px; }
-.rows dt { color: var(--text-muted); }
-.rows dd { margin: 0; color: var(--text-secondary); }
-.email { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; vertical-align: bottom; }
+.email { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--font-mono); font-size: var(--fs-sm); vertical-align: bottom; }
 
 /* One row per linked account: each carries its own health and its own
- * disconnect, so one expired session never drags the working ones down. */
-.accountList { display: grid; gap: 8px; }
-.accountRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
-  background: var(--bg-surface);
-}
-.accountText { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; flex: 1 1 auto; }
+ * disconnect, so one expired session never drags the working ones down.
+ * The rows share one frame divided by hairlines, like a short table. */
+.accountList { display: grid; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-surface); }
+.accountRow { display: flex; min-height: var(--row-height); align-items: center; justify-content: space-between; gap: 10px; padding: 4px 6px 4px 10px; transition: background var(--motion-fast); }
+.accountRow + .accountRow { border-top: 1px solid var(--border-subtle); }
+.accountRow:hover { background: var(--bg-hover); }
+.accountText { display: flex; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .accountText .email { flex: 0 1 auto; min-width: 0; }
-.plan { color: var(--text-muted); font-size: 12px; }
-.sectionLabel { margin: 0; color: var(--text-muted); font-size: 13px; font-weight: 500; }
+.plan { color: var(--text-muted); font-size: var(--fs-xs); }
+.sectionLabel { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); font-weight: 500; }
 
-.cardActions { display: flex; justify-content: space-between; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
+.cardActions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 4px; }
 
 /* The phase region lives inside the card, under everything the card shows
  * while idle, separated by a hairline. */
-.phase { display: grid; gap: 7px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
-.statusRow { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-primary); font-size: 13px; min-width: 0; }
-.statusRow > svg { color: var(--text-secondary); flex: 0 0 auto; }
-.statusRow > span { display: block; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.successIcon { color: var(--status-success); flex: 0 0 auto; }
+.phase { display: grid; gap: 8px; margin-top: 4px; border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+.phase > :global(.button) { justify-self: start; }
+.statusRow { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0; color: var(--text-primary); font-size: var(--fs-base); }
+.statusRow > svg { flex: 0 0 auto; color: var(--accent); }
+/* The sentence truncates; a trailing plan Pill keeps its own shape. */
+.statusRow > span:first-of-type { display: block; min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statusRow > .successIcon { color: var(--status-success); }
+.successIcon { flex: 0 0 auto; color: var(--status-success); }
 
-.hint { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.error { margin: 0; color: var(--text-danger); font-size: 12.5px; line-height: 1.5; }
+.hint { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
+.error { margin: 0; border: 1px solid color-mix(in srgb, var(--status-danger) 34%, transparent); border-radius: var(--radius-control); padding: 7px 10px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 8%, transparent); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
 
 /* Four ways in, one picked: radio cards in the same visual language as the
  * preset chooser one step up. A live flow disables the whole group and the
  * running method stays marked, so the cards keep telling the truth. */
-.methods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.methods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 
 .methodCard {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
-  gap: 2px 9px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-strong);
+  gap: 2px 8px;
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-control);
-  color: inherit;
+  padding: 8px 10px;
+  color: var(--text-secondary);
   background: var(--bg-surface);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast);
+  transition: color var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast);
 }
-.methodCard > svg { margin-top: 2px; color: var(--text-secondary); }
-.methodCard:hover:not(:disabled) { background: var(--bg-hover); }
+.methodCard > svg { width: 16px; height: 16px; margin-top: 1px; color: var(--text-muted); transition: color var(--motion-fast); }
+.methodCard:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); }
+.methodCard:active:not(:disabled) { background: var(--bg-selected); transform: translateY(.5px); }
 .methodCard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.methodCard:active:not(:disabled) { background: var(--bg-selected); }
-.methodCard:disabled { color: var(--text-disabled); cursor: default; }
-.methodCard[data-checked='true'] {
-  border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border-subtle));
-  background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
-}
-.methodCard:disabled[data-checked='true'] { border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border-subtle)); }
+.methodCard:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.methodCard:disabled .methodText strong, .methodCard:disabled .methodText small { color: var(--text-disabled); }
+/* Checked: the selection surface plus the accent hairline and icon. */
+.methodCard[data-checked='true'] { border-color: var(--accent-line); color: var(--text-primary); background: var(--bg-selected); }
+.methodCard[data-checked='true'] > svg { color: var(--accent); }
+.methodCard[data-checked='true']:hover:not(:disabled) { border-color: var(--accent-line); background: var(--bg-selected); }
+.methodCard:disabled[data-checked='true'] .methodText strong { color: var(--text-secondary); }
 
-.methodText { display: grid; gap: 2px; min-width: 0; }
-.methodText strong { color: var(--text-primary); font-size: 13px; font-weight: 640; }
-.methodText small { color: var(--text-muted); font-size: 11.5px; line-height: 1.45; }
+.methodText { display: grid; gap: 1px; min-width: 0; }
+.methodText strong { color: var(--text-primary); font-size: var(--fs-base); font-weight: 500; }
+.methodText small { color: var(--text-muted); font-size: var(--fs-xs); line-height: 1.45; }
 
-/* Pasted credentials are code: monospace, vertically resizable, and the
- * same field recipe every input in the app uses. */
+/* Pasted credentials are code: monospace and vertically resizable; border,
+ * hover, focus and disabled come from the global field recipe. */
 .importTextarea {
   width: 100%;
-  min-height: 88px;
+  min-height: 84px;
   max-height: 220px;
-  padding: 10px 11px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-control);
-  color: var(--text-primary);
-  background: var(--bg-field);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.55;
-  resize: vertical;
-  transition: border-color var(--motion-fast), background var(--motion-fast);
 }
-.importTextarea:hover { border-color: var(--border-field); background: var(--bg-raised); }
-.importTextarea:focus-visible { border-color: var(--focus-ring); outline: none; }
 
 /* The device code is the one thing the user must carry elsewhere; it gets
  * its own row so copying is a single click and the code stays selectable. */
 .deviceCode {
   display: flex;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px 8px 12px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border-field);
   border-radius: var(--radius-control);
+  padding: 4px 4px 4px 12px;
   background: var(--bg-field);
 }
 .userCode {
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 15px;
-  letter-spacing: 0.06em;
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums slashed-zero;
+  letter-spacing: .08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   user-select: all;
 }
 
@@ -131,23 +121,33 @@
 /* DisconnectCodexDialog rides this module: it is the same feature surface
  * and needs only a width override plus an error block. */
 .disconnect { --dialog-width: 460px; }
-.disconnectError { margin: 0; padding: 14px 18px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, transparent); }
+.disconnectError { margin: 0; border-bottom: 1px solid color-mix(in srgb, var(--status-danger) 30%, transparent); padding: 10px 18px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 8%, transparent); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
 /* Batch confirmations name every account they touch: the list is the
  * contract, so what the owner sees leaving is exactly what gets removed. */
 .disconnectAccounts {
-  margin: 0;
-  padding: 10px 18px 8px 36px;
   display: grid;
-  gap: 4px;
+  gap: 2px;
   max-height: 148px;
   overflow-y: auto;
+  margin: 0;
+  padding: 10px 18px 8px 34px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
 }
 
 .spinning { animation: icon-spin 1s linear infinite; }
 [data-animations='off'] .spinning { animation: none; }
-@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+
+@media (max-width: 600px) {
+  .methods { grid-template-columns: minmax(0, 1fr); }
+  .disconnectError { padding-inline: var(--pad); }
+  .disconnectAccounts { padding-inline: var(--pad); padding-left: 30px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinning { animation: none; }
+  .methodCard:active:not(:disabled) { transform: none; }
+}
 
 @keyframes icon-spin { to { transform: rotate(360deg); } }

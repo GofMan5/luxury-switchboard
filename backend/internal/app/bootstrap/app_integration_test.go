@@ -31,7 +31,7 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 			t.Fatal("legacy live-key source is unavailable")
 		}
 		t.Setenv("LOCALAPPDATA", root)
-		for _, name := range []string{"SWITCHBOARD_SETTINGS_PATH", "SWITCHBOARD_PROVIDERS_PATH", "SWITCHBOARD_KEYS_PATH", "SWITCHBOARD_CODEX_PATH", "SWITCHBOARD_ROUTES_PATH", "SWITCHBOARD_TUNNEL_PATH", "SWITCHBOARD_HISTORY_PATH", "SWITCHBOARD_TUNNEL_HISTORY_PATH"} {
+		for _, name := range []string{"SWITCHBOARD_SETTINGS_PATH", "SWITCHBOARD_PROVIDERS_PATH", "SWITCHBOARD_KEYS_PATH", "SWITCHBOARD_CODEX_PATH", "SWITCHBOARD_ROUTES_PATH", "SWITCHBOARD_TUNNEL_PATH", "SWITCHBOARD_HISTORY_PATH", "SWITCHBOARD_TUNNEL_HISTORY_PATH", "SWITCHBOARD_APPEARANCE_PATH", "SWITCHBOARD_PLUGINS_PATH"} {
 			t.Setenv(name, "")
 		}
 		directory := filepath.Join(root, "ProviderSwitchboard")
@@ -47,6 +47,8 @@ func TestSidecarStdioListenerAndCleanShutdown(t *testing.T) {
 		t.Setenv("SWITCHBOARD_TUNNEL_PATH", filepath.Join(root, "tunnel.dpapi"))
 		t.Setenv("SWITCHBOARD_HISTORY_PATH", filepath.Join(root, "history.db"))
 		t.Setenv("SWITCHBOARD_TUNNEL_HISTORY_PATH", filepath.Join(root, "tunnel-history.db"))
+		t.Setenv("SWITCHBOARD_APPEARANCE_PATH", filepath.Join(root, "appearance.dpapi"))
+		t.Setenv("SWITCHBOARD_PLUGINS_PATH", filepath.Join(root, "plugins.dpapi"))
 	}
 
 	inputReader, inputWriter := io.Pipe()

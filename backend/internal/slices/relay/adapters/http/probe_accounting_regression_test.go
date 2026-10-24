@@ -184,6 +184,9 @@ func TestProbeCancellationRetainsPartialProviderUsage(t *testing.T) {
 func TestProbeRecordsMeasuredUsageThroughRealActivityRecorder(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		// Immediate loopback can reach the first token inside one Windows clock
+		// tick; wait so the positive first-token assertion measures real time.
+		time.Sleep(20 * time.Millisecond)
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n")
 		w.(http.Flusher).Flush()
 		time.Sleep(10 * time.Millisecond)

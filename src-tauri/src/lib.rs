@@ -1,5 +1,6 @@
 mod sidecar;
 mod sidecar_process;
+mod startup;
 
 use std::path::{Path, PathBuf};
 
@@ -183,21 +184,69 @@ fn update_directory() -> Result<String, String> {
     Err("self-update is not supported on this platform".to_string())
 }
 
-/// Windows: the setup is its own program; the OS takes it from here and the
-/// app steps out of the way.
+/// Windows: the setup is its own program. When the app steps out of the way,
+/// the installer runs as an unattended update (`/P` passive progress only,
+/// `/UPDATE` keeps shortcuts and skips the uninstall round, `/R` starts the new
+/// version when it is done) and only after this process has stopped its
+/// sidecar: the installer replaces both binaries and must not find either one
+/// still running. The interactive finish page used to start the new version
+/// itself while the old one could still be holding the WebView2 profile.
 #[cfg(windows)]
 fn launch_verified_installer(
     app: &tauri::AppHandle,
     installer: &Path,
     exit: bool,
 ) -> Result<(), String> {
-    std::process::Command::new(installer)
-        .spawn()
-        .map_err(|error| format!("the installer could not start: {error}"))?;
-    if exit {
-        app.exit(0);
+    use tauri::Manager;
+    if !exit {
+        std::process::Command::new(installer)
+            .spawn()
+            .map_err(|error| format!("the installer could not start: {error}"))?;
+        return Ok(());
     }
+    *app.state::<PendingInstaller>()
+        .0
+        .lock()
+        .map_err(|_| "the update state is unavailable".to_string())? =
+        Some(installer.to_path_buf());
+    app.exit(0);
     Ok(())
+}
+
+/// The verified installer waiting for the app to finish exiting.
+#[cfg(windows)]
+#[derive(Default)]
+struct PendingInstaller(std::sync::Mutex<Option<PathBuf>>);
+
+#[cfg(windows)]
+const UNATTENDED_UPDATE_ARGS: [&str; 3] = ["/P", "/UPDATE", "/R"];
+
+/// Runs on the way out, after the sidecar is stopped. The window is already
+/// gone, so a failure is reported in a dialog that names the verified file.
+#[cfg(windows)]
+fn start_pending_installer(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(installer) = app
+        .state::<PendingInstaller>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take())
+    else {
+        return;
+    };
+    if let Err(error) = std::process::Command::new(&installer)
+        .args(UNATTENDED_UPDATE_ARGS)
+        .spawn()
+    {
+        startup::show_error(
+            "The update could not start",
+            &format!(
+                "{error}\n\nThe verified installer is on disk; run it by hand:\n{}",
+                installer.display()
+            ),
+        );
+    }
 }
 
 /// Linux: the app runs from an AppImage, so the update is that image. The new
@@ -411,7 +460,12 @@ fn spawn_after_exit(target: &Path) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    #[cfg(windows)]
+    startup::install_panic_hook();
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.manage(PendingInstaller::default());
+    let builder = builder
         .plugin(tauri_plugin_shell::init())
         .manage(sidecar::SidecarState::default())
         .invoke_handler(tauri::generate_handler![
@@ -422,16 +476,30 @@ pub fn run() {
             open_url,
             pick_auth_files,
             run_installer,
-        ])
+        ]);
+    // Elsewhere the window is built in setup, as Tauri itself would; on
+    // Windows it is built before the event loop starts, where a WebView2
+    // failure is returned instead of logged (see the startup module).
+    #[cfg(not(windows))]
+    let builder = builder.setup(|app| Ok(startup::create_main_window(app)?));
+    let app = builder
         .build(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|error| startup::fail(&error.to_string()));
+    #[cfg(windows)]
+    if let Err(error) = startup::create_main_window(&app) {
+        startup::fail(&format!("The app window could not be created: {error}"));
+    }
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
             if sidecar::begin_graceful_exit(app) {
                 api.prevent_exit();
             }
         }
-        tauri::RunEvent::Exit => sidecar::stop_on_exit(app),
+        tauri::RunEvent::Exit => {
+            sidecar::stop_on_exit(app);
+            #[cfg(windows)]
+            start_pending_installer(app);
+        }
         _ => {}
     });
 }

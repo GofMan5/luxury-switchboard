@@ -31,6 +31,7 @@
 .version { color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-sm); }
 .author { color: var(--text-muted); font-size: var(--fs-sm); }
 .description { max-width: 90ch; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; text-wrap: pretty; }
+.devPath { min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
 .reason { color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .reason[data-tone='danger'] { color: var(--text-danger); }
 .pluginMeta { display: grid; justify-items: end; gap: 2px; padding-top: 2px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; }
@@ -150,6 +151,11 @@
 .settingHint { color: var(--text-muted); }
 .settingProblem { color: var(--text-danger); }
 .setting[data-invalid='true'] .settingLabel { color: var(--text-danger); }
+.setting[data-type='secret'] { grid-template-columns: minmax(0, 1fr) auto; }
+.secretEdit { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.secretEdit input { width: 200px; max-width: 100%; }
+.secretState { color: var(--text-muted); font-size: var(--fs-sm); }
+.secretState[data-set='true'] { color: var(--status-success); }
 
 /* A stored plugin this version cannot use. */
 .problemNote { display: flex; align-items: flex-start; gap: 6px; color: var(--status-warning); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }

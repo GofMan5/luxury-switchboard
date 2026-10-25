@@ -15,7 +15,9 @@ import { WorkspaceBoundary } from '../shared/ui/WorkspaceBoundary'
 import { useMediaQuery } from '../shared/ui/useMediaQuery'
 import { restartInSafeMode, safeMode } from '../shared/runtime/safe-mode'
 import { visibleNavigation, type AppRoute } from './navigation'
-import { railGroups, railItemName } from './rail'
+import { arrangeSections, railGroups, railItemName } from './rail'
+import { pluginIcon } from './plugin-icons'
+import { actionsFor } from '../shared/contracts/extensions'
 import { boundCommand, shortcutBindings } from './plugin-hotkeys'
 import { overflowSummary, readoutLimit, readoutOwner, splitReadouts } from './status-readouts'
 import { CommandPalette } from './CommandPalette'
@@ -28,6 +30,8 @@ interface AppShellProps extends PropsWithChildren {
 }
 
 const EMPTY_PROVIDERS: readonly never[] = []
+/** Header buttons are icon-only and share the bar with the relay switch. */
+const HEADER_ACTION_LIMIT = 2
 
 export function AppShell({ route, onNavigate, children }: AppShellProps) {
   // The shell committing is the moment the boot sentinel can stand down:
@@ -94,7 +98,8 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   }, [])
 
   const sections = useMemo(() => visibleNavigation(capabilities ?? []), [capabilities])
-  const rail = useMemo(() => railGroups(sections, contributions.pages), [sections, contributions.pages])
+  const rail = useMemo(() => railGroups(arrangeSections(sections, contributions.layout), contributions.pages), [sections, contributions.layout, contributions.pages])
+  const headerActions = useMemo(() => actionsFor(contributions, 'header').slice(0, HEADER_ACTION_LIMIT), [contributions])
   const [paletteOpen, setPaletteOpen] = useState(false)
   const toggleRelay = useCallback(() => relay.toggle(), [relay])
   const activate = useCallback((id: string) => providersModel.activate(id), [providersModel])
@@ -266,6 +271,15 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
                 <span>Safe mode</span>
               </button>
             ) : null}
+            {headerActions.map((action) => {
+              const Icon = pluginIcon(action.icon)
+              const name = `${action.title} (from ${action.owner})`
+              return (
+                <button key={action.id} type="button" className={styles.headerAction} data-ui="header-action" data-tone={action.tone ?? 'neutral'} aria-label={name} title={name} onClick={() => action.run()}>
+                  <Icon size={15} strokeWidth={1.8} />
+                </button>
+              )
+            })}
             <Button
               variant={needsStop ? 'secondary' : 'primary'}
               disabled={relayState.pending}

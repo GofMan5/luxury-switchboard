@@ -54,6 +54,7 @@ func TestLiveRelayTokenCountingEndToEnd(t *testing.T) {
 		"SWITCHBOARD_TUNNEL_HISTORY_PATH": "tunnel-history.db",
 		"SWITCHBOARD_APPEARANCE_PATH":     "appearance.dpapi",
 		"SWITCHBOARD_PLUGINS_PATH":        "plugins.dpapi",
+		"SWITCHBOARD_RULES_PATH":          "rules.dpapi",
 	} {
 		t.Setenv(name, filepath.Join(root, file))
 	}
@@ -277,6 +278,7 @@ func TestLiveRelayOutlastsPreContentBreaksEndToEnd(t *testing.T) {
 		"SWITCHBOARD_TUNNEL_HISTORY_PATH": "tunnel-history.db",
 		"SWITCHBOARD_APPEARANCE_PATH":     "appearance.dpapi",
 		"SWITCHBOARD_PLUGINS_PATH":        "plugins.dpapi",
+		"SWITCHBOARD_RULES_PATH":          "rules.dpapi",
 	} {
 		t.Setenv(name, filepath.Join(root, file))
 	}
@@ -482,6 +484,7 @@ func TestLiveRelayStreamDeliveryTiming(t *testing.T) {
 		"SWITCHBOARD_TUNNEL_HISTORY_PATH": "tunnel-history.db",
 		"SWITCHBOARD_APPEARANCE_PATH":     "appearance.dpapi",
 		"SWITCHBOARD_PLUGINS_PATH":        "plugins.dpapi",
+		"SWITCHBOARD_RULES_PATH":          "rules.dpapi",
 	} {
 		t.Setenv(name, filepath.Join(root, file))
 	}

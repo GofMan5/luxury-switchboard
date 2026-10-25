@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "example.overview-actions",
+  "name": "Pinned requests",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "Pin requests from the Activity inspector, see them in an Overview widget, and review or clear them in a dialog opened from the top bar.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:slots",
+    "ui:dialogs",
+    "storage"
+  ]
+}

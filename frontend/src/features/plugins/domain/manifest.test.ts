@@ -117,9 +117,10 @@ describe('package size', () => {
 })
 
 describe('grants', () => {
-  it('ticks every permission by default except control:sensitive', () => {
+  it('ticks every permission by default except the ones that reach traffic, the network or secrets', () => {
     const all = PERMISSION_SPECS.map((spec) => spec.id)
-    expect(defaultGrants(all)).toEqual(all.filter((permission) => permission !== 'control:sensitive'))
+    const optIn = ['control:sensitive', 'net:fetch', 'relay:content']
+    expect(defaultGrants(all)).toEqual(all.filter((permission) => !optIn.includes(permission)))
   })
 
   it('keeps only declared, known, unique grants in declared order', () => {
@@ -127,8 +128,14 @@ describe('grants', () => {
   })
 
   it('starts an upgrade from the previous decisions and defaults only new permissions', () => {
-    const previous = { permissions: ['ui:pages', 'control:write'], granted: ['ui:pages'] }
+    const previous = { permissions: ['ui:pages', 'control:write'], granted: ['ui:pages'], hosts: [] }
     expect(initialGrants(['ui:pages', 'control:write', 'storage', 'control:sensitive'], previous)).toEqual(['ui:pages', 'storage'])
     expect(initialGrants(['ui:pages', 'control:sensitive'])).toEqual(['ui:pages'])
+  })
+
+  it('asks again for net:fetch when an upgrade adds a host, not when the hosts stay', () => {
+    const previous = { permissions: ['net:fetch', 'storage'], granted: ['net:fetch', 'storage'], hosts: ['api.example.com'] }
+    expect(initialGrants(['net:fetch', 'storage'], previous, ['api.example.com'])).toEqual(['net:fetch', 'storage'])
+    expect(initialGrants(['net:fetch', 'storage'], previous, ['api.example.com', 'collect.example.net'])).toEqual(['storage'])
   })
 })

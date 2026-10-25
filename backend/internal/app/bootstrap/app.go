@@ -50,7 +50,9 @@ import (
 	notificationsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/adapters/stdio"
 	notificationsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/application"
 	notificationsdomain "github.com/luxuryprivate/switchboard/backend/internal/slices/notifications/domain"
+	pluginsdevfolder "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/adapters/devfolder"
 	pluginsdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/adapters/dpapi"
+	pluginsnetfetch "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/adapters/netfetch"
 	pluginsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/adapters/stdio"
 	pluginsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/application"
 	providerdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/providers/adapters/dpapi"
@@ -65,11 +67,19 @@ import (
 	relayroutes "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/routes"
 	relaystdio "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/stdio"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
+	relayhooksrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/relayhooks/adapters/relay"
+	relayhooksstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/relayhooks/adapters/stdio"
+	relayhooksapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relayhooks/application"
 	routedpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/dpapi"
 	routeproviders "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/providers"
 	routestdio "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/adapters/stdio"
 	routeapp "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/application"
 	routedomain "github.com/luxuryprivate/switchboard/backend/internal/slices/routes/domain"
+	rulesactivity "github.com/luxuryprivate/switchboard/backend/internal/slices/rules/adapters/activity"
+	rulesdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/rules/adapters/dpapi"
+	rulesrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/rules/adapters/relay"
+	rulesstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/rules/adapters/stdio"
+	rulesapp "github.com/luxuryprivate/switchboard/backend/internal/slices/rules/application"
 	settingsdpapi "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/adapters/dpapi"
 	settingsstdio "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/adapters/stdio"
 	settingsapp "github.com/luxuryprivate/switchboard/backend/internal/slices/settings/application"
@@ -92,6 +102,7 @@ type App struct {
 	updatesRefresher *updatesapp.Refresher
 	updatesCancel    context.CancelFunc
 	codex            *codexapplication.Service
+	pluginDevLinks   *pluginsapp.DevLinks
 }
 
 func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
@@ -218,11 +229,27 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Plugin relay hooks: the relay asks them before forwarding and tells them
+	// after answering (relayhooksrelay.New adapts the service to the relay).
+	// They do nothing until the protocol and the plugin grants are connected
+	// below.
+	relayHooksService := relayhooksapp.NewService()
+	// Request and retry rules. A file that cannot be read leaves the relay
+	// with no rules and the service refusing saves, never a silent reset.
+	rulesService, err := defaultRulesService(history)
+	if err != nil {
+		return nil, err
+	}
+	if loadErr := rulesService.Load(context.Background()); loadErr != nil {
+		logger.Printf("encrypted rules could not be loaded; the relay runs without rules")
+	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(environmentPort(settings.ListenerPort)))
 	httpRuntime := relayhttp.NewServer(address, relayhttp.Dependencies{
 		Routes: routes, Credentials: credentials, Activity: recorder,
 		Guardrail: guardrailrelay.New(guardrails), Failovers: routes,
 		RouteEvents: notificationsrelay.NewSink(notifications),
+		Hooks:       relayhooksrelay.New(relayHooksService),
+		Rules:       rulesrelay.New(rulesService),
 		// The learned request shapes persist beside the history database:
 		// a probe 400 is a full round trip on the first request of every
 		// launch otherwise. The file carries no secret.
@@ -342,6 +369,21 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		logger.Printf("encrypted plugins could not be loaded; plugin commands are unavailable")
 	}
 	pluginsstdio.Register(protocol, pluginService)
+	pluginDevLinks, err := wirePluginExtensions(protocol, pluginService)
+	if err != nil {
+		return nil, err
+	}
+	relayHooksService.Connect(pluginService, relayhooksstdio.NewEvents(protocol))
+	relayhooksstdio.Register(protocol, relayHooksService)
+	pluginService.OnRemoved(relayHooksService.UnregisterPlugin)
+	rulesstdio.Register(protocol, rulesService)
+	// A removed plugin's rules go with it; a failed save leaves them for the
+	// next removal attempt rather than blocking the uninstall.
+	pluginService.OnRemoved(func(id string) {
+		if dropErr := rulesService.DropOwner(context.Background(), "plugin:"+id); dropErr != nil {
+			logger.Printf("a removed plugin's rules could not be dropped")
+		}
+	})
 	guardrailstdio.Register(protocol, guardrails)
 	notificationsstdio.Register(protocol, notifications)
 	// A dead key is the one failure the relay absorbs silently — the pool
@@ -448,6 +490,7 @@ func New(stdin io.Reader, stdout io.Writer, stderr io.Writer) (*App, error) {
 		healthMonitor:    healthMonitor,
 		updatesRefresher: updatesRefresher,
 		codex:            codexService,
+		pluginDevLinks:   pluginDevLinks,
 	}, nil
 }
 
@@ -482,7 +525,11 @@ func (app *App) Run(ctx context.Context) error {
 			app.logger.Printf("codex session could not be restored: %v", err)
 		}
 	}()
+	// Linked plugin folders are polled only while commands are served.
+	devCtx, stopDev := context.WithCancel(ctx)
+	go app.pluginDevLinks.Watch(devCtx)
 	err := app.protocol.Serve(ctx)
+	stopDev()
 	publishingCtx, cancelPublishing := context.WithTimeout(context.Background(), 5*time.Second)
 	if stopErr := app.publishing.Stop(publishingCtx); stopErr != nil {
 		app.logger.Printf("the publishing runtime did not stop cleanly")
@@ -656,6 +703,41 @@ func defaultPluginService() (*pluginsapp.Service, error) {
 		return nil, err
 	}
 	return pluginsapp.NewService(pluginsdpapi.New(path), platform.MaxPayloadBytes, systemstdio.AppVersion)
+}
+
+// defaultRulesService keeps the rules in their own encrypted file and reads
+// recent failures from the request history (nil when history is unavailable).
+func defaultRulesService(history activityapp.History) (*rulesapp.Service, error) {
+	path, err := storePath("SWITCHBOARD_RULES_PATH", rulesdpapi.DefaultPath)
+	if err != nil {
+		return nil, err
+	}
+	return rulesapp.NewService(rulesdpapi.New(path), rulesactivity.New(history))
+}
+
+// wirePluginExtensions serves the plugins' network fetch, document
+// collections and folder links. Collections live beside the plugins file.
+func wirePluginExtensions(protocol *platform.Server, plugins *pluginsapp.Service) (*pluginsapp.DevLinks, error) {
+	path, err := storePath("SWITCHBOARD_PLUGINS_PATH", pluginsdpapi.DefaultPath)
+	if err != nil {
+		return nil, err
+	}
+	fetcher, err := pluginsapp.NewFetcher(plugins, pluginsnetfetch.New())
+	if err != nil {
+		return nil, err
+	}
+	collections, err := pluginsapp.NewCollections(plugins, pluginsdpapi.NewCollections(pluginsdpapi.DefaultCollectionsPath(path)))
+	if err != nil {
+		return nil, err
+	}
+	devLinks, err := pluginsapp.NewDevLinks(plugins, pluginsdevfolder.New())
+	if err != nil {
+		return nil, err
+	}
+	pluginsstdio.RegisterFetch(protocol, fetcher)
+	pluginsstdio.RegisterCollections(protocol, collections)
+	pluginsstdio.RegisterDevLinks(protocol, devLinks)
+	return devLinks, nil
 }
 
 // storePath reads an absolute override from name, or falls back to the

@@ -6,7 +6,7 @@ import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import { openExternal } from '../../../platform/lifecycle/open-external'
 import { byteLength, needsNewerApp, packageBytes, packageSizeProblem, parsePackage, type PluginPackage } from '../domain/manifest'
-import { initialGrants, isPluginPermission, permissionSpec, type PermissionRisk, type PluginPermission } from '../domain/permissions'
+import { DANGEROUS_PERMISSIONS, initialGrants, isPluginPermission, reviewedBefore, permissionSpec, type PermissionRisk, type PluginPermission } from '../domain/permissions'
 import type { PluginSummary } from '../domain/plugin'
 import { useStyleHold } from './useStyleHold'
 import styles from './PluginsPage.module.css'
@@ -70,6 +70,53 @@ export function PasteDialog({ onCancel, onReview }: {
   )
 }
 
+/** Loads a plugin from a folder on this computer, for development: the
+ * folder's `plugin.json` is read again whenever it changes. */
+export function DevLinkDialog({ pending, error, onCancel, onLink }: {
+  readonly pending: boolean
+  readonly error: string
+  readonly onCancel: () => void
+  readonly onLink: (path: string) => void
+}) {
+  const ref = useModalFocus<HTMLElement>(onCancel)
+  const [path, setPath] = useState('')
+  const field = useId()
+  return (
+    <div className="ui-scrim">
+      <section ref={ref} className={`ui-modal ${styles.dialog}`} role="dialog" aria-modal="true" aria-labelledby={`${field}-title`}>
+        <header>
+          <div>
+            <h2 id={`${field}-title`}>Load a plugin from a folder</h2>
+            <p>For plugin development. The plugin reloads when its files change. New permissions start ungranted; grant them under Permissions.</p>
+          </div>
+          <button type="button" aria-label="Close" onClick={onCancel}><X size={16} /></button>
+        </header>
+        <form className={styles.dialogBody} onSubmit={(event) => { event.preventDefault(); if (path.trim() && !pending) onLink(path) }}>
+          <label className={styles.fieldLabel} htmlFor={field}>Folder with plugin.json</label>
+          <input
+            id={field}
+            value={path}
+            spellCheck={false}
+            autoComplete="off"
+            data-autofocus
+            placeholder="C:\Users\you\my-plugin"
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? `${field}-error` : undefined}
+            onChange={(event) => setPath(event.target.value)}
+          />
+          <small className={styles.fieldHint}>An absolute path. Only plugins you are writing belong here.</small>
+          {error ? <p id={`${field}-error`} className={styles.dialogError} role="alert">{error}</p> : null}
+          <button type="submit" hidden />
+        </form>
+        <footer>
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button variant="primary" disabled={!path.trim() || pending} onClick={() => onLink(path)}>{pending ? 'Loading…' : 'Load'}</Button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
 /** A package file that could not be read. */
 export function ProblemsDialog({ title, problems, onClose }: { readonly title: string; readonly problems: readonly string[]; readonly onClose: () => void }) {
   const ref = useModalFocus<HTMLElement>(onClose)
@@ -117,11 +164,11 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', pending, e
 }) {
   const ref = useModalFocus<HTMLElement>(onCancel, pending)
   const id = useId()
-  const [granted, setGranted] = useState<ReadonlySet<PluginPermission>>(() => new Set(initialGrants(pkg.permissions, existing)))
+  const [granted, setGranted] = useState<ReadonlySet<PluginPermission>>(() => new Set(initialGrants(pkg.permissions, existing, pkg.network?.hosts)))
   const ordered = pkg.permissions.filter((permission) => granted.has(permission))
   const sizeProblem = useMemo(() => packageSizeProblem(pkg, ordered), [pkg, ordered])
   const tooNew = needsNewerApp(pkg.minAppVersion, appVersion)
-  const previous = new Set(existing?.permissions ?? [])
+  const previous = existing ? reviewedBefore(existing, pkg.network?.hosts ?? []) : new Set<string>()
   useStyleHold()
   const upgrade = existing !== undefined
   const contents = [
@@ -166,6 +213,7 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', pending, e
               </div>
             ) : null}
             {pkg.minAppVersion ? <div><dt>Needs app</dt><dd>{pkg.minAppVersion} or later{appVersion ? ` (this is ${appVersion})` : ''}</dd></div> : null}
+            {pkg.network?.hosts.length ? <div><dt>Network</dt><dd>{pkg.network.hosts.join(', ')}</dd></div> : null}
             <div><dt>Contains</dt><dd>{contents.length ? contents.join(' · ') : 'Nothing but its name'}</dd></div>
             <div><dt>Size</dt><dd>{formatBytes(packageBytes(pkg))}</dd></div>
           </dl>
@@ -193,6 +241,11 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', pending, e
           </fieldset>
           {pkg.permissions.length > 0 && ordered.length < pkg.permissions.length ? (
             <p className={styles.muted}>Calls that need an unticked permission fail inside the plugin; it keeps running. You can change this later.</p>
+          ) : null}
+          {ordered.some((permission) => DANGEROUS_PERMISSIONS.has(permission)) ? (
+            <p className={styles.dialogError} role="alert">
+              You ticked {ordered.filter((permission) => DANGEROUS_PERMISSIONS.has(permission)).map((permission) => permissionSpec(permission).title).join(', ')}. These let the plugin reach credentials, the internet or your prompts. Grant them only to plugins you wrote or fully trust.
+            </p>
           ) : null}
           {tooNew ? <p className={styles.dialogError} role="alert">This plugin needs Luxury Switchboard {pkg.minAppVersion} or later; this is {appVersion}. Update the app first.</p> : null}
           {sizeProblem ? <p className={styles.dialogError} role="alert">{sizeProblem}</p> : null}

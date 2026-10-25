@@ -3,9 +3,10 @@ import { ExtensionPoints } from '../../../shared/contracts/extensions'
 import type { PluginPermission } from '../domain/permissions'
 import type { PluginDetail } from '../domain/plugin'
 import { RUNTIME_LIMITS } from '../domain/protocol'
+import { DATA_LIMITS } from '../domain/specs'
 import { HOST_LIMITS, PluginHost } from './plugin-host'
 import type { ConfirmRequest } from './ports'
-import { FakeControl, FakeWorkers, MemoryPluginsPort, detail } from './test-fakes'
+import { FakeControl, FakeWorkers, MemoryPluginsPort, detail, hostExtras, type FakeWorker } from './test-fakes'
 
 const ALL_BASE: PluginPermission[] = ['ui:theme', 'ui:css', 'ui:pages', 'ui:status', 'ui:commands', 'ui:notify', 'control:read', 'control:write', 'storage']
 
@@ -26,12 +27,13 @@ function setup(
   const onChange = vi.fn()
   const confirm = vi.fn(async (_request: ConfirmRequest, _signal: AbortSignal) => true)
   const clipboard = vi.fn(async (_text: string) => undefined)
+  const extras = hostExtras()
   const host = new PluginHost(plugin, grants, {
-    workers, control, storage, extensions, notify, navigate, onChange, confirm, clipboard,
+    ...extras, workers, control, storage, extensions, notify, navigate, onChange, confirm, clipboard,
     isRoute: (route) => route === 'overview' || route === 'plugin/acme.tools/board',
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   }, initial)
-  return { host, workers, control, storage, extensions, notify, navigate, onChange, confirm, clipboard }
+  return { host, workers, control, storage, extensions, notify, navigate, onChange, confirm, clipboard, ...extras }
 }
 
 async function running(grants?: readonly PluginPermission[], plugin?: PluginDetail, initial: Record<string, string> | null = null) {
@@ -54,6 +56,7 @@ describe('PluginHost', () => {
       plugin: { id: 'acme.tools', name: 'Acme tools', version: '1.0.0', granted: ['ui:pages'] },
       app: { version: '1.0.0', capabilities: ['plugins.manage'] },
       settings: {},
+      secrets: [],
     })
     workers.last.send({ type: 'ready' })
     expect(host.runtime().state).toBe('running')
@@ -410,10 +413,13 @@ describe('PluginHost', () => {
     expect(workers.last.context.settings).toEqual({ limit: 25, compact: false })
     workers.last.send({ type: 'ready' })
     host.storageChanged({ 'setting:limit': '25', 'setting:compact': 'true' })
-    expect(workers.last.posted).toContainEqual({ type: 'settings', values: { limit: 25, compact: true } })
+    expect(workers.last.posted).toContainEqual({ type: 'settings', values: { limit: 25, compact: true }, secrets: [] })
     const before = workers.last.posted.length
     host.storageChanged({ 'setting:limit': '25', 'setting:compact': 'true', unrelated: 'x' })
+    host.secretsChanged([])
     expect(workers.last.posted).toHaveLength(before)
+    host.secretsChanged(['token'])
+    expect(workers.last.posted.at(-1)).toEqual({ type: 'settings', values: { limit: 25, compact: true }, secrets: ['token'] })
   })
 
   it('delivers page events only for registered pages once running', async () => {
@@ -423,5 +429,226 @@ describe('PluginHost', () => {
     await worker.call('ui.registerPage', { id: 'board', title: 'Board' })
     host.dispatch('board', { kind: 'action', action: 'refresh', form: { q: 'x' } })
     expect(worker.posted).toContainEqual({ type: 'ui', pageId: 'board', event: { kind: 'action', action: 'refresh', form: { q: 'x' } } })
+  })
+})
+
+const DATA: PluginPermission[] = ['ui:pages', 'ui:slots', 'ui:layout', 'ui:dialogs', 'ui:sound', 'files', 'bus', 'net:fetch', 'storage', 'relay:rules', 'relay:content', 'control:read']
+
+/** A second plugin in the same window: same contributions and bus. */
+function neighbour(env: ReturnType<typeof setup>, grants: readonly PluginPermission[] = DATA) {
+  const workers = new FakeWorkers()
+  const plugin = detail({ id: 'other.tools', name: 'Other tools', permissions: [...grants], granted: [...grants] })
+  const host = new PluginHost(plugin, grants, {
+    ...hostExtras(env.bus), workers, control: new FakeControl(), storage: new MemoryPluginsPort(), extensions: env.extensions,
+    notify: vi.fn(), navigate: vi.fn(), onChange: vi.fn(), confirm: vi.fn(async () => true), clipboard: vi.fn(async () => undefined),
+    isRoute: () => true, app: { version: '1.0.0', capabilities: ['plugins.manage'] },
+  }, null)
+  host.start()
+  workers.last.send({ type: 'ready' })
+  return { host, worker: workers.last }
+}
+
+/** The operator acts on the plugin's page, opening the gesture window. */
+async function act(host: PluginHost, worker: FakeWorker) {
+  await worker.call('ui.registerPage', { id: 'board', title: 'Board' })
+  host.dispatch('board', { kind: 'action', action: 'go', form: {} })
+}
+
+async function settle() { for (let turn = 0; turn < 10; turn += 1) await Promise.resolve() }
+
+const URL_X = { url: 'https://api.example.com/x' }
+
+describe('PluginHost data and surface APIs', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('contributes slot surfaces and actions and removes either by id', async () => {
+    const { host, worker, extensions, renderSlot } = await running(DATA)
+    expect(await worker.call('ui.registerWidget', { id: 'load', title: 'Load', wide: true })).toMatchObject({ ok: true, value: { surface: 'widget:load' } })
+    expect(await worker.call('ui.registerAction', { id: 'retry', title: 'Retry', scope: 'activity' })).toMatchObject({ ok: true })
+    const [slot] = extensions.snapshot().slots
+    expect(slot).toMatchObject({ owner: 'Acme tools', scope: 'overview', title: 'Load', wide: true })
+    slot?.render({ scope: 'overview' })
+    expect(renderSlot).toHaveBeenCalledWith('acme.tools', 'widget:load', { scope: 'overview' })
+    expect(host.surfaces()).toEqual([{ key: 'acme.tools/widget:load', pluginId: 'acme.tools', surface: 'widget:load', tree: null, problem: '' }])
+    expect(extensions.snapshot().actions).toMatchObject([{ owner: 'Acme tools', scope: 'activity', title: 'Retry' }])
+
+    await worker.call('ui.unregister', { id: 'widget:load' })
+    await worker.call('ui.unregister', { id: 'retry' })
+    expect(extensions.snapshot()).toMatchObject({ slots: [], actions: [] })
+    expect(host.surfaces()).toEqual([])
+
+    const { worker: bare } = await running(['ui:pages'])
+    expect(await bare.call('ui.registerWidget', { id: 'load', title: 'Load' })).toMatchObject({ ok: false, error: { code: 'permission_denied' } })
+  })
+
+  it('lets one plugin own the layout at a time', async () => {
+    const env = await running(DATA)
+    const other = neighbour(env)
+    expect(await env.worker.call('ui.setLayout', { hidden: ['keys'] })).toMatchObject({ ok: true })
+    expect(env.extensions.snapshot().layout).toMatchObject({ owner: 'Acme tools', hidden: ['keys'] })
+    expect(await other.worker.call('ui.setLayout', { hidden: ['activity'] })).toMatchObject({ ok: false, error: { code: 'conflict' } })
+    env.extensions.snapshot().layout?.reset()
+    expect(env.extensions.snapshot().layout).toBeUndefined()
+    expect(await other.worker.call('ui.setLayout', { hidden: ['activity'] })).toMatchObject({ ok: true })
+    expect(env.extensions.snapshot().layout).toMatchObject({ owner: 'Other tools' })
+  })
+
+  it('opens one dialog after a gesture, keeps the last good tree and returns the answer', async () => {
+    const { host, worker } = await running(DATA)
+    const spec = { title: 'Rename', tree: { type: 'text', text: 'Name?' }, actions: [{ id: 'ok', label: 'OK', tone: 'primary' }] }
+    expect(await worker.call('ui.dialog', spec)).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+    await act(host, worker)
+    expect(await worker.call('ui.dialog', spec)).toMatchObject({ ok: true, value: { id: 'd1' } })
+    expect(host.dialog()).toMatchObject({ id: 'd1', title: 'Rename', pluginName: 'Acme tools', tree: { type: 'text', text: 'Name?' } })
+    expect(await worker.call('ui.dialog', spec)).toMatchObject({ ok: false, error: { code: 'busy' } })
+
+    expect(await worker.call('ui.dialogUpdate', { id: 'd1', tree: { type: 'script' } })).toMatchObject({ ok: false, error: { code: 'invalid_tree' } })
+    expect(host.dialog()).toMatchObject({ tree: { type: 'text', text: 'Name?' }, problem: expect.stringMatching(/node type/u) })
+
+    host.answerDialog('d1', 'not-a-button', {})
+    expect(host.dialog()).not.toBeNull()
+    host.answerDialog('d1', 'ok', { name: 'A' })
+    expect(host.dialog()).toBeNull()
+    expect(worker.posted).toContainEqual({ type: 'dialog', id: 'd1', result: { action: 'ok', form: { name: 'A' } } })
+    expect(await worker.call('ui.dialogUpdate', { id: 'd1', tree: { type: 'divider' } })).toMatchObject({ ok: false, error: { code: 'not_found' } })
+  })
+
+  it('limits requests in flight and per minute', async () => {
+    const { worker, control } = await running(DATA)
+    const pending: (() => void)[] = []
+    const answer = { status: 200, headers: {}, body: '' }
+    control.call.mockImplementation((method) => (method === 'plugins.fetch' && pending.length < DATA_LIMITS.fetchInflight
+      ? new Promise((resolve) => { pending.push(() => resolve(answer)) })
+      : Promise.resolve(answer)))
+    for (let index = 0; index < DATA_LIMITS.fetchInflight; index += 1) worker.send({ type: 'call', id: 900 + index, op: 'net.fetch', args: URL_X })
+    await settle()
+    expect(await worker.call('net.fetch', URL_X)).toMatchObject({ ok: false, error: { code: 'rate_limited' } })
+    expect(control.call).toHaveBeenCalledWith('plugins.fetch', expect.objectContaining({ id: 'acme.tools', url: URL_X.url, method: 'GET' }), expect.any(AbortSignal))
+    for (const resolve of pending) resolve()
+    await settle()
+    // A call refused for being over the in-flight cap spends nothing.
+    for (let index = DATA_LIMITS.fetchInflight; index < DATA_LIMITS.fetchPerMinute; index += 1) {
+      expect(await worker.call('net.fetch', URL_X)).toMatchObject({ ok: true })
+    }
+    expect(await worker.call('net.fetch', URL_X)).toMatchObject({ ok: false, error: { code: 'rate_limited' } })
+    vi.setSystemTime(Date.now() + 60_001)
+    expect(await worker.call('net.fetch', URL_X)).toMatchObject({ ok: true })
+    expect(await worker.call('net.fetch', { url: 'http://api.example.com/x' })).toMatchObject({ ok: false, error: { code: 'not_allowed' } })
+  })
+
+  it('unwraps collection answers and budgets collection writes', async () => {
+    const { worker, control } = await running(DATA)
+    const answers: Record<string, unknown> = {
+      'plugins.collection.get': { doc: { a: 1 } }, 'plugins.collection.delete': { deleted: true }, 'plugins.collection.clear': { cleared: 3 },
+      'plugins.collection.put': { ok: true }, 'plugins.collection.list': { items: [{ id: 'x', doc: 1 }] },
+    }
+    control.call.mockImplementation(async (method) => answers[method])
+    expect(await worker.call('db.get', { collection: 'notes', docId: 'a' })).toMatchObject({ ok: true, value: { a: 1 } })
+    expect(await worker.call('db.delete', { collection: 'notes', docId: 'a' })).toMatchObject({ ok: true, value: true })
+    expect(await worker.call('db.clear', { collection: 'notes' })).toMatchObject({ ok: true, value: 3 })
+    expect(await worker.call('db.list', { collection: 'notes' })).toMatchObject({ ok: true, value: { items: [{ id: 'x', doc: 1 }] } })
+    expect(control.call).toHaveBeenCalledWith('plugins.collection.get', { id: 'acme.tools', collection: 'notes', docId: 'a' }, expect.any(AbortSignal))
+    answers['plugins.collection.get'] = { doc: null }
+    expect(await worker.call('db.get', { collection: 'notes', docId: 'b' })).toMatchObject({ ok: true, value: null })
+
+    // delete and clear above were two writes.
+    for (let index = 2; index < DATA_LIMITS.writesPerMinute; index += 1) await worker.call('db.put', { collection: 'notes', docId: `d${index}`, doc: { index } })
+    expect(await worker.call('db.put', { collection: 'notes', docId: 'over', doc: 1 })).toMatchObject({ ok: false, error: { code: 'rate_limited' } })
+  })
+
+  it('reads a picked file only within the gesture window and its size cap', async () => {
+    const { host, worker, files } = await running(DATA)
+    files.next = { name: 'big.json', size: 2048, read: async () => '{}' }
+    expect(await worker.call('files.open', {})).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+    await act(host, worker)
+    expect(await worker.call('files.open', { maxBytes: 1024 })).toMatchObject({ ok: false, error: { code: 'too_large' } })
+    files.next = { name: 'small.json', size: 2, read: async () => '{}' }
+    expect(await worker.call('files.open', { accept: ['.json'] })).toMatchObject({ ok: true, value: { name: 'small.json', text: '{}', size: 2 } })
+    expect(files.opened.at(-1)).toEqual({ accept: ['.json'], maxBytes: DATA_LIMITS.openBytes })
+    expect(await worker.call('files.save', { name: 'out.json', text: '[]' })).toMatchObject({ ok: true, value: true })
+    expect(files.saved).toEqual([{ name: 'out.json', text: '[]' }])
+  })
+
+  it('carries bus messages between plugins but not back to the sender', async () => {
+    const env = await running(DATA)
+    const other = neighbour(env)
+    await env.worker.call('bus.subscribe', { channel: 'news' })
+    await other.worker.call('bus.subscribe', { channel: 'news' })
+    expect(await other.worker.call('bus.publish', { channel: 'news', payload: { n: 1 } })).toMatchObject({ ok: true })
+    expect(env.worker.posted).toContainEqual({ type: 'bus', channel: 'news', payload: { n: 1 }, from: 'other.tools' })
+    expect(other.worker.posted.some((message) => message.type === 'bus')).toBe(false)
+
+    await env.worker.call('bus.unsubscribe', { channel: 'news' })
+    await other.worker.call('bus.publish', { channel: 'news', payload: 2 })
+    expect(env.worker.posted.filter((message) => message.type === 'bus')).toHaveLength(1)
+
+    for (let index = 0; index < DATA_LIMITS.busSubscriptions; index += 1) await env.worker.call('bus.subscribe', { channel: `c${index}` })
+    expect(await env.worker.call('bus.subscribe', { channel: 'c0' })).toMatchObject({ ok: true })
+    expect(await env.worker.call('bus.subscribe', { channel: 'one-more' })).toMatchObject({ ok: false, error: { code: 'limit' } })
+  })
+
+  it('answers relay hooks and fails open on anything it cannot use', async () => {
+    const { worker, control } = await running(DATA)
+    expect(await worker.call('relay.register', { hookId: 'h1', phase: 'request', models: ['gpt-*'] })).toMatchObject({ ok: true })
+    expect(control.call).toHaveBeenCalledWith('relayhooks.register', { pluginId: 'acme.tools', hookId: 'h1', phase: 'request', models: ['gpt-*'], endpoints: [], timeoutMs: DATA_LIMITS.hookTimeoutMs.default }, expect.any(AbortSignal))
+    const invoke = control.listeners.get('relayhooks.invoke')
+    const responses = () => control.call.mock.calls.filter(([method]) => method === 'relayhooks.respond').map(([, payload]) => payload)
+
+    invoke?.({ pluginId: 'acme.tools', hookId: 'h1', callId: 'c1', request: { model: 'gpt-4' } })
+    expect(worker.posted).toContainEqual({ type: 'hook', kind: 'invoke', hookId: 'h1', callId: 'c1', request: { model: 'gpt-4' } })
+    worker.send({ type: 'hookResult', callId: 'c1', decision: { action: 'explode' } })
+    worker.send({ type: 'hookResult', callId: 'c1', decision: { action: 'block', block: { status: 403 } } })
+    invoke?.({ pluginId: 'acme.tools', hookId: 'h9', callId: 'c2', request: {} })
+    invoke?.({ pluginId: 'other.tools', hookId: 'h1', callId: 'c3', request: {} })
+    invoke?.({ pluginId: 'acme.tools', hookId: 'h1', callId: 'c4', request: {} })
+    worker.send({ type: 'hookResult', callId: 'c4', decision: { action: 'rewrite', model: 'gpt-mini' } })
+    expect(responses()).toEqual([
+      { callId: 'c1', action: 'continue' },
+      { callId: 'c2', action: 'continue' },
+      { callId: 'c4', action: 'rewrite', model: 'gpt-mini' },
+    ])
+
+    control.listeners.get('relayhooks.changed')?.({ pluginId: 'acme.tools', hookId: 'h1', removed: true, reason: 'timed out' })
+    invoke?.({ pluginId: 'acme.tools', hookId: 'h1', callId: 'c5', request: {} })
+    expect(responses().at(-1)).toEqual({ callId: 'c5', action: 'continue' })
+  })
+
+  it('stamps the plugin as the actor on rule changes only', async () => {
+    const { worker, control } = await running(DATA)
+    await worker.call('control.call', { method: 'rules.saveRequestRule', payload: { rule: { id: 'r1' }, actor: 'operator' } })
+    expect(control.call).toHaveBeenLastCalledWith('rules.saveRequestRule', { rule: { id: 'r1' }, actor: 'plugin:acme.tools' }, expect.any(AbortSignal))
+    await worker.call('control.call', { method: 'rules.list', payload: {} })
+    expect(control.call).toHaveBeenLastCalledWith('rules.list', {}, expect.any(AbortSignal))
+    expect(await worker.call('control.call', { method: 'rules.deleteRetryRule', payload: 'r1' })).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(await worker.call('control.call', { method: 'rules.reorder', payload: {} })).toMatchObject({ ok: false, error: { code: 'not_allowed' } })
+  })
+
+  it('paints draws on known surfaces and caps tones per second', async () => {
+    const { worker, host, sound } = await running(DATA)
+    await worker.call('ui.registerWidget', { id: 'load', title: 'Load' })
+    const draw = vi.fn()
+    host.canvas.subscribe('widget:load', 'c', draw)
+    worker.send({ type: 'draw', surface: 'widget:load', canvas: 'c', ops: [{ op: 'clear' }] })
+    worker.send({ type: 'draw', surface: 'widget:gone', canvas: 'c', ops: [{ op: 'clear' }] })
+    expect(draw).toHaveBeenCalledTimes(1)
+    const late = vi.fn()
+    host.canvas.subscribe('widget:load', 'c', late)
+    expect(late).toHaveBeenCalledWith(draw.mock.calls[0]?.[0])
+
+    for (let index = 0; index < DATA_LIMITS.tonesPerSecond + 5; index += 1) worker.send({ type: 'tone', spec: { frequency: 440, durationMs: 50 } })
+    expect(sound).toHaveBeenCalledTimes(DATA_LIMITS.tonesPerSecond)
+    expect(sound).toHaveBeenCalledWith({ frequency: 440, durationMs: 50, type: 'sine', volume: DATA_LIMITS.toneVolume })
+
+    const { worker: mute, sound: silent } = await running(['ui:slots'])
+    mute.send({ type: 'tone', spec: { frequency: 440, durationMs: 50 } })
+    expect(silent).not.toHaveBeenCalled()
+  })
+
+  it('stops a worker that floods stream messages', async () => {
+    const { worker, host } = await running(DATA)
+    for (let index = 0; index <= HOST_LIMITS.streamFloodPerSecond; index += 1) worker.send({ type: 'frameDone' })
+    expect(host.runtime()).toMatchObject({ reason: expect.stringMatching(/flooding/u) })
+    expect(host.runtime().state).not.toBe('running')
   })
 })

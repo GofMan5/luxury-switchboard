@@ -123,7 +123,36 @@ const __switchboardStart = (function (scope, boot) {
   const activateHandlers = [];
   const settingHandlers = new Set();
   let settings = freeze(Object.assign({}, boot.settings));
+  let secrets = freeze((boot.secrets || []).slice());
   let active = false;
+  const frameHandlers = new Set();
+  const inputHandlers = new Set();
+  const themeHandlers = new Set();
+  const channels = new Map();
+  const hooks = new Map();
+  const dialogs = new Map();
+  let nextHook = 1;
+
+  // A hook's answer goes back once; anything that goes wrong lets the
+  // request continue (fail-open), as a timeout would.
+  const answerHook = function (callId, decision) {
+    let data = { action: 'continue' };
+    try { if (decision && typeof decision === 'object') data = JSON.parse(JSON.stringify(decision)); } catch (error) { fault(error); }
+    post({ type: 'hookResult', callId: callId, decision: data });
+  };
+  const runHook = function (message) {
+    const hook = hooks.get(message.hookId);
+    const request = freeze(Object.assign({}, message.request));
+    if (message.kind === 'observe') {
+      if (hook && hook.phase === 'response') guard(hook.handler, request, freeze(Object.assign({}, message.response)));
+      return;
+    }
+    if (typeof message.callId !== 'string') return;
+    if (!hook || hook.phase !== 'request') { answerHook(message.callId); return; }
+    let result;
+    try { result = hook.handler(request); } catch (error) { fault(error); answerHook(message.callId); return; }
+    Promise.resolve(result).then(function (decision) { answerHook(message.callId, decision); }, function (error) { fault(error); answerHook(message.callId); });
+  };
 
   listen('message', function (event) {
     const message = event.data;
@@ -166,13 +195,69 @@ const __switchboardStart = (function (scope, boot) {
         const next = freeze(Object.assign({}, message.values));
         const changed = freeze(Object.keys(next).filter(function (key) { return next[key] !== settings[key]; }));
         settings = next;
+        if (Array.isArray(message.secrets)) secrets = freeze(message.secrets.slice());
         if (changed.length === 0) return;
         for (const handler of Array.from(settingHandlers)) guard(handler, next, changed);
+        return;
+      }
+      case 'frame':
+        // The host sends the next frame only after this one is done.
+        for (const handler of Array.from(frameHandlers)) {
+          try { handler(message.dtMs, message.tMs); } catch (error) { fault(error); }
+        }
+        post({ type: 'frameDone' });
+        return;
+      case 'input': {
+        const detail = freeze(Object.assign({}, message.event));
+        for (const handler of Array.from(inputHandlers)) guard(handler, detail);
+        return;
+      }
+      case 'theme': {
+        const theme = freeze(Object.assign({}, message.theme));
+        for (const handler of Array.from(themeHandlers)) guard(handler, theme);
+        return;
+      }
+      case 'bus': {
+        const subscription = channels.get(message.channel);
+        if (subscription) for (const handler of Array.from(subscription.handlers)) guard(handler, message.payload, String(message.from));
+        return;
+      }
+      case 'hook':
+        runHook(message);
+        return;
+      case 'dialog': {
+        const settle = dialogs.get(message.id);
+        if (!settle) return;
+        dialogs.delete(message.id);
+        const result = message.result || {};
+        settle(freeze({ action: typeof result.action === 'string' ? result.action : null, form: freeze(Object.assign({}, result.form)) }));
         return;
       }
       default:
     }
   });
+
+  // The handler is known before the relay can call it, so the first request
+  // is not waved through.
+  const hook = function (phase, filter, handler) {
+    needFunction(handler, 'handler');
+    const hookId = 'h' + nextHook;
+    nextHook += 1;
+    const entry = { phase: phase, handler: handler };
+    hooks.set(hookId, entry);
+    const spec = Object.assign({}, filter, { hookId: hookId, phase: phase });
+    if (phase === 'response') delete spec.timeoutMs;
+    return call('relay.register', spec).then(function () {
+      let removing = null;
+      return function () {
+        if (!removing) removing = call('relay.unregister', { hookId: hookId }).then(function () { hooks.delete(hookId); }, function (error) { removing = null; throw error; });
+        return removing;
+      };
+    }, function (error) {
+      hooks.delete(hookId);
+      throw error;
+    });
+  };
 
   const granted = freeze(boot.plugin.granted.slice());
   const api = freeze({
@@ -198,10 +283,60 @@ const __switchboardStart = (function (scope, boot) {
       setStatus: function (id, status) { return call('ui.setStatus', { id: id, status: status === undefined ? null : status }); },
       setBadge: function (pageId, badge) { return call('ui.setBadge', { pageId: pageId, badge: badge === undefined ? null : badge }); },
       confirm: function (spec) { return call('ui.confirm', spec); },
+      registerWidget: function (spec) { return call('ui.registerWidget', spec); },
+      registerInspectorTab: function (spec) { return call('ui.registerInspectorTab', spec); },
+      registerSettingsSection: function (spec) { return call('ui.registerSettingsSection', spec); },
+      registerAction: function (spec) { return call('ui.registerAction', spec); },
+      registerHeaderButton: function (spec) { return call('ui.registerHeaderButton', spec); },
+      unregister: function (id) { return call('ui.unregister', { id: id }); },
+      setLayout: function (layout) { return call('ui.setLayout', layout); },
+      resetLayout: function () { return call('ui.resetLayout'); },
+      dialog: function (spec) {
+        return call('ui.dialog', spec).then(function (opened) {
+          const id = opened.id;
+          const result = new Promise(function (resolve) { dialogs.set(id, resolve); });
+          return freeze({
+            id: id,
+            update: function (tree) { return call('ui.dialogUpdate', { id: id, tree: tree }); },
+            close: function () { return call('ui.dialogClose', { id: id }); },
+            result: result,
+          });
+        });
+      },
+      sound: freeze({
+        tone: function (spec) {
+          if (!spec || typeof spec !== 'object') throw new TypeError('tone needs a spec object');
+          post({ type: 'tone', spec: JSON.parse(JSON.stringify(spec)) });
+        },
+      }),
+      theme: function () { return call('ui.theme'); },
+      onTheme: function (handler) {
+        const entry = function (theme) { return handler(theme); };
+        needFunction(handler, 'handler');
+        themeHandlers.add(entry);
+        return function () { themeHandlers.delete(entry); };
+      },
+      draw: function (surfaceId, canvasId, ops) {
+        if (typeof surfaceId !== 'string' || typeof canvasId !== 'string' || surfaceId.length > 64 || canvasId.length > 64) throw new TypeError('draw needs a surface id and a canvas id');
+        post({ type: 'draw', surface: surfaceId, canvas: canvasId, ops: ops });
+      },
+      onFrame: function (handler) {
+        const entry = function (dtMs, tMs) { return handler(dtMs, tMs); };
+        needFunction(handler, 'handler');
+        frameHandlers.add(entry);
+        return function () { frameHandlers.delete(entry); };
+      },
+      onInput: function (handler) {
+        const entry = function (event) { return handler(event); };
+        needFunction(handler, 'handler');
+        inputHandlers.add(entry);
+        return function () { inputHandlers.delete(entry); };
+      },
     }),
     settings: freeze({
       get: function (key) { return hasOwn.call(settings, key) ? settings[key] : undefined; },
       all: function () { return settings; },
+      get secrets() { return secrets; },
       onChange: function (handler) {
         needFunction(handler, 'handler');
         const entry = function (values, changed) { return handler(values, changed); };
@@ -271,6 +406,80 @@ const __switchboardStart = (function (scope, boot) {
     }),
     navigate: function (route) { return call('navigate', { route: route }); },
     log: logger,
+    db: freeze({
+      collection: function (name) {
+        return freeze({
+          get: function (id) { return call('db.get', { collection: name, docId: id }); },
+          put: function (id, doc) { return call('db.put', { collection: name, docId: id, doc: doc }); },
+          delete: function (id) { return call('db.delete', { collection: name, docId: id }); },
+          list: function (options) { return call('db.list', Object.assign({}, options, { collection: name })); },
+          clear: function () { return call('db.clear', { collection: name }); },
+          stats: function () { return call('db.stats'); },
+        });
+      },
+    }),
+    files: freeze({
+      open: function (options) { return call('files.open', options || {}); },
+      save: function (file) { return call('files.save', file); },
+    }),
+    bus: freeze({
+      publish: function (channel, payload) { return call('bus.publish', { channel: channel, payload: payload }); },
+      subscribe: function (channel, handler) {
+        needFunction(handler, 'handler');
+        const name = String(channel);
+        let subscription = channels.get(name);
+        if (!subscription) {
+          const created = { handlers: new Set() };
+          subscription = created;
+          channels.set(name, created);
+          call('bus.subscribe', { channel: name }).catch(function (error) {
+            if (channels.get(name) === created) channels.delete(name);
+            fault(error);
+          });
+        }
+        const current = subscription;
+        const entry = function (payload, from) { return handler(payload, from); };
+        current.handlers.add(entry);
+        let off = false;
+        return function () {
+          if (off) return;
+          off = true;
+          current.handlers.delete(entry);
+          if (current.handlers.size === 0 && channels.get(name) === current) {
+            channels.delete(name);
+            call('bus.unsubscribe', { channel: name }).catch(function () { /* stopping anyway */ });
+          }
+        };
+      },
+    }),
+    net: freeze({
+      fetch: function (url, init) {
+        return call('net.fetch', Object.assign({}, init, { url: url })).then(function (answer) {
+          const text = typeof answer.body === 'string' ? answer.body : '';
+          return freeze({
+            status: answer.status,
+            ok: answer.status >= 200 && answer.status <= 299,
+            headers: freeze(Object.assign({}, answer.headers)),
+            text: text,
+            json: function () { return JSON.parse(text); },
+          });
+        });
+      },
+    }),
+    rules: freeze({
+      list: function () { return api.control.call('rules.list', {}); },
+      saveRequestRule: function (rule) { return api.control.call('rules.saveRequestRule', { rule: rule }); },
+      deleteRequestRule: function (id) { return api.control.call('rules.deleteRequestRule', { id: id }); },
+      saveRetryRule: function (rule) { return api.control.call('rules.saveRetryRule', { rule: rule }); },
+      deleteRetryRule: function (id) { return api.control.call('rules.deleteRetryRule', { id: id }); },
+      test: function (input) { return api.control.call('rules.test', input); },
+      stats: function () { return api.control.call('rules.stats', {}); },
+      recentErrors: function (limit) { return api.control.call('rules.recentErrors', limit === undefined ? {} : { limit: limit }); },
+    }),
+    relay: freeze({
+      onRequest: function (filter, handler) { return hook('request', filter, handler); },
+      onResponse: function (filter, handler) { return hook('response', filter, handler); },
+    }),
   });
   seal(scope, 'switchboard', api);
 

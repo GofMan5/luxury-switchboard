@@ -1,7 +1,7 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import type { ControlPort, PluginsPort } from '../application/ports'
 import type { PluginPackage } from '../domain/manifest'
-import { normalizeDetail, normalizeList, normalizeSummary, normalizeValues, type PluginDetail, type PluginSummary } from '../domain/plugin'
+import { normalizeDetail, normalizeList, normalizeSummary, normalizeValues, strings, type PluginDetail, type PluginSummary } from '../domain/plugin'
 
 export class StdioPluginsPort implements PluginsPort {
   readonly #session: ControlPlaneSession
@@ -38,6 +38,19 @@ export class StdioPluginsPort implements PluginsPort {
     return normalizeValues(await this.#session.call('plugins.storage.update', { id, values }))
   }
 
+  async secretSet(id: string, key: string, value: string | null): Promise<string[]> {
+    const answer = await this.#session.call<{ secrets?: unknown }>('plugins.secret.set', { id, key, value })
+    return strings(answer?.secrets)
+  }
+
+  async devLink(path: string): Promise<PluginSummary> {
+    return summaryOf(await this.#session.call('plugins.dev.link', { path }))
+  }
+
+  async devUnlink(id: string): Promise<PluginSummary> {
+    return summaryOf(await this.#session.call('plugins.dev.unlink', { id }))
+  }
+
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {
     return this.#session.subscribe('plugins.changed', (event) => {
       try {
@@ -47,6 +60,12 @@ export class StdioPluginsPort implements PluginsPort {
       }
     })
   }
+}
+
+/** `{ plugin }` as the other commands answer, or the summary itself. */
+function summaryOf(answer: unknown): PluginSummary {
+  const wrapped = answer && typeof answer === 'object' && 'plugin' in answer ? (answer as { plugin: unknown }).plugin : answer
+  return normalizeSummary(wrapped)
 }
 
 /** The control plane as plugins see it. The host has already checked the

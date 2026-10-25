@@ -79,18 +79,42 @@ const SENSITIVE = [
   'codex.logout',
 ] as const
 
+/** Request and retry rules. The host stamps the plugin as the actor on every
+ * change, so a plugin can change only the rules it owns. */
+export const RULES_METHODS = [
+  'rules.list',
+  'rules.stats',
+  'rules.test',
+  'rules.recentErrors',
+  'rules.saveRequestRule',
+  'rules.deleteRequestRule',
+  'rules.saveRetryRule',
+  'rules.deleteRetryRule',
+] as const
+
 /** Never reachable from a plugin, whatever it was granted: managing plugins
- * (a plugin could grant itself more), the persisted appearance (the user's
- * own), the handshake and lifecycle, installing an update, and the plaintext
- * backup — the one place credentials leave the store. */
-const DENIED_PREFIXES = ['plugins.', 'system.', 'backup.']
+ * (a plugin could grant itself more), relay hooks (only the host registers
+ * and answers them, on the plugin's behalf), the persisted appearance (the
+ * user's own), the handshake and lifecycle, installing an update, the
+ * plaintext backup — the one place credentials leave the store — and rule
+ * order, which is the operator's. */
+const DENIED_PREFIXES = ['plugins.', 'system.', 'backup.', 'relayhooks.', 'rules.reorder']
 const DENIED = new Set(['appearance.update', 'updates.install'])
 
 export const CONTROL_METHODS: Readonly<Record<string, PluginPermission>> = Object.freeze(Object.fromEntries<PluginPermission>([
   ...READ.map((method) => [method, 'control:read'] as const),
   ...WRITE.map((method) => [method, 'control:write'] as const),
   ...SENSITIVE.map((method) => [method, 'control:sensitive'] as const),
+  ...RULES_METHODS.map((method) => [method, 'relay:rules'] as const),
 ]))
+
+/** The rule changes; the control plane rejects `actor` on the read-only ones. */
+const STAMPED = new Set<string>(['rules.saveRequestRule', 'rules.deleteRequestRule', 'rules.saveRetryRule', 'rules.deleteRetryRule'])
+
+/** Whether the host must stamp `actor: "plugin:<id>"` on this command. */
+export function stampsActor(method: string): boolean {
+  return STAMPED.has(method)
+}
 
 export type ControlAccess =
   | { readonly allowed: true; readonly permission: PluginPermission }
@@ -108,35 +132,41 @@ export function controlAccess(method: string, granted: ReadonlySet<string>): Con
   return { allowed: true, permission }
 }
 
-/** Live topics a plugin may follow with `control:read`. */
-export const CONTROL_TOPICS: readonly string[] = [
-  'activity.changed',
-  'appearance.changed',
-  'clients.changed',
-  'codex.changed',
-  'guardrails.changed',
-  'guardrails.finding',
-  'keys.changed',
-  'models.tested',
-  'notifications.raised',
-  'providers.changed',
-  'providers.health',
-  'relay.changed',
-  'routes.changed',
-  'settings.changed',
-  'tunnel.changed',
-  'updates.installProgress',
-  'updates.stateChanged',
-]
+/** Live topics a plugin may follow, and the permission each one needs. */
+export const TOPIC_PERMISSIONS: Readonly<Record<string, PluginPermission>> = Object.freeze({
+  'activity.changed': 'control:read',
+  'appearance.changed': 'control:read',
+  'clients.changed': 'control:read',
+  'codex.changed': 'control:read',
+  'guardrails.changed': 'control:read',
+  'guardrails.finding': 'control:read',
+  'keys.changed': 'control:read',
+  'models.tested': 'control:read',
+  'notifications.raised': 'control:read',
+  'providers.changed': 'control:read',
+  'providers.health': 'control:read',
+  'relay.changed': 'control:read',
+  'routes.changed': 'control:read',
+  'rules.changed': 'relay:rules',
+  'settings.changed': 'control:read',
+  'tunnel.changed': 'control:read',
+  'updates.installProgress': 'control:read',
+  'updates.stateChanged': 'control:read',
+})
 
-const TOPICS = new Set(CONTROL_TOPICS)
+export const CONTROL_TOPICS: readonly string[] = Object.keys(TOPIC_PERMISSIONS)
 
 export function topicAccess(topic: string, granted: ReadonlySet<string>): ControlAccess {
-  if (!TOPICS.has(topic)) return { allowed: false, code: 'not_allowed', message: `"${topic}" is not a topic plugins can follow.` }
-  if (!granted.has('control:read')) {
-    return { allowed: false, code: 'permission_denied', permission: 'control:read', message: `Following "${topic}" needs the "control:read" permission, which this plugin was not granted.` }
+  const permission = Object.hasOwn(TOPIC_PERMISSIONS, topic) ? TOPIC_PERMISSIONS[topic] : undefined
+  if (!permission) return { allowed: false, code: 'not_allowed', message: `"${topic}" is not a topic plugins can follow.` }
+  if (!granted.has(permission)) {
+    return { allowed: false, code: 'permission_denied', permission, message: `Following "${topic}" needs the "${permission}" permission, which this plugin was not granted.` }
   }
-  return { allowed: true, permission: 'control:read' }
+  return { allowed: true, permission }
+}
+
+export function topicsFor(permission: PluginPermission): string[] {
+  return Object.entries(TOPIC_PERMISSIONS).filter(([, needed]) => needed === permission).map(([topic]) => topic)
 }
 
 export function methodsFor(permission: PluginPermission): string[] {

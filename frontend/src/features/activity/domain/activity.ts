@@ -38,6 +38,32 @@ export interface ActivityRequest {
   readonly reasoningBudget?: number
   readonly thinking?: boolean
   readonly thinkingMs?: number
+  /** Operator labels from request rules and relay hooks, in first-seen order;
+   * absent when there are none (and from older sidecars). */
+  readonly tags?: readonly string[]
+}
+
+/** The sidecar's own bound on one request's labels. */
+export const MAX_ACTIVITY_TAGS = 16
+const TAG = /^[a-z0-9][a-z0-9_.-]{0,31}$/u
+
+/**
+ * The record as the screen may trust it: tags are data from the wire, so only
+ * well-formed labels survive, once each, at most {@link MAX_ACTIVITY_TAGS}.
+ * An empty or invalid list drops the field instead of rendering nothing.
+ */
+export function normalizeActivityRequest(request: ActivityRequest): ActivityRequest {
+  const raw: unknown = (request as { tags?: unknown }).tags
+  if (raw === undefined) return request
+  const tags: string[] = []
+  if (Array.isArray(raw)) {
+    for (const tag of raw) {
+      if (tags.length >= MAX_ACTIVITY_TAGS) break
+      if (typeof tag === 'string' && TAG.test(tag) && !tags.includes(tag)) tags.push(tag)
+    }
+  }
+  const { tags: _dropped, ...rest } = request
+  return tags.length > 0 ? { ...rest, tags } : rest
 }
 
 /** Still in flight: the relay holds a socket for it. */

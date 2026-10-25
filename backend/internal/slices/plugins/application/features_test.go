@@ -151,7 +151,7 @@ func TestAStoredPluginThisVersionRefusesIsListedBroken(t *testing.T) {
 		t.Fatalf("a healthy plugin is affected: %+v", ok)
 	}
 	stale := byID["acme.stale"]
-	if stale.Problem != "This plugin no longer passes this version's checks (settings[0].type must be text, number, toggle or select). Reinstall a fixed version or remove it." ||
+	if stale.Problem != "This plugin no longer passes this version's checks (settings[0].type must be text, number, toggle, select or secret). Reinstall a fixed version or remove it." ||
 		stale.Enabled || stale.Name != "Stale" || stale.Version != "1.0.0" || !slices.Equal(stale.Granted, []string{domain.PermissionStorage}) ||
 		stale.InstalledAt != "2026-01-01T00:00:00Z" || stale.UpdatedAt != "2026-01-01T01:00:00Z" || stale.SizeBytes <= 0 {
 		t.Fatalf("unexpected stale summary %+v", stale)

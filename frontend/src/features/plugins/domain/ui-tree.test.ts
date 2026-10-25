@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NODE_TYPES, TREE_LIMITS, checkTree, formatNumber, formatScalar, type UiNode } from './ui-tree'
+import { NODE_TYPES, TREE_LIMITS, checkTree, formatNumber, formatScalar, onStep, type UiNode } from './ui-tree'
 
 function ok(raw: unknown): UiNode {
   const checked = checkTree(raw)
@@ -84,6 +84,10 @@ describe('checkTree', () => {
         { type: 'textarea', name: 'note', label: 'Note', rows: 6, action: 'save' },
         { type: 'tabs', name: 'tab', tabs: [{ id: 'one', label: 'One', children: [{ type: 'chart', label: 'Load', values: [1, 2, 3] }] }, { id: 'two', label: 'Two' }] },
         { type: 'callout', tone: 'warning', title: 'Heads up', text: 'Check this.', actions: [{ type: 'button', text: 'Fix', action: 'fix' }] },
+        { type: 'details', summary: 'More', children: [{ type: 'markdown', text: '*hi*' }, { type: 'image', src: 'data:image/gif;base64,R0lGOD==', alt: 'Dot' }] },
+        { type: 'slider', name: 'speed', label: 'Speed', min: 0, max: 10, step: 1, value: 3 },
+        { type: 'color', name: 'tint', label: 'Tint', value: '#112233' },
+        { type: 'canvas', id: 'board', width: 10, height: 10, label: 'Board' },
       ],
     }
     const seen = new Set<string>()
@@ -298,5 +302,53 @@ describe('formatScalar', () => {
     expect(formatScalar(125_000, 'duration')).toBe('2m 05s')
     expect(formatScalar(3_725_000, 'duration')).toBe('1h 02m')
     expect(formatScalar(1234.5, 'number')).toBe('1,235')
+  })
+})
+
+describe('richer nodes', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgo='
+
+  it('fills their defaults', () => {
+    expect(ok({ type: 'markdown', text: '**hi**' })).toEqual({ type: 'markdown', text: '**hi**' })
+    expect(ok({ type: 'image', src: PNG, alt: 'Logo', width: 32 })).toEqual({ type: 'image', src: PNG, alt: 'Logo', width: 32 })
+    expect(ok({ type: 'slider', name: 'speed', label: 'Speed', min: 0, max: 1, step: 0.1, value: 0.34 }))
+      .toEqual({ type: 'slider', name: 'speed', label: 'Speed', min: 0, max: 1, step: 0.1, value: 0.3, disabled: false })
+    expect(ok({ type: 'color', name: 'tint', label: 'Tint', value: '#AABBCC' })).toEqual({ type: 'color', name: 'tint', label: 'Tint', value: '#aabbcc', disabled: false })
+    expect(ok({ type: 'details', summary: 'More', children: [{ type: 'divider' }] })).toEqual({ type: 'details', summary: 'More', open: false, children: [{ type: 'divider' }] })
+    expect(ok({ type: 'canvas', id: 'board', width: 200, height: 400, label: 'Board' }))
+      .toEqual({ type: 'canvas', id: 'board', width: 200, height: 400, label: 'Board', keys: false, pointer: false, frames: false, fit: 'contain' })
+  })
+
+  it('takes inline pictures only', () => {
+    for (const src of ['https://example.test/a.png', '//example.test/a.png', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:text/html;base64,PGI+', 'data:image/png,raw', `${PNG}"onerror="x`]) {
+      expect(problem({ type: 'image', src, alt: 'x' })).toMatch(/must be a data:image/u)
+    }
+    // The page budget is the same size, so an oversized picture is refused before its own check.
+    expect(problem({ type: 'image', src: `data:image/png;base64,${'A'.repeat(TREE_LIMITS.image)}`, alt: 'x' })).toMatch(/^The tree is 257 KiB/u)
+    expect(problem({ type: 'image', src: PNG, alt: 'x', width: 0 })).toMatch(/^tree\.width/u)
+  })
+
+  it('checks slider ranges and colour form', () => {
+    expect(problem({ type: 'slider', name: 's', label: 'S', min: 5, max: 5, step: 1, value: 5 })).toBe('tree.max must be above min.')
+    expect(problem({ type: 'slider', name: 's', label: 'S', min: 0, max: 5, step: 0, value: 1 })).toBe('tree.step must be above 0.')
+    expect(problem({ type: 'color', name: 'c', label: 'C', value: 'red' })).toBe('tree.value must be a #rrggbb colour.')
+    expect(problem({ type: 'color', name: 'c', label: 'C', value: '#abc' })).toBe('tree.value must be a #rrggbb colour.')
+  })
+
+  it('keeps canvas ids unique and sizes bounded', () => {
+    const canvas = { type: 'canvas', width: 10, height: 10, label: 'C' }
+    expect(problem({ type: 'stack', children: [{ ...canvas, id: 'a' }, { type: 'details', summary: 's', children: [{ ...canvas, id: 'a' }] }] }))
+      .toBe('tree.children[1].children[0].id repeats the id of the canvas at tree.children[0].')
+    expect(problem({ ...canvas, id: 'a', width: 4096 })).toMatch(/^tree\.width/u)
+    expect(problem({ type: 'canvas', id: 'a', height: 10, label: 'C' })).toMatch(/^tree\.width/u)
+    expect(problem({ ...canvas, id: 'a', fit: 'cover' })).toMatch(/^tree\.fit/u)
+  })
+
+  it('snaps slider values onto the step', () => {
+    expect(onStep(0.34, 0, 1, 0.1)).toBe(0.3)
+    expect(onStep(7, 0, 5, 1)).toBe(5)
+    expect(onStep(-2, 0, 5, 1)).toBe(0)
+    expect(onStep(9, 0, 10, 3)).toBe(9)
+    expect(onStep(10, 0, 10, 3)).toBe(9)
   })
 })

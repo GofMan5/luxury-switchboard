@@ -16,6 +16,7 @@ import type { GuardrailRecord } from '../features/guardrails/domain/guardrail'
 import type { InsightsReport, HistoryRequest, ModelPrice } from '../features/insights/domain/insights'
 import { ControlPlaneError } from '../shared/contracts/protocol'
 import { PLUGIN_LIMIT, checkPackage, needsNewerApp, type PluginPackage } from '../features/plugins/domain/manifest'
+import { FixtureRules } from './fixture-rules'
 
 interface FixturePlugin {
   package: PluginPackage
@@ -24,6 +25,7 @@ interface FixturePlugin {
   installedAt: string
   updatedAt: string
   storage: Record<string, string>
+  secrets?: Record<string, string>
 }
 
 const FIXTURE_PLUGINS_KEY = 'switchboard.fixture.plugins'
@@ -95,6 +97,8 @@ function fixtureRequest(index: number, offsetMs: number): ActivityRequest {
     // The level each client dialect sends: an effort name, a token budget,
     // or nothing at all (the provider's default).
     ...fixtureReasoning(index, state, output),
+    // Labels from request rules and relay hooks, on some rows only.
+    ...(index % 3 === 0 ? { tags: index % 2 === 0 ? ['team.alpha', 'batch'] : ['nightly'] } : {}),
   }
 }
 
@@ -273,8 +277,9 @@ export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = appVersion
   /** The fixture advertises the Codex preset flow, its usage probes and the
    * fleet wake, like a current control plane. */
-  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage']
+  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'rules.manage']
   readonly #listeners = new Map<string, Set<EventListener>>()
+  readonly #rules = new FixtureRules((topic, payload) => this.#emit(topic, payload))
   // The appearance store survives a dev reload in browser storage, like the
   // encrypted record survives a restart of the real control plane.
   #appearance: Record<string, unknown> = (() => {
@@ -452,7 +457,52 @@ export class FixtureSession implements ControlPlaneSession {
       enabled: record.enabled && !problem, installedAt: record.installedAt, updatedAt: record.updatedAt,
       sizeBytes: new TextEncoder().encode(JSON.stringify(pkg)).length,
       hasScript: Boolean(pkg.script?.trim()), hasCss: Boolean(pkg.css?.trim()), hasTheme: pkg.theme !== undefined, hasSettings: Boolean(pkg.settings?.length),
-      problem,
+      problem, secrets: Object.keys(record.secrets ?? {}).sort(), hosts: pkg.network?.hosts ?? [],
+    }
+  }
+
+  // ponytail: collections live in memory only; a dev reload starts empty.
+  #collections = new Map<string, Map<string, Map<string, unknown>>>()
+
+  #collection(body: Record<string, unknown>): Map<string, unknown> {
+    const record = this.#pluginFind(body.id)
+    const name = typeof body.collection === 'string' ? body.collection : ''
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/u.test(name)) throw new ControlPlaneError('invalid_plugin', 'Plugin collection name is invalid')
+    const all = this.#collections.get(record.package.id) ?? new Map<string, Map<string, unknown>>()
+    this.#collections.set(record.package.id, all)
+    const docs = all.get(name) ?? new Map<string, unknown>()
+    all.set(name, docs)
+    return docs
+  }
+
+  #collectionAnswer(method: string, body: Record<string, unknown>): unknown {
+    if (method === 'plugins.collection.stats') {
+      const all = [...(this.#collections.get(this.#pluginFind(body.id).package.id) ?? new Map<string, Map<string, unknown>>())]
+      const collections = all.filter(([, docs]) => docs.size > 0).map(([name, docs]) => ({ name, count: docs.size, bytes: new TextEncoder().encode(JSON.stringify([...docs])).length }))
+      return { collections, bytes: collections.reduce((sum, item) => sum + item.bytes, 0), limitBytes: 2 * 1024 * 1024 }
+    }
+    const docs = this.#collection(body)
+    const docId = typeof body.docId === 'string' ? body.docId : ''
+    switch (method) {
+      case 'plugins.collection.get': return { doc: docs.get(docId) ?? null }
+      case 'plugins.collection.put':
+        if (body.doc === null || body.doc === undefined) throw new ControlPlaneError('invalid_plugin', 'Plugin document must not be null')
+        docs.set(docId, body.doc)
+        return { ok: true }
+      case 'plugins.collection.delete': return { deleted: docs.delete(docId) }
+      case 'plugins.collection.clear': {
+        const cleared = docs.size
+        docs.clear()
+        return { cleared }
+      }
+      default: {
+        const prefix = typeof body.prefix === 'string' ? body.prefix : ''
+        const after = typeof body.after === 'string' ? body.after : ''
+        const limit = typeof body.limit === 'number' ? body.limit : 50
+        const ids = [...docs.keys()].filter((id) => id.startsWith(prefix) && id > after).sort()
+        const page = ids.slice(0, limit)
+        return { items: page.map((id) => ({ id, doc: docs.get(id) })), ...(ids.length > limit ? { next: page.at(-1) } : {}) }
+      }
     }
   }
 
@@ -521,6 +571,7 @@ export class FixtureSession implements ControlPlaneSession {
       case 'plugins.remove': {
         this.#pluginFind(body.id)
         this.#plugins.delete(body.id as string)
+        this.#collections.delete(body.id as string)
         this.#pluginChanged()
         return { removed: true }
       }
@@ -538,7 +589,27 @@ export class FixtureSession implements ControlPlaneSession {
         if (count > 64 || (count === 0 && body.clear !== true)) throw new ControlPlaneError('invalid_plugin', 'Plugin values must list at most 64 keys, and at least one unless clearing')
         return { values: this.#pluginStore(record, values as Record<string, unknown>, body.clear === true) }
       }
-      default: throw new Error(`fixture session has no answer for ${method}`)
+      case 'plugins.secret.set': {
+        const record = this.#pluginFind(body.id)
+        const key = typeof body.key === 'string' ? body.key : ''
+        if (!record.package.settings?.some((setting) => setting.key === key && setting.type === 'secret')) throw new ControlPlaneError('invalid_plugin', 'Plugin has no such secret setting')
+        const secrets = { ...record.secrets }
+        if (typeof body.value === 'string' && body.value) secrets[key] = body.value
+        else delete secrets[key]
+        record.secrets = secrets
+        this.#pluginChanged()
+        return { secrets: Object.keys(secrets).sort() }
+      }
+      case 'plugins.fetch': {
+        this.#pluginFind(body.id)
+        // Nothing leaves a dev browser: every request gets the same canned answer.
+        return { status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fixture: true, method: body.method ?? 'GET', url: body.url }), redirected: false }
+      }
+      case 'plugins.dev.link': throw new ControlPlaneError('plugin_dev_problem', 'Loading a plugin from a folder needs the desktop app.')
+      case 'plugins.dev.unlink': throw new ControlPlaneError('plugin_not_linked', 'Plugin is not loaded from a folder')
+      default:
+        if (method.startsWith('plugins.collection.')) return this.#collectionAnswer(method, body)
+        throw new Error(`fixture session has no answer for ${method}`)
     }
   }
   // ── End plugins ──────────────────────────────────────────────────────────
@@ -546,6 +617,7 @@ export class FixtureSession implements ControlPlaneSession {
   #answer(method: string, payload?: unknown): unknown {
     const body = (payload ?? {}) as Record<string, never>
     if (method.startsWith('plugins.')) return this.#pluginAnswer(method, body)
+    if (method.startsWith('rules.')) return this.#rules.answer(method, body)
     switch (method) {
       case 'appearance.get': return { ...this.#appearance }
       case 'appearance.update': {
@@ -554,6 +626,11 @@ export class FixtureSession implements ControlPlaneSession {
         this.#emit('appearance.changed', { ...this.#appearance })
         return { ...this.#appearance }
       }
+      // No relay traffic in the fixture, so hooks are accepted and never called.
+      case 'relayhooks.register': return { registered: true }
+      case 'relayhooks.unregister': return { removed: 1 }
+      case 'relayhooks.reset': return { removed: 0 }
+      case 'relayhooks.respond': return { accepted: false }
       case 'relay.status': return { state: 'live', address: 'http://127.0.0.1:8787', port: 8787 }
       case 'updates.status': return { ...updateFeed }
       case 'updates.check': return (async () => {

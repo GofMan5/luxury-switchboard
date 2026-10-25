@@ -1,7 +1,9 @@
+import type { ThemeToken } from '../domain/canvas'
 import type { PluginPackage } from '../domain/manifest'
 import type { PluginDetail, PluginSummary } from '../domain/plugin'
 import type { HostMessage } from '../domain/protocol'
 import type { SettingValue } from '../domain/settings'
+import type { OpenSpec, SaveSpec } from '../domain/specs'
 
 /** The control plane's plugin store. */
 export interface PluginsPort {
@@ -14,6 +16,13 @@ export interface PluginsPort {
   /** Applies every change (`null` deletes) in one encrypted write, or none of
    * them. Answers with every value the plugin now has. */
   storageUpdate(id: string, values: Readonly<Record<string, string | null>>): Promise<Record<string, string>>
+  /** Sets (`value`) or clears (`null`) one secret setting. Answers with the
+   * keys that now have a value; a value is never read back. */
+  secretSet(id: string, key: string, value: string | null): Promise<string[]>
+  /** Loads a plugin from a folder on this computer for development. */
+  devLink(path: string): Promise<PluginSummary>
+  /** Stops loading a plugin from its folder. */
+  devUnlink(id: string): Promise<PluginSummary>
   /** Installs, upgrades, updates and removals — from this window or another. */
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void
 }
@@ -30,6 +39,8 @@ export interface BootContext {
   readonly app: { readonly version: string; readonly capabilities: readonly string[] }
   /** The operator's current setting values, defaults filled in. */
   readonly settings: Readonly<Record<string, SettingValue>>
+  /** The keys of the plugin's secret settings that have a value. */
+  readonly secrets: readonly string[]
 }
 
 /** A question a plugin asks the operator before it does something. */
@@ -61,4 +72,30 @@ export interface Announcement {
   readonly severity: 'info' | 'success' | 'warning' | 'danger'
   readonly title: string
   readonly body: string
+}
+
+/** The window's current colours, as `ui.theme()` reports them. */
+export interface ThemeInfo {
+  readonly mode: 'dark' | 'light'
+  readonly tokens: Readonly<Record<ThemeToken, string>>
+}
+
+export interface ThemePort {
+  read(): ThemeInfo
+  /** Runs `listener` after the operator changes the theme or mode. */
+  subscribe(listener: () => void): () => void
+}
+
+/** A file the operator picked; nothing is read until `read()`. */
+export interface PickedFile {
+  readonly name: string
+  readonly size: number
+  read(): Promise<string>
+}
+
+export interface FilesPort {
+  /** Resolves null when the operator cancels (or the signal aborts). */
+  open(spec: OpenSpec, signal: AbortSignal): Promise<PickedFile | null>
+  /** Resolves false when the operator cancels. */
+  save(spec: SaveSpec): Promise<boolean>
 }

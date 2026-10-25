@@ -1,16 +1,18 @@
 ﻿import { useContext, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type KeyboardEvent as UIKeyboardEvent, type ReactNode } from 'react'
-import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, RefreshCw, RotateCcw, Save, ShieldCheck } from 'lucide-react'
+import { ArchiveRestore, Bell, Database, Gauge, GitBranch, History, Puzzle, RefreshCw, RotateCcw, Save, ShieldCheck } from 'lucide-react'
 import { Button } from '../../../shared/ui/Button'
 import { useMediaQuery } from '../../../shared/ui/useMediaQuery'
+import { SlotFrame } from '../../../app/Contributed'
+import { useContributed } from '../../../app/contributions'
 import { ServicesContext } from '../../../app/services'
 import { SETTINGS_DEFAULTS, type Settings } from '../domain/settings'
 import { useSettings } from './useSettings'
 import type { UpdatesState } from '../../updates/application/updates-model'
 import styles from './SettingsPage.module.css'
 
-type SettingsTab = 'relay' | 'reliability' | 'data' | 'routing' | 'interface' | 'updates' | 'backup'
+type SettingsTab = 'relay' | 'reliability' | 'data' | 'routing' | 'interface' | 'updates' | 'backup' | 'plugins'
 
-const tabs: readonly { id: SettingsTab; label: string; icon: ReactNode; description: string }[] = [
+const baseTabs: readonly { id: SettingsTab; label: string; icon: ReactNode; description: string }[] = [
   { id: 'relay', label: 'Relay', icon: <Gauge size={16} />, description: 'The address your clients call and how much traffic may pile up waiting.' },
   { id: 'reliability', label: 'Reliability', icon: <ShieldCheck size={16} />, description: 'Timeouts and retries shared by every provider profile.' },
   { id: 'data', label: 'Data', icon: <Database size={16} />, description: 'How much the app remembers, in memory and on disk.' },
@@ -19,9 +21,11 @@ const tabs: readonly { id: SettingsTab; label: string; icon: ReactNode; descript
   { id: 'updates', label: 'Updates', icon: <RefreshCw size={16} />, description: 'How the app learns about a new release — and a button that asks right now.' },
   { id: 'backup', label: 'Backup', icon: <ArchiveRestore size={16} />, description: 'Carry providers, keys, routes and model prices to another machine or another install.' },
 ]
+/** Shown only while a running plugin contributes a settings section. */
+const pluginsTab = { id: 'plugins', label: 'Plugins', icon: <Puzzle size={16} />, description: 'Sections your running plugins add. Each one keeps and saves its own values.' } as const
 
 /** Which draft fields a tab edits, so its reset touches its own and nothing else. */
-const tabFields: Record<Exclude<SettingsTab, 'backup'>, readonly (keyof Settings)[]> = {
+const tabFields: Record<Exclude<SettingsTab, 'backup' | 'plugins'>, readonly (keyof Settings)[]> = {
   relay: ['listenerPort', 'maxRequestMiB', 'maxQueued', 'streamProbationMilliseconds'],
   reliability: ['headerTimeoutSeconds', 'streamIdleSeconds', 'heartbeatSeconds', 'retryBaseMilliseconds', 'retryMaxSeconds', 'permanentAttempts'],
   data: ['activityCapacity', 'historyRetentionDays', 'tunnelRetentionHours', 'guardrailFindings'],
@@ -53,7 +57,11 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
   // The page hoists the tab so a post-save remount keeps it; the form rendered
   // standalone (its tests) just keeps its own.
   const [internalTab, setInternalTab] = useState<SettingsTab>('relay')
-  const tab = controlledTab ?? internalTab
+  const { slots: pluginSlots } = useContributed('settings')
+  const tabs = pluginSlots.length > 0 ? [...baseTabs, pluginsTab] : baseTabs
+  // A plugin that stops takes its tab with it; the page falls back to the first.
+  const requestedTab = controlledTab ?? internalTab
+  const tab = tabs.some((entry) => entry.id === requestedTab) ? requestedTab : 'relay'
   const setTab = onTab ?? setInternalTab
   const dirty = JSON.stringify(settings) !== JSON.stringify(initial)
   const set = <K extends keyof Settings>(field: K, value: Settings[K]) => {
@@ -62,7 +70,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
   // The tab reset writes the shipped defaults back into the draft; saving is
   // still the operator's call, so an accidental click is one Cancel away.
   const resetTab = () => {
-    if (tab === 'backup') return
+    if (tab === 'backup' || tab === 'plugins') return
     setSettings((current) => {
       const next = { ...current }
       for (const field of tabFields[tab]) {
@@ -71,7 +79,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
       return next
     })
   }
-  const tabAtDefaults = tab !== 'backup' && tabFields[tab].every((field) => settings[field] === SETTINGS_DEFAULTS[field])
+  const tabAtDefaults = tab !== 'backup' && tab !== 'plugins' && tabFields[tab].every((field) => settings[field] === SETTINGS_DEFAULTS[field])
   const submit = (event: FormEvent) => { event.preventDefault(); void onSave(settings) }
   const activeTab = tabs.find((entry) => entry.id === tab) ?? tabs[0]
   // The save bar counts what actually differs, so "Save" never lies.
@@ -138,7 +146,7 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
               <h2>{activeTab.label}</h2>
               <p>{activeTab.description}</p>
             </div>
-            {tab !== 'backup' ? (
+            {tab !== 'backup' && tab !== 'plugins' ? (
               <Button type="button" variant="ghost" disabled={tabAtDefaults} onClick={resetTab}>
                 <RotateCcw size={14} aria-hidden="true" />
                 Defaults
@@ -276,6 +284,12 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
           {tab === 'backup' ? (
             <div className={styles.fields}>
               <BackupPanel />
+            </div>
+          ) : null}
+
+          {tab === 'plugins' ? (
+            <div className={styles.fields}>
+              {pluginSlots.map((slot) => <SlotFrame key={slot.id} slot={slot} context={{ scope: 'settings' }} />)}
             </div>
           ) : null}
 

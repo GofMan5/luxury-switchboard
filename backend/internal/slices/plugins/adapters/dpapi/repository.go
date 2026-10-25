@@ -37,6 +37,10 @@ type storedPlugin struct {
 	InstalledAt time.Time         `json:"installedAt"`
 	UpdatedAt   time.Time         `json:"updatedAt"`
 	Storage     map[string]string `json:"storage"`
+	// Secrets are the owner's secret setting values. They live only here,
+	// encrypted with the plugin, and are never part of a backup.
+	Secrets map[string]string `json:"secrets,omitempty"`
+	Dev     *domain.DevLink   `json:"dev,omitempty"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -76,6 +80,8 @@ func (repository *Repository) Load(ctx context.Context) ([]domain.Plugin, error)
 			InstalledAt: saved.InstalledAt,
 			UpdatedAt:   saved.UpdatedAt,
 			Storage:     saved.Storage,
+			Secrets:     saved.Secrets,
+			Dev:         saved.Dev,
 		})
 	}
 	return plugins, nil
@@ -97,6 +103,8 @@ func (repository *Repository) Save(ctx context.Context, plugins []domain.Plugin)
 			InstalledAt: plugin.InstalledAt.UTC(),
 			UpdatedAt:   plugin.UpdatedAt.UTC(),
 			Storage:     plugin.Storage,
+			Secrets:     plugin.Secrets,
+			Dev:         plugin.Dev,
 		})
 	}
 	// encryptedfile refuses an oversized document without saying why; measure

@@ -65,6 +65,14 @@ type Summary struct {
 	// this version refuses the stored plugin and what to do; such a plugin
 	// is listed disabled and can only be reinstalled or removed.
 	Problem string `json:"problem"`
+	// Secrets names the secret settings that have a value, in declared
+	// order. Values never leave the control plane.
+	Secrets []string `json:"secrets"`
+	// Hosts is the package's network allowlist, empty without net:fetch, so
+	// an update review can tell when it reaches somewhere new.
+	Hosts []string `json:"hosts"`
+	// Dev is set while the plugin is loaded from a source folder.
+	Dev *domain.DevLink `json:"dev,omitempty"`
 }
 
 // Detail is the whole of one plugin, as plugins.get answers it.
@@ -112,6 +120,9 @@ type Service struct {
 	// It runs under opMu, so notifications arrive in mutation order and the
 	// last one always describes the current state.
 	changed func([]Summary)
+	// removed hears each plugin id that stopped being installed, after the
+	// removal was saved. It runs under opMu, outside mu.
+	removed []func(id string)
 }
 
 // NewService creates the service. budget bounds the encoded plugins.get and
@@ -136,6 +147,28 @@ func (service *Service) OnChanged(listener func([]Summary)) {
 	service.opMu.Lock()
 	service.changed = listener
 	service.opMu.Unlock()
+}
+
+// OnRemoved adds a listener told the id of every plugin once its removal is
+// saved, so other slices can drop what that plugin registered. Listeners run
+// in the order added, synchronously, under the service's mutation lock: they
+// must not call back into this service. Set before serving.
+func (service *Service) OnRemoved(listener func(id string)) {
+	service.opMu.Lock()
+	service.removed = append(service.removed, listener)
+	service.opMu.Unlock()
+}
+
+// Granted reports whether plugin id is installed, usable, enabled and holds
+// permission. Other slices ask it before acting on a plugin's behalf.
+func (service *Service) Granted(id, permission string) bool {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	if service.loadErr != nil {
+		return false
+	}
+	entry, exists := service.plugins[id]
+	return exists && entry.problem == "" && entry.plugin.Enabled && slices.Contains(entry.plugin.Granted, permission)
 }
 
 // Load restores the saved plugins. A failure is remembered and every command
@@ -192,6 +225,11 @@ func (service *Service) restoreOne(record domain.Plugin) (installed, error) {
 	if plugin.Storage == nil {
 		plugin.Storage = map[string]string{}
 	}
+	plugin.Secrets = maps.Clone(record.Secrets)
+	if plugin.Dev != nil {
+		link := *record.Dev
+		plugin.Dev = &link
+	}
 	size, sizeErr := encodedSize(plugin.Package)
 	broken := func(problem string) installed {
 		if sizeErr != nil {
@@ -239,9 +277,10 @@ func (service *Service) StorageGet(id string) (Values, error) {
 }
 
 // Install adds pkg, or upgrades the installed plugin with its id: an upgrade
-// keeps the plugin's storage and install time, enables it and replaces the
-// grant. Installing over a broken entry replaces it, keeping only the stored
-// install time and storage that still pass.
+// keeps the plugin's storage, the secrets the new version still declares and
+// the install time, enables it and replaces the grant. A manual install ends
+// a dev link. Installing over a broken entry replaces it, keeping only the
+// stored install time and storage that still pass.
 func (service *Service) Install(ctx context.Context, pkg domain.Package, granted []string) (Summary, error) {
 	pkg = pkg.Normalized()
 	if err := pkg.Validate(); err != nil {
@@ -269,6 +308,7 @@ func (service *Service) Install(ctx context.Context, pkg domain.Package, granted
 	plugin := domain.Plugin{Package: pkg, Enabled: true, Granted: granted, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}}
 	if previous, exists := current[pkg.ID]; exists {
 		plugin.InstalledAt, plugin.UpdatedAt, plugin.Storage = upgraded(previous, now)
+		plugin.Secrets = domain.KeptSecrets(pkg.Settings, previous.plugin.Secrets)
 	} else if len(current) >= domain.MaxPlugins {
 		return Summary{}, ErrLimit
 	}
@@ -356,7 +396,40 @@ func (service *Service) Remove(ctx context.Context, id string) error {
 		return err
 	}
 	service.notify(next)
+	for _, listener := range service.removed {
+		listener(id)
+	}
 	return nil
+}
+
+// SetSecret sets the secret setting key, or clears it when value is nil, and
+// returns the names that have a value afterwards. The value is never
+// returned; a change is announced so the shell can show "Set" or "Not set".
+func (service *Service) SetSecret(ctx context.Context, id, key string, value *string) ([]string, error) {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	current, err := service.current()
+	if err != nil {
+		return nil, err
+	}
+	entry, exists := current[id]
+	if !exists {
+		return nil, ErrNotFound
+	}
+	if entry.problem != "" {
+		return nil, ErrBroken
+	}
+	secrets, err := domain.WithSecret(entry.plugin.Package.Settings, entry.plugin.Secrets, key, value)
+	if err != nil {
+		return nil, err
+	}
+	if !maps.Equal(secrets, entry.plugin.Secrets) {
+		entry.plugin.Secrets = secrets
+		if err := service.commit(ctx, current, entry, ErrStorageFull); err != nil {
+			return nil, err
+		}
+	}
+	return secretNames(entry.plugin), nil
 }
 
 // StorageSet sets key, or deletes it when value is nil, and returns the
@@ -494,6 +567,13 @@ func summaries(plugins map[string]installed) []Summary {
 	return list
 }
 
+func hosts(network *domain.Network) []string {
+	if network == nil {
+		return []string{}
+	}
+	return slices.Clone(network.Hosts)
+}
+
 func summary(entry installed) Summary {
 	plugin := entry.plugin
 	if entry.problem != "" {
@@ -519,7 +599,30 @@ func summary(entry installed) Summary {
 		HasTheme:      pkg.Theme != nil,
 		HasSettings:   len(pkg.Settings) > 0,
 		Problem:       entry.problem,
+		Secrets:       secretNames(plugin),
+		Hosts:         hosts(pkg.Network),
+		Dev:           devCopy(plugin.Dev),
 	}
+}
+
+// secretNames lists the secret settings of plugin that have a value.
+func secretNames(plugin domain.Plugin) []string {
+	names := []string{}
+	for _, key := range domain.SecretKeys(plugin.Package.Settings) {
+		if plugin.Secrets[key] != "" {
+			names = append(names, key)
+		}
+	}
+	return names
+}
+
+func devCopy(link *domain.DevLink) *domain.DevLink {
+	if link == nil {
+		return nil
+	}
+	copied := *link
+	copied.LoadedAt = copied.LoadedAt.UTC()
+	return &copied
 }
 
 // listed is what of a refused record can be shown: fields that break their

@@ -70,6 +70,11 @@
 .safeMode { display: inline-flex; min-height: 26px; align-items: center; gap: 6px; border: 1px solid color-mix(in srgb, var(--status-warning) 40%, transparent); border-radius: var(--radius-control); padding: 0 8px; color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 8%, transparent); font: inherit; font-size: var(--fs-xs); font-weight: 500; cursor: pointer; transition: background var(--motion-fast); }
 .safeMode:hover { background: color-mix(in srgb, var(--status-warning) 15%, transparent); }
 .safeMode:active { background: color-mix(in srgb, var(--status-warning) 20%, transparent); }
+.headerAction { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); color: var(--text-secondary); background: transparent; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
+.headerAction:hover { color: var(--text-primary); background: var(--bg-hover); }
+.headerAction:active { background: var(--bg-selected); }
+.headerAction:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.headerAction[data-tone='danger'] { color: var(--status-danger); }
 .content { position: relative; min-width: 0; min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; }
 .content:focus-visible { outline: 0; }
 

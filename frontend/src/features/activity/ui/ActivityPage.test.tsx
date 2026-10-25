@@ -6,7 +6,7 @@ import type { ActivityRequest } from '../domain/activity'
 import type { ActivityModelState } from '../application/activity-model'
 
 vi.mock('./useActivity', () => ({ useActivity: vi.fn() }))
-vi.mock('../../../app/services', () => ({ useAppServices: vi.fn() }))
+vi.mock('../../../app/services', async (actual) => ({ ...await actual<typeof import('../../../app/services')>(), useAppServices: vi.fn() }))
 
 import { useAppServices } from '../../../app/services'
 import ActivityPage from './ActivityPage'
@@ -218,5 +218,34 @@ describe('ActivityPage reasoning', () => {
     show({ phase: 'ready', available: 1, summary, error: '', requests: [request('a')] })
     fireEvent.click(rows()[0])
     expect(screen.getByRole('complementary').textContent).toContain('ReasoningProvider default')
+  })
+})
+
+describe('ActivityPage tags and retry rules', () => {
+  const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')]
+
+  it('lists tags in the inspector and finds a request by one of them', () => {
+    show({ phase: 'ready', available: 2, summary, error: '', requests: [{ ...request('a', 'completed'), tags: ['batch', 'nightly'] }, request('b', 'completed')] })
+    fireEvent.change(screen.getByPlaceholderText(/Search model, route, tag/u), { target: { value: 'nightly' } })
+    expect(rows()).toHaveLength(1)
+    fireEvent.click(rows()[0])
+    const tags = screen.getByRole('region', { name: 'Tags' })
+    expect([...tags.querySelectorAll('li')].map((item) => item.textContent)).toEqual(['batch', 'nightly'])
+  })
+
+  it('offers a prefilled retry rule for a failed request, only where rules exist', () => {
+    mockUseAppServices.mockReturnValue({ activity: { connect: mockConnect }, capabilities: ['rules.manage'] } as never)
+    show({ phase: 'ready', available: 2, summary, error: '', requests: [{ ...request('a', 'failed'), status: 503, errorCode: 'upstream_unavailable' }, request('b', 'completed')] })
+    fireEvent.click(rows()[0])
+    const link = screen.getByRole('link', { name: 'Create retry rule' })
+    expect(link.getAttribute('href')).toMatch(/^#rules\?tab=retry&draft=1&/u)
+    expect(link.getAttribute('href')).toContain('status=503')
+    fireEvent.click(rows()[1])
+    expect(screen.queryByRole('link', { name: 'Create retry rule' })).toBeNull()
+    cleanup()
+    mockUseAppServices.mockReturnValue({ activity: { connect: mockConnect } } as never)
+    show({ phase: 'ready', available: 1, summary, error: '', requests: [request('a', 'failed')] })
+    fireEvent.click(rows()[0])
+    expect(screen.queryByRole('link', { name: 'Create retry rule' })).toBeNull()
   })
 })

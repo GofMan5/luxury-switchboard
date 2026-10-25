@@ -24,9 +24,18 @@ export const FRAME_BYTES = 262_144
 export const PAYLOAD_BYTES = 258_048
 export const PLUGIN_LIMIT = 24
 export const HOMEPAGE_BYTES = 200
+/** Permissions one package may list. */
+export const PERMISSION_LIMIT = 24
+/** Hosts in `network.hosts`. */
+export const NETWORK_HOST_LIMIT = 16
+const HOST_BYTES = 253
+export { SECRET_SETTING_LIMIT, SECRET_VALUE_LIMIT } from './settings'
 const APP_VERSION_PATTERN = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/u
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u
+/** Names that only ever mean this machine or the local network. */
+const PRIVATE_SUFFIXES = ['localhost', 'local', 'internal'] as const
 
-const PACKAGE_FIELDS = new Set(['schema', 'id', 'name', 'version', 'author', 'description', 'homepage', 'minAppVersion', 'permissions', 'settings', 'theme', 'css', 'script'])
+const PACKAGE_FIELDS = new Set(['schema', 'id', 'name', 'version', 'author', 'description', 'homepage', 'minAppVersion', 'permissions', 'network', 'settings', 'theme', 'css', 'script'])
 // Go's unicode.IsSpace or unicode.IsControl.
 // eslint-disable-next-line no-control-regex -- control characters are exactly what this refuses
 const SPACE_OR_CONTROL = /[\p{White_Space}\u0000-\u001f\u007f-\u009f]/u
@@ -44,6 +53,11 @@ export interface PluginTheme {
   readonly tokens: Readonly<Record<string, string>>
 }
 
+export interface PluginNetwork {
+  /** Lowercase DNS names; a leading `*.` allows every subdomain (not the name itself). */
+  readonly hosts: readonly string[]
+}
+
 export interface PluginPackage {
   readonly schema: typeof PACKAGE_SCHEMA
   readonly id: string
@@ -56,6 +70,8 @@ export interface PluginPackage {
   /** The oldest Luxury Switchboard it runs on, `major.minor.patch`. */
   readonly minAppVersion?: string
   readonly permissions: readonly PluginPermission[]
+  /** The only hosts `net.fetch` may reach; present exactly when `net:fetch` is listed. */
+  readonly network?: PluginNetwork
   /** Options the operator edits on the Plugins page; the script reads them. */
   readonly settings?: readonly PluginSetting[]
   readonly theme?: PluginTheme
@@ -128,12 +144,23 @@ export function checkPackage(value: unknown): PackageCheck {
   const permissions: PluginPermission[] = []
   if (!Array.isArray(value.permissions)) {
     problems.push('"permissions" must be a list (it may be empty).')
+  } else if (value.permissions.length > PERMISSION_LIMIT) {
+    problems.push(`"permissions" lists more than ${PERMISSION_LIMIT} entries.`)
   } else {
     for (const permission of value.permissions) {
       if (!isPluginPermission(permission)) problems.push(`Unknown permission ${JSON.stringify(permission)}.`)
       else if (permissions.includes(permission)) problems.push(`Permission "${permission}" is listed twice.`)
       else permissions.push(permission)
     }
+  }
+
+  let network: PluginNetwork | undefined
+  if (value.network !== undefined) {
+    const checked = checkNetwork(value.network, problems)
+    if (checked) network = checked
+    if (!permissions.includes('net:fetch')) problems.push('"network" applies only with the "net:fetch" permission.')
+  } else if (permissions.includes('net:fetch')) {
+    problems.push('"net:fetch" needs "network": { "hosts": [...] } naming the hosts it may reach.')
   }
 
   let theme: PluginTheme | undefined
@@ -182,12 +209,52 @@ export function checkPackage(value: unknown): PackageCheck {
     ...(value.homepage !== undefined ? { homepage: value.homepage as string } : {}),
     ...(value.minAppVersion !== undefined ? { minAppVersion: value.minAppVersion as string } : {}),
     permissions,
+    ...(network ? { network } : {}),
     ...(settings ? { settings } : {}),
     ...(theme ? { theme } : {}),
     ...(value.css !== undefined ? { css: value.css as string } : {}),
     ...(value.script !== undefined ? { script } : {}),
   }
   return { ok: true, package: result }
+}
+
+function checkNetwork(raw: unknown, problems: string[]): PluginNetwork | null {
+  if (!isRecord(raw)) {
+    problems.push('"network" must be an object with "hosts".')
+    return null
+  }
+  const before = problems.length
+  for (const key of Object.keys(raw)) if (key !== 'hosts') problems.push(`Unknown field "network.${key}".`)
+  const hosts: string[] = []
+  if (!Array.isArray(raw.hosts) || raw.hosts.length === 0 || raw.hosts.length > NETWORK_HOST_LIMIT) {
+    problems.push(`"network.hosts" must list 1 to ${NETWORK_HOST_LIMIT} hosts.`)
+  } else {
+    raw.hosts.forEach((host, index) => {
+      const problem = hostProblem(host)
+      if (problem) problems.push(`"network.hosts[${index}]" ${problem}.`)
+      else if (hosts.includes(host as string)) problems.push(`"network.hosts[${index}]" repeats "${host as string}".`)
+      else hosts.push(host as string)
+    })
+  }
+  return problems.length > before ? null : { hosts }
+}
+
+/** Why a `network.hosts` entry is refused, or ''. The control plane applies
+ * the same rules; the address a name resolves to is checked again when the
+ * request connects. */
+export function hostProblem(host: unknown): string {
+  if (typeof host !== 'string' || !host) return 'must be a host name'
+  if (host.length > HOST_BYTES) return `is longer than ${HOST_BYTES} characters`
+  const name = host.startsWith('*.') ? host.slice(2) : host
+  if (/[:/?#@\s]/u.test(name)) return 'must be a bare host name, without a scheme, port or path'
+  const labels = name.split('.')
+  if (!labels.every((label) => HOST_LABEL.test(label))) return 'must be a lowercase DNS name such as "api.example.com" or "*.example.com"'
+  const last = labels[labels.length - 1]
+  if (PRIVATE_SUFFIXES.some((suffix) => suffix === last)) return 'names this machine or the local network, which plugins cannot reach'
+  // No top-level domain is all digits, so this also catches every IPv4 literal.
+  if (/^\d+$/u.test(last)) return 'must be a name, not an IP address'
+  if (labels.length < 2) return 'must have a domain, such as "example.com"'
+  return ''
 }
 
 function checkTheme(raw: unknown, problems: string[]): PluginTheme | null {
@@ -233,8 +300,11 @@ export function packageSizeProblem(pkg: PluginPackage, granted: readonly string[
       permissions: pkg.permissions, granted: pkg.permissions, enabled: true,
       installedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', sizeBytes: 999_999,
       hasScript: true, hasCss: true, hasTheme: true, hasSettings: true, problem: '',
+      secrets: (pkg.settings ?? []).filter((setting) => setting.type === 'secret').map((setting) => setting.key),
+      hosts: pkg.network?.hosts ?? [],
     },
     script: pkg.script ?? '', css: pkg.css ?? '', theme: pkg.theme ?? null, settings: pkg.settings ?? [],
+    ...(pkg.network ? { network: pkg.network } : {}),
   })
   if (byteLength(answer) > PAYLOAD_BYTES) return `This package is too large to load back (${formatKiB(byteLength(answer))}; at most ${Math.floor(PAYLOAD_BYTES / 1024)} KiB).`
   return ''

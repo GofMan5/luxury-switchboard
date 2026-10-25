@@ -46,15 +46,31 @@
       "pattern": "^(?:|https://[^\\s\\u0000-\\u001f\\u007f-\\u009f@/?#]+(?:[/?#][^\\s\\u0000-\\u001f\\u007f-\\u009f]*)?)$"
     },
     "minAppVersion": {
-      "description": "The oldest Luxury Switchboard it runs on, major.minor.patch.",
+      "description": "The oldest Luxury Switchboard it runs on, major.minor.patch. Set \"1.0.66\" when the plugin uses any 1.0.66 permission, network, a secret setting, slots, canvas or the richer nodes.",
       "type": "string",
       "pattern": "^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$"
     },
     "permissions": {
-      "description": "What the plugin asks for; the operator grants each one on install. Every permission except ui:theme and ui:css needs a script.",
+      "description": "What the plugin asks for; the operator grants each one on install. Every permission except ui:theme and ui:css needs a script. control:sensitive, net:fetch and relay:content start unticked.",
       "type": "array",
+      "maxItems": 24,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/permission" }
+    },
+    "network": {
+      "description": "The hosts net.fetch may reach. Required exactly when permissions include net:fetch. Hosts are lowercase DNS names, optionally starting with *. for any subdomain; no scheme, port, path or IP address, and never localhost, *.local or *.internal.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hosts"],
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/host" }
+        }
+      }
     },
     "settings": {
       "description": "Options the operator edits on the Plugins page; the script reads them with switchboard.settings. Non-empty settings need a script.",
@@ -96,6 +112,9 @@
       "maxLength": 131072
     }
   },
+  "if": { "properties": { "permissions": { "contains": { "const": "net:fetch" } } }, "required": ["permissions"] },
+  "then": { "required": ["network"] },
+  "else": { "not": { "required": ["network"] } },
   "$defs": {
     "permission": {
       "enum": [
@@ -109,8 +128,24 @@
         "control:read",
         "control:write",
         "control:sensitive",
-        "storage"
+        "storage",
+        "ui:slots",
+        "ui:layout",
+        "ui:dialogs",
+        "ui:sound",
+        "files",
+        "bus",
+        "net:fetch",
+        "relay:rules",
+        "relay:content"
       ]
+    },
+    "host": {
+      "description": "A lowercase DNS name with at least two labels (api.example.com), or *. and such a name. The last label is not all digits and is not localhost, local or internal.",
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^(?:[*][.])?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+      "not": { "pattern": "[.](?:localhost|local|internal|[0-9]+)$" }
     },
     "tokenValue": {
       "description": "A CSS value of at most 120 bytes; no ; { } < > \\ ` or control characters (byte limit; maxLength here is the character bound), and no url(, expression(, @import or javascript:.",
@@ -143,16 +178,30 @@
     },
     "setting": {
       "type": "object",
-      "required": ["key", "label", "type", "default"],
+      "required": ["key", "label", "type"],
       "properties": {
-        "type": { "enum": ["text", "number", "toggle", "select"] }
+        "type": { "enum": ["text", "number", "toggle", "select", "secret"] }
       },
+      "if": { "properties": { "type": { "const": "secret" } } },
+      "else": { "required": ["default"] },
       "oneOf": [
         { "$ref": "#/$defs/textSetting" },
         { "$ref": "#/$defs/numberSetting" },
         { "$ref": "#/$defs/toggleSetting" },
-        { "$ref": "#/$defs/selectSetting" }
+        { "$ref": "#/$defs/selectSetting" },
+        { "$ref": "#/$defs/secretSetting" }
       ]
+    },
+    "secretSetting": {
+      "description": "A write-only value such as an API token (at most 8 per package, 4096 characters each). The script sees only its key in settings.secrets and uses it as {{secret:KEY}} in net.fetch headers or bodies. No default; never shown again and left out of backups.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/settingKey" },
+        "label": { "$ref": "#/$defs/label" },
+        "description": { "$ref": "#/$defs/settingDescription" },
+        "type": { "const": "secret" }
+      }
     },
     "textSetting": {
       "type": "object",

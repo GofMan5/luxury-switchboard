@@ -32,7 +32,7 @@ afterEach(() => {
 })
 
 const PLUGIN = 'plugin:acme.tools'
-const NO_QUESTION = { asking: null }
+const NO_QUESTION = { asking: null, dialogs: {} }
 
 function fakeSession(): ControlPlaneSession {
   const responses: Record<string, unknown> = {
@@ -66,7 +66,7 @@ async function mountShell(children: React.ReactNode = <PageFixture />) {
     notifications,
     updates,
     extensions,
-    // The shell only reads whether a plugin is asking something.
+    // The shell only reads whether a plugin is asking something or has a dialog open.
     plugins: { subscribe: () => () => undefined, snapshot: () => NO_QUESTION },
     appVersion: '9.9.9',
     capabilities: ['plugins.manage'],
@@ -167,6 +167,17 @@ describe('data-ui parts', () => {
     const more = screen.getByRole('note', { name: '2 more readouts: Readout e, Readout f' })
     expect(more.textContent).toBe('+2')
     expect(more.tabIndex).toBe(0)
+  })
+
+  it('shows at most two header actions, each naming its owner and running on click', async () => {
+    const { extensions } = await mountShell()
+    const run = vi.fn()
+    act(() => extensions.contribute(PLUGIN, { actions: ['One', 'Two', 'Three'].map((title) => ({ id: `${PLUGIN}:${title}`, owner: 'Acme', scope: 'header' as const, title, run })) }))
+    const buttons = document.querySelectorAll<HTMLElement>('[data-ui="header-action"]')
+    expect(buttons).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Two (from Acme)' }))
+    expect(run).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('button', { name: 'Three (from Acme)' })).toBeNull()
   })
 
   it('shows a plugin page badge and makes it part of the entry name', async () => {

@@ -13,6 +13,8 @@ type ActivityStart struct {
 	// thinking-token budget where the dialect speaks in budgets instead.
 	ReasoningEffort string
 	ReasoningBudget int64
+	// Tags are the request rules' labels.
+	Tags []string
 }
 
 type ActivityRetry struct {
@@ -35,6 +37,8 @@ type ActivityFinish struct {
 	// Pace is the serving attempt's streaming measurement; its zero value
 	// says the answer carried none.
 	Pace StreamPace
+	// Tags are added after Begin, by relay hooks.
+	Tags []string
 }
 
 // StreamPace is one streamed answer's timing: when its first generated token

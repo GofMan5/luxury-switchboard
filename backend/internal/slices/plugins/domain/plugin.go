@@ -24,7 +24,7 @@ const (
 	SchemaVersion = 1
 
 	MaxPlugins          = 24
-	MaxPermissions      = 16
+	MaxPermissions      = 24
 	MaxNameRunes        = 64
 	MaxVersionBytes     = 32
 	MaxAuthorRunes      = 64
@@ -53,11 +53,23 @@ const (
 	PermissionWrite     = "control:write"
 	PermissionSensitive = "control:sensitive"
 	PermissionStorage   = "storage"
+	// 1.0.66.
+	PermissionSlots        = "ui:slots"
+	PermissionLayout       = "ui:layout"
+	PermissionDialogs      = "ui:dialogs"
+	PermissionSound        = "ui:sound"
+	PermissionFiles        = "files"
+	PermissionBus          = "bus"
+	PermissionNetFetch     = "net:fetch"
+	PermissionRelayRules   = "relay:rules"
+	PermissionRelayContent = "relay:content"
 )
 
 var knownPermissions = []string{
 	PermissionTheme, PermissionCSS, PermissionPages, PermissionStatus, PermissionCommands,
 	PermissionNotify, PermissionClipboard, PermissionRead, PermissionWrite, PermissionSensitive, PermissionStorage,
+	PermissionSlots, PermissionLayout, PermissionDialogs, PermissionSound, PermissionFiles, PermissionBus,
+	PermissionNetFetch, PermissionRelayRules, PermissionRelayContent,
 }
 
 // scriptPermissions only mean something to code: declaring one without a
@@ -65,6 +77,8 @@ var knownPermissions = []string{
 var scriptPermissions = []string{
 	PermissionPages, PermissionStatus, PermissionCommands, PermissionNotify, PermissionClipboard,
 	PermissionRead, PermissionWrite, PermissionSensitive, PermissionStorage,
+	PermissionSlots, PermissionLayout, PermissionDialogs, PermissionSound, PermissionFiles, PermissionBus,
+	PermissionNetFetch, PermissionRelayRules, PermissionRelayContent,
 }
 
 var (
@@ -106,12 +120,15 @@ type Package struct {
 	// ever opens it on the owner's click.
 	Homepage string `json:"homepage,omitempty"`
 	// MinAppVersion is the oldest app release the plugin runs on.
-	MinAppVersion string    `json:"minAppVersion,omitempty"`
-	Permissions   []string  `json:"permissions"`
-	Theme         *Theme    `json:"theme,omitempty"`
-	CSS           string    `json:"css,omitempty"`
-	Script        string    `json:"script,omitempty"`
-	Settings      []Setting `json:"settings,omitempty"`
+	MinAppVersion string   `json:"minAppVersion,omitempty"`
+	Permissions   []string `json:"permissions"`
+	// Network lists the only hosts net:fetch may reach. It is present
+	// exactly when net:fetch is declared.
+	Network  *Network  `json:"network,omitempty"`
+	Theme    *Theme    `json:"theme,omitempty"`
+	CSS      string    `json:"css,omitempty"`
+	Script   string    `json:"script,omitempty"`
+	Settings []Setting `json:"settings,omitempty"`
 }
 
 // Plugin is an installed package with the owner's decisions about it.
@@ -122,6 +139,11 @@ type Plugin struct {
 	InstalledAt time.Time
 	UpdatedAt   time.Time
 	Storage     map[string]string
+	// Secrets holds the owner's value for each secret setting that has one.
+	// Values never leave the control plane.
+	Secrets map[string]string
+	// Dev is set while the plugin is loaded from a source folder.
+	Dev *DevLink
 }
 
 // ValidID reports whether id can name a plugin.
@@ -132,6 +154,9 @@ func ValidID(id string) bool { return pluginID.MatchString(id) }
 // so a stored package reads back byte for byte.
 func (pkg Package) Normalized() Package {
 	pkg.Permissions = cloneList(pkg.Permissions)
+	if pkg.Network != nil {
+		pkg.Network = &Network{Hosts: cloneList(pkg.Network.Hosts)}
+	}
 	if pkg.Theme != nil {
 		theme := *pkg.Theme
 		theme.Tokens = cloneMap(theme.Tokens)
@@ -171,6 +196,11 @@ func (pkg Package) Validate() error {
 	if err := validatePermissions(pkg.Permissions); err != nil {
 		return err
 	}
+	if pkg.Network != nil {
+		if err := pkg.Network.validate(); err != nil {
+			return err
+		}
+	}
 	if pkg.Theme != nil {
 		if err := pkg.Theme.validate(); err != nil {
 			return err
@@ -188,6 +218,10 @@ func (pkg Package) Validate() error {
 		return ValidationError{"theme", "requires the ui:theme permission"}
 	case pkg.CSS != "" && !slices.Contains(declared, PermissionCSS):
 		return ValidationError{"css", "requires the ui:css permission"}
+	case pkg.Network != nil && !slices.Contains(declared, PermissionNetFetch):
+		return ValidationError{"network", "applies only with the net:fetch permission"}
+	case pkg.Network == nil && slices.Contains(declared, PermissionNetFetch):
+		return ValidationError{"network", "must list the hosts net:fetch may reach"}
 	case pkg.Script == "" && slices.ContainsFunc(declared, isScriptPermission):
 		return ValidationError{"permissions", "declare script capabilities without a script"}
 	case pkg.Script == "" && len(pkg.Settings) > 0:
@@ -299,7 +333,61 @@ func (plugin Plugin) Validate() error {
 	if plugin.InstalledAt.IsZero() || plugin.UpdatedAt.IsZero() || plugin.UpdatedAt.Before(plugin.InstalledAt) {
 		return ValidationError{"timestamps", "are missing or out of order"}
 	}
+	if err := CheckSecrets(plugin.Package.Settings, plugin.Secrets); err != nil {
+		return err
+	}
+	if plugin.Dev != nil {
+		if err := plugin.Dev.validate(); err != nil {
+			return err
+		}
+	}
 	return CheckStorage(plugin.Storage)
+}
+
+// CheckSecrets validates saved secret values against the package's secret
+// settings: every key is a declared secret and every value fits.
+func CheckSecrets(settings []Setting, secrets map[string]string) error {
+	keys := SecretKeys(settings)
+	for key, value := range secrets {
+		if !slices.Contains(keys, key) {
+			return ValidationError{"secrets", "include a key that is not a secret setting"}
+		}
+		if !ValidSecretValue(value) {
+			return ValidationError{"secrets", fmt.Sprintf("must be 1-%d characters without control characters", MaxSecretRunes)}
+		}
+	}
+	return nil
+}
+
+// KeptSecrets returns the secrets that still name a secret setting of
+// settings, so an upgrade that drops or retypes a key drops its value.
+func KeptSecrets(settings []Setting, secrets map[string]string) map[string]string {
+	keys := SecretKeys(settings)
+	kept := map[string]string{}
+	for key, value := range secrets {
+		if slices.Contains(keys, key) && ValidSecretValue(value) {
+			kept[key] = value
+		}
+	}
+	return kept
+}
+
+// WithSecret returns a copy of secrets with key set, or removed when value is
+// nil. key must name a secret setting of settings.
+func WithSecret(settings []Setting, secrets map[string]string, key string, value *string) (map[string]string, error) {
+	if !slices.Contains(SecretKeys(settings), key) {
+		return nil, ValidationError{"key", "is not a secret setting of this plugin"}
+	}
+	next := cloneMap(secrets)
+	if value == nil {
+		delete(next, key)
+		return next, nil
+	}
+	if !ValidSecretValue(*value) {
+		return nil, ValidationError{"value", fmt.Sprintf("must be 1-%d characters without control characters", MaxSecretRunes)}
+	}
+	next[key] = *value
+	return next, nil
 }
 
 // ValidStorageKey reports whether key may name a storage entry.

@@ -4,7 +4,7 @@ import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import type { PluginSettingsView, PluginsModel } from '../application/plugins-model'
 import type { PluginSummary } from '../domain/plugin'
-import { valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
+import { SECRET_VALUE_LIMIT, isSecretSetting, secretProblem, valueProblem, type SecretSetting, type SettingValue, type ValueSetting } from '../domain/settings'
 import { useStyleHold } from './useStyleHold'
 import styles from './PluginsPage.module.css'
 
@@ -24,7 +24,7 @@ type Load =
  */
 export function PluginSettingsDialog({ plugin, model, pending, onClose, onSaved }: {
   readonly plugin: PluginSummary
-  readonly model: Pick<PluginsModel, 'loadSettings' | 'saveSettings'>
+  readonly model: Pick<PluginsModel, 'loadSettings' | 'saveSettings' | 'secretSet'>
   readonly pending: boolean
   readonly onClose: () => void
   readonly onSaved: () => void
@@ -44,14 +44,16 @@ export function PluginSettingsDialog({ plugin, model, pending, onClose, onSaved 
     model.loadSettings(plugin.id).then((view) => {
       if (!live) return
       setLoad({ phase: 'ready', view })
-      setDrafts(toDrafts(view.settings, view.values))
+      setDrafts(toDrafts(view.settings.filter((setting): setting is ValueSetting => !isSecretSetting(setting)), view.values))
     }, (reason: unknown) => {
       if (live) setLoad({ phase: 'error', message: reason instanceof Error && reason.message ? reason.message : 'The settings could not be loaded.' })
     })
     return () => { live = false }
   }, [model, plugin.id, attempt])
 
-  const settings = load.phase === 'ready' ? load.view.settings : []
+  const declared = load.phase === 'ready' ? load.view.settings : []
+  const settings = declared.filter((setting): setting is ValueSetting => !isSecretSetting(setting))
+  const secrets = declared.filter(isSecretSetting)
   const saved = load.phase === 'ready' ? toDrafts(settings, load.view.values) : {}
   const dirty = settings.some((setting) => drafts[setting.key] !== saved[setting.key])
   const atDefaults = settings.every((setting) => drafts[setting.key] === draftOf(setting, setting.default))
@@ -106,7 +108,7 @@ export function PluginSettingsDialog({ plugin, model, pending, onClose, onSaved 
               <Button type="button" onClick={() => setAttempt((count) => count + 1)}><RotateCcw size={13} aria-hidden="true" />Retry</Button>
             </div>
           ) : null}
-          {load.phase === 'ready' && settings.length === 0 ? <p className={styles.muted}>This version of the plugin declares no settings.</p> : null}
+          {load.phase === 'ready' && declared.length === 0 ? <p className={styles.muted}>This version of the plugin declares no settings.</p> : null}
           {settings.length > 0 ? (
             <div className={styles.settingList}>
               {settings.map((setting) => (
@@ -120,6 +122,13 @@ export function PluginSettingsDialog({ plugin, model, pending, onClose, onSaved 
                   disabled={pending}
                   onChange={(value) => edit(setting.key, value)}
                 />
+              ))}
+            </div>
+          ) : null}
+          {secrets.length > 0 ? (
+            <div className={styles.settingList} aria-label="Secrets">
+              {secrets.map((setting) => (
+                <SecretField key={setting.key} id={`${id}-${setting.key}`} pluginId={plugin.id} setting={setting} set={plugin.secrets.includes(setting.key)} disabled={pending} model={model} />
               ))}
             </div>
           ) : null}
@@ -148,9 +157,82 @@ export function PluginSettingsDialog({ plugin, model, pending, onClose, onSaved 
   )
 }
 
+/**
+ * A write-only field: it shows whether a value is set, never the value. A new
+ * value goes to the control plane the moment it is saved, apart from the
+ * settings form, and is forgotten here.
+ */
+function SecretField({ id, pluginId, setting, set, disabled, model }: {
+  readonly id: string
+  readonly pluginId: string
+  readonly setting: SecretSetting
+  readonly set: boolean
+  readonly disabled: boolean
+  readonly model: Pick<PluginsModel, 'secretSet'>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState('')
+  const off = disabled || busy
+
+  const apply = async (next: string | null) => {
+    if (next !== null) {
+      const found = secretProblem(next)
+      if (found) { setProblem(found); return }
+    }
+    setBusy(true)
+    const result = await model.secretSet(pluginId, setting.key, next)
+    setBusy(false)
+    if (!result.ok) { setProblem(result.message); return }
+    setValue('')
+    setEditing(false)
+    setProblem('')
+  }
+
+  const described = [setting.description ? `${id}-hint` : '', problem ? `${id}-problem` : ''].filter(Boolean).join(' ') || undefined
+  return (
+    <div className={styles.setting} data-type="secret" data-invalid={problem ? true : undefined}>
+      <label id={`${id}-label`} htmlFor={editing ? id : undefined} className={styles.settingLabel}>{setting.label}</label>
+      <div className={styles.settingControl}>
+        {editing ? (
+          <span className={styles.secretEdit}>
+            <input
+              id={id}
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              maxLength={SECRET_VALUE_LIMIT}
+              disabled={off}
+              aria-invalid={problem ? true : undefined}
+              aria-describedby={described}
+              value={value}
+              autoFocus
+              onChange={(event) => { setValue(event.target.value); setProblem('') }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') { event.preventDefault(); void apply(value) }
+              }}
+            />
+            <Button type="button" variant="primary" disabled={off} aria-busy={busy || undefined} onClick={() => void apply(value)}>{busy ? 'Saving…' : 'Save'}</Button>
+            <Button type="button" variant="ghost" disabled={off} onClick={() => { setEditing(false); setValue(''); setProblem('') }}>Cancel</Button>
+          </span>
+        ) : (
+          <span className={styles.secretEdit}>
+            <span className={styles.secretState} data-set={set || undefined}>{set ? 'Set' : 'Not set'}</span>
+            <Button type="button" disabled={off} aria-describedby={`${id}-label`} onClick={() => setEditing(true)}>{set ? 'Replace' : 'Set'}</Button>
+            {set ? <Button type="button" variant="ghost" disabled={off} aria-describedby={`${id}-label`} aria-busy={busy || undefined} onClick={() => void apply(null)}>Clear</Button> : null}
+          </span>
+        )}
+      </div>
+      {setting.description ? <p id={`${id}-hint`} className={styles.settingHint}>{setting.description} Saved on its own, write-only.</p> : null}
+      {problem ? <p id={`${id}-problem`} className={styles.settingProblem} role="alert">{problem}</p> : null}
+    </div>
+  )
+}
+
 function SettingField({ id, setting, draft, changed, problem, disabled, onChange }: {
   readonly id: string
-  readonly setting: PluginSetting
+  readonly setting: ValueSetting
   readonly draft: Draft
   readonly changed: boolean
   readonly problem: string
@@ -218,7 +300,7 @@ function SettingField({ id, setting, draft, changed, problem, disabled, onChange
   )
 }
 
-function defaultText(setting: PluginSetting): string {
+function defaultText(setting: ValueSetting): string {
   switch (setting.type) {
     case 'toggle': return `Default: ${setting.default ? 'on' : 'off'}.`
     case 'select': return `Default: ${setting.options.find((option) => option.value === setting.default)?.label ?? setting.default}.`
@@ -227,11 +309,11 @@ function defaultText(setting: PluginSetting): string {
   }
 }
 
-function draftOf(setting: PluginSetting, value: SettingValue): Draft {
+function draftOf(setting: ValueSetting, value: SettingValue): Draft {
   return setting.type === 'toggle' ? value === true : String(value)
 }
 
-function toDrafts(settings: readonly PluginSetting[], values: Readonly<Record<string, SettingValue>>): Record<string, Draft> {
+function toDrafts(settings: readonly ValueSetting[], values: Readonly<Record<string, SettingValue>>): Record<string, Draft> {
   const drafts: Record<string, Draft> = {}
   for (const setting of settings) drafts[setting.key] = draftOf(setting, values[setting.key] ?? setting.default)
   return drafts
@@ -239,7 +321,7 @@ function toDrafts(settings: readonly PluginSetting[], values: Readonly<Record<st
 
 /** The draft as the value the declaration checks; a number that does not
  * parse stays text, so the check reports it. */
-function fromDraft(setting: PluginSetting, draft: Draft | undefined): unknown {
+function fromDraft(setting: ValueSetting, draft: Draft | undefined): unknown {
   if (draft === undefined) return setting.default
   if (setting.type !== 'number' || typeof draft !== 'string') return draft
   const text = draft.trim()

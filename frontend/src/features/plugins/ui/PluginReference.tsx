@@ -5,7 +5,7 @@ import { SHORTCUT_FORMAT } from '../../../shared/keyboard/shortcuts'
 import { PLUGIN_ICONS } from '../../../app/plugin-icons'
 import { openExternal } from '../../../platform/lifecycle/open-external'
 import { Pill, Segmented } from '../../../shared/ui/chrome'
-import { CONTROL_TOPICS, methodsFor } from '../domain/control-access'
+import { methodsFor, topicsFor } from '../domain/control-access'
 import { CSS_BYTES, DESCRIPTION_LIMIT, HOMEPAGE_BYTES, SCRIPT_BYTES, PLUGIN_LIMIT } from '../domain/manifest'
 import { PERMISSION_SPECS } from '../domain/permissions'
 import { RUNTIME_LIMITS, STORAGE_KEYS, STORAGE_TOTAL_BYTES, STORAGE_VALUE_BYTES } from '../domain/protocol'
@@ -86,6 +86,26 @@ const API: readonly { readonly group: string; readonly entries: readonly Entry[]
       { name: 'storage.remove(key)', text: 'Deletes a key.', needs: 'storage' },
       { name: 'storage.all()', text: 'Resolves with every key and value (settings are not included).', needs: 'storage' },
       { name: 'storage.clear()', text: 'Deletes every key the plugin stored. The operator’s settings stay.', needs: 'storage' },
+      { name: 'db.collection(name).{get,put,delete,list,clear}', text: 'JSON documents by id (null is refused: use delete). list({ prefix?, after?, limit? }) pages by id and can return fewer than limit with next. Over-limit writes fail at once with "rate_limited".', needs: 'storage' },
+    ],
+  },
+  {
+    group: 'Window (1.0.66)',
+    entries: [
+      { name: 'ui.registerWidget / registerInspectorTab / registerSettingsSection / registerAction / registerHeaderButton', text: 'Labelled slots in the window. Draw a slot with ui.render(surface, tree); its clicks arrive at ui.onEvent. All go when the plugin stops.', needs: 'ui:slots' },
+      { name: 'ui.setLayout({ hidden?, order?, startPage? }) / ui.resetLayout()', text: 'Hides and reorders built-in pages. Plugins and Settings are never hidden; one plugin holds the layout ("conflict"); safe mode resets it.', needs: 'ui:layout' },
+      { name: 'ui.dialog({ title, tree, actions })', text: 'A modal that names the plugin; resolves with { action, form }. Needs a recent gesture.', needs: 'ui:dialogs' },
+      { name: 'canvas node / ui.onFrame / ui.sound', text: 'A page node drawn with ops, a frame clock while it is visible, and short synthesized tones.', needs: 'ui:pages · ui:sound' },
+      { name: 'files.open / files.save', text: 'Opens or saves one text file through the system dialog. Needs a recent gesture.', needs: 'files' },
+      { name: 'bus.publish / bus.subscribe', text: 'JSON messages to other running plugins; not stored, untrusted.', needs: 'bus' },
+    ],
+  },
+  {
+    group: 'Network and relay (1.0.66)',
+    entries: [
+      { name: 'net.fetch(url, init?)', text: 'https on port 443 to a host in network.hosts; private addresses are refused. {{secret:KEY}} is filled in headers and body only, never the URL. No redirects.', needs: 'net:fetch' },
+      { name: 'rules.*', text: 'The plugin’s own relay rules; they are deleted with the plugin. Built-in retry patterns stay hidden.', needs: 'relay:rules' },
+      { name: 'relay.onRequest / relay.onResponse', text: 'Sees and can rewrite or block local relay traffic, never the public tunnel. Refusals are never retried.', needs: 'relay:content' },
     ],
   },
 ]
@@ -171,6 +191,7 @@ export function PluginReference() {
         <div className={styles.permissionTable}>
           {PERMISSION_SPECS.map((spec) => {
             const methods = methodsFor(spec.id)
+            const topics = topicsFor(spec.id)
             return (
               <div key={spec.id} className={styles.permissionRow}>
                 <div className={styles.grantTitle}>
@@ -181,11 +202,11 @@ export function PluginReference() {
                 </div>
                 <p>{spec.description}</p>
                 {methods.length ? <p className={styles.methods}>{methods.join(' · ')}</p> : null}
-                {spec.id === 'control:read' ? <p className={styles.methods}>Topics: {CONTROL_TOPICS.join(' · ')}</p> : null}
+                {topics.length ? <p className={styles.methods}>Topics: {topics.join(' · ')}</p> : null}
               </div>
             )
           })}
-          <p className={styles.muted}>Never available to plugins: plugins.*, system.*, backup.*, appearance.update and updates.install.</p>
+          <p className={styles.muted}>Never available to plugins: plugins.*, system.*, backup.*, relayhooks.*, rules.reorder*, appearance.update and updates.install.</p>
         </div>
       ) : null}
       {section === 'tokens' ? (

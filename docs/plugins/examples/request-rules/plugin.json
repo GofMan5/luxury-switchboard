@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "example.request-rules",
+  "name": "Rule pack",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "Installs a small pack of request and retry rules through switchboard.rules, shows which of them are active, and lists the recent failures that no custom retry rule covers yet.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:pages",
+    "relay:rules"
+  ]
+}

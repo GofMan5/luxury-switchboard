@@ -1,6 +1,8 @@
 package application
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +41,7 @@ func TestUnknownErrorTextIsNotPersisted(t *testing.T) {
 }
 
 func TestRelayErrorCodesSurviveFinish(t *testing.T) {
-	for _, code := range []string{"policy_refusal", "chat_compatibility", "responses_compatibility", "guardrail_blocked", "pool_busy"} {
+	for _, code := range []string{"policy_refusal", "chat_compatibility", "responses_compatibility", "guardrail_blocked", "pool_busy", "rule_blocked", "rule_limited", "hook_blocked"} {
 		service := NewService(10)
 		id := service.Start(domain.Start{Path: "/v1/responses"})
 		service.Finish(id, domain.Finish{Status: 502, ErrorCode: code, ErrorDetail: "relay detail"})
@@ -153,5 +155,27 @@ func TestTrimmedInflightRequestStillPublishesItsTerminalEvent(t *testing.T) {
 	}
 	if _, retained := service.requests[first]; retained {
 		t.Fatal("hidden terminal request was retained after publication")
+	}
+}
+
+func TestTagsAreValidatedMergedAndBounded(t *testing.T) {
+	service := NewService(10)
+	id := service.Start(domain.Start{Path: "/v1/responses", Tags: []string{"team.a", "Bad Tag", "team.a", "-lead", "ok_1"}})
+	if tags := service.List(1)[0].Tags; strings.Join(tags, ",") != "team.a,ok_1" {
+		t.Fatalf("start tags were not cleaned: %q", tags)
+	}
+	extra := []string{"ok_1", strings.Repeat("x", 33), "hook,comma"}
+	for index := range 20 {
+		extra = append(extra, "h"+strconv.Itoa(index))
+	}
+	service.Finish(id, domain.Finish{Status: 200, Tags: extra})
+	tags := service.List(1)[0].Tags
+	if len(tags) != domain.MaxTags || tags[0] != "team.a" || tags[1] != "ok_1" || tags[2] != "h0" {
+		t.Fatalf("finish tags were not merged in order and capped: %q", tags)
+	}
+	untagged := service.Start(domain.Start{Path: "/v1/responses"})
+	service.Finish(untagged, domain.Finish{Status: 200})
+	if tags := service.List(1)[0].Tags; tags != nil {
+		t.Fatalf("an untagged request carries tags: %q", tags)
 	}
 }

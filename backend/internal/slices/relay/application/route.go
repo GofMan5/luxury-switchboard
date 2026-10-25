@@ -41,6 +41,13 @@ type RouteSource interface {
 	Pinned(context.Context, string, string) (Route, error)
 }
 
+// RulePinSource resolves a request rule's provider pin: the route to the named
+// provider only while it exists and is enabled. A route source without it
+// leaves pins unhonoured.
+type RulePinSource interface {
+	PinnedEnabled(ctx context.Context, providerID, upstreamModel string) (Route, error)
+}
+
 type ModelRoute struct {
 	ProviderID    string
 	UpstreamModel string

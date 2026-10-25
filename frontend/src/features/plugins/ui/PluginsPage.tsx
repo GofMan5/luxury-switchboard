@@ -1,5 +1,5 @@
-import { useRef, useState, type ChangeEvent } from 'react'
-import { ChevronDown, ClipboardPaste, ExternalLink, LifeBuoy, Puzzle, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
+import { useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
+import { ChevronDown, ClipboardPaste, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2Off, Puzzle, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
 import { EmptyState, Panel, Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { formatBytes } from '../../../shared/format/metrics'
@@ -10,7 +10,7 @@ import { EXAMPLE_PLUGINS } from '../domain/examples'
 import { PLUGIN_LIMIT, parsePackage, type PluginPackage } from '../domain/manifest'
 import { isPluginPermission, permissionSpec } from '../domain/permissions'
 import { knownTime, type LogEntry, type PluginRuntime, type PluginSummary, type RuntimeState } from '../domain/plugin'
-import { InstallReviewDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
+import { DevLinkDialog, InstallReviewDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
 import { PluginReference } from './PluginReference'
 import { PluginSettingsDialog } from './PluginSettingsDialog'
 import { usePlugins } from './usePlugins'
@@ -18,6 +18,7 @@ import styles from './PluginsPage.module.css'
 
 type Dialog =
   | { readonly kind: 'paste' }
+  | { readonly kind: 'dev'; readonly error: string }
   | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string }
   | { readonly kind: 'problems'; readonly title: string; readonly problems: readonly string[] }
   | { readonly kind: 'permissions'; readonly id: string }
@@ -29,7 +30,8 @@ const FILE_LIMIT = 512 * 1024
 
 export default function PluginsPage() {
   const { model, state } = usePlugins()
-  const { appVersion } = useAppServices()
+  const { appVersion, extensions } = useAppServices()
+  const layout = useSyncExternalStore(extensions.subscribe, extensions.snapshot).layout
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [notice, setNotice] = useState('')
   const [expanded, setExpanded] = useState<string>('')
@@ -69,6 +71,16 @@ export default function PluginsPage() {
     }
   }
 
+  const link = async (path: string) => {
+    const result = await model.devLink(path)
+    if (result.ok) {
+      setDialog(null)
+      setNotice(`${result.plugin.name} ${result.plugin.version} loaded from its folder.`)
+    } else {
+      setDialog({ kind: 'dev', error: result.message })
+    }
+  }
+
   const current = dialog && (dialog.kind === 'permissions' || dialog.kind === 'settings' || dialog.kind === 'remove')
     ? state.plugins.find((plugin) => plugin.id === dialog.id)
     : undefined
@@ -87,6 +99,9 @@ export default function PluginsPage() {
           <Button onClick={() => { setNotice(''); setDialog({ kind: 'paste' }) }} disabled={busy || state.phase !== 'ready'}>
             <ClipboardPaste size={14} aria-hidden="true" />Paste JSON
           </Button>
+          <Button onClick={() => { model.clearError(); setNotice(''); setDialog({ kind: 'dev', error: '' }) }} disabled={busy || state.phase !== 'ready'}>
+            <FolderOpen size={14} aria-hidden="true" />Load from folder…
+          </Button>
           <input ref={fileInput} type="file" accept=".json,application/json" className="sr-only" aria-label="Plugin package file" tabIndex={-1} onChange={pick} />
         </div>
       </header>
@@ -96,6 +111,13 @@ export default function PluginsPage() {
           <LifeBuoy size={14} aria-hidden="true" />
           <span>Safe mode is on: no plugin code, stylesheet or theme is running. You can still turn plugins off, change permissions or remove them.</span>
           <button type="button" className={styles.linkButton} onClick={() => restartInSafeMode(false)}>Leave safe mode</button>
+        </div>
+      ) : null}
+      {layout ? (
+        <div className={styles.banner} data-tone="warning" role="status">
+          <LayoutGrid size={14} aria-hidden="true" />
+          <span>Layout customised by {layout.owner}: it may hide sidebar items or choose the start page.</span>
+          <button type="button" className={styles.linkButton} onClick={() => layout.reset()}>Reset layout</button>
         </div>
       ) : null}
       {state.error && !dialog ? (
@@ -135,6 +157,7 @@ export default function PluginsPage() {
                   onSettings={() => { model.clearError(); setNotice(''); setDialog({ kind: 'settings', id: plugin.id }) }}
                   onRestart={() => void model.restart(plugin.id)}
                   onRemove={() => { model.clearError(); setDialog({ kind: 'remove', id: plugin.id }) }}
+                  onUnlink={() => { setNotice(''); void model.devUnlink(plugin.id).then((ok) => { if (ok) setNotice(`${plugin.name} is no longer loaded from its folder; the last loaded version stays installed.`) }) }}
                 />
               ))}
             </ul>
@@ -168,6 +191,7 @@ export default function PluginsPage() {
         </Panel>
       </div>
 
+      {dialog?.kind === 'dev' ? <DevLinkDialog pending={state.pending === 'install'} error={dialog.error} onCancel={() => setDialog(null)} onLink={(path) => void link(path)} /> : null}
       {dialog?.kind === 'paste' ? <PasteDialog onCancel={() => setDialog(null)} onReview={review} /> : null}
       {dialog?.kind === 'problems' ? <ProblemsDialog title={dialog.title} problems={dialog.problems} onClose={() => setDialog(null)} /> : null}
       {dialog?.kind === 'review' ? (
@@ -232,7 +256,7 @@ const STATE: Readonly<Record<RuntimeState, { readonly label: string; readonly to
   stopped: { label: 'Not running', tone: 'neutral' },
 }
 
-function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove }: {
+function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove, onUnlink }: {
   readonly plugin: PluginSummary
   readonly runtime: PluginRuntime | undefined
   readonly pending: boolean
@@ -245,6 +269,7 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
   readonly onSettings: () => void
   readonly onRestart: () => void
   readonly onRemove: () => void
+  readonly onUnlink: () => void
 }) {
   // A stored plugin this version cannot use is off whatever its switch says;
   // turning it on is refused until an update or a newer app fixes it.
@@ -277,7 +302,15 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
             <span className={styles.version}>{plugin.version}</span>
             {plugin.author ? <span className={styles.author}>by {plugin.author}</span> : null}
             <Pill tone={display.tone}>{pending ? 'Saving…' : display.label}</Pill>
+            {plugin.dev ? <Pill tone="info">Dev</Pill> : null}
           </div>
+          {plugin.dev ? <p className={styles.devPath} title={plugin.dev.path}>Loaded from <code>{plugin.dev.path}</code></p> : null}
+          {plugin.dev?.problem ? (
+            <p className={styles.problemNote} role="status">
+              <TriangleAlert size={13} aria-hidden="true" />
+              <span>The folder's latest change was not loaded: {plugin.dev.problem}</span>
+            </p>
+          ) : null}
           {plugin.description ? <p className={styles.description}>{plugin.description}</p> : null}
           <div className={styles.chips} aria-label="Permissions">
             {declared.length === 0 ? <span className={styles.muted}>No permissions</span> : null}
@@ -315,6 +348,11 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
           {plugin.hasSettings && !blocked ? (
             <Button variant="ghost" disabled={busy} onClick={onSettings} aria-label={`${plugin.name} settings`}>
               <SlidersHorizontal size={13} aria-hidden="true" />Settings
+            </Button>
+          ) : null}
+          {plugin.dev ? (
+            <Button variant="ghost" disabled={busy} onClick={onUnlink} title="Stop reloading from the folder; keep the last loaded version">
+              <Link2Off size={13} aria-hidden="true" />Unlink
             </Button>
           ) : null}
           <Button variant="ghost" disabled={busy} onClick={onPermissions}>

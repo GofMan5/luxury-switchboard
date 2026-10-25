@@ -1,7 +1,9 @@
 import { vi } from 'vitest'
 import type { PluginDetail, PluginSummary } from '../domain/plugin'
 import type { HostMessage } from '../domain/protocol'
-import type { BootContext, ControlPort, PluginWorker, PluginsPort, WorkerFactory } from './ports'
+import type { OpenSpec } from '../domain/specs'
+import { PluginBus } from './plugin-bus'
+import type { BootContext, ControlPort, FilesPort, PickedFile, PluginWorker, PluginsPort, ThemeInfo, ThemePort, WorkerFactory } from './ports'
 
 /** Test doubles for the plugin runtime: a worker the test drives by hand, a
  * control plane that records calls, and an in-memory plugin store. */
@@ -71,7 +73,7 @@ export function summary(overrides: Partial<PluginSummary> = {}): PluginSummary {
     id: 'acme.tools', name: 'Acme tools', version: '1.0.0', author: 'Acme', description: '', homepage: '', minAppVersion: '',
     permissions: ['ui:pages'], granted: ['ui:pages'], enabled: true,
     installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 512,
-    hasScript: true, hasCss: false, hasTheme: false, hasSettings: false, problem: '',
+    hasScript: true, hasCss: false, hasTheme: false, hasSettings: false, problem: '', secrets: [], hosts: [],
     ...overrides,
   }
 }
@@ -137,6 +139,33 @@ export class MemoryPluginsPort implements PluginsPort {
       return { ...values }
     })
   }
+  readonly secretWrites: { id: string; key: string; set: boolean }[] = []
+  async secretSet(id: string, key: string, value: string | null): Promise<string[]> {
+    return this.#guard(() => {
+      const plugin = this.plugins.find((entry) => entry.id === id)
+      if (!plugin) throw Object.assign(new Error('not found'), { code: 'plugin_not_found' })
+      this.secretWrites.push({ id, key, set: value !== null })
+      const secrets = value === null ? plugin.secrets.filter((entry) => entry !== key) : [...new Set([...plugin.secrets, key])].sort()
+      this.plugins = this.plugins.map((entry) => (entry.id === id ? { ...entry, secrets } : entry))
+      return secrets
+    })
+  }
+  async devLink(path: string): Promise<PluginSummary> {
+    return this.#guard(() => {
+      const plugin = summary({ id: 'dev.local', name: 'Local plugin', dev: { path, loadedAt: '2026-01-01T00:00:00Z', problem: '' } })
+      this.plugins = [...this.plugins.filter((entry) => entry.id !== plugin.id), plugin]
+      return plugin
+    })
+  }
+  async devUnlink(id: string): Promise<PluginSummary> {
+    return this.#guard(() => {
+      const current = this.plugins.find((entry) => entry.id === id)
+      if (!current) throw Object.assign(new Error('not found'), { code: 'plugin_not_found' })
+      const { dev: _dev, ...next } = current
+      this.plugins = this.plugins.map((entry) => (entry.id === id ? next : entry))
+      return next
+    })
+  }
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
@@ -150,4 +179,41 @@ export class MemoryPluginsPort implements PluginsPort {
     if (failure) throw failure
     return run()
   }
+}
+
+/** A file picker the test answers by hand: `next` is what the next open picks. */
+export class FakeFiles implements FilesPort {
+  next: PickedFile | null = null
+  saveAnswer = true
+  readonly saved: { name: string; text: string }[] = []
+  readonly opened: OpenSpec[] = []
+  async open(spec: OpenSpec): Promise<PickedFile | null> { this.opened.push(spec); return this.next }
+  async save(spec: { readonly name: string; readonly text: string }): Promise<boolean> {
+    if (this.saveAnswer) this.saved.push({ name: spec.name, text: spec.text })
+    return this.saveAnswer
+  }
+}
+
+export const FAKE_THEME: ThemeInfo = {
+  mode: 'dark',
+  tokens: { background: '#111', surface: '#222', text: '#eee', muted: '#999', border: '#333', accent: '#08f', success: '#0a0', warning: '#fa0', danger: '#f33', info: '#09f' },
+}
+
+export class FakeTheme implements ThemePort {
+  current: ThemeInfo = FAKE_THEME
+  readonly listeners = new Set<() => void>()
+  read(): ThemeInfo { return this.current }
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+  change(next: ThemeInfo): void {
+    this.current = next
+    for (const listener of this.listeners) listener()
+  }
+}
+
+/** The host dependencies beyond the store and the control plane. */
+export function hostExtras(bus = new PluginBus()) {
+  return { bus, files: new FakeFiles(), sound: vi.fn(), theme: new FakeTheme(), renderSlot: vi.fn(() => null) }
 }

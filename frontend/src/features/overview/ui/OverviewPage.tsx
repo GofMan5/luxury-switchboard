@@ -10,6 +10,7 @@ import { useInsights } from '../../insights/ui/useInsights'
 import { formatClock, formatCost, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { Metric, MetricStrip, Panel, Pill } from '../../../shared/ui/chrome'
 import { StatusDot } from '../../../shared/ui/StatusDot'
+import { SlotGrid } from '../../../app/Contributed'
 import styles from './OverviewPage.module.css'
 
 /** The report re-reads itself on this cadence while the workspace is open. */
@@ -189,6 +190,8 @@ export default function OverviewPage() {
             </Panel>
           </div>
         </div>
+
+        <SlotGrid scope="overview" />
       </div>
     </section>
   )

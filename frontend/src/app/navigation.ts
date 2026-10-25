@@ -6,6 +6,7 @@ import {
   Database,
   FlaskConical,
   KeyRound,
+  ListFilter,
   Palette,
   Puzzle,
   RadioTower,
@@ -21,6 +22,7 @@ export type StaticRoute =
   | 'providers'
   | 'keys'
   | 'routes'
+  | 'rules'
   | 'tests'
   | 'guardrails'
   | 'tunnel'
@@ -73,6 +75,7 @@ export const navigation: readonly NavigationSection[] = [
       { id: 'providers', label: 'Providers', icon: Database, key: '4' },
       { id: 'keys', label: 'API Keys', icon: KeyRound, key: '5' },
       { id: 'routes', label: 'Model Routes', icon: Route, key: '6' },
+      { id: 'rules', label: 'Rules', icon: ListFilter, capability: 'rules.manage' },
       { id: 'tests', label: 'Tests', icon: FlaskConical, key: '7' },
     ],
   },
@@ -119,7 +122,8 @@ export function visibleNavigation(capabilities: readonly string[]): NavigationSe
 /** The route a hash names, or overview for anything unknown. Plugin routes are
  * accepted by shape; the page view says so when nobody registered it. */
 export function routeFromHash(hash: string): AppRoute {
-  const value = hash.replace(/^#\/?/u, '')
+  // A query (`#rules?tab=retry`) belongs to the page; the route is before it.
+  const value = hash.replace(/^#\/?/u, '').replace(/\?.*$/su, '')
   if (navigation.some((section) => section.items.some((item) => item.id === value))) return value as StaticRoute
   return isPluginRoute(value) ? value : 'overview'
 }

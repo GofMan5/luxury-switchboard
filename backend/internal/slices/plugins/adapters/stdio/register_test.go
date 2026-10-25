@@ -46,6 +46,8 @@ type frame struct {
 type harness struct {
 	t       *testing.T
 	service *application.Service
+	// extensions registers further handlers beside Register's, when set.
+	extensions func(*platform.Server)
 }
 
 func newHarness(t *testing.T, store *memory) harness {
@@ -69,6 +71,9 @@ func (h harness) call(method, payload string) (frame, []frame) {
 	var output bytes.Buffer
 	server := platform.NewServer(strings.NewReader(request+"}\n"), &output, 1)
 	Register(server, h.service)
+	if h.extensions != nil {
+		h.extensions(server)
+	}
 	if err := server.Serve(context.Background()); err != nil {
 		h.t.Fatal(err)
 	}
@@ -131,15 +136,15 @@ func TestTheWireContract(t *testing.T) {
 	}
 	fields := slices.Sorted(maps.Keys(installed.Plugin))
 	want := []string{
-		"author", "description", "enabled", "granted", "hasCss", "hasScript", "hasSettings", "hasTheme", "homepage", "id",
-		"installedAt", "minAppVersion", "name", "permissions", "problem", "sizeBytes", "updatedAt", "version",
+		"author", "description", "enabled", "granted", "hasCss", "hasScript", "hasSettings", "hasTheme", "homepage", "hosts", "id",
+		"installedAt", "minAppVersion", "name", "permissions", "problem", "secrets", "sizeBytes", "updatedAt", "version",
 	}
 	if !slices.Equal(fields, want) {
 		t.Fatalf("summary fields %v, want %v", fields, want)
 	}
 	for field, value := range map[string]string{
 		"granted": `["ui:theme","storage"]`, "author": `""`, "enabled": "true", "homepage": `""`, "minAppVersion": `""`,
-		"hasSettings": "false", "problem": `""`,
+		"hasSettings": "false", "problem": `""`, "hosts": "[]",
 	} {
 		if string(installed.Plugin[field]) != value {
 			t.Fatalf("summary %s is %s, want %s: %s", field, installed.Plugin[field], value, result.Payload)

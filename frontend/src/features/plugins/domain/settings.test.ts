@@ -34,7 +34,7 @@ describe('checkSettings', () => {
   it.each([
     [{ key: 'Bad', label: 'L', type: 'toggle', default: true }, '"settings[0].key" must start with a lowercase letter, then up to 31 letters, digits or underscores.'],
     [{ key: 'k', label: ' ', type: 'toggle', default: true }, '"settings[0].label" is required.'],
-    [{ key: 'k', label: 'L', type: 'color', default: '#fff' }, '"settings[0].type" must be text, number, toggle or select.'],
+    [{ key: 'k', label: 'L', type: 'color', default: '#fff' }, '"settings[0].type" must be text, number, toggle, select or secret.'],
     [{ key: 'k', label: 'L', type: 'toggle', default: true, min: 1 }, '"settings[0].min" does not apply to a toggle setting.'],
     [{ key: 'k', label: 'L', type: 'toggle', default: true, secret: true }, 'Unknown field "settings[0].secret".'],
     [{ key: 'k', label: 'L', type: 'toggle' }, '"settings[0].default" is required.'],

@@ -31,6 +31,7 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 		"SWITCHBOARD_TUNNEL_HISTORY_PATH": "tunnel-history.db",
 		"SWITCHBOARD_APPEARANCE_PATH":     "appearance.dpapi",
 		"SWITCHBOARD_PLUGINS_PATH":        "plugins.dpapi",
+		"SWITCHBOARD_RULES_PATH":          "rules.dpapi",
 	} {
 		t.Setenv(name, filepath.Join(root, file))
 	}
@@ -83,12 +84,12 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 
 	// One build serves everything: the publishing stack is part of the product,
 	// and the handshake's capability list must admit what the binary answers.
-	for _, method := range []string{"tunnel.get", "clients.list", "relay.status", "guardrails.status", "codex.status", "codex.quota", "appearance.get", "plugins.list"} {
+	for _, method := range []string{"tunnel.get", "clients.list", "relay.status", "guardrails.status", "codex.status", "codex.quota", "appearance.get", "plugins.list", "rules.list"} {
 		if answer := call(t, toApp, answers, method); !answer.OK {
 			t.Fatalf("the build refused %s: %s", method, answer.Error.Code)
 		}
 	}
-	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage", "codex.login", "codex.quota", "appearance.manage", "plugins.manage"} {
+	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage", "codex.login", "codex.quota", "appearance.manage", "plugins.manage", "rules.manage"} {
 		if !slices.Contains(handshake.Payload.Capabilities, capability) {
 			t.Fatalf("the handshake hides a workspace this binary serves: %v", handshake.Payload.Capabilities)
 		}

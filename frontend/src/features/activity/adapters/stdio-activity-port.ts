@@ -1,6 +1,6 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import type { ActivityListResult, ActivityPort } from '../application/activity-port'
-import type { ActivityRequest, ActivitySummary } from '../domain/activity'
+import { normalizeActivityRequest, type ActivityRequest, type ActivitySummary } from '../domain/activity'
 
 export class StdioActivityPort implements ActivityPort {
   readonly #session: ControlPlaneSession
@@ -15,7 +15,7 @@ export class StdioActivityPort implements ActivityPort {
       { limit },
       signal,
     )
-    return { requests: result.requests, available: result.available ?? result.requests.length }
+    return { requests: result.requests.map(normalizeActivityRequest), available: result.available ?? result.requests.length }
   }
 
   summary(signal?: AbortSignal): Promise<ActivitySummary> {
@@ -24,7 +24,7 @@ export class StdioActivityPort implements ActivityPort {
 
   subscribe(listener: (request: ActivityRequest) => void): () => void {
     return this.#session.subscribe<ActivityRequest>('activity.changed', (event) => {
-      if (event.payload) listener(event.payload)
+      if (event.payload) listener(normalizeActivityRequest(event.payload))
     })
   }
 }

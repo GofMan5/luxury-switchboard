@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactElement } from 'react'
 import { Activity, ArrowDown, ArrowUp, ClipboardPaste, KeyRound, Pencil, Plus, RefreshCcw, Trash2, X } from 'lucide-react'
 import { useProviders } from '../../providers/ui/useProviders'
+import { actionName, useContributed } from '../../../app/contributions'
+import { pluginIcon } from '../../../app/plugin-icons'
 import { useAppServices } from '../../../app/services'
 import { hasCodexLogin, hasCodexQuota } from '../../codex/application/codex-capability'
 import type { CodexAccount } from '../../codex/domain/codex'
@@ -21,6 +23,7 @@ export default function ApiKeysPage() {
   const { state: providers } = useProviders()
   const { model, state } = useApiKeys()
   const { capabilities } = useAppServices()
+  const { actions: keyActions } = useContributed(undefined, 'key')
   const [providerID, setProviderID] = useState('')
   const [editor, setEditor] = useState<{ mode: 'add' | 'edit'; key?: ApiKey } | null>(null)
   const [importing, setImporting] = useState(false)
@@ -164,7 +167,8 @@ export default function ApiKeysPage() {
 
           {state.error ? <div className={styles.error} role="alert">{state.error}</div> : null}
           <div className={styles.tableWrap}>
-            <table className={styles.table}>
+            {/* The actions column grows by one icon per contributed key action. */}
+            <table className={styles.table} style={{ '--row-actions': 5 + keyActions.length } as CSSProperties}>
               <thead>
                 <tr>
                   <th>Priority</th><th>Label</th><th>Limit</th><th>Actual</th><th>Proxy</th><th>State</th><th>429</th><th>Actions</th>
@@ -203,6 +207,10 @@ export default function ApiKeysPage() {
                           <IconAction label={`Edit ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => { model.clearError(); setEditor({ mode: 'edit', key }) }}><Pencil /></IconAction>
                           <IconAction label={`Reset cooldown for ${key.label}`} disabled={Boolean(state.pendingId)} onClick={() => void model.reset(key.id)}><RefreshCcw /></IconAction>
                           <IconAction label={`Remove ${key.label}`} danger disabled={key.pinned || Boolean(state.pendingId)} onClick={() => { model.clearError(); setRemoveKey(key) }}><Trash2 /></IconAction>
+                          {keyActions.map((action) => {
+                            const Icon = pluginIcon(action.icon)
+                            return <IconAction key={action.id} label={`${actionName(action)}: ${key.label}`} danger={action.tone === 'danger'} onClick={() => action.run(key.id)}><Icon /></IconAction>
+                          })}
                         </div>
                       </td>
                     </tr>

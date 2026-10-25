@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ServicesContext, type AppServices } from '../../../app/services'
 import { ExtensionPoints } from '../../../shared/contracts/extensions'
 import { PluginsModel } from '../application/plugins-model'
-import { FakeControl, FakeWorkers, MemoryPluginsPort, summary } from '../application/test-fakes'
+import { FakeControl, FakeWorkers, MemoryPluginsPort, summary, hostExtras } from '../application/test-fakes'
 import { EXAMPLE_PLUGINS } from '../domain/examples'
 import type { PluginPackage } from '../domain/manifest'
 import { checkTree } from '../domain/ui-tree'
@@ -128,14 +128,16 @@ describe('PluginTree', () => {
 async function page(safeMode = false) {
   const port = new MemoryPluginsPort()
   const workers = new FakeWorkers()
+  const { bus: _bus, ...extras } = hostExtras()
+  const extensions = new ExtensionPoints()
   const model = new PluginsModel({
-    port, control: new FakeControl(), workers, extensions: new ExtensionPoints(), safeMode,
+    ...extras, port, control: new FakeControl(), workers, extensions, safeMode,
     notify: () => undefined, navigate: () => undefined, isRoute: () => true, clipboard: async () => undefined,
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   })
   await model.connect()
-  render(<ServicesContext value={{ plugins: model } as unknown as AppServices}><PluginsPage /></ServicesContext>)
-  return { port, workers, model }
+  render(<ServicesContext value={{ plugins: model, extensions, appVersion: '1.0.66' } as unknown as AppServices}><PluginsPage /></ServicesContext>)
+  return { port, workers, model, extensions }
 }
 
 describe('PluginsPage', () => {
@@ -185,6 +187,39 @@ describe('PluginsPage', () => {
     const { model } = await page(true)
     expect(screen.getByRole('status').textContent).toContain('Safe mode is on')
     expect(screen.getByRole('button', { name: 'Leave safe mode' })).toBeTruthy()
+    model.dispose()
+  })
+
+  it('loads a plugin from a folder, marks it Dev and unlinks it', async () => {
+    const { model, port } = await page()
+    fireEvent.click(screen.getByRole('button', { name: 'Load from folder…' }))
+    const field = screen.getByLabelText('Folder with plugin.json')
+    expect((screen.getByRole('button', { name: 'Load' }) as HTMLButtonElement).disabled).toBe(true)
+    port.failNext = Object.assign(new Error('x'), { code: 'plugin_dev_limit' })
+    fireEvent.change(field, { target: { value: 'C:\\dev\\plugin' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Load' }))
+    await waitFor(() => expect(screen.getByText('No more plugin folders can be linked; unlink one first')).toBeTruthy())
+    expect(screen.getByLabelText('Folder with plugin.json')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load' }))
+    await waitFor(() => expect(screen.getByText('Local plugin 1.0.0 loaded from its folder.')).toBeTruthy())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByText('Dev')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /Unlink/u }))
+    await waitFor(() => expect(screen.getByText(/no longer loaded from its folder/u)).toBeTruthy())
+    expect(screen.queryByText('Dev')).toBeNull()
+    model.dispose()
+  })
+
+  it('says which plugin arranged the rail and resets it', async () => {
+    const { model, extensions } = await page()
+    const reset = vi.fn(() => extensions.clear('plugin:acme.tools'))
+    act(() => extensions.contribute('plugin:acme.tools', { layout: { owner: 'Acme tools', hidden: ['keys'], order: [], reset } }))
+    expect(screen.getByText(/Layout customised by Acme tools/u)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset layout' }))
+    expect(reset).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/Layout customised by/u)).toBeNull()
     model.dispose()
   })
 })

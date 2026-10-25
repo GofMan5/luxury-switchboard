@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CommandContribution } from '../shared/contracts/extensions'
 import { scoreCommand } from './command-score'
 import { isPluginRoute, navigation, routeFromHash, visibleNavigation } from './navigation'
-import { railGroups, railItemName } from './rail'
+import { arrangeSections, layoutStartRoute, railGroups, railItemName } from './rail'
 
 const command = (title: string, group = 'Navigate', keywords: string[] = []): CommandContribution => ({ id: title, title, group, keywords, run: () => undefined })
 
@@ -39,9 +39,13 @@ describe('navigation', () => {
     expect(ids([])).not.toContain('plugins')
     expect(ids(['plugins.manage'])).toContain('plugins')
     expect(ids([])).toContain('appearance')
+    expect(ids([])).not.toContain('rules')
+    expect(ids(['rules.manage'])).toContain('rules')
   })
 
   it('reads static and plugin routes from the hash and sends anything else to the overview', () => {
+    expect(routeFromHash('#rules?tab=retry&draft=1&status=502')).toBe('rules')
+    expect(routeFromHash('#rules')).toBe('rules')
     expect(routeFromHash('#appearance')).toBe('appearance')
     expect(routeFromHash('#/settings')).toBe('settings')
     expect(routeFromHash('#plugin/latency-lens/main')).toBe('plugin/latency-lens/main')
@@ -97,5 +101,50 @@ describe('railGroups', () => {
     // A badge with nothing to say is no badge.
     expect(blank.badge).toBeUndefined()
     expect(railItemName(blank)).toBe('Blank')
+  })
+})
+
+describe('arrangeSections', () => {
+  const sections = visibleNavigation(['plugins.manage'])
+  const ids = (arranged: ReturnType<typeof arrangeSections>) => arranged.map((section) => section.items.map((item) => item.id))
+
+  it('leaves the rail alone without a layout', () => {
+    expect(arrangeSections(sections, undefined)).toBe(sections)
+  })
+
+  it('hides listed pages but never plugins or settings, and ignores unknown ids', () => {
+    const arranged = arrangeSections(sections, { hidden: ['activity', 'plugins', 'settings', 'nope'], order: [] })
+    const all = ids(arranged).flat()
+    expect(all).not.toContain('activity')
+    expect(all).toContain('plugins')
+    expect(all).toContain('settings')
+    expect(all.length).toBe(sections.flatMap((section) => section.items).length - 1)
+  })
+
+  it('leads each section with the listed order and keeps the rest in their own order', () => {
+    const watch = sections[0].items.map((item) => item.id)
+    const arranged = arrangeSections(sections, { hidden: [], order: ['ghost', watch.at(-1)!] })
+    expect(ids(arranged)[0]).toEqual([watch.at(-1), ...watch.slice(0, -1)])
+  })
+
+  it('drops a section whose every page is hidden', () => {
+    const watch = sections[0].items.map((item) => item.id)
+    const arranged = arrangeSections(sections, { hidden: watch, order: [] })
+    expect(arranged.map((section) => section.id)).not.toContain(sections[0].id)
+  })
+})
+
+describe('layoutStartRoute', () => {
+  const sections = visibleNavigation([])
+
+  it('accepts a visible static page or any plugin page', () => {
+    expect(layoutStartRoute('activity', sections)).toBe('activity')
+    expect(layoutStartRoute('plugin/acme/board', sections)).toBe('plugin/acme/board')
+  })
+
+  it('ignores missing, unknown and capability-gated pages', () => {
+    expect(layoutStartRoute(undefined, sections)).toBeUndefined()
+    expect(layoutStartRoute('nope', sections)).toBeUndefined()
+    expect(layoutStartRoute('plugins', sections)).toBeUndefined()
   })
 })

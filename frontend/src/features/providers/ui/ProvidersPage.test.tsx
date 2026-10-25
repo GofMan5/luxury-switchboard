@@ -8,7 +8,7 @@ import type { Provider } from '../domain/provider'
 
 vi.mock('./useProviders', () => ({ useProviders: vi.fn() }))
 vi.mock('../../codex/ui/useCodex', () => ({ useCodex: vi.fn() }))
-vi.mock('../../../app/services', () => ({ useAppServices: vi.fn() }))
+vi.mock('../../../app/services', async (actual) => ({ ...await actual<typeof import('../../../app/services')>(), useAppServices: vi.fn() }))
 
 import { useAppServices } from '../../../app/services'
 import { useCodex } from '../../codex/ui/useCodex'

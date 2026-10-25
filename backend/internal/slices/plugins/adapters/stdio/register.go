@@ -126,6 +126,7 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		return values, nil
 	})
+	registerSecrets(server, service)
 	server.Handle("plugins.storage.update", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var request storageUpdatePayload
 		// An absent or null values object is malformed; {} is an empty batch.

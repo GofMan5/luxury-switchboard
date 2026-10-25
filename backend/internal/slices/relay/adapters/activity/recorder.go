@@ -20,6 +20,7 @@ func (recorder *Recorder) Begin(value relayapp.ActivityStart) string {
 		Model: value.Model, ProviderID: value.ProviderID, ProviderName: value.ProviderName,
 		Method: value.Method, Path: value.Path, BytesIn: value.BytesIn,
 		ReasoningEffort: value.ReasoningEffort, ReasoningBudget: value.ReasoningBudget,
+		Tags: value.Tags,
 	})
 }
 
@@ -52,5 +53,6 @@ func (recorder *Recorder) Finish(id string, value relayapp.ActivityFinish) {
 		TotalTokens: value.Usage.TotalTokens, ContextTokens: value.Usage.ContextTokens,
 		Generation: value.Generation,
 		FirstToken: value.Pace.FirstToken, TokensPerSecond: value.Pace.TokensPerSecond,
+		Tags: value.Tags,
 	})
 }

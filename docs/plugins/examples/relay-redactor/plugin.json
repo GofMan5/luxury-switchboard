@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "example.relay-redactor",
+  "name": "Prompt redactor",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "Replaces e-mail addresses and phone numbers in chat prompts with placeholders before they reach a provider, and tags the requests it changed. Local relay only.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "relay:content"
+  ],
+  "settings": [
+    {
+      "key": "phones",
+      "label": "Redact phone numbers",
+      "description": "E-mail addresses are always redacted.",
+      "type": "toggle",
+      "default": true
+    }
+  ]
+}

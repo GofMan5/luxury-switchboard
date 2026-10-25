@@ -64,6 +64,9 @@ type Server struct {
 	guardrail   relayapp.Guardrail
 	failovers   relayapp.FailoverSource
 	routeEvents relayapp.RouteEventSink
+	// hooks and rules are optional; nil disables them.
+	hooks relayapp.RequestHooks
+	rules relayapp.RequestRules
 	// config, client and transport are one invariant: Reconfigure swaps all
 	// three under mu, so a request never reads a new client with the old
 	// timeouts. Tests may still mutate config directly because they do so
@@ -103,7 +106,12 @@ type Dependencies struct {
 	// provider ids, field names, and effort levels a provider's own error
 	// message named.
 	RepairMemoPath string
-	Config         Config
+	// Hooks and Rules are optional. Request rules, request hooks and
+	// response observers apply to the local relay only; retry rules also
+	// apply to Dispatch.
+	Hooks  relayapp.RequestHooks
+	Rules  relayapp.RequestRules
+	Config Config
 }
 
 type attemptMetadata struct {
@@ -162,6 +170,8 @@ func NewServer(address string, dependencies Dependencies) *Server {
 		guardrail:    guardrail,
 		failovers:    dependencies.Failovers,
 		routeEvents:  dependencies.RouteEvents,
+		hooks:        dependencies.Hooks,
+		rules:        dependencies.Rules,
 		config:       config,
 		client:       &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
 		transport:    transport,
@@ -243,20 +253,61 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		return
 	}
-	body, clientTools := normalizeResponsesTools(request.Method, request.URL.Path, request.Header.Get("Content-Type"), body)
+	contentType := request.Header.Get("Content-Type")
+	endpoint := relayapp.ClassifyEndpoint(canonicalPath(request.URL.Path))
+	// Plugin request hooks see the client's own body, before any relay
+	// normalization, and may rewrite it; the rewrite is normalized like the
+	// original would have been.
+	var tags []string
+	hookBlock, hookBlocked := relayapp.HookDecision{}, false
+	if server.hooks != nil && server.hooks.Active(relayapp.HookPhaseRequest, requestModel(body, contentType), endpoint) {
+		var hookTags []string
+		body, hookTags, hookBlock, hookBlocked = server.runRequestHooks(ctx, request, body, endpoint)
+		tags = append(tags, hookTags...)
+	}
+	body, clientTools := normalizeResponsesTools(request.Method, request.URL.Path, contentType, body)
 	// Read from the normalized body: the relay has just folded any nested
 	// declaration into the documented tools array.
 	clientDeclaredTools := server.guardrail.ClientDeclaredTools(body)
-	model := requestModel(body, request.Header.Get("Content-Type"))
+	model := requestModel(body, contentType)
+	if hookBlocked {
+		server.answerLocally(writer, request, model, len(body), tags, hookBlock.BlockStatus, hookBlock.BlockMessage, 0, "hook_blocked", endpoint)
+		return
+	}
+	var rule relayapp.RuleOutcome
+	if server.rules != nil {
+		rule = server.rules.Evaluate(relayapp.RuleRequest{Model: model, Endpoint: endpoint})
+		tags = append(tags, rule.Tags...)
+		switch {
+		case rule.Block != nil:
+			server.answerLocally(writer, request, model, len(body), tags, rule.Block.Status, rule.Block.Message, 0, "rule_blocked", endpoint)
+			return
+		case rule.Limit != nil:
+			server.answerLocally(writer, request, model, len(body), tags, http.StatusTooManyRequests, fmt.Sprintf("Rule %q limit reached", rule.Limit.RuleName), rule.Limit.RetryAfter, "rule_limited", endpoint)
+			return
+		}
+	}
 	// The name the client asked for, before any rewrite for the first route.
 	// Failover resolves chains by this name: it is the identity the routes
 	// slice knows, and it stays the same while every attempt speaks the
 	// upstream name of whichever provider is serving.
 	publicModel := model
 	route, err := server.routes.Current(ctx, model)
+	// A rule's provider pin wins only while that provider exists and is
+	// enabled; otherwise the request routes as if no rule had pinned it.
+	if rule.ProviderID != "" && (err != nil || route.ProviderID != rule.ProviderID) {
+		if pins, ok := server.routes.(relayapp.RulePinSource); ok {
+			if pinned, pinErr := pins.PinnedEnabled(ctx, rule.ProviderID, model); pinErr == nil {
+				route, err = pinned, nil
+			}
+		}
+	}
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "Relay route is unavailable")
 		return
+	}
+	if rule.Model != "" {
+		route.UpstreamModel = rule.Model
 	}
 	streamRequested := requiresStreamTerminal(request, body)
 	originalBody := body
@@ -272,7 +323,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	upstreamRequest.URL = &targetURL
 	upstreamRequest.URL.Path = entryPath
 	upstreamRequest.URL.RawPath = ""
-	upstreamRequest.Header = preparedHeaders
+	upstreamRequest.Header = withRuleHeaders(preparedHeaders, rule.Headers)
 	// The level the client asked for, read from its own body: the
 	// compatibility conversion and the repair memo may respell it for the
 	// provider, but the request's reasoning level is the caller's choice.
@@ -284,6 +335,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Method: request.Method, Path: request.URL.Path, BytesIn: int64(len(body)),
 		ReasoningEffort: reasoningEffort, ReasoningBudget: reasoningBudget,
+		Tags: tags,
 	})
 	status := 0
 	bytesOut := int64(0)
@@ -300,6 +352,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			ProviderID:  serving.route.ProviderID, ProviderName: serving.route.ProviderName,
 			Usage: usage, Generation: generation, Pace: serving.streamPace(requestStarted),
 		})
+		if server.rules != nil && len(rule.Budgeted) > 0 && usage.TotalTokens > 0 {
+			server.rules.SpendTokens(rule.Budgeted, usage.TotalTokens)
+		}
+		server.observeResponse(relayapp.HookRequest{
+			ActivityID: activityID, Model: model, Endpoint: endpoint,
+			Method: request.Method, Path: request.URL.Path, Bytes: int64(len(originalBody)),
+		}, status, errorCode, requestStarted, usage)
 	}()
 	committed := false
 	// What the credential of the attempt in flight is, so the answer's headers can be
@@ -325,7 +384,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 		upstreamRequest.URL.Path = path
 		upstreamRequest.URL.RawPath = ""
-		upstreamRequest.Header = headers
+		upstreamRequest.Header = withRuleHeaders(headers, rule.Headers)
 		imageCompat, chatCompat, responsesCompat, statelessJSON = image, chat, responses, stateless
 		serving.wholeJSON = stateless || (responses && !clientStream)
 		serving.image = image
@@ -1266,6 +1325,63 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		server.observeRetry(activityID, attempt, status, 0)
 		return true
 	}
+	// ruleSpent counts the extra attempts each custom retry rule has spent on
+	// this request; a rule past its own MaxAttempts or the relay's ceiling no
+	// longer applies and the built-in classification takes over.
+	ruleSpent := map[string]int{}
+	// applyRetryRule asks the operator's retry rules about a failed attempt
+	// (status zero for a transport error). handled means the rule finished the
+	// lease and decided: a non-nil result or err is returned to the caller,
+	// otherwise the ladder continues with the next attempt. Callers check the
+	// content-policy refusal first, so a refusal never reaches a rule.
+	applyRetryRule := func(lease relayapp.CredentialLease, response *http.Response, status int, errorCode, errorText string) (bool, *http.Response, error) {
+		if server.rules == nil {
+			return false, nil, nil
+		}
+		decision, ok := server.rules.Retry(relayapp.RetryQuery{
+			ProviderID: route.ProviderID, Model: model, Status: status, ErrorCode: errorCode, ErrorText: errorText,
+		})
+		if !ok {
+			return false, nil, nil
+		}
+		answerStatus := status
+		if answerStatus == 0 {
+			answerStatus = http.StatusBadGateway
+		}
+		delay := decision.Delay
+		if delay <= 0 {
+			delay = retryDelay(attempt, response, server.configSnapshot())
+		}
+		if decision.Action == relayapp.RetryActionFail {
+			finishLease(lease, ruleLeaseOutcome(status, delay))
+			return true, genericErrorResponse(answerStatus), nil
+		}
+		if ruleSpent[decision.RuleID] >= decision.MaxAttempts || !canRetry(attempt, attemptLimit) {
+			return false, nil, nil
+		}
+		if decision.Action == relayapp.RetryActionRotateKey {
+			if !server.canRotateCredential(attempt, attemptLimit, lease, credentialFailures+1, route.ProviderID) {
+				return false, nil, nil
+			}
+			ruleSpent[decision.RuleID]++
+			credentialFailures++
+			// The key steps aside for the delay so the rotation reaches
+			// another one; the request itself does not wait for it.
+			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRateLimited, RetryAfter: max(delay, time.Second)})
+			rotateImmediate = true
+			rotationStatus = answerStatus
+			return true, nil, server.retryCredentialFailure(ctx, lease, activityID, attempt, status, delay)
+		}
+		ruleSpent[decision.RuleID]++
+		finishLease(lease, ruleLeaseOutcome(status, delay))
+		// switch_provider needs a failover chain; without one (and always on
+		// Dispatch, which has no public model to chain by) it acts as retry.
+		if decision.Action == relayapp.RetryActionSwitchProvider && switchRoute(answerStatus) {
+			return true, nil, nil
+		}
+		server.observeRetry(activityID, attempt, status, delay)
+		return true, nil, waitRetry(ctx, delay)
+	}
 	for ; ; attempt++ {
 		// Error prose belongs to this attempt. In particular, the bodyless
 		// 429 path must not retain a previous key's authentication message.
@@ -1310,6 +1426,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		attemptStarted := time.Now()
 		response, err := client.Do(upstream)
 		if err != nil {
+			if ctx.Err() == nil {
+				if handled, result, ruleErr := applyRetryRule(lease, nil, 0, "transport", normalizeErrorText([]byte(transportErrorDetail(err)))); handled {
+					if result != nil || ruleErr != nil {
+						return result, ruleErr
+					}
+					continue
+				}
+			}
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
 			if !canRetry(attempt, attemptLimit) {
 				return nil, err
@@ -1567,6 +1691,28 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptSuccess})
 			server.noteLearnedShape(route.ProviderID, learned)
 			return response, nil
+		}
+
+		// Custom retry rules match on the error's words, so with rules
+		// configured the body is read here, before every built-in branch, and
+		// replayed to them. A refusal is the provider's verdict on the content:
+		// no rule may retry it.
+		if server.rules != nil {
+			errorBody, readErr := readErrorBody(ctx, response, server.configSnapshot().StreamIdleTimeout)
+			if readErr != nil {
+				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport})
+				return nil, readErr
+			}
+			noteUpstreamDetail(upstreamDetail, errorBody)
+			if !policyRefused(string(errorBody)) {
+				if handled, result, ruleErr := applyRetryRule(lease, response, status, "upstream_status", normalizeErrorText(errorBody)); handled {
+					if result != nil || ruleErr != nil {
+						return result, ruleErr
+					}
+					continue
+				}
+			}
+			response.Body = io.NopCloser(bytes.NewReader(errorBody))
 		}
 
 		// A 429 or 529 needs no prose: close immediately. Draining a silent

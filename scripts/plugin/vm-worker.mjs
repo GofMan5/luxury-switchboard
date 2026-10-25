@@ -47,7 +47,7 @@ class VmWorker {
   #nextTimer = 1
   #closed = false
 
-  constructor(text, offset, timeoutMs) {
+  constructor(text, offset, timeoutMs, globals = {}) {
     this.#offset = offset
     this.#timeoutMs = timeoutMs
     const timer = (repeat) => (callback, delay, ...args) => {
@@ -79,6 +79,7 @@ class VmWorker {
       TextEncoder, TextDecoder, URL, URLSearchParams, atob, btoa,
       crypto: Object.freeze({ randomUUID: () => randomUUID(), getRandomValues: (array) => getRandomValues(array) }),
       performance: Object.freeze({ now: () => performance.now(), timeOrigin: performance.timeOrigin }),
+      ...globals,
     }, { name: 'switchboard-plugin', microtaskMode: 'afterEvaluate' })
     // `afterEvaluate` gives the context its own microtask queue, drained at
     // the end of every entry under the same time limit, so a runaway promise
@@ -148,6 +149,13 @@ class VmWorker {
     setImmediate(() => this.#enter(() => { for (const listener of this.#listeners.message) listener({ data }) }))
   }
 
+  /** Calls `globalThis.__cliHooks[name](payload)` inside the context, under the same time limit. */
+  invoke(name, payload) {
+    if (this.#closed) return
+    const data = this.#parse(JSON.stringify(payload ?? null))
+    this.#enter(() => this.#context.__cliHooks?.[name]?.(data))
+  }
+
   onMessage(listener) { this.#onMessage.push(listener) }
   onError(listener) { this.#onError.push(listener) }
 
@@ -161,11 +169,11 @@ class VmWorker {
 }
 
 /** A WorkerFactory over the frontend's own workerSource(script, context). */
-export function vmWorkerFactory(workerSource, { timeoutMs = 5_000 } = {}) {
+export function vmWorkerFactory(workerSource, { timeoutMs = 5_000, globals } = {}) {
   return {
     create(script, context) {
       const { text, offset } = workerSource(script, context)
-      return new VmWorker(text, offset, timeoutMs)
+      return new VmWorker(text, offset, timeoutMs, globals)
     },
   }
 }

@@ -253,7 +253,7 @@ describe('PluginPageView', () => {
       pages: { 'acme.tools/board': { key: 'acme.tools/board', pluginId: 'acme.tools', pluginName: 'Acme tools', pageId: 'board', title: 'Board', tree: tree(raw), problem: '' } },
     }
     const sendPageEvent = vi.fn()
-    const plugins = { subscribe: () => () => undefined, snapshot: () => state, sendPageEvent, restart: vi.fn() }
+    const plugins = { subscribe: () => () => undefined, snapshot: () => state, sendPageEvent, restart: vi.fn(), canvas: () => undefined }
     return { services: { plugins } as unknown as AppServices, sendPageEvent }
   }
 

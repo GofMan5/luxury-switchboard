@@ -1,7 +1,7 @@
 // Reading, checking, packing and scaffolding plugin packages. Every rule comes
 // from frontend/src through ./domain.mjs; this file only gathers the files and
 // reports what the app's own checks say.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import vm from 'node:vm'
 import { manifest, settings, tokens, workerSource } from './domain.mjs'
@@ -20,16 +20,60 @@ export function checkoutVersion() {
 }
 
 const stripBom = (text) => (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 function readText(path) {
   try { return stripBom(readFileSync(path, 'utf8')) } catch (error) { throw new UsageError(`Cannot read ${path}: ${error.message}`) }
 }
 
+/** The most a source file may hold before it is read: one frame. The real
+ * script/css budgets are checked later, on the decoded text. */
+export const SOURCE_FILE_BYTES = 262_144
+
+/**
+ * One source file as the Go dev-link packer reads it. Returns
+ * `{ text }`, `{ missing: true }` or `{ problem }`.
+ */
+function readSourceFile(dir, name) {
+  const path = join(dir, name)
+  let stat
+  try { stat = lstatSync(path, { throwIfNoEntry: false }) } catch (error) { return { problem: `Cannot read ${name}: ${error.message}` } }
+  if (!stat) return { missing: true }
+  if (!stat.isFile()) return { problem: `${name} is not a regular file.` }
+  if (stat.size > SOURCE_FILE_BYTES) return { problem: `${name} is larger than 256 KiB.` }
+  let text
+  try { text = utf8.decode(readFileSync(path)) } catch (error) {
+    return { problem: error?.code === 'ERR_ENCODING_INVALID_ENCODED_DATA' ? `${name} is not valid UTF-8.` : `Cannot read ${name}: ${error.message}` }
+  }
+  if (manifest.byteLength(text) > SOURCE_FILE_BYTES) return { problem: `${name} is larger than 256 KiB.` }
+  return { text: stripBom(text) }
+}
+
 /**
  * The package a path describes, as unchecked JSON, with the problems found
  * while assembling it. A path is either a packed `.json` file or a source
- * directory: `plugin.json` (the package without script and css), an optional
- * `main.js` (the script) and an optional `style.css` (the stylesheet).
+ * directory.
+ *
+ * Source directory packing. The Go dev link (plugins.dev.link,
+ * backend/internal/slices/plugins) implements the same rules; change both
+ * together:
+ * 1. Exactly three names are read, all optional except the first:
+ *    `plugin.json` (the package without script and css), `main.js` (becomes
+ *    "script") and `style.css` (becomes "css"). Nothing else in the folder
+ *    is read: dist/, node_modules, dotfiles and subfolders are ignored.
+ * 2. Each must be a regular file inside the folder. A symlink or anything
+ *    else is "<file> is not a regular file.".
+ * 3. Each is at most 262144 bytes (256 KiB) before decoding, else
+ *    "<file> is larger than 256 KiB." and it is not read. The 128 KiB script
+ *    and 64 KiB css budgets are package rules checked afterwards.
+ * 4. Strict UTF-8 ("<file> is not valid UTF-8."); one leading BOM is
+ *    stripped; nothing else changes (CRLF and the final newline are kept).
+ *    An empty main.js or style.css still sets "script"/"css" to "".
+ * 5. plugin.json must parse as JSON ("plugin.json is not valid JSON: …").
+ *    "script", "css" and "$schema" in it are problems (texts below); every
+ *    other key goes to the normal strict package check.
+ * 6. A missing plugin.json is a usage error here and a link problem in Go.
+ * 7. Every problem is reported; one does not hide the others.
  */
 export function loadPackage(path) {
   let stat
@@ -40,24 +84,27 @@ export function loadPackage(path) {
       return { value: undefined, problems: [`The file is not valid JSON: ${error.message}`], source: 'package', scriptName: 'the script' }
     }
   }
-  const manifestPath = join(path, SOURCE_FILES.manifest)
-  if (!existsSync(manifestPath)) throw new UsageError(`${path} has no ${SOURCE_FILES.manifest}; pass a packed .json file or a plugin source directory.`)
-  let value
-  try { value = JSON.parse(readText(manifestPath)) } catch (error) {
-    return { value: undefined, problems: [`${SOURCE_FILES.manifest} is not valid JSON: ${error.message}`], source: 'directory', scriptName: SOURCE_FILES.script }
-  }
+  const directory = { source: 'directory', scriptName: SOURCE_FILES.script }
+  const manifestFile = readSourceFile(path, SOURCE_FILES.manifest)
+  if (manifestFile.missing) throw new UsageError(`${path} has no ${SOURCE_FILES.manifest}; pass a packed .json file or a plugin source directory.`)
   const problems = []
+  let value
+  if (manifestFile.problem) problems.push(manifestFile.problem)
+  else {
+    try { value = JSON.parse(manifestFile.text) } catch (error) { problems.push(`${SOURCE_FILES.manifest} is not valid JSON: ${error.message}`) }
+  }
+  const script = readSourceFile(path, SOURCE_FILES.script)
+  const css = readSourceFile(path, SOURCE_FILES.css)
+  for (const file of [script, css]) if (file.problem) problems.push(file.problem)
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     if ('script' in value) problems.push(`${SOURCE_FILES.manifest} may not carry "script"; the script is ${SOURCE_FILES.script}.`)
     if ('css' in value) problems.push(`${SOURCE_FILES.manifest} may not carry "css"; the stylesheet is ${SOURCE_FILES.css}.`)
     if ('$schema' in value) problems.push(`${SOURCE_FILES.manifest} may not carry "$schema" (packages refuse unknown fields); point your editor at docs/plugins/plugin.schema.json instead.`)
     value = Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'script' && key !== 'css' && key !== '$schema'))
-    const scriptPath = join(path, SOURCE_FILES.script)
-    const cssPath = join(path, SOURCE_FILES.css)
-    if (existsSync(scriptPath)) value.script = readText(scriptPath)
-    if (existsSync(cssPath)) value.css = readText(cssPath)
+    if (script.text !== undefined) value.script = script.text
+    if (css.text !== undefined) value.css = css.text
   }
-  return { value, problems, source: 'directory', scriptName: SOURCE_FILES.script }
+  return { value, problems, ...directory }
 }
 
 /** Compiles the script exactly as the worker will (inside the prelude) without

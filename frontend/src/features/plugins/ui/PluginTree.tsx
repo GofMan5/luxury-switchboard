@@ -4,12 +4,15 @@ import { pluginIcon } from '../../../app/plugin-icons'
 import { openExternal } from '../../../platform/lifecycle/open-external'
 import { EmptyState, Metric, MetricStrip, Panel, Pill } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
+import type { CanvasChannel } from '../domain/canvas'
+import { isSafeHref, parseMarkdown, type Block, type Inline } from '../domain/markdown'
 import type { PageEvent } from '../domain/protocol'
+import { PluginCanvas } from './PluginCanvas'
 import { formatNumber, formatScalar, type CellValue, type Option, type TableNode, type Tone, type UiNode } from '../domain/ui-tree'
 import chrome from '../../../shared/ui/chrome.module.css'
 import styles from './PluginTree.module.css'
 
-type FieldValue = string | boolean
+type FieldValue = string | number | boolean
 /** Every named control's current value, by name. Whoever sends page events reads it. */
 export type FormValues = Map<string, FieldValue>
 type Send = (event: Omit<PageEvent, 'form'>) => void
@@ -21,6 +24,8 @@ interface Form {
   readonly owners: Map<string, object>
   readonly send: Send
   readonly disabled: boolean
+  /** Where canvas nodes get their draws and send their input; absent outside a running page. */
+  readonly canvas?: { readonly channel: CanvasChannel; readonly surface: string }
 }
 
 const FormContext = createContext<Form | null>(null)
@@ -36,13 +41,17 @@ function useForm(): Form {
  * event carries the current value of every field on the page, so a plugin
  * reads its form from the event instead of tracking keystrokes.
  */
-export function PluginTree({ tree, disabled, onEvent, values: shared }: {
+export function PluginTree({ tree, disabled, onEvent, values: shared, canvas, surface }: {
   readonly tree: UiNode
   /** While the plugin is not running its controls cannot do anything. */
   readonly disabled: boolean
   readonly onEvent: (event: PageEvent) => void
   /** The page's form, when the caller sends events of its own (show/hide) with it. */
   readonly values?: FormValues
+  /** The plugin host's canvas channel; without it and {@link surface} canvas nodes draw a placeholder. */
+  readonly canvas?: CanvasChannel
+  /** The page or surface id this tree was rendered for, as the channel names it. */
+  readonly surface?: string
 }) {
   const [own] = useState<FormValues>(() => new Map())
   const values = shared ?? own
@@ -54,6 +63,7 @@ export function PluginTree({ tree, disabled, onEvent, values: shared }: {
     owners: scope.owners,
     disabled,
     send: (event) => onEvent({ ...event, form: Object.fromEntries(scope.values) }),
+    ...(canvas && surface ? { canvas: { channel: canvas, surface } } : {}),
   }
   return (
     <FormContext value={form}>
@@ -105,7 +115,7 @@ function Node({ node }: { readonly node: UiNode }): ReactNode {
         </MetricStrip>
       )
     case 'badge':
-      return <Pill tone={node.tone}>{node.text}</Pill>
+      return <span className={styles.badge}><Pill tone={node.tone}>{node.text}</Pill></span>
     case 'dot':
       return (
         <span className={styles.dot}>
@@ -169,7 +179,137 @@ function Node({ node }: { readonly node: UiNode }): ReactNode {
       return <EmptyState icon={pluginIcon(undefined)} title={node.title} hint={node.hint || undefined} height={120} />
     case 'link':
       return <PluginLink node={node} />
+    case 'markdown':
+      return <div className={styles.markdown}><MarkdownBlocks blocks={parseMarkdown(node.text)} /></div>
+    case 'image':
+      // The checker admits only data:image URLs, so an image can never make the window fetch.
+      return <img className={styles.image} src={node.src} alt={node.alt} width={node.width} height={node.height} />
+    case 'slider':
+      return <SliderField node={node} />
+    case 'color':
+      return <ColorField node={node} />
+    case 'details':
+      return <DetailsField node={node} />
+    case 'canvas':
+      return <CanvasField node={node} />
   }
+}
+
+/** Markdown drawn as React elements; the parser never produces HTML, so `<b>` stays text. */
+function MarkdownBlocks({ blocks }: { readonly blocks: readonly Block[] }): ReactNode {
+  return blocks.map((block, index) => {
+    switch (block.kind) {
+      case 'heading': {
+        const Tag = block.level === 1 ? 'h2' : block.level === 2 ? 'h3' : 'h4'
+        return <Tag key={index} className={styles.heading} data-level={block.level}><MarkdownInline nodes={block.children} /></Tag>
+      }
+      case 'paragraph': return <p key={index}><MarkdownInline nodes={block.children} /></p>
+      case 'code': return <pre key={index} className={styles.code}><code>{block.text}</code></pre>
+      case 'quote': return <blockquote key={index}><MarkdownBlocks blocks={block.children} /></blockquote>
+      case 'rule': return <hr key={index} className={styles.divider} />
+      case 'list': {
+        const items = block.items.map((item, at) => <li key={at}><MarkdownBlocks blocks={item} /></li>)
+        return block.ordered ? <ol key={index} start={block.start}>{items}</ol> : <ul key={index}>{items}</ul>
+      }
+    }
+  })
+}
+
+function MarkdownInline({ nodes }: { readonly nodes: readonly Inline[] }): ReactNode {
+  return nodes.map((node, index) => {
+    switch (node.kind) {
+      case 'text': return node.text
+      case 'code': return <code key={index}>{node.text}</code>
+      case 'strong': return <strong key={index}><MarkdownInline nodes={node.children} /></strong>
+      case 'em': return <em key={index}><MarkdownInline nodes={node.children} /></em>
+      case 'link':
+        // The parser already refused unsafe targets; checked again because this is where the click happens.
+        return isSafeHref(node.href)
+          ? <ExternalAnchor key={index} href={node.href}><MarkdownInline nodes={node.children} /></ExternalAnchor>
+          : <MarkdownInline key={index} nodes={node.children} />
+    }
+  })
+}
+
+/** A native range input: keyboard, focus and the spoken value come for free. Commits once the operator lets go. */
+function SliderField({ node }: { readonly node: NodeOf<'slider'> }) {
+  const form = useForm()
+  const id = useId()
+  const [value, setValue] = useFieldValue(node.name, node.value)
+  const { commit } = useCommit(node.name, node.value, value)
+  return (
+    <div className={styles.field}>
+      <label htmlFor={id} className={styles.sliderLabel}>
+        <span>{node.label}</span>
+        <output htmlFor={id}>{formatNumber(value)}</output>
+      </label>
+      <input
+        id={id}
+        type="range"
+        className={styles.slider}
+        min={node.min}
+        max={node.max}
+        step={node.step}
+        value={value}
+        disabled={node.disabled || form.disabled}
+        onChange={(event) => setValue(Number(event.target.value))}
+        onPointerUp={() => commit()}
+        onKeyUp={() => commit()}
+        onBlur={() => commit()}
+      />
+    </div>
+  )
+}
+
+function ColorField({ node }: { readonly node: NodeOf<'color'> }) {
+  const form = useForm()
+  const id = useId()
+  const [value, setValue] = useFieldValue(node.name, node.value)
+  const { commit } = useCommit(node.name, node.value, value)
+  return (
+    <div className={styles.field}>
+      <label htmlFor={id}>{node.label}</label>
+      <span className={styles.color}>
+        <input
+          id={id}
+          type="color"
+          value={value}
+          disabled={node.disabled || form.disabled}
+          // React's onChange is the input event (every drag step); the native change fires once the picker closes.
+          onChange={(event) => setValue(event.target.value.toLowerCase())}
+          onBlur={() => commit()}
+          ref={(input) => {
+            if (!input) return
+            const done = () => commit(input.value.toLowerCase())
+            input.addEventListener('change', done)
+            return () => input.removeEventListener('change', done)
+          }}
+        />
+        <code aria-hidden="true">{value}</code>
+      </span>
+    </div>
+  )
+}
+
+/** Native disclosure; the open state follows the plugin's tree until the operator toggles it. */
+function DetailsField({ node }: { readonly node: NodeOf<'details'> }) {
+  const [open, setOpen] = useState(node.open)
+  const [previous, setPrevious] = useState(node.open)
+  if (previous !== node.open) {
+    setPrevious(node.open)
+    setOpen(node.open)
+  }
+  return (
+    <details className={styles.details} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>{node.summary}</summary>
+      {open ? <div className={styles.detailsBody}><Nodes nodes={node.children} /></div> : null}
+    </details>
+  )
+}
+
+function CanvasField({ node }: { readonly node: NodeOf<'canvas'> }) {
+  const form = useForm()
+  return <PluginCanvas node={node} channel={form.canvas?.channel} surface={form.canvas?.surface} disabled={form.disabled} />
 }
 
 function PluginButton({ node }: { readonly node: NodeOf<'button'> }) {
@@ -190,22 +330,30 @@ function PluginButton({ node }: { readonly node: NodeOf<'button'> }) {
 
 /** A real link, so it reads and focuses as one, that always opens in the system browser. */
 function PluginLink({ node }: { readonly node: NodeOf<'link'> }) {
+  return (
+    <ExternalAnchor href={node.href}>
+      {node.text}
+      <ExternalLink size={12} aria-hidden="true" />
+    </ExternalAnchor>
+  )
+}
+
+function ExternalAnchor({ href, children }: { readonly href: string; readonly children: ReactNode }) {
   // Enter on a link is a click, so the keyboard takes the same path as the mouse.
   const open = (event: MouseEvent) => {
     event.preventDefault()
-    void openExternal(node.href)
+    void openExternal(href)
   }
   return (
     <a
       className={styles.link}
-      href={node.href}
-      title={node.href}
+      href={href}
+      title={href}
       rel="noreferrer"
       onClick={open}
       onAuxClick={(event) => { if (event.button === 1) open(event) }}
     >
-      {node.text}
-      <ExternalLink size={12} aria-hidden="true" />
+      {children}
     </a>
   )
 }
@@ -335,15 +483,15 @@ function rangeProblem(node: NodeOf<'input'>, value: string): string {
 }
 
 /** Commits a text value as a change once, when it differs from what the plugin last saw. */
-function useCommit(name: string, fromTree: string, value: string) {
+function useCommit<T extends FieldValue>(name: string, fromTree: T, value: T) {
   const form = useForm()
   const committed = useRef(fromTree)
   useEffect(() => { committed.current = fromTree }, [fromTree])
   return {
-    commit: () => {
-      if (committed.current === value) return
-      committed.current = value
-      form.send({ kind: 'change', name, value })
+    commit: (next: T = value) => {
+      if (committed.current === next) return
+      committed.current = next
+      form.send({ kind: 'change', name, value: next })
     },
     act: (action: string) => {
       committed.current = value
@@ -375,7 +523,7 @@ function TextField({ node }: { readonly node: NodeOf<'input'> }) {
         aria-describedby={describedBy(id, node.hint, error)}
         disabled={node.disabled || form.disabled}
         onChange={(event) => setValue(event.target.value)}
-        onBlur={commit}
+        onBlur={() => commit()}
         onKeyDown={(event) => {
           if (number && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
             event.preventDefault()
@@ -423,7 +571,7 @@ function TextareaField({ node }: { readonly node: NodeOf<'textarea'> }) {
         aria-keyshortcuts="Control+Enter"
         disabled={node.disabled || form.disabled}
         onChange={(event) => setValue(event.target.value)}
-        onBlur={commit}
+        onBlur={() => commit()}
         onKeyDown={(event) => {
           // Enter alone is a new line; Ctrl+Enter (⌘+Enter on a Mac) submits.
           if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return

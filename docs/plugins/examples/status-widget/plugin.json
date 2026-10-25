@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "example.status-widget",
+  "name": "Status widget",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "An Overview widget with the state of a fictional status API, fetched every few minutes with a write-only API key.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:slots",
+    "net:fetch"
+  ],
+  "network": {
+    "hosts": ["status.example.com"]
+  },
+  "settings": [
+    {
+      "key": "apiKey",
+      "label": "Status API key",
+      "description": "Sent as a bearer token to status.example.com. Write-only: it is never shown again and is left out of backups.",
+      "type": "secret"
+    },
+    {
+      "key": "minutes",
+      "label": "Refresh every (minutes)",
+      "type": "number",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    }
+  ]
+}

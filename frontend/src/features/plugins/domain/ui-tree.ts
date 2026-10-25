@@ -8,6 +8,8 @@
  * copies only known properties, so the renderer only ever sees the shapes
  * declared here. Table rows are the one open record (see the `table` case).
  */
+import { CANVAS_LIMITS } from './canvas'
+
 export type Tone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
 export type Gap = 'none' | 'sm' | 'md' | 'lg'
 /** A number stays a number so the window formats it once, the same way everywhere. */
@@ -61,19 +63,34 @@ export interface CalloutNode extends Base { readonly type: 'callout'; readonly t
 export interface DividerNode extends Base { readonly type: 'divider' }
 export interface EmptyNode extends Base { readonly type: 'empty'; readonly title: string; readonly hint: string }
 export interface LinkNode extends Base { readonly type: 'link'; readonly text: string; readonly href: string }
+/** Formatted text; the window parses it into elements (see `markdown.ts`), never into HTML. */
+export interface MarkdownNode extends Base { readonly type: 'markdown'; readonly text: string }
+/** An embedded picture: `src` is always a checked `data:image/…;base64,` URL, never a remote address. */
+export interface ImageNode extends Base { readonly type: 'image'; readonly src: string; readonly alt: string; readonly width?: number; readonly height?: number }
+/** `value` sits on a step inside the range, so what the window shows is what the form holds. */
+export interface SliderNode extends Base { readonly type: 'slider'; readonly name: string; readonly label: string; readonly min: number; readonly max: number; readonly step: number; readonly value: number; readonly disabled: boolean }
+/** `value` is lower-case `#rrggbb`, the form a colour input reports. */
+export interface ColorNode extends Base { readonly type: 'color'; readonly name: string; readonly label: string; readonly value: string; readonly disabled: boolean }
+export interface DetailsNode extends Base { readonly type: 'details'; readonly summary: string; readonly open: boolean; readonly children: readonly UiNode[] }
+/** A drawing surface the plugin paints with `ui.draw`; `id` is unique in its tree. */
+export interface CanvasNode extends Base {
+  readonly type: 'canvas'; readonly id: string; readonly width: number; readonly height: number; readonly label: string
+  readonly keys: boolean; readonly pointer: boolean; readonly frames: boolean; readonly fit: 'contain' | 'none'
+}
 
 export type UiNode =
   | StackNode | RowNode | GridNode | PanelNode | HeadingNode | TextNode | MetricNode | MetricsNode
   | BadgeNode | DotNode | TableNode | ListNode | CodeNode | KvNode | ButtonNode | InputNode | TextareaNode
   | SelectNode | ToggleNode | SegmentedNode | TabsNode | ProgressNode | ChartNode | CalloutNode
   | DividerNode | EmptyNode | LinkNode
+  | MarkdownNode | ImageNode | SliderNode | ColorNode | DetailsNode | CanvasNode
 
 export type NodeType = UiNode['type']
 
 export const NODE_TYPES: readonly NodeType[] = [
   'stack', 'row', 'grid', 'panel', 'heading', 'text', 'metric', 'metrics', 'badge', 'dot', 'table', 'list',
   'code', 'kv', 'button', 'input', 'textarea', 'select', 'toggle', 'segmented', 'tabs', 'progress', 'chart',
-  'callout', 'divider', 'empty', 'link',
+  'callout', 'divider', 'empty', 'link', 'markdown', 'image', 'slider', 'color', 'details', 'canvas',
 ]
 
 export const TREE_LIMITS = {
@@ -91,6 +108,9 @@ export const TREE_LIMITS = {
   options: 100,
   tabs: 8,
   points: 200,
+  markdown: 20_000,
+  /** Characters of an image's `data:` URL, which is all ASCII, so characters are bytes. */
+  image: 256 * 1024,
 } as const
 
 /** Field names and actions: what a plugin matches on in its event handler. */
@@ -142,6 +162,12 @@ const FIELD_LISTS = {
   divider: [],
   empty: ['title', 'hint'],
   link: ['text', 'href'],
+  markdown: ['text'],
+  image: ['src', 'alt', 'width', 'height'],
+  slider: ['name', 'label', 'min', 'max', 'step', 'value', 'disabled'],
+  color: ['name', 'label', 'value', 'disabled'],
+  details: ['summary', 'open', 'children'],
+  canvas: ['id', 'width', 'height', 'label', 'keys', 'pointer', 'frames', 'fit'],
   column: ['key', 'label', 'align', 'mono', 'width', 'format'],
   listItem: ['title', 'detail', 'meta', 'tone'],
   kvItem: ['key', 'value'],
@@ -213,7 +239,7 @@ export function checkTree(raw: unknown): TreeCheck {
   }
   const bytes = new TextEncoder().encode(json).length
   if (bytes > TREE_LIMITS.bytes) return { ok: false, problem: `The tree is ${Math.ceil(bytes / 1024)} KiB; a page takes at most ${TREE_LIMITS.bytes / 1024} KiB.` }
-  const budget = { left: TREE_LIMITS.nodes }
+  const budget: Walk = { left: TREE_LIMITS.nodes, canvases: new Map() }
   try {
     return { ok: true, tree: node(raw, 'tree', 0, budget) }
   } catch (error) {
@@ -222,7 +248,10 @@ export function checkTree(raw: unknown): TreeCheck {
   }
 }
 
-function node(raw: unknown, path: string, depth: number, budget: { left: number }): UiNode {
+/** What one check carries through the tree: the node budget left and where each canvas id first appeared. */
+interface Walk { left: number; readonly canvases: Map<string, string> }
+
+function node(raw: unknown, path: string, depth: number, budget: Walk): UiNode {
   if (depth > TREE_LIMITS.depth) fail(path, `nests deeper than ${TREE_LIMITS.depth} levels`)
   spend(budget, 1, path)
   const value = record(raw, path)
@@ -432,6 +461,54 @@ function node(raw: unknown, path: string, depth: number, budget: { left: number 
       if (!url || url.protocol !== 'https:' || url.username || url.password) fail(at('href'), 'must be an https:// address without credentials')
       return { type, ...key, text: text(value.text, at('text'), TREE_LIMITS.label), href }
     }
+    case 'markdown': return { type, ...key, text: text(value.text, at('text'), TREE_LIMITS.markdown, true) }
+    case 'image': {
+      if (typeof value.src !== 'string') fail(at('src'), 'must be a string')
+      const src = value.src as string
+      if (src.length > TREE_LIMITS.image) fail(at('src'), `is ${Math.ceil(src.length / 1024)} KiB; an image takes at most ${TREE_LIMITS.image / 1024} KiB`)
+      if (!IMAGE_SOURCE.test(src)) fail(at('src'), 'must be a data:image/png, jpeg, gif or webp;base64, URL (remote addresses are refused)')
+      const width = value.width === undefined ? undefined : integer(value.width, 1, CANVAS_LIMITS.size, 0, at('width'))
+      const height = value.height === undefined ? undefined : integer(value.height, 1, CANVAS_LIMITS.size, 0, at('height'))
+      return {
+        type, ...key, src, alt: text(value.alt, at('alt'), TREE_LIMITS.label),
+        ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }),
+      }
+    }
+    case 'slider': {
+      const min = number(value.min, at('min'))
+      const max = number(value.max, at('max'))
+      const step = number(value.step, at('step'))
+      if (max <= min) fail(at('max'), 'must be above min')
+      if (!Number.isFinite(max - min)) fail(at('max'), 'is too far from min')
+      if (step <= 0) fail(at('step'), 'must be above 0')
+      const amount = number(value.value, at('value'))
+      return {
+        type, ...key, name: name(value.name, at('name')), label: text(value.label, at('label'), TREE_LIMITS.label),
+        min, max, step, value: onStep(amount, min, max, step), disabled: bool(value.disabled, false, at('disabled')),
+      }
+    }
+    case 'color': {
+      if (typeof value.value !== 'string' || !HEX_COLOR.test(value.value)) fail(at('value'), 'must be a #rrggbb colour')
+      return {
+        type, ...key, name: name(value.name, at('name')), label: text(value.label, at('label'), TREE_LIMITS.label),
+        value: (value.value as string).toLowerCase(), disabled: bool(value.disabled, false, at('disabled')),
+      }
+    }
+    case 'details': return { type, ...key, summary: text(value.summary, at('summary'), TREE_LIMITS.label), open: bool(value.open, false, at('open')), children: kids() }
+    case 'canvas': {
+      const id = name(value.id, at('id'))
+      const first = budget.canvases.get(id)
+      if (first !== undefined) fail(at('id'), `repeats the id of the canvas at ${first}`)
+      budget.canvases.set(id, path)
+      return {
+        type, ...key, id,
+        width: integer(needed(value.width, at('width')), 1, CANVAS_LIMITS.size, 0, at('width')),
+        height: integer(needed(value.height, at('height')), 1, CANVAS_LIMITS.size, 0, at('height')),
+        label: text(value.label, at('label'), TREE_LIMITS.label),
+        keys: bool(value.keys, false, at('keys')), pointer: bool(value.pointer, false, at('pointer')), frames: bool(value.frames, false, at('frames')),
+        fit: oneOf(value.fit, ['contain', 'none'] as const, 'contain', at('fit')),
+      }
+    }
     default:
       return fail(at('type'), typeof type === 'string' ? `"${type.slice(0, 32)}" is not a node type (use one of ${NODE_TYPES.join(', ')})` : 'is missing')
   }
@@ -470,7 +547,7 @@ function fieldValue(value: unknown, path: string): string {
 }
 
 /** `null` and `false` children are skipped, so a plugin can write `cond ? node : null`; paths keep the plugin's own indexes. */
-function children(raw: unknown, path: string, depth: number, budget: { left: number }): UiNode[] {
+function children(raw: unknown, path: string, depth: number, budget: Walk): UiNode[] {
   if (raw === undefined) return []
   const result: UiNode[] = []
   array(raw, path, TREE_LIMITS.nodes).forEach((child, index) => {
@@ -562,6 +639,31 @@ function finite(value: unknown, path: string): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) fail(path, 'must be a finite number')
   return value as number
 }
+
+function number(value: unknown, path: string): number {
+  return finite(needed(value, path), path) as number
+}
+
+/** A field with no default: absent is its own error, not "must be a …". */
+function needed(value: unknown, path: string): unknown {
+  if (value === undefined) fail(path, 'is missing')
+  return value
+}
+
+/**
+ * A slider value as the control holds it: inside the range and on a step
+ * counted from `min`, the way a native range input snaps it. Rounding to 12
+ * significant digits keeps `0.1 + 0.2` reading as `0.3`.
+ */
+export function onStep(value: number, min: number, max: number, step: number): number {
+  const top = Math.floor((max - min) / step + 1e-9)
+  const steps = Math.min(top, Math.max(0, Math.round((value - min) / step)))
+  return Number((min + steps * step).toPrecision(12))
+}
+
+/** Image sources: inline pictures only, so a page can never make the window fetch anything. */
+const IMAGE_SOURCE = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/u
+const HEX_COLOR = /^#[0-9a-f]{6}$/iu
 
 function name(value: unknown, path: string): string {
   if (typeof value !== 'string' || !NAME_PATTERN.test(value)) fail(path, 'must be 1–64 letters, digits, dots, colons, dashes or underscores')

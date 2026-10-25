@@ -30,7 +30,7 @@
 .table th:nth-child(6) { width: 128px; }
 .table th:nth-child(7) { width: 52px; }
 /* Five icon buttons, their gaps, the cell padding and the edge. */
-.table th:last-child { width: calc(5 * var(--control-height-sm) + 8px + 12px + var(--edge)); }
+.table th:last-child { width: calc(var(--row-actions, 5) * (var(--control-height-sm) + 2px) + 10px + var(--edge)); }
 .table th:nth-child(1) { text-align: center; }
 .table th:nth-child(3), .table th:nth-child(4), .table th:nth-child(7) { text-align: right; }
 .table .num { color: var(--text-primary); font-family: var(--font-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }

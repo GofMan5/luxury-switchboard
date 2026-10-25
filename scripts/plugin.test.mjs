@@ -18,6 +18,8 @@ const CLI = join(ROOT, 'scripts', 'plugin.mjs')
 const EXAMPLES = join(ROOT, 'docs', 'plugins', 'examples')
 const SCHEMA = JSON.parse(readFileSync(join(ROOT, 'docs', 'plugins', 'plugin.schema.json'), 'utf8'))
 const LATENCY_BOARD = join(EXAMPLES, 'latency-board.json')
+/** Source-folder examples (docs/plugins/examples/<name>/plugin.json); the top-level .json files are the built-in ones. */
+const SOURCE_EXAMPLES = readdirSync(EXAMPLES, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()
 
 const scratch = mkdtempSync(join(tmpdir(), 'switchboard-plugin-test-'))
 after(() => rmSync(scratch, { recursive: true, force: true }))
@@ -53,7 +55,7 @@ function* nodes(tree) {
 }
 
 describe('validate', () => {
-  for (const file of readdirSync(EXAMPLES).filter((name) => name.endsWith('.json')).sort()) {
+  for (const file of [...readdirSync(EXAMPLES).filter((name) => name.endsWith('.json')).sort(), ...SOURCE_EXAMPLES]) {
     test(`examples/${file} is valid`, () => {
       const report = validatePackage(loadPackage(join(EXAMPLES, file)))
       assert.equal(report.ok, true, report.problems.join('\n'))
@@ -276,10 +278,60 @@ describe('run', () => {
     assert.deepEqual(current.problems, [])
   })
 
+  const example = (name) => validatePackage(loadPackage(join(EXAMPLES, name)), { appVersion: '1.0.66' }).package
+  const run66 = (name, options = {}) => runPackage(example(name), { seconds: 0, appVersion: '1.0.66', ...options })
+
+  test('tetris draws on its canvas every frame without refused draws', async () => {
+    const report = await run66('tetris')
+    assert.deepEqual(report.problems, [])
+    assert.equal(report.frames, 5)
+    assert.ok(Object.values(report.draws).some((draw) => draw.count > 0 && draw.ops > 0))
+  })
+
+  test('net.fetch is never sent: not_allowed unless a --fetch prefix answers it', async () => {
+    const unmocked = await run66('status-widget', { settings: ['apiKey=fictional-key'] })
+    assert.deepEqual(unmocked.problems, [])
+    assert.ok(unmocked.fetches.length > 0 && unmocked.fetches.every((fetch) => fetch.result.startsWith('not_allowed')))
+    const mocked = await run66('status-widget', { settings: ['apiKey=fictional-key'], fetch: ['https://status.example.com/={"status":"operational","components":[]}'] })
+    assert.ok(mocked.fetches.length > 0 && mocked.fetches.every((fetch) => fetch.result === 200))
+  })
+
+  test('net.fetch refuses what Go refuses: bad methods, too many or oversized headers, secrets in the URL', async () => {
+    const dir = sourceDir('page', {
+      'plugin.json': JSON.stringify({ schema: 1, id: 'me.fetch', name: 'F', version: '1.0.0', minAppVersion: '1.0.66', permissions: ['net:fetch'], network: { hosts: ['api.example.com'] } }),
+      'main.js': `const url = 'https://api.example.com/'
+for (const init of [{ method: 'HEAD' }, { headers: Object.fromEntries(Array.from({ length: 33 }, (_, i) => ['x-' + i, '1'])) }, { headers: { 'x-big': 'a'.repeat(8193) } }]) {
+  await switchboard.net.fetch(url, init).catch(() => {})
+}
+await switchboard.net.fetch(url + '{{secret:token}}').catch(() => {})`,
+    })
+    const report = await runPackage(validatePackage(loadPackage(dir), { appVersion: '1.0.66' }).package, { seconds: 0, appVersion: '1.0.66', fetch: ['https://api.example.com/=ok'] })
+    assert.deepEqual(report.fetches.map((fetch) => fetch.result), ['invalid_plugin', 'invalid_plugin', 'invalid_plugin', 200])
+  })
+
+  test('the redactor rewrites the fictional prompt and tags it', async () => {
+    const report = await run66('relay-redactor')
+    const rewrite = report.hookDecisions.find((decision) => decision.phase === 'request')
+    assert.equal(rewrite?.outcome, 'rewrite')
+    assert.deepEqual(rewrite.tags, ['redacted'])
+    assert.match(rewrite.body, /\[email\].*\[phone\]/u)
+    assert.doesNotMatch(rewrite.body, /@/u)
+  })
+
+  test('a layout can never hide Plugins or Settings', async () => {
+    const dir = sourceDir('page', {
+      'plugin.json': JSON.stringify({ schema: 1, id: 'me.layout', name: 'L', version: '1.0.0', minAppVersion: '1.0.66', permissions: ['ui:layout'] }),
+      'main.js': "await switchboard.ui.setLayout({ hidden: ['plugins', 'settings', 'tunnel'] })",
+    })
+    const report = await runPackage(validatePackage(loadPackage(dir), { appVersion: '1.0.66' }).package, { seconds: 0, appVersion: '1.0.66' })
+    assert.deepEqual(report.layout.map((layout) => layout.hidden), [['tunnel']])
+  })
+
   test('usage mistakes in run options are usage errors', async () => {
     const pkg = checked(sourceDir('page'))
     await assert.rejects(runPackage(pkg, { seconds: 0, settings: ['nope=1'] }), UsageError)
-    await assert.rejects(runPackage(pkg, { seconds: 0, events: ['no-colon'] }), UsageError)
+    await assert.rejects(runPackage(pkg, { seconds: 0, events: [':x'] }), UsageError)
+    await assert.rejects(runPackage(pkg, { seconds: 0, events: ['main:'] }), UsageError)
   })
 
   test('tidyStack maps plugin.js lines to script lines and drops harness frames', () => {
@@ -348,8 +400,8 @@ describe('command line', () => {
 // the constants it repeats, and a table of values both must judge alike.
 describe('plugin.schema.json', () => {
   const ANNOTATIONS = new Set(['$schema', '$id', '$defs', 'title', 'description', 'default'])
-  const KEYWORDS = new Set(['$ref', 'type', 'const', 'enum', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'items', 'minItems', 'maxItems', 'uniqueItems', 'properties', 'required', 'additionalProperties', 'propertyNames', 'maxProperties', 'oneOf', 'not'])
-  const SCHEMA_VALUED = new Set(['items', 'additionalProperties', 'propertyNames', 'not'])
+  const KEYWORDS = new Set(['$ref', 'type', 'const', 'enum', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'items', 'minItems', 'maxItems', 'uniqueItems', 'properties', 'required', 'additionalProperties', 'propertyNames', 'maxProperties', 'oneOf', 'not', 'contains', 'if', 'then', 'else'])
+  const SCHEMA_VALUED = new Set(['items', 'additionalProperties', 'propertyNames', 'not', 'contains', 'if', 'then', 'else'])
 
   const typeOf = (value) => (value === null ? 'null' : Array.isArray(value) ? 'array' : Number.isInteger(value) ? 'integer' : typeof value)
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -381,6 +433,7 @@ describe('plugin.schema.json', () => {
       if (schema.maxItems !== undefined && value.length > schema.maxItems) fail('has too many items')
       if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) fail('repeats an item')
       if (schema.items) value.forEach((item, index) => found.push(...errors(schema.items, item, `${at}[${index}]`)))
+      if (schema.contains && !value.some((item) => errors(schema.contains, item, at).length === 0)) fail('contains no matching item')
     }
     if (typeOf(value) === 'object') {
       const keys = Object.keys(value)
@@ -395,6 +448,10 @@ describe('plugin.schema.json', () => {
     }
     if (schema.oneOf && schema.oneOf.filter((branch) => errors(branch, value, at).length === 0).length !== 1) fail('matches no single variant')
     if (schema.not && errors(schema.not, value, at).length === 0) fail('matches a refused form')
+    if (schema.if) {
+      const branch = errors(schema.if, value, at).length === 0 ? schema.then : schema.else
+      if (branch) found.push(...errors(branch, value, at))
+    }
     return found
   }
 
@@ -440,12 +497,15 @@ describe('plugin.schema.json', () => {
     assert.equal(defs.selectSetting.properties.options.maxItems, settings.SETTING_OPTION_LIMIT)
     assert.deepEqual(defs.setting.properties.type.enum, [...settings.SETTING_TYPES])
     assert.deepEqual(defs.setting.oneOf.map((branch) => resolveRef(branch.$ref).properties.type.const), [...settings.SETTING_TYPES])
+    assert.equal(top.permissions.maxItems, manifest.PERMISSION_LIMIT)
+    assert.equal(top.network.properties.hosts.maxItems, manifest.NETWORK_HOST_LIMIT)
   })
 
   test('the examples, the templates and their packs fit the schema', () => {
     for (const file of readdirSync(EXAMPLES).filter((name) => name.endsWith('.json'))) {
       assert.deepEqual(errors(SCHEMA, JSON.parse(readFileSync(join(EXAMPLES, file), 'utf8'))), [], file)
     }
+    for (const dir of SOURCE_EXAMPLES) assert.deepEqual(errors(SCHEMA, loadPackage(join(EXAMPLES, dir)).value), [], dir)
     for (const kind of TEMPLATE_KINDS) {
       const { out } = packDirectory(sourceDir(kind))
       assert.deepEqual(errors(SCHEMA, JSON.parse(readFileSync(out, 'utf8'))), [], kind)
@@ -535,6 +595,18 @@ describe('plugin.schema.json', () => {
     ['a select option without a label', withSettings({ key: 'mode', label: 'Mode', type: 'select', default: 'a', options: [{ value: 'a' }] })],
     ['a select option with an extra field', withSettings({ key: 'mode', label: 'Mode', type: 'select', default: 'a', options: [{ value: 'a', label: 'A', icon: 'x' }] })],
     ['a select with maxLength', withSettings({ key: 'mode', label: 'Mode', type: 'select', default: 'a', options: [{ value: 'a', label: 'A' }], maxLength: 3 })],
+    ['a secret setting', withSettings({ key: 'token', label: 'Token', type: 'secret', description: 'Write-only.' })],
+    ['a secret with a default', withSettings({ key: 'token', label: 'Token', type: 'secret', default: 'x' })],
+    ['a secret with a placeholder', withSettings({ key: 'token', label: 'Token', type: 'secret', placeholder: 'x' })],
+    ['8 secrets', withSettings(...Array.from({ length: 8 }, (_, index) => ({ key: `t${index}`, label: 'T', type: 'secret' })))],
+    ['every 1.0.66 permission', { ...scripted, permissions: [...permissions.PLUGIN_PERMISSIONS], network: { hosts: ['api.example.com'] } }],
+    ...['api.example.com', '*.example.com', 'a-b.example.net', 'example', 'localhost', 'printer.local', '*.local', 'x.internal', '10.0.0.1', '1.2.3.example', 'api.example.com:443', 'https://example.com', 'Example.com', 'a..b', '-a.example.com', '*.*.example.com', `${repeat('a', 63)}.com`, `${repeat('a', 64)}.com`].map((host) => [`network host ${host.length > 40 ? `of ${host.length} bytes` : JSON.stringify(host)}`, { ...scripted, permissions: ['net:fetch'], network: { hosts: [host] } }]),
+    ['net:fetch without network', { ...scripted, permissions: ['net:fetch'] }],
+    ['network without net:fetch', { ...scripted, permissions: ['storage'], network: { hosts: ['api.example.com'] } }],
+    ['no network hosts', { ...scripted, permissions: ['net:fetch'], network: { hosts: [] } }],
+    ['17 network hosts', { ...scripted, permissions: ['net:fetch'], network: { hosts: Array.from({ length: 17 }, (_, index) => `h${index}.example.com`) } }],
+    ['a repeated network host', { ...scripted, permissions: ['net:fetch'], network: { hosts: ['api.example.com', 'api.example.com'] } }],
+    ['network with an extra field', { ...scripted, permissions: ['net:fetch'], network: { hosts: ['api.example.com'], ports: [443] } }],
   ]
   for (const [name, value] of rows) {
     test(`agrees with the app on ${name}`, () => {

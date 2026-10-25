@@ -88,7 +88,7 @@ export default function PluginPageView({ pageId }: { readonly pageId: string }) 
       </header>
       <div className="page-body">
         {page.problem ? <p className={styles.notice} data-tone="danger" role="alert">The plugin sent a page this window cannot draw: {page.problem}</p> : null}
-        {page.tree ? <PluginTree tree={page.tree} disabled={!running} onEvent={send} values={values} /> : (
+        {page.tree ? <PluginTree tree={page.tree} disabled={!running} onEvent={send} values={values} canvas={model.canvas(page.pluginId)} surface={page.pageId} /> : (
           <EmptyState icon={Icon} title={`${page.title} is loading`} hint="The plugin has not drawn this page yet." height={240} />
         )}
       </div>

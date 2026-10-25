@@ -7,7 +7,7 @@ const PLUGIN = {
   permissions: ['ui:pages'], granted: ['ui:pages'], enabled: true,
   installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 64,
   hasScript: true, hasCss: false, hasTheme: false, homepage: 'https://example.com/acme', minAppVersion: '1.0.65',
-  hasSettings: true, problem: '',
+  hasSettings: true, problem: '', secrets: [], hosts: [],
 }
 
 type Listener = (event: { payload: unknown }) => void

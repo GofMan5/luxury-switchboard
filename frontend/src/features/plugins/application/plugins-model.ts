@@ -1,11 +1,15 @@
-import type { ExtensionPoints } from '../../../shared/contracts/extensions'
+import type { ReactNode } from 'react'
+import type { ExtensionPoints, SlotContext } from '../../../shared/contracts/extensions'
+import type { CanvasChannel } from '../domain/canvas'
 import { PLUGIN_LIMIT, packageSizeProblem, type PluginPackage } from '../domain/manifest'
 import { effectiveGrants } from '../domain/permissions'
 import { IDLE_RUNTIME, splitPageKey, type PluginRuntime, type PluginSummary } from '../domain/plugin'
 import type { PageEvent } from '../domain/protocol'
-import { acceptValue, settingStorageKey, settingValues, valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
-import { PluginHost, revisionOf, type PluginPage } from './plugin-host'
-import type { Announcement, BootContext, ConfirmRequest, ControlPort, PluginsPort, WorkerFactory } from './ports'
+import { acceptValue, isSecretSetting, secretProblem, settingStorageKey, settingValues, valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
+import type { ToneSpec } from '../domain/specs'
+import { PluginBus } from './plugin-bus'
+import { PluginHost, revisionOf, type PluginDialog, type PluginPage, type PluginSurface } from './plugin-host'
+import type { Announcement, BootContext, ConfirmRequest, ControlPort, FilesPort, PluginsPort, ThemePort, WorkerFactory } from './ports'
 
 export interface PluginsState {
   readonly phase: 'loading' | 'ready' | 'error'
@@ -13,6 +17,10 @@ export interface PluginsState {
   readonly runtimes: Readonly<Record<string, PluginRuntime>>
   /** Pages running plugins registered, by `<pluginId>/<pageId>`. */
   readonly pages: Readonly<Record<string, PluginPage>>
+  /** Slot surfaces running plugins registered, by `<pluginId>/<surface>`. */
+  readonly surfaces: Readonly<Record<string, PluginSurface>>
+  /** The dialog each running plugin has open, by plugin id. */
+  readonly dialogs: Readonly<Record<string, PluginDialog>>
   /** The plugin id an operation is running for, or `install`. */
   readonly pending: string
   readonly error: string
@@ -48,7 +56,14 @@ export interface PluginsDeps {
   readonly isRoute: (route: string) => boolean
   readonly app: BootContext['app']
   readonly safeMode: boolean
+  readonly files: FilesPort
+  readonly sound: (tone: ToneSpec) => void
+  readonly theme: ThemePort
+  readonly renderSlot: (pluginId: string, surface: string, context: SlotContext) => ReactNode
 }
+
+/** What a canvas of a plugin that is not running talks to. */
+const IDLE_CANVAS: CanvasChannel = { subscribe: () => () => undefined, input: () => undefined, visible: () => undefined }
 
 const ERRORS: Readonly<Record<string, string>> = {
   invalid_plugin: 'The control plane refused this package',
@@ -59,6 +74,9 @@ const ERRORS: Readonly<Record<string, string>> = {
   secure_storage_unavailable: 'Secure storage is unavailable, so plugins cannot be saved',
   plugin_save_failed: 'Plugins could not be saved',
   command_too_large: 'This package is too large to send in one command',
+  plugin_dev_limit: 'No more plugin folders can be linked; unlink one first',
+  plugin_dev_linked: 'That plugin is already loaded from a folder',
+  plugin_not_linked: 'That plugin is not loaded from a folder',
 }
 
 /**
@@ -81,10 +99,11 @@ export class PluginsModel {
   #notifyScheduled = false
   #questions: { readonly question: PluginQuestion; readonly settle: (answer: boolean) => void }[] = []
   #nextQuestion = 1
+  readonly #bus = new PluginBus()
 
   constructor(deps: PluginsDeps) {
     this.#deps = deps
-    this.#state = { phase: 'loading', plugins: [], runtimes: {}, pages: {}, pending: '', error: '', safeMode: deps.safeMode, asking: null }
+    this.#state = { phase: 'loading', plugins: [], runtimes: {}, pages: {}, surfaces: {}, dialogs: {}, pending: '', error: '', safeMode: deps.safeMode, asking: null }
   }
 
   snapshot = (): PluginsState => this.#state
@@ -96,6 +115,8 @@ export class PluginsModel {
 
   async connect(): Promise<void> {
     this.#unsubscribe ??= this.#deps.port.subscribe((plugins) => this.#reconcile(plugins))
+    // Hooks a previous window registered have no host answering them any more.
+    if (!this.#deps.safeMode) await this.#deps.control.call('relayhooks.reset', {}).catch(() => undefined)
     await this.refresh()
   }
 
@@ -171,6 +192,21 @@ export class PluginsModel {
     this.#hosts.get(parts.pluginId)?.dispatch(parts.pageId, event)
   }
 
+  /** Forwards what the operator did on a slot surface (`widget:<id>`, …). */
+  sendSurfaceEvent(pluginId: string, surface: string, event: PageEvent): void {
+    this.#hosts.get(pluginId)?.dispatch(surface, event)
+  }
+
+  /** The operator pressed a button of a plugin's dialog (`null`: dismissed). */
+  answerDialog(pluginId: string, id: string, action: string | null, form: PageEvent['form']): void {
+    this.#hosts.get(pluginId)?.answerDialog(id, action, form)
+  }
+
+  /** How a plugin's canvases reach its running script. */
+  canvas(pluginId: string): CanvasChannel {
+    return this.#hosts.get(pluginId)?.canvas ?? IDLE_CANVAS
+  }
+
   /** The operator answered the question on screen. */
   answer(id: number, yes: boolean): void {
     const index = this.#questions.findIndex((entry) => entry.question.id === id)
@@ -195,7 +231,7 @@ export class PluginsModel {
     if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
     const changes: Record<string, string | null> = {}
     for (const setting of settings) {
-      if (!Object.hasOwn(values, setting.key)) continue
+      if (isSecretSetting(setting) || !Object.hasOwn(values, setting.key)) continue
       const value = acceptValue(setting, values[setting.key])
       if (value === null) return { ok: false, message: `${setting.label}: ${valueProblem(setting, values[setting.key])}` }
       changes[settingStorageKey(setting.key)] = value === setting.default ? null : JSON.stringify(value)
@@ -208,6 +244,59 @@ export class PluginsModel {
       return { ok: true }
     } catch (error) {
       return { ok: false, message: describe(error) }
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  /**
+   * Sets (`value`) or clears (`null`) one secret. The value goes straight to
+   * the control plane and is never kept here; the answer is the list of keys
+   * that now have one.
+   */
+  async secretSet(id: string, key: string, value: string | null): Promise<SaveResult> {
+    if (value !== null) {
+      const problem = secretProblem(value)
+      if (problem) return { ok: false, message: problem }
+    }
+    try {
+      const secrets = await this.#deps.port.secretSet(id, key, value)
+      this.#set({ ...this.#state, plugins: this.#state.plugins.map((plugin) => (plugin.id === id ? { ...plugin, secrets } : plugin)) })
+      this.#hosts.get(id)?.secretsChanged(secrets)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    }
+  }
+
+  /** Loads (or reloads) a plugin from a folder on this computer. */
+  async devLink(path: string): Promise<InstallResult> {
+    if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
+    const trimmed = path.trim()
+    if (!trimmed) return { ok: false, message: 'Enter the folder that holds plugin.json' }
+    this.#set({ ...this.#state, pending: 'install', error: '' })
+    try {
+      const plugin = await this.#deps.port.devLink(trimmed)
+      await this.refresh()
+      return { ok: true, plugin }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  /** Stops loading a plugin from its folder; the installed copy stays. */
+  async devUnlink(id: string): Promise<boolean> {
+    if (this.#state.pending) return false
+    this.#set({ ...this.#state, pending: id, error: '' })
+    try {
+      await this.#deps.port.devUnlink(id)
+      await this.refresh()
+      return true
+    } catch (error) {
+      this.#set({ ...this.#state, error: describe(error) })
+      return false
     } finally {
       this.#set({ ...this.#state, pending: '' })
     }
@@ -317,6 +406,11 @@ export class PluginsModel {
       isRoute: this.#deps.isRoute,
       app: this.#deps.app,
       onChange: () => this.#schedulePublish(),
+      bus: this.#bus,
+      files: this.#deps.files,
+      sound: this.#deps.sound,
+      theme: this.#deps.theme,
+      renderSlot: this.#deps.renderSlot,
     }, storage)
     this.#hosts.set(plugin.id, host)
     host.start()
@@ -355,11 +449,16 @@ export class PluginsModel {
   #publish(): void {
     const runtimes: Record<string, PluginRuntime> = {}
     const pages: Record<string, PluginPage> = {}
+    const surfaces: Record<string, PluginSurface> = {}
+    const dialogs: Record<string, PluginDialog> = {}
     for (const plugin of this.#state.plugins) {
       const host = this.#hosts.get(plugin.id)
       if (host) {
         runtimes[plugin.id] = host.runtime()
         for (const page of host.pages()) pages[page.key] = page
+        for (const surface of host.surfaces()) surfaces[surface.key] = surface
+        const dialog = host.dialog()
+        if (dialog) dialogs[plugin.id] = dialog
       } else if (!plugin.enabled) {
         runtimes[plugin.id] = { ...IDLE_RUNTIME, state: 'disabled' }
       } else if (this.#deps.safeMode) {
@@ -369,7 +468,7 @@ export class PluginsModel {
         runtimes[plugin.id] = failure ? { ...IDLE_RUNTIME, state: 'crashed', reason: failure } : IDLE_RUNTIME
       }
     }
-    this.#set({ ...this.#state, runtimes: reuse(this.#state.runtimes, runtimes), pages: reuse(this.#state.pages, pages) })
+    this.#set({ ...this.#state, runtimes: reuse(this.#state.runtimes, runtimes), pages: reuse(this.#state.pages, pages), surfaces: reuse(this.#state.surfaces, surfaces), dialogs: reuse(this.#state.dialogs, dialogs) })
   }
 
   #set(state: PluginsState): void {
@@ -389,6 +488,8 @@ function reuse<T>(previous: Readonly<Record<string, T>>, next: Record<string, T>
 export function describe(error: unknown): string {
   const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : ''
   if (code === 'invalid_plugin' && error instanceof Error && error.message.startsWith('Plugin ')) return `The control plane refused this package: ${error.message.slice('Plugin '.length)}`
+  // The folder's own problem (a bad plugin.json, a missing file) is the message.
+  if (code === 'plugin_dev_problem' && error instanceof Error && error.message) return error.message
   if (code && ERRORS[code]) return ERRORS[code]
   return error instanceof Error && error.message ? error.message : 'The plugin change failed'
 }

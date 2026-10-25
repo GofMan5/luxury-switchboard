@@ -15,11 +15,15 @@ export const SETTING_DESCRIPTION_LIMIT = 200
 export const SETTING_PLACEHOLDER_LIMIT = 64
 export const SETTING_TEXT_LIMIT = 256
 export const SETTING_OPTION_LIMIT = 32
+/** `secret` settings one package may declare. */
+export const SECRET_SETTING_LIMIT = 8
+/** Characters of one secret value. */
+export const SECRET_VALUE_LIMIT = 4096
 /** Storage keys under this prefix belong to settings. */
 export const SETTING_PREFIX = 'setting:'
 
-export type SettingType = 'text' | 'number' | 'toggle' | 'select'
-export const SETTING_TYPES: readonly SettingType[] = ['text', 'number', 'toggle', 'select']
+export type SettingType = 'text' | 'number' | 'toggle' | 'select' | 'secret'
+export const SETTING_TYPES: readonly SettingType[] = ['text', 'number', 'toggle', 'select', 'secret']
 
 interface SettingBase {
   readonly key: string
@@ -31,8 +35,18 @@ export interface TextSetting extends SettingBase { readonly type: 'text'; readon
 export interface NumberSetting extends SettingBase { readonly type: 'number'; readonly default: number; readonly placeholder: string; readonly min?: number; readonly max?: number }
 export interface ToggleSetting extends SettingBase { readonly type: 'toggle'; readonly default: boolean }
 export interface SelectSetting extends SettingBase { readonly type: 'select'; readonly default: string; readonly options: readonly { readonly value: string; readonly label: string }[] }
-export type PluginSetting = TextSetting | NumberSetting | ToggleSetting | SelectSetting
+/**
+ * A credential the operator enters (a token, a webhook address). It has no
+ * default, is never stored with the other settings and never reaches the
+ * script: the control plane keeps it and puts it into `net.fetch` requests
+ * where the plugin writes `{{secret:KEY}}`.
+ */
+export interface SecretSetting extends SettingBase { readonly type: 'secret' }
+export type ValueSetting = TextSetting | NumberSetting | ToggleSetting | SelectSetting
+export type PluginSetting = ValueSetting | SecretSetting
 export type SettingValue = string | number | boolean
+
+export const isSecretSetting = (setting: PluginSetting): setting is SecretSetting => setting.type === 'secret'
 
 const FIELDS = new Set(['key', 'label', 'description', 'type', 'default', 'placeholder', 'maxLength', 'min', 'max', 'options'])
 const OPTION_FIELDS = new Set(['value', 'label'])
@@ -42,6 +56,7 @@ const ATTRIBUTES: Readonly<Record<SettingType, readonly string[]>> = {
   number: ['placeholder', 'min', 'max'],
   toggle: [],
   select: ['options'],
+  secret: [],
 }
 const TYPE_ONLY = ['placeholder', 'maxLength', 'min', 'max', 'options'] as const
 // Go's unicode.IsControl: C0 (line breaks included), DEL and C1.
@@ -78,6 +93,7 @@ export function checkSettings(raw: unknown, problems: string[]): PluginSetting[]
       problems.push(error.message)
     }
   })
+  if (settings.filter(isSecretSetting).length > SECRET_SETTING_LIMIT) problems.push(`"settings" has more than ${SECRET_SETTING_LIMIT} secret entries.`)
   return problems.length > before ? null : settings
 }
 
@@ -91,7 +107,7 @@ function checkSetting(raw: unknown, at: string): PluginSetting {
   const label = requiredText(raw.label, `${at}.label`, SETTING_LABEL_LIMIT)
   const description = optionalText(raw.description, `${at}.description`, SETTING_DESCRIPTION_LIMIT)
   const type = raw.type
-  if (typeof type !== 'string' || !SETTING_TYPES.includes(type as SettingType)) throw new SettingError(`"${at}.type" must be text, number, toggle or select.`)
+  if (typeof type !== 'string' || !SETTING_TYPES.includes(type as SettingType)) throw new SettingError(`"${at}.type" must be text, number, toggle, select or secret.`)
   const kind = type as SettingType
   for (const attribute of TYPE_ONLY) {
     if (raw[attribute] !== undefined && !ATTRIBUTES[kind].includes(attribute)) throw new SettingError(`"${at}.${attribute}" does not apply to a ${kind} setting.`)
@@ -143,14 +159,25 @@ function checkSetting(raw: unknown, at: string): PluginSetting {
       if (typeof raw.default !== 'string' || !values.has(raw.default)) throw new SettingError(`"${at}.default" must be one of the option values.`)
       return { ...base, type: kind, default: raw.default, options }
     }
+    case 'secret':
+      if (raw.default !== undefined) throw new SettingError(`"${at}.default" does not apply to a secret setting.`)
+      return { ...base, type: kind }
   }
+}
+
+/** Why a secret value cannot be saved, in the operator's words, or ''. */
+export function secretProblem(value: string): string {
+  if (!value) return 'Enter a value, or use Clear to remove it.'
+  if (!fits(value, SECRET_VALUE_LIMIT)) return `Use at most ${SECRET_VALUE_LIMIT} characters.`
+  if (CONTROL.test(value)) return 'Remove line breaks and other control characters.'
+  return ''
 }
 
 /** The value a setting has: the saved one when it still fits the
  * declaration, otherwise the default. An upgrade that narrows a setting
  * therefore falls back to the default instead of handing the plugin a value
  * it no longer accepts. */
-export function settingValue(setting: PluginSetting, stored: string | undefined): SettingValue {
+export function settingValue(setting: ValueSetting, stored: string | undefined): SettingValue {
   if (stored === undefined) return setting.default
   let decoded: unknown
   try {
@@ -162,20 +189,25 @@ export function settingValue(setting: PluginSetting, stored: string | undefined)
   return accepted === null ? setting.default : accepted
 }
 
-/** Every setting's current value, by key, from the plugin's storage. */
+/** Every setting's current value, by key, from the plugin's storage.
+ * Secrets have no value here: they never leave the control plane. */
 export function settingValues(settings: readonly PluginSetting[], storage: Readonly<Record<string, string>>): Record<string, SettingValue> {
   const values: Record<string, SettingValue> = {}
-  for (const setting of settings) values[setting.key] = settingValue(setting, storage[settingStorageKey(setting.key)])
+  for (const setting of settings) {
+    if (!isSecretSetting(setting)) values[setting.key] = settingValue(setting, storage[settingStorageKey(setting.key)])
+  }
   return values
 }
 
-/** The value as the declaration accepts it, or null. */
+/** The value as the declaration accepts it, or null. A secret never has a
+ * value in the settings store. */
 export function acceptValue(setting: PluginSetting, value: unknown): SettingValue | null {
   switch (setting.type) {
     case 'text': return textValue(value, setting.maxLength)
     case 'number': return numberValue(value, setting)
     case 'toggle': return typeof value === 'boolean' ? value : null
     case 'select': return typeof value === 'string' && setting.options.some((option) => option.value === value) ? value : null
+    case 'secret': return null
   }
 }
 
@@ -187,6 +219,7 @@ export function valueProblem(setting: PluginSetting, value: unknown): string {
     case 'number': return `Enter a number${rangeText(setting)}.`
     case 'toggle': return 'Choose on or off.'
     case 'select': return 'Choose one of the options.'
+    case 'secret': return 'Secrets are saved on their own.'
   }
 }
 

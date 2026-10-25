@@ -4,6 +4,9 @@ import "time"
 
 type State string
 
+// MaxTags bounds the labels one request carries.
+const MaxTags = 16
+
 const (
 	StateActive    State = "active"
 	StateRetrying  State = "retrying"
@@ -58,6 +61,9 @@ type Request struct {
 	// phase; ThinkingMS accumulates the closed reasoning spans.
 	Thinking   bool    `json:"thinking,omitempty"`
 	ThinkingMS float64 `json:"thinkingMs,omitempty"`
+	// Tags are the operator's labels from request rules and relay hooks:
+	// at most MaxTags, each ^[a-z0-9][a-z0-9_.-]{0,31}$, in first-seen order.
+	Tags []string `json:"tags,omitempty"`
 	// ThinkingSince opens the current reasoning span. Internal: the span's
 	// length lands in ThinkingMS when it closes.
 	ThinkingSince time.Time `json:"-"`
@@ -72,6 +78,7 @@ type Start struct {
 	BytesIn         int64
 	ReasoningEffort string
 	ReasoningBudget int64
+	Tags            []string
 }
 
 type Retry struct {
@@ -99,6 +106,8 @@ type Finish struct {
 	// the serving attempt's decode rate, already guarded by the relay.
 	FirstToken      time.Duration
 	TokensPerSecond float64
+	// Tags join the request's start tags; hooks add theirs after the start.
+	Tags []string
 }
 
 type Summary struct {

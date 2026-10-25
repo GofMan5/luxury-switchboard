@@ -37,6 +37,10 @@ import { AppearanceModel } from '../features/appearance/application/appearance-m
 import { SessionControlPort, StdioPluginsPort } from '../features/plugins/adapters/stdio-plugins-port'
 import { BlobWorkerFactory } from '../features/plugins/adapters/blob-worker-factory'
 import { PluginsModel } from '../features/plugins/application/plugins-model'
+import { browserFiles, documentTheme, webAudioTone } from '../features/plugins/adapters/browser-ports'
+import { PluginSlot } from '../features/plugins/ui/PluginSlot'
+import { StdioRulesPort } from '../features/rules/adapters/stdio-rules-port'
+import { RulesModel } from '../features/rules/application/rules-model'
 import { ExtensionPoints } from '../shared/contracts/extensions'
 import { safeMode } from '../shared/runtime/safe-mode'
 import { createControlPlaneSession } from '../platform/stdio/create-session'
@@ -86,6 +90,8 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         session?.capabilities && hasCodexLogin(session.capabilities) ? current.codex.connect() : Promise.resolve(),
         // Plugins only exist when the control plane stores them.
         session?.capabilities?.includes('plugins.manage') ? current.plugins.connect() : Promise.resolve(),
+        // Rules only exist when the control plane advertises them.
+        session?.capabilities?.includes('rules.manage') ? current.rules.connect() : Promise.resolve(),
         keys.providerId ? current.apiKeys.load(keys.providerId) : Promise.resolve(),
         routes.phase !== 'idle' ? current.routes.load(routes.target) : Promise.resolve(),
         models.providerId ? current.models.discover(models.providerId) : Promise.resolve(),
@@ -114,6 +120,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
       services?.appearance.dispose()
       // Stops every plugin worker and takes back what they contributed.
       services?.plugins.dispose()
+      services?.rules.dispose()
       if (session && !sessionStopped) {
         sessionStopped = true
         void session.stop().catch(() => undefined)
@@ -143,6 +150,10 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           isRoute: (route) => routes.has(route) || isPluginRoute(route),
           app: { version: session.appVersion ?? '', capabilities },
           safeMode,
+          files: browserFiles,
+          sound: webAudioTone,
+          theme: documentTheme,
+          renderSlot: (pluginId, surface, context) => <PluginSlot pluginId={pluginId} surface={surface} context={context} />,
         })
         services = {
           relay: new RelayModel(new StdioRelayPort(session)),
@@ -171,6 +182,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
             localAppearanceCache,
           ),
           plugins,
+          rules: new RulesModel(new StdioRulesPort(session)),
           extensions,
         }
         if (disposed) { shutdown(); return }

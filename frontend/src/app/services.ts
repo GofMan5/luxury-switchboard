@@ -17,6 +17,7 @@ import type { BackupModel } from '../features/backup/application/backup-model'
 import type { CodexModel } from '../features/codex/application/codex-model'
 import type { AppearanceModel } from '../features/appearance/application/appearance-model'
 import type { PluginsModel } from '../features/plugins/application/plugins-model'
+import type { RulesModel } from '../features/rules/application/rules-model'
 import type { ExtensionPoints } from '../shared/contracts/extensions'
 
 export interface AppServices {
@@ -41,6 +42,8 @@ export interface AppServices {
   readonly appearance: AppearanceModel
   /** Installed plugins and the sandboxed runtime that hosts their scripts. */
   readonly plugins: PluginsModel
+  /** Request rules and custom retry rules for the local relay. */
+  readonly rules: RulesModel
   /** What slices contribute to the shell: themes, styles, palette commands,
    * runtime-bar readouts and plugin pages. */
   readonly extensions: ExtensionPoints

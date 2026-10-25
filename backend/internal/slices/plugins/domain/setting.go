@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -20,6 +23,10 @@ const (
 	MaxSettingTextRunes   = 256
 	MaxSettingOptions     = 32
 	MaxSettingOptionRunes = 64
+	// MaxSecretSettings bounds the secret settings of one package.
+	MaxSecretSettings = 8
+	// MaxSecretRunes bounds one secret value.
+	MaxSecretRunes = 4096
 )
 
 const (
@@ -27,6 +34,9 @@ const (
 	SettingNumber = "number"
 	SettingToggle = "toggle"
 	SettingSelect = "select"
+	// SettingSecret is a value the owner enters and the plugin never reads:
+	// net:fetch substitutes it for {{secret:KEY}} in the control plane.
+	SettingSecret = "secret"
 )
 
 var settingKey = regexp.MustCompile(`^[a-z][A-Za-z0-9_]{0,31}$`)
@@ -40,7 +50,7 @@ type Setting struct {
 	Description string `json:"description,omitempty"`
 	Type        string `json:"type"`
 	// Default is raw so its JSON type can be checked against Type.
-	Default     json.RawMessage `json:"default"`
+	Default     json.RawMessage `json:"default,omitempty"`
 	Placeholder string          `json:"placeholder,omitempty"`
 	// MaxLength bounds a text setting; zero means MaxSettingTextRunes.
 	MaxLength int             `json:"maxLength,omitempty"`
@@ -74,7 +84,32 @@ func validateSettings(settings []Setting) error {
 			return err
 		}
 	}
+	if len(SecretKeys(settings)) > MaxSecretSettings {
+		return ValidationError{"settings", fmt.Sprintf("list more than %d secret entries", MaxSecretSettings)}
+	}
 	return nil
+}
+
+// SecretKeys returns the keys of the secret settings, in declared order.
+func SecretKeys(settings []Setting) []string {
+	var keys []string
+	for _, setting := range settings {
+		if setting.Type == SettingSecret {
+			keys = append(keys, setting.Key)
+		}
+	}
+	return keys
+}
+
+// ValidSecretValue reports whether value can be saved as a secret: 1 to
+// MaxSecretRunes characters of valid UTF-8 without control characters, so
+// it can sit in a header value.
+func ValidSecretValue(value string) bool {
+	count := utf8.RuneCountInString(value)
+	if count < 1 || count > MaxSecretRunes || !utf8.ValidString(value) {
+		return false
+	}
+	return !strings.ContainsFunc(value, unicode.IsControl)
 }
 
 // validate checks one setting in a fixed order — key, label, description,
@@ -100,8 +135,9 @@ func (setting Setting) validate(field string, earlier []Setting) error {
 	case SettingToggle:
 	case SettingSelect:
 		used = []string{"options"}
+	case SettingSecret:
 	default:
-		return ValidationError{field + ".type", "must be text, number, toggle or select"}
+		return ValidationError{field + ".type", "must be text, number, toggle, select or secret"}
 	}
 	for _, attribute := range setting.attributes() {
 		if !slices.Contains(used, attribute) {
@@ -116,6 +152,11 @@ func (setting Setting) validate(field string, earlier []Setting) error {
 	case SettingToggle:
 		if _, ok := decodeDefault(setting.Default).(bool); !ok {
 			return defaultError(setting, field, "must be true or false")
+		}
+		return nil
+	case SettingSecret:
+		if len(setting.Default) != 0 {
+			return ValidationError{field + ".default", "does not apply to a secret setting"}
 		}
 		return nil
 	default:

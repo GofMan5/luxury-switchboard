@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('./useApiKeys', () => ({ useApiKeys: vi.fn() }))
 vi.mock('../../providers/ui/useProviders', () => ({ useProviders: vi.fn() }))
 vi.mock('../../codex/ui/useCodex', () => ({ useCodex: vi.fn() }))
-vi.mock('../../../app/services', () => ({ useAppServices: vi.fn() }))
+vi.mock('../../../app/services', async (actual) => ({ ...await actual<typeof import('../../../app/services')>(), useAppServices: vi.fn() }))
 // The pane's own behaviour is pinned in CodexAccountsPane.test.tsx; here it
 // is a harness that fires the callbacks, so the page test stays about the
 // page's branching and wiring.

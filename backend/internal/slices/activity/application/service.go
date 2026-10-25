@@ -31,6 +31,11 @@ const (
 	errResponsesCompatibility = "responses_compatibility"
 	errGuardrailBlocked       = "guardrail_blocked"
 	errPoolBusy               = "pool_busy"
+	// A request rule's block, a request rule's rate limit or budget, and a
+	// relay hook's block: the local relay answered without an upstream.
+	errRuleBlocked = "rule_blocked"
+	errRuleLimited = "rule_limited"
+	errHookBlocked = "hook_blocked"
 )
 
 var serviceSequence atomic.Uint64
@@ -82,6 +87,7 @@ func (service *Service) Start(value domain.Start) string {
 		Path: safePath(value.Path), BytesIn: max(value.BytesIn, 0),
 		ReasoningEffort: cleanReasoningEffort(value.ReasoningEffort),
 		ReasoningBudget: min(max(value.ReasoningBudget, 0), maxReasoningBudget),
+		Tags:            mergeTags(nil, value.Tags),
 	}
 	service.mu.Lock()
 	service.requests[id] = request
@@ -129,6 +135,7 @@ func (service *Service) Finish(id string, value domain.Finish) {
 			request.ProviderName = clean(value.ProviderName, 80)
 		}
 		endThinking(request, now)
+		request.Tags = mergeTags(request.Tags, value.Tags)
 		request.UpdatedAt = now
 		request.LatencyMS = max(float64(now.Sub(request.StartedAt).Microseconds())/1_000, 0)
 		request.Status = normalizedStatus(value.Status)
@@ -335,7 +342,8 @@ func cleanError(value string) string {
 	switch value {
 	case errCancelled, errProviderUnavailable, errTransport, errUpstreamStatus, errStreamIncomplete,
 		errClientDisconnected, errRequestRejected, errImageGeneration,
-		errPolicyRefusal, errChatCompatibility, errResponsesCompatibility, errGuardrailBlocked, errPoolBusy:
+		errPolicyRefusal, errChatCompatibility, errResponsesCompatibility, errGuardrailBlocked, errPoolBusy,
+		errRuleBlocked, errRuleLimited, errHookBlocked:
 		return value
 	default:
 		return ""
@@ -357,6 +365,41 @@ func cleanReasoningEffort(value string) string {
 	default:
 		return ""
 	}
+}
+
+// mergeTags appends the well-formed tags of extra not already in tags, up to
+// domain.MaxTags. Tags come from operator rules and plugin hooks, which
+// validate them; the shape is enforced again here because the activity feed
+// and history must never carry arbitrary text in this field.
+func mergeTags(tags, extra []string) []string {
+	// Published snapshots share the old array; appending must never write
+	// into it.
+	tags = slices.Clip(tags)
+	for _, tag := range extra {
+		if len(tags) >= domain.MaxTags {
+			break
+		}
+		if validTag(tag) && !slices.Contains(tags, tag) {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func validTag(tag string) bool {
+	if tag == "" || len(tag) > 32 {
+		return false
+	}
+	for index := range len(tag) {
+		character := tag[index]
+		switch {
+		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+		case index > 0 && (character == '_' || character == '.' || character == '-'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // endThinking closes an open reasoning span into the request's total.

@@ -22,13 +22,26 @@ Commands
   run <package.json|dir> [options]
       Starts the plugin in the app's own PluginHost against the dev fixture
       control plane, then reports its pages (with their trees), commands,
-      status, notifications, log and faults.
+      status, notifications, log and faults. The 1.0.66 APIs are stand-ins:
+      net.fetch answers not_allowed unless mocked, collections live in memory,
+      canvas draws are checked and counted, canvases get 5 frames, the bus
+      is local, files.open is cancelled, and each relay hook sees one fictional
+      chat request. Slots, layout, dialogs and tones are reported.
       NOT a sandbox: the script runs inside this Node process. Trusted code only.
         --seconds <n>              how long to let it run (default 3)
         --grant all|<perm,perm>    what to grant (default: every declared permission)
-        --event <pageId>:<action>  show the page, then press the action (repeatable)
+        --event <pageId>:<action>  show the page, then press the action (repeatable);
+                <surface>:<action> presses it on a slot (widget:<id>:<action>);
+                <actionId>         clicks a registered row action or header button
         --command <id>             run one of its palette commands (repeatable)
-        --setting <key>=<value>    a setting value; JSON or plain text (repeatable)
+        --key <key>                press a key on the first canvas with keys: true
+                                   (KeyboardEvent.key: Enter, ArrowLeft, x; repeatable)
+        --setting <key>=<value>    a setting value; JSON or plain text (repeatable).
+                                   A secret only counts as set; its value is not used
+        --fetch <url-prefix>=<body> answer net.fetch for URLs starting with the
+                                   prefix with 200 and this body (repeatable)
+        --dialog <actionId>        the footer action every ui.dialog answers
+                                   (default: dismissed)
         --confirm yes|no           the answer to ui.confirm (default yes)
         --app-version <x.y.z>      the app version it sees (default this checkout's)
         --json                     print the report as JSON
@@ -46,6 +59,7 @@ const COMMANDS = {
   run: {
     seconds: { type: 'string' }, grant: { type: 'string' }, event: { type: 'string', multiple: true },
     command: { type: 'string', multiple: true }, setting: { type: 'string', multiple: true },
+    key: { type: 'string', multiple: true }, fetch: { type: 'string', multiple: true }, dialog: { type: 'string' },
     confirm: { type: 'string' }, 'app-version': { type: 'string' }, json: { type: 'boolean' },
   },
 }
@@ -133,6 +147,21 @@ function printRun(report) {
   for (const ask of report.confirms ?? []) out(`confirm "${ask.title}" → ${ask.answer ? 'yes' : 'no'}`)
   for (const text of report.clipboard ?? []) out(`clipboard ${JSON.stringify(text)}`)
   for (const route of report.navigations ?? []) out(`navigate ${route}`)
+  for (const slot of report.slots ?? []) out(`slot ${slot.kind} ${slot.id} "${slot.title}"${slot.scope ? ` scope=${slot.scope}` : ''}`)
+  for (const [surface, entry] of Object.entries(report.surfaces ?? {})) {
+    out(`surface ${surface}: ${entry.renders} render${entry.renders === 1 ? '' : 's'}`)
+    if (entry.tree) out(JSON.stringify(entry.tree, null, 2).replace(/^/gmu, '    '))
+  }
+  for (const [canvas, draw] of Object.entries(report.draws ?? {})) out(`draw ${canvas}: ${draw.count} draw${draw.count === 1 ? '' : 's'}, last ${draw.ops} ops`)
+  if (report.frames) out(`frames ${report.frames}`)
+  if (report.tones || report.tonesDropped) out(`tones ${report.tones}${report.tonesDropped ? ` (${report.tonesDropped} dropped)` : ''}`)
+  for (const layout of report.layout ?? []) out(`layout ${JSON.stringify(layout)}`)
+  for (const dialog of report.dialogs ?? []) out(`dialog "${dialog.title}" → ${dialog.answer ?? 'dismissed'}`)
+  for (const fetch of report.fetches ?? []) out(`fetch ${fetch.method} ${fetch.url} → ${fetch.result}`)
+  for (const file of report.files ?? []) out(`files ${JSON.stringify(file)}`)
+  for (const message of report.bus ?? []) out(`bus ${message.channel} (${message.bytes} bytes)`)
+  for (const hook of report.hooks ?? []) out(`hook ${hook.phase} ${hook.id}${hook.models.length ? ` models=${hook.models.join(',')}` : ''}${hook.endpoints.length ? ` endpoints=${hook.endpoints.join(',')}` : ''}`)
+  for (const decision of report.hookDecisions ?? []) out(`hook ${decision.hook} → ${decision.outcome}${decision.body ? ` ${decision.body}` : ''}${decision.model ? ` model=${decision.model}` : ''}${decision.tags ? ` tags=${decision.tags.join(',')}` : ''}`)
   for (const entry of report.logs ?? []) out(`log ${entry.level.padEnd(5)} ${entry.text}`)
 }
 
@@ -154,7 +183,7 @@ async function run(args) {
   }
   const report = await runPackage(checked.package, {
     seconds, grant: values.grant, events: values.event, commands: values.command, settings: values.setting,
-    confirm: values.confirm, appVersion, scriptName: loaded.source === 'directory' ? 'main.js' : 'script',
+    confirm: values.confirm, appVersion, keys: values.key, fetch: values.fetch, dialog: values.dialog, scriptName: loaded.source === 'directory' ? 'main.js' : 'script',
   })
   if (values.json) out(JSON.stringify(report, null, 2))
   else printRun(report)

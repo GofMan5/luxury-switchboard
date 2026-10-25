@@ -1,0 +1,18 @@
+/* Plugin-contributed sections: framed like a panel, labelled with their owner. */
+.grid { display: grid; min-width: 0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: var(--gap); }
+.frame { display: flex; min-width: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); box-shadow: var(--shadow-panel); }
+.frame[data-wide] { grid-column: 1 / -1; }
+.header { display: flex; min-width: 0; min-height: 40px; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 1px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); }
+.title { min-width: 0; color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; line-height: 1.35; overflow-wrap: anywhere; }
+.owner { min-width: 0; color: var(--text-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.description { padding: 8px var(--pad) 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.45; }
+.body { min-width: 0; padding: 10px var(--pad) 12px; }
+.bare { display: grid; min-width: 0; gap: 8px; padding: 12px var(--pad); }
+.failed { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-muted); font-size: var(--fs-sm); }
+.tabs { display: flex; min-width: 0; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border-subtle); padding: 0 var(--pad); scrollbar-width: thin; }
+.tab { flex: 0 0 auto; max-width: 18ch; overflow: hidden; border: 0; border-bottom: 2px solid transparent; padding: 7px 8px 6px; color: var(--text-muted); background: transparent; font: inherit; font-size: var(--fs-sm); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color var(--motion-fast), border-color var(--motion-fast); }
+.tab:hover { color: var(--text-primary); }
+.tab:active { color: var(--text-primary); background: var(--bg-hover); }
+.tab[aria-selected='true'] { border-bottom-color: var(--action-primary); color: var(--text-primary); }
+.tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.tabPanel { min-width: 0; }

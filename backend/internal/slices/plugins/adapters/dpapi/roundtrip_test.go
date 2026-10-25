@@ -18,6 +18,7 @@ import (
 func TestPluginsRoundTripEncrypted(t *testing.T) {
 	useTestKeyring()
 	path := filepath.Join(t.TempDir(), "plugins.dpapi")
+	devFolder := filepath.Join(t.TempDir(), "dusk")
 	repository := New(path)
 	if plugins, err := repository.Load(context.Background()); err != nil || len(plugins) != 0 {
 		t.Fatalf("a missing file is not an empty store: %v %v", plugins, err)
@@ -34,6 +35,7 @@ func TestPluginsRoundTripEncrypted(t *testing.T) {
 			Settings: []domain.Setting{
 				{Key: "greeting", Label: "Greeting", Type: domain.SettingText, Default: json.RawMessage(`"<fixture-private-default>"`)},
 				{Key: "limit", Label: "Limit", Type: domain.SettingNumber, Default: json.RawMessage(`2.5`), Max: &limit},
+				{Key: "token", Label: "Token", Type: domain.SettingSecret},
 			},
 		},
 		Enabled:     true,
@@ -41,6 +43,8 @@ func TestPluginsRoundTripEncrypted(t *testing.T) {
 		InstalledAt: installed,
 		UpdatedAt:   installed.Add(time.Hour),
 		Storage:     map[string]string{"prefs:a": "fixture-private-value"},
+		Secrets:     map[string]string{"token": "fixture-private-secret"},
+		Dev:         &domain.DevLink{Path: devFolder, LoadedAt: installed.UTC(), Problem: "fixture-private-problem"},
 	}}
 	if err := repository.Save(context.Background(), plugins); err != nil {
 		t.Fatal(err)

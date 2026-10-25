@@ -49,6 +49,11 @@ func deepCopy(plugins []domain.Plugin) []domain.Plugin {
 		plugin.Package = plugin.Package.Normalized()
 		plugin.Granted = slices.Clone(plugin.Granted)
 		plugin.Storage = maps.Clone(plugin.Storage)
+		plugin.Secrets = maps.Clone(plugin.Secrets)
+		if plugin.Dev != nil {
+			dev := *plugin.Dev
+			plugin.Dev = &dev
+		}
 		copied = append(copied, plugin)
 	}
 	return copied

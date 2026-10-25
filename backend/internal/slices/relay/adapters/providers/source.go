@@ -76,6 +76,16 @@ func (source *Source) Pinned(_ context.Context, providerID, upstreamModel string
 	return source.providerRoute(provider, upstreamModel)
 }
 
+// PinnedEnabled is Pinned for a request rule's pin: a disabled provider is
+// unavailable, so the request keeps its normal route.
+func (source *Source) PinnedEnabled(_ context.Context, providerID, upstreamModel string) (relayapp.Route, error) {
+	provider, exists := source.catalog.Get(providerID)
+	if !exists || !provider.Enabled {
+		return relayapp.Route{}, providerapp.ErrProviderUnavailable
+	}
+	return source.providerRoute(provider, upstreamModel)
+}
+
 // Next walks the failover chain past the provider that just refused. Entries
 // whose provider is gone or disabled are skipped here rather than at the
 // routes slice: the catalog is this adapter's own domain. With the chain

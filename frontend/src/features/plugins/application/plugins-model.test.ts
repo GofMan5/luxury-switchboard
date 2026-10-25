@@ -3,7 +3,7 @@ import { ExtensionPoints } from '../../../shared/contracts/extensions'
 import { EXAMPLE_PLUGINS } from '../domain/examples'
 import type { PluginPackage } from '../domain/manifest'
 import { describe as describeError, PluginsModel } from './plugins-model'
-import { FakeControl, FakeWorkers, MemoryPluginsPort } from './test-fakes'
+import { FakeControl, FakeWorkers, MemoryPluginsPort, hostExtras } from './test-fakes'
 
 const pkg: PluginPackage = {
   schema: 1, id: 'acme.tools', name: 'Acme tools', version: '1.0.0',
@@ -14,8 +14,9 @@ function setup(safeMode = false) {
   const port = new MemoryPluginsPort()
   const workers = new FakeWorkers()
   const extensions = new ExtensionPoints()
+  const { bus: _bus, ...extras } = hostExtras()
   const model = new PluginsModel({
-    port, control: new FakeControl(), workers, extensions, safeMode,
+    ...extras, port, control: new FakeControl(), workers, extensions, safeMode,
     notify: vi.fn(), navigate: vi.fn(), isRoute: () => true, clipboard: vi.fn(async () => undefined),
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   })
@@ -164,7 +165,7 @@ describe('PluginsModel', () => {
     expect(port.writes).toHaveLength(0)
     expect(await model.saveSettings('acme.tools', view.settings, { limit: 42, mode: 'fast' })).toEqual({ ok: true })
     expect(port.writes).toEqual([{ 'setting:limit': '42', 'setting:mode': null }])
-    expect(workers.last.posted).toContainEqual({ type: 'settings', values: { limit: 42, mode: 'fast' } })
+    expect(workers.last.posted).toContainEqual({ type: 'settings', values: { limit: 42, mode: 'fast' }, secrets: [] })
 
     // A restart boots with the saved values, never the defaults first.
     await model.restart('acme.tools')
@@ -208,6 +209,53 @@ describe('PluginsModel', () => {
     model.dispose()
     expect(workers.last.terminated).toBe(true)
     expect(extensions.snapshot().styles).toEqual([])
+  })
+
+  it('publishes slot surfaces and dialogs and routes the operator back to the right plugin', async () => {
+    const { model, workers } = setup()
+    await model.connect()
+    await model.install({ ...pkg, permissions: ['ui:pages', 'ui:slots', 'ui:dialogs'] }, ['ui:pages', 'ui:slots', 'ui:dialogs'])
+    const worker = workers.last
+    worker.send({ type: 'ready' })
+    await worker.call('ui.registerWidget', { id: 'load', title: 'Load' })
+    await Promise.resolve()
+    expect(model.snapshot().surfaces['acme.tools/widget:load']).toMatchObject({ pluginId: 'acme.tools', surface: 'widget:load' })
+
+    model.sendSurfaceEvent('acme.tools', 'widget:load', { kind: 'action', action: 'go', form: {} })
+    expect(worker.posted).toContainEqual({ type: 'ui', pageId: 'widget:load', event: { kind: 'action', action: 'go', form: {} } })
+    expect(await worker.call('ui.dialog', { title: 'Hi', tree: { type: 'divider' }, actions: [{ id: 'ok', label: 'OK' }] })).toMatchObject({ ok: true })
+    await Promise.resolve()
+    expect(model.snapshot().dialogs['acme.tools']).toMatchObject({ id: 'd1', title: 'Hi' })
+    model.answerDialog('acme.tools', 'd1', 'ok', {})
+    await Promise.resolve()
+    expect(model.snapshot().dialogs).toEqual({})
+    expect(worker.posted).toContainEqual({ type: 'dialog', id: 'd1', result: { action: 'ok', form: {} } })
+  })
+
+  it('stores a secret without keeping it and tells the running plugin which keys are set', async () => {
+    const { model, port, workers } = setup()
+    await model.connect()
+    await model.install(withSettings, withSettings.permissions)
+    workers.last.send({ type: 'ready' })
+    expect(await model.secretSet('acme.tools', 'token', 'line\nbreak')).toMatchObject({ ok: false })
+    expect(await model.secretSet('acme.tools', 'token', 'sk-fictional')).toEqual({ ok: true })
+    expect(port.secretWrites).toEqual([{ id: 'acme.tools', key: 'token', set: true }])
+    expect(model.snapshot().plugins[0]?.secrets).toEqual(['token'])
+    expect(workers.last.posted.at(-1)).toEqual({ type: 'settings', values: { limit: 10, mode: 'fast' }, secrets: ['token'] })
+    expect(JSON.stringify(model.snapshot())).not.toContain('sk-fictional')
+  })
+
+  it('links a plugin folder and unlinks it', async () => {
+    const { model, port } = setup()
+    await model.connect()
+    expect(await model.devLink('   ')).toEqual({ ok: false, message: 'Enter the folder that holds plugin.json' })
+    expect(await model.devLink(' C:\\dev\\plugin ')).toMatchObject({ ok: true, plugin: { id: 'dev.local', dev: { path: 'C:\\dev\\plugin' } } })
+    expect(model.snapshot().plugins.find((plugin) => plugin.id === 'dev.local')?.dev).toBeDefined()
+    expect(await model.devUnlink('dev.local')).toBe(true)
+    expect(model.snapshot().plugins.find((plugin) => plugin.id === 'dev.local')?.dev).toBeUndefined()
+    port.failNext = Object.assign(new Error('x'), { code: 'plugin_not_linked' })
+    expect(await model.devUnlink('dev.local')).toBe(false)
+    expect(model.snapshot().error).toBe('That plugin is not loaded from a folder')
   })
 })
 

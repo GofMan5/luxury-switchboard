@@ -1,6 +1,9 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Check, Copy, Pause, Play, Search, X } from 'lucide-react'
+import { Check, Copy, ListPlus, Pause, Play, Search, X } from 'lucide-react'
 import { useAppServices } from '../../../app/services'
+import { ActionButtons, InspectorTabs } from '../../../app/Contributed'
+import { useContributed } from '../../../app/contributions'
+import { retryRuleDraftHash } from '../../../shared/contracts/rules-link'
 import { formatBytes, formatClock, formatDecimal, formatDuration, formatInteger } from '../../../shared/format/metrics'
 import { Button } from '../../../shared/ui/Button'
 import { describeReasoningLevel } from '../../../shared/format/reasoning'
@@ -42,7 +45,7 @@ export default function ActivityPage() {
     () => source.filter((request) => {
       if (stateFilter !== 'all' && request.state !== stateFilter) return false
       if (!deferredSearch) return true
-      return [request.model, request.providerName, request.method, request.path, request.id]
+      return [request.model, request.providerName, request.method, request.path, request.id, ...(request.tags ?? [])]
         .some((value) => value.toLocaleLowerCase().includes(deferredSearch))
     }),
     [source, stateFilter, deferredSearch],
@@ -90,7 +93,7 @@ export default function ActivityPage() {
           <input
             type="search"
             value={search}
-            placeholder="Search model, route, request…"
+            placeholder="Search model, route, tag, request…"
             onChange={(event) => setSearch(event.currentTarget.value)}
           />
         </label>
@@ -239,6 +242,10 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
       window.setTimeout(() => setCopied(false), 2000)
     } catch { /* the id stays on screen either way */ }
   }
+  const { actions } = useContributed(undefined, 'activity')
+  const { capabilities } = useAppServices()
+  // A retry rule is the answer to a failure; the link opens a prefilled editor.
+  const retryRule = request.state === 'failed' && (capabilities ?? []).includes('rules.manage')
   // Non-modal side panel: live updates continue behind it, so modal semantics would lie.
   return (
     <aside ref={panelRef} className={styles.inspector} role="complementary" aria-label="Request inspector">
@@ -258,10 +265,36 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
       </header>
 
       <div className={styles.inspectorScroll}>
+        <InspectorTabs scope="activity" id={request.id} label="Request inspector sections">
         <div className={styles.inspectorStatus}>
           <Pill tone={statePillTone[request.state]}>{activityLabel(request)}</Pill>
           <span className={styles.inspectorMeta}>{request.method} {request.path}{request.status ? ` · HTTP ${request.status}` : ''}</span>
         </div>
+
+        {retryRule || actions.length > 0 ? (
+          <div className={styles.inspectorActions} data-ui="request-actions">
+            {retryRule ? (
+              <a
+                className="button button-secondary"
+                data-variant="secondary"
+                href={retryRuleDraftHash({ ...(request.status ? { status: request.status } : {}), ...(request.errorCode ? { errorCode: request.errorCode } : {}), ...(request.errorDetail ? { detail: request.errorDetail } : {}) })}
+              >
+                <ListPlus size={13} aria-hidden="true" />
+                Create retry rule
+              </a>
+            ) : null}
+            <ActionButtons actions={actions} targetId={request.id} />
+          </div>
+        ) : null}
+
+        {request.tags?.length ? (
+          <section className={styles.inspectorSection} aria-label="Tags">
+            <h3 className={styles.sectionTitle}>Tags</h3>
+            <ul className={styles.tags}>
+              {request.tags.map((tag) => <li key={tag}>{tag}</li>)}
+            </ul>
+          </section>
+        ) : null}
 
         <section className={styles.inspectorSection} aria-label="Timing">
           <dl className={styles.details}>
@@ -307,6 +340,7 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
             </button>
           </div>
         ) : null}
+        </InspectorTabs>
       </div>
     </aside>
   )

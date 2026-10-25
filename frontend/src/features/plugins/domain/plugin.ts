@@ -34,6 +34,23 @@ export interface PluginSummary {
    * newer app), or ''. A plugin with a problem stays disabled until it is
    * reinstalled or removed. */
   readonly problem: string
+  /** The keys of the `secret` settings that have a value; never the values. */
+  readonly secrets: readonly string[]
+  /** The package's `network.hosts`; empty without `net:fetch`. */
+  readonly hosts: readonly string[]
+  /** Set while the plugin is loaded from a folder for development. */
+  readonly dev?: PluginDev
+}
+
+/** A plugin linked from a local folder: the control plane re-reads it there
+ * and reloads it when it changes. */
+export interface PluginDev {
+  readonly path: string
+  /** When the folder was last packed into the running version (RFC 3339). */
+  readonly loadedAt: string
+  /** Why the latest change could not be loaded; the last good version keeps
+   * running meanwhile. Empty when it loaded. */
+  readonly problem: string
 }
 
 /** Everything the runtime needs to run one plugin. */
@@ -109,7 +126,16 @@ export function normalizeSummary(raw: unknown): PluginSummary {
     hasTheme: value.hasTheme === true,
     hasSettings: value.hasSettings === true,
     problem: str(value.problem),
+    secrets: strings(value.secrets),
+    hosts: strings(value.hosts),
+    ...devLink(value.dev),
   }
+}
+
+function devLink(raw: unknown): { dev?: PluginDev } {
+  const value = record(raw)
+  if (typeof value.path !== 'string' || !value.path) return {}
+  return { dev: { path: value.path, loadedAt: str(value.loadedAt), problem: str(value.problem) } }
 }
 
 /** A stored time as milliseconds, or null when it is missing, unreadable or
@@ -155,7 +181,7 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-function strings(value: unknown): string[] {
+export function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
 }
 

@@ -65,6 +65,32 @@ export const OPS = [
   'storage.setMany',
   'storage.clear',
   'navigate',
+  'ui.registerWidget',
+  'ui.registerInspectorTab',
+  'ui.registerSettingsSection',
+  'ui.registerAction',
+  'ui.registerHeaderButton',
+  'ui.unregister',
+  'ui.setLayout',
+  'ui.resetLayout',
+  'ui.dialog',
+  'ui.dialogUpdate',
+  'ui.dialogClose',
+  'ui.theme',
+  'net.fetch',
+  'db.get',
+  'db.put',
+  'db.delete',
+  'db.list',
+  'db.clear',
+  'db.stats',
+  'files.open',
+  'files.save',
+  'bus.publish',
+  'bus.subscribe',
+  'bus.unsubscribe',
+  'relay.register',
+  'relay.unregister',
 ] as const
 
 export type Op = (typeof OPS)[number]
@@ -79,17 +105,39 @@ export type WorkerMessage =
   | { readonly type: 'log'; readonly level: LogLevel; readonly text: string }
   | { readonly type: 'pong'; readonly seq: number }
   | { readonly type: 'call'; readonly id: number; readonly op: Op; readonly args: Record<string, unknown> }
+  /* Fire-and-forget messages: no result, validated by the host when used. */
+  | { readonly type: 'draw'; readonly surface: string; readonly canvas: string; readonly ops: unknown }
+  | { readonly type: 'tone'; readonly spec: Record<string, unknown> }
+  | { readonly type: 'frameDone' }
+  | { readonly type: 'hookResult'; readonly callId: string; readonly decision: unknown }
 
-/** What a page sends back when the operator touches it. */
+/** Worker messages that carry no result and are budgeted separately from
+ * the call flood window. */
+export const STREAM_MESSAGES: ReadonlySet<string> = new Set(['draw', 'tone', 'frameDone', 'hookResult'])
+
+/** A form value: text, a slider's number or a toggle. */
+export type FormValue = string | number | boolean
+
+/** What a page, slot surface or dialog sends back when the operator touches
+ * it. The host fills `pageId` (and `scope`/`target` for registered actions)
+ * itself before the worker sees it. */
 export interface PageEvent {
   readonly kind: 'action' | 'change' | 'show' | 'hide'
   readonly action?: string
   readonly name?: string
-  readonly value?: string | boolean
+  readonly value?: FormValue
   /** Table row id (or index) for a row action. */
   readonly row?: string | number
+  /** For an inspector tab: what it is showing. */
+  readonly context?: { readonly scope: 'overview' | 'activity' | 'provider' | 'settings'; readonly id?: string }
+  /** The page, `widget:`/`inspector:`/`settings:` surface or `dialog:<id>`
+   * the event came from. */
+  readonly pageId?: string
+  /** For a registered action or header button. */
+  readonly scope?: 'activity' | 'provider' | 'key' | 'header'
+  readonly target?: string
   /** Every named control's current value on the page. */
-  readonly form: Readonly<Record<string, string | boolean>>
+  readonly form: Readonly<Record<string, FormValue>>
 }
 
 export type HostMessage =
@@ -99,8 +147,14 @@ export type HostMessage =
   | { readonly type: 'ui'; readonly pageId: string; readonly event: PageEvent }
   | { readonly type: 'topic'; readonly topic: string; readonly payload: unknown }
   | { readonly type: 'command'; readonly id: string }
-  | { readonly type: 'settings'; readonly values: Readonly<Record<string, SettingValue>> }
+  | { readonly type: 'settings'; readonly values: Readonly<Record<string, SettingValue>>; readonly secrets: readonly string[] }
   | { readonly type: 'ping'; readonly seq: number }
+  | { readonly type: 'frame'; readonly dtMs: number; readonly tMs: number }
+  | { readonly type: 'input'; readonly event: unknown }
+  | { readonly type: 'hook'; readonly kind: 'invoke' | 'observe'; readonly hookId: string; readonly callId?: string; readonly request: unknown; readonly response?: unknown }
+  | { readonly type: 'bus'; readonly channel: string; readonly payload: unknown; readonly from: string }
+  | { readonly type: 'theme'; readonly theme: unknown }
+  | { readonly type: 'dialog'; readonly id: string; readonly result: { readonly action: string | null; readonly form: Readonly<Record<string, FormValue>> } }
 
 const LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error']
 const OP_SET = new Set<string>(OPS)
@@ -127,6 +181,17 @@ export function parseWorkerMessage(data: unknown): WorkerMessage | null {
       if (typeof data.op !== 'string' || !OP_SET.has(data.op)) return null
       if (data.args !== undefined && !isRecord(data.args)) return null
       return { type: 'call', id: data.id as number, op: data.op as Op, args: (data.args ?? {}) as Record<string, unknown> }
+    case 'draw':
+      return typeof data.surface === 'string' && typeof data.canvas === 'string' && data.surface.length <= 64 && data.canvas.length <= 64
+        ? { type: 'draw', surface: data.surface, canvas: data.canvas, ops: data.ops }
+        : null
+    case 'tone':
+      return isRecord(data.spec) ? { type: 'tone', spec: data.spec } : null
+    case 'frameDone': return { type: 'frameDone' }
+    case 'hookResult':
+      return typeof data.callId === 'string' && data.callId.length > 0 && data.callId.length <= 128
+        ? { type: 'hookResult', callId: data.callId, decision: data.decision }
+        : null
     default:
       return null
   }
@@ -256,36 +321,36 @@ export function requireString(args: Record<string, unknown>, field: string, limi
   return string(args[field], field, limit)
 }
 
-function pattern(value: unknown, shape: RegExp, field: string, description: string): string {
+export function pattern(value: unknown, shape: RegExp, field: string, description: string): string {
   if (typeof value !== 'string' || !shape.test(value)) throw new CallError('invalid_argument', `${field} must be ${description}.`)
   return value
 }
 
-function string(value: unknown, field: string, limit: number, allowEmpty = false): string {
+export function string(value: unknown, field: string, limit: number, allowEmpty = false): string {
   if (typeof value !== 'string' || (!allowEmpty && value.trim().length === 0)) throw new CallError('invalid_argument', `${field} must be a non-empty string.`)
   if (runes(value) > limit) throw new CallError('invalid_argument', `${field} is longer than ${limit} characters.`)
   return value
 }
 
-const encoder = new TextEncoder()
+export const encoder = new TextEncoder()
 
 /** Length in code points, so an emoji counts once, as the control plane
  * counts it. */
-function runes(value: string): number {
+export function runes(value: string): number {
   return [...value].length
 }
 
-function tone_(value: unknown, field: string): ContributionTone {
+export function tone_(value: unknown, field: string): ContributionTone {
   if (!TONES.includes(value as ContributionTone)) throw new CallError('invalid_argument', `${field} must be one of ${TONES.join(', ')}.`)
   return value as ContributionTone
 }
 
-function clip(value: string, limit: number): string {
+export function clip(value: string, limit: number): string {
   if (value.length <= limit) return value
   // Never cut a surrogate pair in half.
   return `${Array.from(value.slice(0, limit)).slice(0, limit - 1).join('').replace(/[\uD800-\uDBFF]$/u, '')}…`
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "example.focus-layout",
+  "name": "Focus layout",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "Trims the sidebar to the pages a role uses every day and opens the window on the right one. Pick the role in the plugin settings; a palette command gives the layout back.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:layout",
+    "ui:commands"
+  ],
+  "settings": [
+    {
+      "key": "role",
+      "label": "Role",
+      "type": "select",
+      "default": "operator",
+      "options": [
+        { "value": "operator", "label": "Operator: traffic first" },
+        { "value": "publisher", "label": "Publisher: tunnel and clients first" },
+        { "value": "none", "label": "No layout" }
+      ]
+    }
+  ]
+}

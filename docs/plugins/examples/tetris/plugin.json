@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "example.tetris",
+  "name": "Tetris",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "A playable falling-blocks game on a plugin page: a canvas, keyboard and on-screen controls, a frame loop, sound and a high score kept in plugin storage.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:pages",
+    "ui:sound",
+    "storage"
+  ],
+  "settings": [
+    {
+      "key": "sound",
+      "label": "Sound effects",
+      "description": "Short tones for moves, line clears and game over.",
+      "type": "toggle",
+      "default": true
+    },
+    {
+      "key": "startLevel",
+      "label": "Starting level",
+      "description": "Higher levels fall faster from the first piece.",
+      "type": "number",
+      "default": 1,
+      "min": 1,
+      "max": 10
+    }
+  ]
+}

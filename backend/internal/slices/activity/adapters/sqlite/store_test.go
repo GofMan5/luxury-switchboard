@@ -30,6 +30,7 @@ func TestHistoryPersistsSanitizedRequestsAndNonOverlappingTokens(t *testing.T) {
 		GenerationMS: 1000, TokensPerSecond: 40, TTFTMS: 250,
 		ErrorDetail:     "provider returned HTTP 502",
 		ReasoningEffort: "high", ReasoningBudget: 8192, ThinkingMS: 420.5,
+		Tags: []string{"team.a", "batch-2"},
 	}
 	if !store.Record(request) {
 		t.Fatal("terminal request was not queued")
@@ -55,6 +56,9 @@ func TestHistoryPersistsSanitizedRequestsAndNonOverlappingTokens(t *testing.T) {
 	}
 	if recent[0].ReasoningEffort != "high" || recent[0].ReasoningBudget != 8192 || recent[0].ThinkingMS != 420.5 {
 		t.Fatalf("reasoning level did not survive history: %+v", recent[0])
+	}
+	if len(recent[0].Tags) != 2 || recent[0].Tags[0] != "team.a" || recent[0].Tags[1] != "batch-2" {
+		t.Fatalf("tags did not survive history: %q", recent[0].Tags)
 	}
 	stats, err := store.Stats(context.Background(), application.Period24H)
 	if err != nil {
@@ -219,7 +223,7 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	}
 	if recent[0].ProviderName != "" || recent[0].ErrorDetail != "" ||
 		recent[0].ReasoningEffort != "" || recent[0].ReasoningBudget != 0 || recent[0].ThinkingMS != 0 ||
-		recent[0].TTFTMS != 0 {
+		recent[0].TTFTMS != 0 || recent[0].Tags != nil {
 		t.Fatalf("migrated columns were not empty: %+v", recent[0])
 	}
 	// A migrated database must take the new columns on write too, not only
@@ -228,6 +232,7 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	migrated.ID = "req_after_migration"
 	migrated.ReasoningEffort = "low"
 	migrated.TTFTMS = 312.5
+	migrated.Tags = []string{"migrated"}
 	if err := store.writeBatch([]domain.Request{migrated}); err != nil {
 		t.Fatalf("migrated database refused a row with the new columns: %v", err)
 	}
@@ -238,7 +243,7 @@ generation_ms, tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 	found := false
 	for _, request := range recent {
 		if request.ID == "req_after_migration" {
-			found = request.TTFTMS == 312.5
+			found = request.TTFTMS == 312.5 && len(request.Tags) == 1 && request.Tags[0] == "migrated"
 		}
 	}
 	if !found {

@@ -29,11 +29,11 @@ describe('controlAccess', () => {
 
   it('keeps every allowed command on exactly one control tier and away from the denied families', () => {
     for (const [method, permission] of Object.entries(CONTROL_METHODS)) {
-      expect(['control:read', 'control:write', 'control:sensitive']).toContain(permission)
+      expect(['control:read', 'control:write', 'control:sensitive', 'relay:rules']).toContain(permission)
       expect(method).not.toMatch(/^(plugins|system|backup)\./u)
       expect(['appearance.update', 'updates.install']).not.toContain(method)
     }
-    const listed = [...methodsFor('control:read'), ...methodsFor('control:write'), ...methodsFor('control:sensitive')]
+    const listed = [...methodsFor('control:read'), ...methodsFor('control:write'), ...methodsFor('control:sensitive'), ...methodsFor('relay:rules')]
     expect(new Set(listed).size).toBe(listed.length)
     expect(listed.length).toBe(Object.keys(CONTROL_METHODS).length)
     expect(Object.isFrozen(CONTROL_METHODS)).toBe(true)

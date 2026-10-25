@@ -160,7 +160,7 @@ func TestSettingChecksRunInOrder(t *testing.T) {
 	}{
 		"key before label":        {Setting{Key: "Bad", Label: ""}, ValidationError{"settings[0].key", "must be a lowercase letter then at most 31 letters, digits or underscores"}},
 		"label before type":       {Setting{Key: "a", Label: "", Type: "color"}, ValidationError{"settings[0].label", "must be 1-64 characters without control characters"}},
-		"type before attributes":  {Setting{Key: "a", Label: "A", Type: "color", Options: []SettingOption{{}}}, ValidationError{"settings[0].type", "must be text, number, toggle or select"}},
+		"type before attributes":  {Setting{Key: "a", Label: "A", Type: "color", Options: []SettingOption{{}}}, ValidationError{"settings[0].type", "must be text, number, toggle, select or secret"}},
 		"unused before own rules": {Setting{Key: "a", Label: "A", Type: SettingText, MaxLength: -5, Min: number(0)}, ValidationError{"settings[0].min", "is not used by a text setting"}},
 		"own rules before default": {Setting{Key: "a", Label: "A", Type: SettingSelect},
 			ValidationError{"settings[0].options", "must list 1-32 options"}},

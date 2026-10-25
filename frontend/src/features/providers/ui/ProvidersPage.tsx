@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Database, KeyRound, LogIn, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react'
+import { ActionButtons, InspectorTabs } from '../../../app/Contributed'
+import { useContributed } from '../../../app/contributions'
 import { useAppServices } from '../../../app/services'
 import { Button } from '../../../shared/ui/Button'
 import { EmptyState, Pill } from '../../../shared/ui/chrome'
@@ -272,6 +274,7 @@ function ProviderInspector({ provider, active, pending, codexAccounts, onActivat
   onActivate: () => void; onEdit: () => void; onDelete: () => void
   onCodexSignIn: () => void; onCodexDisconnect: (accountId: string) => void; onClose: () => void
 }) {
+  const { actions } = useContributed(undefined, 'provider')
   // Not a modal: no focus trap, no autofocus — Escape and the X simply close it.
   const panelRef = useRef<HTMLElement>(null)
   useEffect(() => {
@@ -327,8 +330,10 @@ function ProviderInspector({ provider, active, pending, codexAccounts, onActivat
         {!provider.builtin ? (
           <Button variant="danger" onClick={onDelete}><Trash2 size={14} />Delete</Button>
         ) : null}
+        <ActionButtons actions={actions} targetId={provider.id} />
       </div>
       <div className={styles.inspectorScroll}>
+        <InspectorTabs scope="provider" id={provider.id} label="Provider details sections">
         <section className={styles.section}><h3>Identity</h3><dl><dt>Display name</dt><dd>{provider.name}</dd>{isCodex(provider) ? <><dt>Preset</dt><dd>Codex — managed by account sign-in</dd></> : null}<dt>Base URL</dt><dd className={styles.endpoint}>{provider.baseUrl}</dd><dt>Dialect</dt><dd>{provider.dialect}</dd><dt>Models path</dt><dd className={styles.endpoint}>{provider.modelsPath}</dd><dt>Request format</dt><dd>{formatLabel(provider.format)}{provider.format === 'chat' ? ` · ${provider.chatPath}` : ''}</dd><dt>Authentication</dt><dd>{provider.authMode === 'custom' ? provider.authHeader : provider.authMode}</dd></dl></section>
         <section className={styles.section}><h3>Traffic policy</h3><dl><dt>Request limit</dt><dd>{rateLabel(provider)}</dd><dt>Prompt cache TTL</dt><dd>{provider.cacheTtl === '1h0m0s' ? '1 hour' : 'Provider default'}</dd><dt>Image API</dt><dd>{provider.imageCompat ? 'Responses tool compatibility' : 'Native provider endpoint'}</dd><dt>Relay behavior</dt><dd>{active ? 'Receives unassigned models' : 'Available for model routes'}</dd></dl></section>
         <section className={styles.section}><h3>Authentication</h3><div className={styles.authRow}>{provider.authMode === 'passthrough' ? <ShieldCheck size={18} /> : <KeyRound size={18} />}<div><strong>{provider.authMode === 'passthrough' ? 'Forwarded from local client' : provider.keyCount > 0 ? `${provider.keyCount} encrypted keys` : 'No API keys configured'}</strong><span>{provider.authMode === 'passthrough' ? 'Keys added in API Keys are used only for model discovery and tests.' : 'Secret material is never returned to the UI.'}</span></div></div></section>
@@ -360,6 +365,7 @@ function ProviderInspector({ provider, active, pending, codexAccounts, onActivat
             )}
           </section>
         ) : null}
+        </InspectorTabs>
       </div>
     </aside>
   )

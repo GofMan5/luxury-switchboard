@@ -36,6 +36,7 @@
 .text[data-tone='danger'] { color: var(--text-danger); }
 
 .dot { display: inline-flex; min-width: 0; align-items: center; gap: 7px; color: var(--text-secondary); font-size: var(--fs-sm); }
+.badge { display: flex; min-width: 0; align-items: center; justify-self: start; }
 .empty { padding: 16px var(--pad); color: var(--text-muted); font-size: var(--fs-sm); text-align: center; }
 
 .tableWrap { min-width: 0; overflow: auto; max-height: 560px; }
@@ -173,3 +174,41 @@
 }
 :global([data-animations='off']) :is(.knob, .progressTrack span, .tab, .rowButton), :global([data-animations='off']) .tab::after { transition: none; }
 :global([data-animations='off']) .progressTrack[data-indeterminate='true'] span { width: 100%; opacity: .45; animation: none; }
+
+/* Markdown: the text node's voice, with the page's own code, quote and list grammar. */
+.markdown { display: grid; min-width: 0; max-width: 90ch; gap: 8px; color: var(--text-secondary); line-height: 1.55; overflow-wrap: anywhere; }
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote { margin: 0; }
+.markdown ul, .markdown ol { display: grid; gap: 2px; padding-left: 20px; }
+.markdown blockquote { display: grid; gap: 8px; border-left: 2px solid var(--border-strong); padding-left: 12px; color: var(--text-muted); }
+.markdown :not(pre) > code { border-radius: 3px; padding: 1px 4px; background: var(--bg-raised); font-family: var(--font-mono); font-size: .92em; }
+.markdown strong { color: var(--text-primary); font-weight: 600; }
+.markdown .link { display: inline; }
+
+.image { display: block; max-width: 100%; height: auto; border-radius: var(--radius-control); object-fit: contain; }
+
+.sliderLabel { display: flex; min-width: 0; justify-content: space-between; gap: 8px; }
+.sliderLabel output { color: var(--text-primary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.field input.slider { height: var(--control-height); padding: 0; accent-color: var(--action-primary); cursor: pointer; }
+.slider:disabled { cursor: not-allowed; opacity: .55; }
+
+.color { display: inline-flex; align-items: center; gap: 8px; }
+.field .color input { width: 44px; height: var(--control-height); flex: 0 0 auto; padding: 2px; cursor: pointer; }
+.color input:disabled { cursor: not-allowed; opacity: .55; }
+.color code { color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--fs-sm); }
+
+.details { min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); }
+.details > summary { border-radius: var(--radius-control); padding: 8px 12px; color: var(--text-primary); font-size: var(--fs-sm); font-weight: 500; cursor: pointer; transition: background var(--motion-fast); }
+.details > summary:hover { background: var(--bg-hover); }
+.details > summary:active { background: var(--bg-selected); }
+.details > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.details[open] > summary { border-bottom: 1px solid var(--border-subtle); border-radius: var(--radius-control) var(--radius-control) 0 0; }
+.detailsBody { display: grid; min-width: 0; gap: 12px; padding: 12px; }
+
+/* Canvas: sized by the component (fit), so the frame only takes the width and centres nothing. */
+.canvasFrame { min-width: 0; max-width: 100%; }
+.canvasBox { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.canvas { display: block; max-width: 100%; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-canvas); touch-action: none; }
+.canvas[data-pointer] { cursor: crosshair; }
+.canvas:focus-visible, .canvas:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.canvasHint { position: absolute; right: 8px; bottom: 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 3px 8px; color: var(--text-muted); background: var(--bg-surface); font-size: var(--fs-xs); line-height: 1.4; pointer-events: none; }
+.canvasMissing { display: grid; width: 100%; place-items: center; border: 1px dashed var(--border-strong); border-radius: var(--radius-control); color: var(--text-muted); font-size: var(--fs-sm); }

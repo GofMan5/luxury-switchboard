@@ -12,13 +12,13 @@ export function Panel({ title, subtitle, actions, className = '', label, childre
   readonly label?: string
 }>) {
   return (
-    <section className={`${styles.panel} ${className}`} aria-label={label}>
-      <header className={styles.panelHeader}>
-        <div className={styles.panelTitle}>
+    <section className={`${styles.panel} ${className}`} aria-label={label} data-ui="panel">
+      <header className={styles.panelHeader} data-ui="panel-header">
+        <div className={styles.panelTitle} data-ui="panel-title">
           <h2>{title}</h2>
           {subtitle ? <p>{subtitle}</p> : null}
         </div>
-        {actions ? <div className={styles.panelActions}>{actions}</div> : null}
+        {actions ? <div className={styles.panelActions} data-ui="panel-actions">{actions}</div> : null}
       </header>
       {children}
     </section>
@@ -29,12 +29,12 @@ export type MetricTone = 'success' | 'warning' | 'danger'
 
 /** Label / value / detail as one strip of divided cells. */
 export function MetricStrip({ children }: PropsWithChildren) {
-  return <div className={styles.metricStrip}>{children}</div>
+  return <div className={styles.metricStrip} data-ui="metric-strip">{children}</div>
 }
 
 export function Metric({ label, value, detail, tone }: { readonly label: string; readonly value: ReactNode; readonly detail?: ReactNode; readonly tone?: MetricTone }) {
   return (
-    <div className={styles.metric} data-tone={tone}>
+    <div className={styles.metric} data-tone={tone} data-ui="metric">
       <span className={styles.metricLabel}>{label}</span>
       <strong className={styles.metricValue}>{value}</strong>
       {detail ? <small className={styles.metricDetail}>{detail}</small> : null}
@@ -56,7 +56,7 @@ export function Segmented<T extends string>({ options, value, disabled = false, 
   readonly label: string
 }) {
   return (
-    <div className={styles.segmented} role="group" aria-label={label}>
+    <div className={styles.segmented} role="group" aria-label={label} data-ui="segmented">
       {options.map((option) => (
         <button
           key={option.id}
@@ -77,7 +77,7 @@ export type PillTone = 'neutral' | 'success' | 'info' | 'warning' | 'danger'
 
 /** Small labelled state chip for tables and cards. */
 export function Pill({ tone = 'neutral', children }: PropsWithChildren<{ readonly tone?: PillTone }>) {
-  return <span className={styles.pill} data-tone={tone === 'neutral' ? undefined : tone}>{children}</span>
+  return <span className={styles.pill} data-tone={tone === 'neutral' ? undefined : tone} data-ui="pill">{children}</span>
 }
 
 /** The quiet "nothing here yet" block: icon, title, and what happens next. */
@@ -88,7 +88,7 @@ export function EmptyState({ icon: Icon, title, hint, height = 160 }: {
   readonly height?: number
 }) {
   return (
-    <div className={styles.emptyState} style={{ minHeight: height }}>
+    <div className={styles.emptyState} style={{ minHeight: height }} data-ui="empty-state">
       <Icon size={22} strokeWidth={1.6} />
       <strong>{title}</strong>
       {hint ? <p>{hint}</p> : null}

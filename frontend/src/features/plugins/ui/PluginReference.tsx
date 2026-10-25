@@ -1,16 +1,23 @@
+import { ExternalLink } from 'lucide-react'
 import { useState } from 'react'
 import { COLOR_TOKENS, DERIVED_TOKENS } from '../../../shared/contracts/tokens'
+import { SHORTCUT_FORMAT } from '../../../shared/keyboard/shortcuts'
 import { PLUGIN_ICONS } from '../../../app/plugin-icons'
+import { openExternal } from '../../../platform/lifecycle/open-external'
 import { Pill, Segmented } from '../../../shared/ui/chrome'
 import { CONTROL_TOPICS, methodsFor } from '../domain/control-access'
-import { CSS_BYTES, SCRIPT_BYTES, PLUGIN_LIMIT } from '../domain/manifest'
+import { CSS_BYTES, DESCRIPTION_LIMIT, HOMEPAGE_BYTES, SCRIPT_BYTES, PLUGIN_LIMIT } from '../domain/manifest'
 import { PERMISSION_SPECS } from '../domain/permissions'
 import { RUNTIME_LIMITS, STORAGE_KEYS, STORAGE_TOTAL_BYTES, STORAGE_VALUE_BYTES } from '../domain/protocol'
+import { SETTING_LIMIT, SETTING_OPTION_LIMIT, SETTING_TEXT_LIMIT } from '../domain/settings'
 import { TREE_LIMITS } from '../domain/ui-tree'
 import { RiskPill } from './PluginDialogs'
 import styles from './PluginsPage.module.css'
 
 type Section = 'package' | 'api' | 'nodes' | 'permissions' | 'tokens'
+
+/** The plugin guide in the public repository; it opens in the browser. */
+const GUIDE_URL = 'https://github.com/GofMan5/luxury-switchboard/blob/main/docs/PLUGINS.md'
 
 const SECTIONS: readonly { readonly id: Section; readonly label: string }[] = [
   { id: 'package', label: 'Package' },
@@ -36,20 +43,31 @@ const API: readonly { readonly group: string; readonly entries: readonly Entry[]
   {
     group: 'Pages',
     entries: [
-      { name: 'ui.registerPage({ id, title, icon? })', text: `Adds a sidebar page at #plugin/<plugin-id>/<id>, up to ${RUNTIME_LIMITS.pages}.`, needs: 'ui:pages' },
+      { name: 'ui.registerPage({ id, title, icon? })', text: `Adds a sidebar page, up to ${RUNTIME_LIMITS.pages}. Resolves with { route: "plugin/<plugin-id>/<id>" } for navigate.`, needs: 'ui:pages' },
       { name: 'ui.render(pageId, tree)', text: 'Replaces the page with a node tree. Fields keep what the operator typed until the tree changes their value.', needs: 'ui:pages' },
       { name: 'ui.onEvent(pageId?, handler)', text: 'handler({ kind: "action" | "change" | "show" | "hide", action, name, value, row, form }). Returns an unsubscribe function.', needs: 'ui:pages' },
       { name: 'ui.unregisterPage(id)', text: 'Removes the page from the sidebar.', needs: 'ui:pages' },
+      { name: 'ui.setBadge(pageId, { text, tone? } | null)', text: `A short count or flag on the page’s sidebar entry, up to ${RUNTIME_LIMITS.badgeText} characters; null removes it. Register the page first.`, needs: 'ui:pages' },
       { name: 'ui.setStatus(id, { text, tone?, tooltip? } | null)', text: `Shows up to ${RUNTIME_LIMITS.status} readouts in the runtime bar; null removes one.`, needs: 'ui:status' },
     ],
   },
   {
     group: 'Commands and notifications',
     entries: [
-      { name: 'commands.register({ id, title, group?, keywords?, shortcut? }, handler)', text: `Adds a palette command (Ctrl+K), up to ${RUNTIME_LIMITS.commands}. Registering the same id again replaces it. The handler runs when the operator chooses it.`, needs: 'ui:commands' },
-      { name: 'commands.unregister(id)', text: 'Removes a palette command.', needs: 'ui:commands' },
+      { name: 'commands.register({ id, title, group?, keywords?, shortcut? }, handler)', text: `Adds a command to the palette (Ctrl+K), up to ${RUNTIME_LIMITS.commands}; the same id again replaces it. A shortcut is a real global key, written ${SHORTCUT_FORMAT}. The window’s own keys are refused, and a key another command already holds fails with "conflict". The handler runs when the operator picks the command or presses its key.`, needs: 'ui:commands' },
+      { name: 'commands.unregister(id)', text: 'Removes a palette command and frees its shortcut.', needs: 'ui:commands' },
       { name: 'notify({ title, body?, tone? })', text: `Raises a notification; at most ${RUNTIME_LIMITS.notifyPerMinute} a minute.`, needs: 'ui:notify' },
+      { name: 'ui.confirm({ title, body?, confirmText?, tone? })', text: `Asks the operator in a dialog that names the plugin; resolves true or false. One at a time, and only within ${RUNTIME_LIMITS.gestureMs / 1000} s of the operator using the plugin’s page or command ("needs_gesture").`, needs: 'ui:notify' },
+      { name: 'clipboard.writeText(text)', text: `Copies up to ${RUNTIME_LIMITS.clipboardText.toLocaleString('en-US')} characters, only within ${RUNTIME_LIMITS.gestureMs / 1000} s of the operator using the plugin’s page or command. Plugins can never read the clipboard.`, needs: 'ui:clipboard' },
       { name: 'navigate(route)', text: 'Opens a page: "providers", "activity", "plugin/<id>/<page>"…' },
+    ],
+  },
+  {
+    group: 'Settings',
+    entries: [
+      { name: 'settings.get(key)', text: 'The current value of a declared setting: what the operator saved, or its default. Ready before the script starts.' },
+      { name: 'settings.all()', text: 'Every setting by key.' },
+      { name: 'settings.onChange((values, changed) => …)', text: 'Runs after the operator saves new values; changed lists the keys. Returns an unsubscribe function. Only the operator changes settings.' },
     ],
   },
   {
@@ -63,9 +81,11 @@ const API: readonly { readonly group: string; readonly entries: readonly Entry[]
     group: 'Storage',
     entries: [
       { name: 'storage.get(key)', text: 'Resolves with the stored string, or null.', needs: 'storage' },
-      { name: 'storage.set(key, value)', text: `Stores a string up to ${STORAGE_VALUE_BYTES / 1024} KiB; ${STORAGE_KEYS} keys and ${STORAGE_TOTAL_BYTES / 1024} KiB per plugin.`, needs: 'storage' },
+      { name: 'storage.set(key, value)', text: `Stores a string up to ${STORAGE_VALUE_BYTES / 1024} KiB; ${STORAGE_KEYS} keys and ${STORAGE_TOTAL_BYTES / 1024} KiB per plugin, ${RUNTIME_LIMITS.storageWritesPerMinute} writes a minute.`, needs: 'storage' },
+      { name: 'storage.setMany({ key: value | null, … })', text: `Writes up to ${RUNTIME_LIMITS.storageBatch} keys at once, all or none, as one write; null deletes a key.`, needs: 'storage' },
       { name: 'storage.remove(key)', text: 'Deletes a key.', needs: 'storage' },
-      { name: 'storage.all()', text: 'Resolves with every key and value.', needs: 'storage' },
+      { name: 'storage.all()', text: 'Resolves with every key and value (settings are not included).', needs: 'storage' },
+      { name: 'storage.clear()', text: 'Deletes every key the plugin stored. The operator’s settings stay.', needs: 'storage' },
     ],
   },
 ]
@@ -79,14 +99,18 @@ const NODES: readonly Entry[] = [
   { name: 'text', text: 'text, tone, mono, size: sm | md | lg, weight: regular | strong' },
   { name: 'metric / metrics', text: 'label, value, detail, tone — or items: [metric…] as one strip' },
   { name: 'badge / dot', text: 'text, tone: neutral | info | success | warning | danger' },
-  { name: 'table', text: 'columns [{ key, label, align, mono, width }], rows, empty, rowAction (row id in the event)' },
+  { name: 'table', text: 'columns [{ key, label, align, mono, width, format: text | number | percent | bytes | duration }], rows (flat objects keyed by column key, with an optional id), empty, rowAction (row id in the event)' },
   { name: 'list', text: 'items [{ title, detail, meta, tone }], empty' },
   { name: 'kv / code', text: 'items [{ key, value }] — or text, shown monospaced' },
+  { name: 'chart', text: `kind: line | bars, label, values (1–${TREE_LIMITS.points} numbers), labels, min, max, tone, height (48–240)` },
+  { name: 'callout', text: 'tone, title, text, actions (nodes)' },
+  { name: 'tabs', text: 'name, label, value, tabs [{ id, label, children }]; switching sends a change event' },
   { name: 'button', text: 'text, action, variant: default | primary | danger | ghost, icon, disabled' },
-  { name: 'input', text: 'name, label, value, placeholder, kind: text | number | search, maxLength, action (on Enter)' },
-  { name: 'select / segmented', text: 'name, label, value, options [{ value, label }]' },
-  { name: 'toggle', text: 'name, label, value: boolean' },
-  { name: 'progress', text: 'value 0–1, label, tone' },
+  { name: 'input', text: 'name, label, value, placeholder, kind: text | number | search, min, max, step, maxLength, hint, error, required, disabled, action (on Enter)' },
+  { name: 'textarea', text: 'name, label, value, placeholder, rows (2–12), maxLength, hint, error, required, disabled, action' },
+  { name: 'select / segmented', text: 'name, label, value, options [{ value, label }], disabled' },
+  { name: 'toggle', text: 'name, label, value: boolean, disabled' },
+  { name: 'progress', text: 'value 0–1, indeterminate, label, tone' },
   { name: 'divider / empty / link', text: '— / title, hint / text, href (https only, opens the browser)' },
 ]
 
@@ -94,11 +118,14 @@ const PACKAGE: readonly Entry[] = [
   { name: 'schema', text: 'Always 1.' },
   { name: 'id', text: 'Lower-case letters, digits, dots and dashes, 3–64 characters: "acme.latency".' },
   { name: 'name, version', text: 'What the Plugins page shows. Installing the same id again is an update.' },
-  { name: 'author, description', text: 'Optional; shown in the install review.' },
+  { name: 'author, description', text: `Optional; shown in the install review. A description holds up to ${DESCRIPTION_LIMIT} characters.` },
+  { name: 'homepage', text: `Optional https:// address up to ${HOMEPAGE_BYTES} characters, shown as a link and never fetched.` },
+  { name: 'minAppVersion', text: 'Optional, such as "1.0.65". An older Switchboard refuses to install the plugin.' },
   { name: 'permissions', text: 'Everything the plugin may ask for. The operator decides what is granted.' },
+  { name: 'settings', text: `Up to ${SETTING_LIMIT} options the operator edits on the Plugins page: { key, label, description?, type, default } with type text (placeholder, maxLength ≤ ${SETTING_TEXT_LIMIT}), number (placeholder, min, max), toggle or select (options [{ value, label }], up to ${SETTING_OPTION_LIMIT}). Needs a script.` },
   { name: 'theme', text: '{ name, scheme: "dark" | "light", tokens: { "--bg-canvas": "#101214", … } } — needs ui:theme.' },
   { name: 'css', text: `A stylesheet up to ${CSS_BYTES / 1024} KiB, applied while enabled — needs ui:css.` },
-  { name: 'script', text: `Up to ${SCRIPT_BYTES / 1024} KiB of JavaScript run as an async function body in an isolated worker with \`switchboard\` in scope.` },
+  { name: 'script', text: `Up to ${SCRIPT_BYTES / 1024} KiB of JavaScript run as an async function body in an isolated worker with the switchboard object in scope.` },
 ]
 
 /** The in-app reference: the package format, the API, the page nodes, the
@@ -116,7 +143,13 @@ export function PluginReference() {
             no DOM and no storage of its own — everything goes through <code>switchboard</code>, checked against what you granted.
           </p>
           <EntryList entries={PACKAGE} />
-          <p className={styles.muted}>The full guide with worked examples is <code>docs/PLUGINS.md</code> in the repository.</p>
+          <p className={styles.muted}>
+            The full guide, with worked examples, types and the <code>pnpm plugin</code> tooling, is{' '}
+            <button type="button" className={styles.homepage} onClick={() => void openExternal(GUIDE_URL)} title="Opens in your browser">
+              <span>docs/PLUGINS.md</span><ExternalLink size={12} aria-hidden="true" />
+            </button>{' '}
+            in the repository.
+          </p>
         </>
       ) : null}
       {section === 'api' ? API.map((group) => (

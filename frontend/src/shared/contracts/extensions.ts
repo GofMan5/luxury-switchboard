@@ -10,9 +10,19 @@ export interface CommandContribution {
   /** Palette section heading: "Navigate", "Relay", "Appearance", a plugin name… */
   readonly group: string
   readonly keywords?: readonly string[]
-  /** Display-only hint such as "Ctrl+Shift+L"; the owner binds its own keys. */
+  /** A hint such as "Ctrl+Shift+L". Display-only unless {@link bind} is set. */
   readonly shortcut?: string
+  /** The shell binds {@link shortcut} as a global key for this command. Only
+   * for owners that cannot listen to the keyboard themselves (plugins); the
+   * shell's own keys always win and a combination binds at most once. */
+  readonly bind?: boolean
   readonly run: () => void | Promise<void>
+}
+
+/** A short count or label on a sidebar entry, such as "3" or "new". */
+export interface BadgeContribution {
+  readonly text: string
+  readonly tone?: ContributionTone
 }
 
 /** A short readout in the runtime bar, right of the route. */
@@ -31,6 +41,7 @@ export interface PageContribution {
   /** A lucide icon name from the curated set the shell knows; unknown names
    * fall back to a neutral puzzle icon. */
   readonly icon?: string
+  readonly badge?: BadgeContribution
 }
 
 export interface OwnerContributions {
@@ -58,6 +69,7 @@ export class ExtensionPoints {
   #owners = new Map<string, OwnerContributions>()
   #snapshot: ExtensionSnapshot = { ...EMPTY, revision: 0 }
   #listeners = new Set<() => void>()
+  #styleHolds = 0
 
   snapshot = (): ExtensionSnapshot => this.#snapshot
 
@@ -78,11 +90,29 @@ export class ExtensionPoints {
     this.#publish()
   }
 
+  /**
+   * Withholds every contributed stylesheet until the returned release runs.
+   * For screens a stylesheet must not be able to restyle — a permission
+   * review, where hiding one warning would change what the operator agrees
+   * to. Holds nest; releasing twice is harmless.
+   */
+  holdStyles(): () => void {
+    this.#styleHolds += 1
+    if (this.#styleHolds === 1) this.#publish()
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.#styleHolds -= 1
+      if (this.#styleHolds === 0) this.#publish()
+    }
+  }
+
   #publish(): void {
     const merged = { themes: [] as ThemeContribution[], styles: [] as StyleContribution[], commands: [] as CommandContribution[], status: [] as StatusContribution[], pages: [] as PageContribution[] }
     for (const contribution of this.#owners.values()) {
       merged.themes.push(...contribution.themes)
-      merged.styles.push(...contribution.styles)
+      if (this.#styleHolds === 0) merged.styles.push(...contribution.styles)
       merged.commands.push(...contribution.commands)
       merged.status.push(...contribution.status)
       merged.pages.push(...contribution.pages)

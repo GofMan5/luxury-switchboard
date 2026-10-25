@@ -38,7 +38,7 @@ export class WorkspaceBoundary extends Component<PropsWithChildren, WorkspaceBou
   render(): ReactNode {
     if (!this.state.failed) return this.props.children
     return (
-      <div className={styles.failure} role="alert">
+      <div className={styles.failure} role="alert" data-ui="workspace-error">
         <h2>This screen could not be displayed</h2>
         <p>Something in the data it received was not what it expected. Every other screen still works.</p>
         <Button type="button" onClick={() => this.setState({ failed: false })}>

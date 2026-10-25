@@ -16,10 +16,19 @@ function setup(safeMode = false) {
   const extensions = new ExtensionPoints()
   const model = new PluginsModel({
     port, control: new FakeControl(), workers, extensions, safeMode,
-    notify: vi.fn(), navigate: vi.fn(), isRoute: () => true,
+    notify: vi.fn(), navigate: vi.fn(), isRoute: () => true, clipboard: vi.fn(async () => undefined),
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   })
   return { port, workers, extensions, model }
+}
+
+const withSettings: PluginPackage = {
+  ...pkg,
+  permissions: ['ui:commands', 'ui:notify'],
+  settings: [
+    { key: 'limit', label: 'Limit', description: '', type: 'number', default: 10, placeholder: '', min: 1, max: 100 },
+    { key: 'mode', label: 'Mode', description: '', type: 'select', default: 'fast', options: [{ value: 'fast', label: 'Fast' }, { value: 'safe', label: 'Safe' }] },
+  ],
 }
 
 describe('PluginsModel', () => {
@@ -140,6 +149,55 @@ describe('PluginsModel', () => {
     const scripted = EXAMPLE_PLUGINS.filter((example) => example.package.script)
     expect(workers.created).toHaveLength(scripted.length)
     expect(extensions.snapshot().themes.length).toBeGreaterThan(0)
+  })
+
+  it('saves settings in one write, drops values equal to the default, and pushes them to the running plugin', async () => {
+    const { model, port, workers } = setup()
+    await model.connect()
+    await model.install(withSettings, withSettings.permissions)
+    expect(workers.last.context.settings).toEqual({ limit: 10, mode: 'fast' })
+    workers.last.send({ type: 'ready' })
+    const view = await model.loadSettings('acme.tools')
+    expect(view.values).toEqual({ limit: 10, mode: 'fast' })
+
+    expect(await model.saveSettings('acme.tools', view.settings, { limit: 500 })).toEqual({ ok: false, message: 'Limit: Enter a number from 1 to 100.' })
+    expect(port.writes).toHaveLength(0)
+    expect(await model.saveSettings('acme.tools', view.settings, { limit: 42, mode: 'fast' })).toEqual({ ok: true })
+    expect(port.writes).toEqual([{ 'setting:limit': '42', 'setting:mode': null }])
+    expect(workers.last.posted).toContainEqual({ type: 'settings', values: { limit: 42, mode: 'fast' } })
+
+    // A restart boots with the saved values, never the defaults first.
+    await model.restart('acme.tools')
+    expect(workers.last.context.settings).toEqual({ limit: 42, mode: 'fast' })
+  })
+
+  it('queues plugin questions and answers no for a plugin that stops', async () => {
+    const { model, workers, extensions } = setup()
+    await model.connect()
+    await model.install(withSettings, withSettings.permissions)
+    const worker = workers.last
+    worker.send({ type: 'ready' })
+    await worker.call('commands.register', { id: 'go', title: 'Go' })
+    await extensions.snapshot().commands[0].run()
+    worker.send({ type: 'call', id: 40, op: 'ui.confirm', args: { title: 'Proceed?' } })
+    await vi.waitFor(() => expect(model.snapshot().asking).toMatchObject({ pluginName: 'Acme tools', title: 'Proceed?', confirmText: 'Continue', tone: 'neutral' }))
+    model.answer(model.snapshot().asking?.id ?? 0, true)
+    await vi.waitFor(() => expect(worker.posted).toContainEqual({ type: 'result', id: 40, ok: true, value: true }))
+    expect(model.snapshot().asking).toBeNull()
+
+    worker.send({ type: 'call', id: 41, op: 'ui.confirm', args: { title: 'Again?' } })
+    await vi.waitFor(() => expect(model.snapshot().asking).not.toBeNull())
+    await model.setEnabled('acme.tools', false)
+    expect(model.snapshot().asking).toBeNull()
+  })
+
+  it('reloads a plugin when its package changes even within the same timestamp', async () => {
+    const { model, port, workers } = setup()
+    await model.connect()
+    await model.install(pkg, ['ui:pages'])
+    port.plugins[0] = { ...port.plugins[0], version: '1.0.1' }
+    await model.refresh()
+    expect(workers.created).toHaveLength(2)
   })
 
   it('stops every plugin and takes back their contributions on dispose', async () => {

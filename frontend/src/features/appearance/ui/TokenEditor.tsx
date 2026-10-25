@@ -1,10 +1,10 @@
 import { useMemo, useState, type KeyboardEvent } from 'react'
 import { Plus, RotateCcw, Search } from 'lucide-react'
-import { COLOR_TOKENS, DERIVED_TOKENS, TOKEN_LIMIT, tokenProblem, type TokenSpec } from '../../../shared/contracts/tokens'
+import { COLOR_TOKENS, DERIVED_TOKENS, TOKEN_LIMIT, tokenProblem, type TokenGroup, type TokenSpec } from '../../../shared/contracts/tokens'
 import styles from './AppearancePage.module.css'
 
 const HEX = /^#[0-9a-f]{6}$/iu
-const GROUP_ORDER = ['Surface', 'Border', 'Text', 'Accent', 'Status', 'Effect'] as const
+const GROUP_ORDER = ['Surface', 'Border', 'Text', 'Accent', 'Status', 'Layout', 'Effect', 'Motion'] as const satisfies readonly TokenGroup[]
 
 /** Every public token as one dense, filterable table: the theme's value as
  * the placeholder, the override in the field. A row commits on Enter or blur,

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CommandContribution } from '../shared/contracts/extensions'
 import { scoreCommand } from './command-score'
 import { isPluginRoute, navigation, routeFromHash, visibleNavigation } from './navigation'
-import { railGroups } from './rail'
+import { railGroups, railItemName } from './rail'
 
 const command = (title: string, group = 'Navigate', keywords: string[] = []): CommandContribution => ({ id: title, title, group, keywords, run: () => undefined })
 
@@ -76,5 +76,26 @@ describe('railGroups', () => {
     // An unknown icon name still renders: it falls back to the neutral icon.
     expect(extensions?.items[1].icon).toBeTypeOf('object')
     expect(new Set(rail.map((group) => group.key)).size).toBe(rail.length)
+  })
+
+  it('keys every group by a stable section slug', () => {
+    const rail = railGroups(sections, [{ id: 'acme/board', title: 'Board' }])
+    expect(rail.map((group) => group.key)).toEqual(['watch', 'routing', 'safety', 'publishing', 'extensions', 'configure'])
+  })
+
+  it('carries a plugin page badge into the item, its title and its accessible name', () => {
+    const rail = railGroups(sections, [
+      { id: 'acme/queue', title: 'Queue', badge: { text: ' 3 ', tone: 'warning' } },
+      { id: 'acme/new', title: 'News', badge: { text: 'new' } },
+      { id: 'acme/blank', title: 'Blank', badge: { text: '   ' } },
+    ])
+    const [queue, news, blank] = rail.find((group) => group.key === 'extensions')?.items ?? []
+    expect(queue.badge).toEqual({ text: '3', tone: 'warning' })
+    expect(queue.title).toBe('Queue (3)')
+    expect(railItemName(queue)).toBe('Queue, 3')
+    expect(news.badge).toEqual({ text: 'new', tone: 'neutral' })
+    // A badge with nothing to say is no badge.
+    expect(blank.badge).toBeUndefined()
+    expect(railItemName(blank)).toBe('Blank')
   })
 })

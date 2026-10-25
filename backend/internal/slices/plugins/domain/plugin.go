@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -31,6 +33,7 @@ const (
 	MaxThemeTokens      = 96
 	MaxCSSBytes         = 64 * 1024
 	MaxScriptBytes      = 128 * 1024
+	MaxHomepageBytes    = 200
 
 	MaxStorageKeys       = 64
 	MaxStorageValueBytes = 8 * 1024
@@ -45,6 +48,7 @@ const (
 	PermissionStatus    = "ui:status"
 	PermissionCommands  = "ui:commands"
 	PermissionNotify    = "ui:notify"
+	PermissionClipboard = "ui:clipboard"
 	PermissionRead      = "control:read"
 	PermissionWrite     = "control:write"
 	PermissionSensitive = "control:sensitive"
@@ -53,20 +57,22 @@ const (
 
 var knownPermissions = []string{
 	PermissionTheme, PermissionCSS, PermissionPages, PermissionStatus, PermissionCommands,
-	PermissionNotify, PermissionRead, PermissionWrite, PermissionSensitive, PermissionStorage,
+	PermissionNotify, PermissionClipboard, PermissionRead, PermissionWrite, PermissionSensitive, PermissionStorage,
 }
 
 // scriptPermissions only mean something to code: declaring one without a
 // script is a package that promises behavior it cannot have.
 var scriptPermissions = []string{
-	PermissionPages, PermissionStatus, PermissionCommands, PermissionNotify,
+	PermissionPages, PermissionStatus, PermissionCommands, PermissionNotify, PermissionClipboard,
 	PermissionRead, PermissionWrite, PermissionSensitive, PermissionStorage,
 }
 
 var (
-	pluginID   = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,62}[a-z0-9]$`)
-	version    = regexp.MustCompile(`^[0-9A-Za-z.+-]{1,32}$`)
-	storageKey = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+	pluginID      = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,62}[a-z0-9]$`)
+	version       = regexp.MustCompile(`^[0-9A-Za-z.+-]{1,32}$`)
+	appVersion    = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+	storageKey    = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+	addressPrefix = "https://"
 )
 
 // ErrStorageFull is a storage write that would break a storage bound.
@@ -90,16 +96,22 @@ type Theme struct {
 // Package is what the owner installs. It is immutable once installed: an
 // upgrade replaces it whole.
 type Package struct {
-	Schema      int      `json:"schema"`
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Author      string   `json:"author,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Permissions []string `json:"permissions"`
-	Theme       *Theme   `json:"theme,omitempty"`
-	CSS         string   `json:"css,omitempty"`
-	Script      string   `json:"script,omitempty"`
+	Schema      int    `json:"schema"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Author      string `json:"author,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Homepage is where the owner can read about the plugin; the shell only
+	// ever opens it on the owner's click.
+	Homepage string `json:"homepage,omitempty"`
+	// MinAppVersion is the oldest app release the plugin runs on.
+	MinAppVersion string    `json:"minAppVersion,omitempty"`
+	Permissions   []string  `json:"permissions"`
+	Theme         *Theme    `json:"theme,omitempty"`
+	CSS           string    `json:"css,omitempty"`
+	Script        string    `json:"script,omitempty"`
+	Settings      []Setting `json:"settings,omitempty"`
 }
 
 // Plugin is an installed package with the owner's decisions about it.
@@ -116,13 +128,21 @@ type Plugin struct {
 func ValidID(id string) bool { return pluginID.MatchString(id) }
 
 // Normalized returns a copy whose absent lists and maps are empty, sharing no
-// mutable state with the receiver.
+// mutable state with the receiver. Setting defaults are re-encoded compactly
+// so a stored package reads back byte for byte.
 func (pkg Package) Normalized() Package {
 	pkg.Permissions = cloneList(pkg.Permissions)
 	if pkg.Theme != nil {
 		theme := *pkg.Theme
 		theme.Tokens = cloneMap(theme.Tokens)
 		pkg.Theme = &theme
+	}
+	if pkg.Settings != nil {
+		settings := make([]Setting, len(pkg.Settings))
+		for index, setting := range pkg.Settings {
+			settings[index] = setting.normalized()
+		}
+		pkg.Settings = settings
 	}
 	return pkg
 }
@@ -141,6 +161,10 @@ func (pkg Package) Validate() error {
 		return ValidationError{"author", fmt.Sprintf("must be at most %d characters without control characters", MaxAuthorRunes)}
 	case !validText(pkg.Description, 0, MaxDescriptionRunes, true):
 		return ValidationError{"description", fmt.Sprintf("must be at most %d characters without control characters", MaxDescriptionRunes)}
+	case !validHomepage(pkg.Homepage):
+		return ValidationError{"homepage", fmt.Sprintf("must be an https:// address of at most %d characters", MaxHomepageBytes)}
+	case pkg.MinAppVersion != "" && !ValidAppVersion(pkg.MinAppVersion):
+		return ValidationError{"minAppVersion", "must be three dot-separated numbers of 1-4 digits"}
 	case len(pkg.Script) > MaxScriptBytes:
 		return ValidationError{"script", fmt.Sprintf("is larger than %d bytes", MaxScriptBytes)}
 	}
@@ -155,6 +179,9 @@ func (pkg Package) Validate() error {
 	if err := cssguard.CheckStylesheet(pkg.CSS, MaxCSSBytes); err != nil {
 		return ValidationError{"css", err.Error()}
 	}
+	if err := validateSettings(pkg.Settings); err != nil {
+		return err
+	}
 	declared := pkg.Permissions
 	switch {
 	case pkg.Theme != nil && !slices.Contains(declared, PermissionTheme):
@@ -163,8 +190,79 @@ func (pkg Package) Validate() error {
 		return ValidationError{"css", "requires the ui:css permission"}
 	case pkg.Script == "" && slices.ContainsFunc(declared, isScriptPermission):
 		return ValidationError{"permissions", "declare script capabilities without a script"}
+	case pkg.Script == "" && len(pkg.Settings) > 0:
+		return ValidationError{"settings", "need a script to read them"}
 	}
 	return nil
+}
+
+// validHomepage accepts nothing or an absolute https address with a host and
+// no credentials. The literal prefix refuses the forms a URL parser would
+// still read as https, such as an upper-case scheme or no slashes.
+func validHomepage(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > MaxHomepageBytes || !utf8.ValidString(value) || !strings.HasPrefix(value, addressPrefix) ||
+		strings.ContainsFunc(value, func(character rune) bool { return unicode.IsSpace(character) || unicode.IsControl(character) }) {
+		return false
+	}
+	address, err := url.Parse(value)
+	return err == nil && address.Scheme == "https" && address.Hostname() != "" && address.User == nil
+}
+
+// Listed returns a copy of a refused stored package in which each listed
+// field that breaks its own rule is blank, the name falling back to the id,
+// so the record can still be shown to the owner and removed. The caller has
+// checked the id.
+func (pkg Package) Listed() Package {
+	listed := pkg.Normalized()
+	if !validText(listed.Name, 1, MaxNameRunes, false) {
+		listed.Name = listed.ID
+	}
+	if !version.MatchString(listed.Version) {
+		listed.Version = ""
+	}
+	if !validText(listed.Author, 0, MaxAuthorRunes, false) {
+		listed.Author = ""
+	}
+	if !validText(listed.Description, 0, MaxDescriptionRunes, true) {
+		listed.Description = ""
+	}
+	if !validHomepage(listed.Homepage) {
+		listed.Homepage = ""
+	}
+	if !ValidAppVersion(listed.MinAppVersion) {
+		listed.MinAppVersion = ""
+	}
+	if validatePermissions(listed.Permissions) != nil {
+		listed.Permissions = []string{}
+	}
+	return listed
+}
+
+// ValidAppVersion reports whether value names a release as three
+// dot-separated numbers of one to four digits.
+func ValidAppVersion(value string) bool { return appVersion.MatchString(value) }
+
+// NeedsNewerApp reports whether pkg declares a minimum release later than
+// running, comparing the three numbers in order. running must be a valid app
+// version.
+func (pkg Package) NeedsNewerApp(running string) bool {
+	if pkg.MinAppVersion == "" {
+		return false
+	}
+	required, current := releaseNumbers(pkg.MinAppVersion), releaseNumbers(running)
+	return slices.Compare(required, current) > 0
+}
+
+func releaseNumbers(value string) []int {
+	numbers := make([]int, 0, 3)
+	for _, part := range strings.Split(value, ".") {
+		number, _ := strconv.Atoi(part)
+		numbers = append(numbers, number)
+	}
+	return numbers
 }
 
 // Grant validates the permissions the owner grants pkg and returns them in the
@@ -241,6 +339,34 @@ func WithStorage(values map[string]string, key string, value *string) (map[strin
 		return next, nil
 	}
 	next[key] = *value
+	if err := CheckStorage(next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// WithStorageChanges returns a copy of values with every change applied at
+// once — a nil value removes its key — after first removing every key when
+// clear is set, then checks the result against the storage bounds. A batch
+// lists at most MaxStorageKeys keys, and at least one unless it clears.
+func WithStorageChanges(values map[string]string, changes map[string]*string, clear bool) (map[string]string, error) {
+	if len(changes) > MaxStorageKeys || (len(changes) == 0 && !clear) {
+		return nil, ValidationError{"values", fmt.Sprintf("must list at most %d keys, and at least one unless clearing", MaxStorageKeys)}
+	}
+	next := map[string]string{}
+	if !clear {
+		next = cloneMap(values)
+	}
+	for key, value := range changes {
+		if !ValidStorageKey(key) {
+			return nil, ValidationError{"key", "must be 1-64 letters, digits, dots, colons, underscores or dashes"}
+		}
+		if value == nil {
+			delete(next, key)
+		} else {
+			next[key] = *value
+		}
+	}
 	if err := CheckStorage(next); err != nil {
 		return nil, err
 	}

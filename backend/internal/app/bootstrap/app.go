@@ -655,7 +655,7 @@ func defaultPluginService() (*pluginsapp.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return pluginsapp.NewService(pluginsdpapi.New(path), platform.MaxPayloadBytes)
+	return pluginsapp.NewService(pluginsdpapi.New(path), platform.MaxPayloadBytes, systemstdio.AppVersion)
 }
 
 // storePath reads an absolute override from name, or falls back to the

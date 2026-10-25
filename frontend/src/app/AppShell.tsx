@@ -1,4 +1,4 @@
-﻿import type { PropsWithChildren } from 'react'
+import type { PropsWithChildren } from 'react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { ArrowUpCircle, Command, LifeBuoy, PanelLeftClose, PanelLeftOpen, Play, Square } from 'lucide-react'
 import { useProviders } from '../features/providers/ui/useProviders'
@@ -6,14 +6,18 @@ import { useRelay } from '../features/relay/ui/useRelay'
 import { useSettings } from '../features/settings/ui/useSettings'
 import { NotificationsSurface } from '../features/notifications/ui/NotificationsSurface'
 import { UpdateDialog } from '../features/updates/ui/UpdateDialog'
+import { PluginQuestionSurface } from '../features/plugins/ui/PluginQuestion'
 import { useAppServices } from './services'
 import { markBootReady } from './boot'
 import { Button } from '../shared/ui/Button'
 import { StatusDot } from '../shared/ui/StatusDot'
 import { WorkspaceBoundary } from '../shared/ui/WorkspaceBoundary'
+import { useMediaQuery } from '../shared/ui/useMediaQuery'
 import { restartInSafeMode, safeMode } from '../shared/runtime/safe-mode'
 import { visibleNavigation, type AppRoute } from './navigation'
-import { railGroups } from './rail'
+import { railGroups, railItemName } from './rail'
+import { boundCommand, shortcutBindings } from './plugin-hotkeys'
+import { overflowSummary, readoutLimit, readoutOwner, splitReadouts } from './status-readouts'
 import { CommandPalette } from './CommandPalette'
 import { useShellCommands } from './useShellCommands'
 import styles from './AppShell.module.css'
@@ -22,8 +26,6 @@ interface AppShellProps extends PropsWithChildren {
   readonly route: AppRoute
   readonly onNavigate: (route: AppRoute) => void
 }
-
-const STATUS_LIMIT = 4
 
 const EMPTY_PROVIDERS: readonly never[] = []
 
@@ -48,6 +50,13 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   useEffect(() => {
     document.documentElement.dataset.animations = animationsEnabled ? 'on' : 'off'
   }, [animationsEnabled])
+  // The route at the root too, so a theme or stylesheet can restyle one page
+  // (and the chrome around it) with `:root[data-route='providers']`.
+  useEffect(() => {
+    const root = document.documentElement
+    root.dataset.route = route
+    return () => { delete root.dataset.route }
+  }, [route])
   // The toast master switch follows the settings record: the feed stays, the
   // interruptions stop.
   const { notifications, updates } = useAppServices()
@@ -105,6 +114,12 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
   // rail, Alt+digit jumps straight to a page.
   const navigateRef = useRef(onNavigate)
   navigateRef.current = onNavigate
+  // Keys owners asked for, read through a ref so a plugin re-registering its
+  // commands does not re-attach the listener. The shell's own commands carry
+  // display-only shortcuts; only contributions can ask for a binding.
+  const bindings = useMemo(() => shortcutBindings(contributions.commands), [contributions.commands])
+  const bindingsRef = useRef(bindings)
+  bindingsRef.current = bindings
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat) return
@@ -121,20 +136,30 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
         if (!target) return
         event.preventDefault()
         navigateRef.current(target.id)
+      } else {
+        // Owner keys come last, so the shell's own keys always win.
+        const command = boundCommand(bindingsRef.current, event)
+        if (!command) return
+        event.preventDefault()
+        // A contributed command reports its own failures (a plugin's worker
+        // answers through the host); a throw here must not escape the listener.
+        void Promise.resolve().then(() => command.run()).catch(() => undefined)
       }
     }
     window.addEventListener('keydown', keydown)
     return () => window.removeEventListener('keydown', keydown)
   }, [sections, toggleSidebar])
 
-  const readouts = contributions.status.slice(0, STATUS_LIMIT)
+  const compactBar = useMediaQuery('(max-width: 959px)')
+  const tinyBar = useMediaQuery('(max-width: 600px)')
+  const readouts = splitReadouts(contributions.status, readoutLimit(compactBar, tinyBar))
   const relayLabel = live ? 'Live' : relayState.snapshot.state === 'starting' ? 'Starting' : relayState.snapshot.state === 'error' ? 'Error' : 'Stopped'
 
   return (
-    <div className={styles.shell} data-sidebar={collapsed ? 'collapsed' : undefined}>
+    <div className={styles.shell} data-ui="shell" data-sidebar={collapsed ? 'collapsed' : undefined}>
       <a className="skip-link" href="#workspace" onClick={(event) => { event.preventDefault(); document.getElementById('workspace')?.focus() }}>Skip to workspace</a>
-      <aside className={styles.sidebar} aria-label="Sidebar">
-        <div className={styles.brand}>
+      <aside className={styles.sidebar} aria-label="Sidebar" data-ui="sidebar">
+        <div className={styles.brand} data-ui="sidebar-brand">
           <span className={styles.brandMark} aria-hidden="true">
             <svg viewBox="0 0 20 20" width="20" height="20" fill="none">
               <path d="M3 6h5.5l3 8H17" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -144,37 +169,43 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
           </span>
           <span className={styles.brandName}>Luxury Switchboard</span>
         </div>
-        <button type="button" className={styles.paletteTrigger} onClick={() => setPaletteOpen(true)} aria-label="Open command palette" title="Command palette (Ctrl+K)">
+        <button type="button" className={styles.paletteTrigger} data-ui="palette-trigger" onClick={() => setPaletteOpen(true)} aria-label="Open command palette" title="Command palette (Ctrl+K)">
           <Command size={14} aria-hidden="true" />
           <span>Search and run</span>
           <kbd>Ctrl K</kbd>
         </button>
-        <nav className={styles.navigation} aria-label="Main navigation">
+        <nav className={styles.navigation} aria-label="Main navigation" data-ui="nav">
           {rail.map((group) => (
-            <div key={group.key} className={styles.navSection}>
-              {group.label ? <span className={styles.navSectionLabel}>{group.label}</span> : null}
+            <div key={group.key} className={styles.navSection} data-ui="nav-section" data-section={group.key}>
+              {group.label ? <span className={styles.navSectionLabel} data-ui="nav-section-label">{group.label}</span> : null}
               {group.items.map((item) => (
                 <button
                   key={item.route}
                   type="button"
                   className={styles.navItem}
+                  data-ui="nav-item"
+                  data-route={item.route}
                   data-active={route === item.route}
                   aria-current={route === item.route ? 'page' : undefined}
-                  aria-label={item.label}
+                  aria-label={railItemName(item)}
                   title={item.title}
                   onClick={() => onNavigate(item.route)}
                 >
                   <item.icon size={16} strokeWidth={1.8} />
                   <span>{item.label}</span>
+                  {item.badge ? (
+                    <span className={styles.navBadge} data-ui="nav-badge" data-tone={item.badge.tone} aria-hidden="true">{item.badge.text}</span>
+                  ) : null}
                 </button>
               ))}
             </div>
           ))}
         </nav>
-        <div className={styles.sidebarFooter}>
+        <div className={styles.sidebarFooter} data-ui="sidebar-footer">
           <button
             type="button"
             className={styles.collapse}
+            data-ui="sidebar-toggle"
             aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             aria-pressed={collapsed}
             title={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'}
@@ -186,6 +217,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <button
               type="button"
               className={styles.updatePill}
+              data-ui="update-pill"
               aria-label={`Update to version ${update.latest} — open the update dialog`}
               title={`Version ${update.latest} is out — download and verify`}
               onClick={() => setUpdateOpen(true)}
@@ -194,36 +226,42 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
               <span>v{update.latest}</span>
             </button>
           ) : null}
-          <span className={styles.version} title={appVersion ? `Luxury Switchboard ${appVersion}` : 'Luxury Switchboard'}>{appVersion ? `v${appVersion}` : 'Luxury Switchboard'}</span>
+          <span className={styles.version} data-ui="app-version" title={appVersion ? `Luxury Switchboard ${appVersion}` : 'Luxury Switchboard'}>{appVersion ? `v${appVersion}` : 'Luxury Switchboard'}</span>
         </div>
       </aside>
 
-      <section className={styles.workspace}>
-        <header className={styles.runtimeBar}>
+      <section className={styles.workspace} data-ui="workspace">
+        <header className={styles.runtimeBar} data-ui="runtime-bar">
           <div className={styles.runtimeState}>
-            <span className={styles.relayState} data-state={relayState.snapshot.state}>
+            <span className={styles.relayState} data-ui="relay-state" data-state={relayState.snapshot.state}>
               <StatusDot state={live ? 'live' : relayState.snapshot.state === 'error' ? 'error' : 'stopped'} />
               <strong>{relayLabel}</strong>
             </span>
             <span className={styles.divider} aria-hidden="true" />
-            <span className={styles.address}>
+            <span className={styles.address} data-ui="relay-address">
               {relayState.snapshot.address || (configuredPort ? `127.0.0.1:${configuredPort}` : 'Loopback listener')}
             </span>
             <span className={`${styles.divider} ${styles.routeDivider}`} aria-hidden="true" />
-            <span className={styles.route}>
+            <span className={styles.route} data-ui="active-route">
               <span className={styles.routeLabel}>Active route:</span> <span className={styles.routeName}>{activeProvider?.name ?? '—'}</span>
               {activeProvider ? <StatusDot state={healthTone} /> : null}
             </span>
-            {readouts.map((readout) => (
-              <span key={readout.id} className={styles.readout} title={readout.tooltip ?? readout.text} data-tone={readout.tone ?? 'neutral'}>
+            {readouts.shown.map((readout) => (
+              <span key={readout.id} className={styles.readout} title={readout.tooltip ?? readout.text} data-ui="status-readout" data-owner={readoutOwner(readout.id) || undefined} data-tone={readout.tone ?? 'neutral'}>
                 <span className={styles.readoutTick} aria-hidden="true" />
                 {readout.text}
               </span>
             ))}
+            {readouts.hidden.length > 0 ? (
+              // Focusable so a keyboard reaches the list the count stands for.
+              <span className={styles.readoutMore} data-ui="status-overflow" role="note" tabIndex={0} aria-label={overflowSummary(readouts.hidden)} title={overflowSummary(readouts.hidden)}>
+                +{readouts.hidden.length}
+              </span>
+            ) : null}
           </div>
-          <div className={styles.runtimeActions}>
+          <div className={styles.runtimeActions} data-ui="runtime-actions">
             {safeMode ? (
-              <button type="button" className={styles.safeMode} onClick={() => restartInSafeMode(false)} title="Plugins, custom CSS and token overrides are off. Click to restart normally.">
+              <button type="button" className={styles.safeMode} data-ui="safe-mode-badge" onClick={() => restartInSafeMode(false)} title="Plugins, custom CSS and token overrides are off. Click to restart normally.">
                 <LifeBuoy size={13} aria-hidden="true" />
                 <span>Safe mode</span>
               </button>
@@ -240,7 +278,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
             <NotificationsSurface />
           </div>
         </header>
-        <main id="workspace" ref={workspaceRef} tabIndex={-1} className={styles.content}>
+        <main id="workspace" ref={workspaceRef} tabIndex={-1} className={styles.content} data-ui="workspace-content" data-route={route}>
           {/* Around the workspace, not the shell: a screen that throws must not
               take the sidebar with it, because navigating away is the recovery.
               Keyed on the route so that navigation discards a failed boundary. */}
@@ -251,6 +289,7 @@ export function AppShell({ route, onNavigate, children }: AppShellProps) {
       {updateOpen && update ? (
         <UpdateDialog check={update} state={updateState} onClose={() => setUpdateOpen(false)} onInstall={() => updates.install()} />
       ) : null}
+      <PluginQuestionSurface />
     </div>
   )
 }

@@ -163,7 +163,7 @@ Press **Start** on the Tunnel page and you get an HTTPS address plus a stable ac
 </td>
 <td width="50%" valign="top">
 
-**Plugins**: one JSON file adds themes, stylesheets, sidebar pages, palette commands, status items and automations. Each plugin runs in its own sealed worker with only the permissions you tick at install; managing plugins, backups and updates is never on offer. The guide is [docs/PLUGINS.md](docs/PLUGINS.md).
+**Plugins**: one JSON file adds themes, stylesheets, sidebar pages with badges, palette commands with keyboard shortcuts, status items, operator settings and automations. Each plugin runs in its own sealed worker with only the permissions you tick at install; managing plugins, backups and updates is never on offer. The guide is [docs/PLUGINS.md](docs/PLUGINS.md); `pnpm plugin init|validate|run|pack` scaffolds, checks and packs a plugin, and coding agents get the [switchboard-plugin skill](.agents/skills/switchboard-plugin/SKILL.md).
 
 ![Plugins](docs/screenshots/plugins.png)
 

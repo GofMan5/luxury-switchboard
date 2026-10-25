@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "acme.hello-page",
+  "name": "Hello page",
+  "version": "0.1.0",
+  "author": "Your name",
+  "description": "A sidebar page with a counter that survives restarts and a greeting the operator sets.",
+  "permissions": [
+    "ui:pages",
+    "storage"
+  ],
+  "settings": [
+    {
+      "key": "greeting",
+      "label": "Greeting",
+      "description": "Shown at the top of the page.",
+      "type": "text",
+      "default": "Hello from a plugin",
+      "maxLength": 80
+    }
+  ]
+}

@@ -1,28 +1,39 @@
-import type { PluginTheme } from './manifest'
+import { isHomepage, type PluginTheme } from './manifest'
+import { checkSettings, type PluginSetting } from './settings'
 
 /** An installed plugin as the control plane lists it. Every field is always
- * present: `author`/`description` are empty strings when the package left
- * them out. */
+ * present: `author`/`description`/`homepage`/`minAppVersion` are empty
+ * strings when the package left them out. */
 export interface PluginSummary {
   readonly id: string
   readonly name: string
   readonly version: string
   readonly author: string
   readonly description: string
+  /** A checked https:// address, or ''. */
+  readonly homepage: string
+  readonly minAppVersion: string
   /** What the package declares, in its own order. */
   readonly permissions: readonly string[]
   /** What the operator granted; a subset of `permissions`. */
   readonly granted: readonly string[]
   readonly enabled: boolean
-  /** RFC 3339, UTC, whole seconds. */
+  /** RFC 3339, UTC, 0–3 fraction digits (`…07Z`, `…07.25Z`). A record whose
+   * time was lost reads `0001-01-01T00:00:00Z`; see `knownTime`. */
   readonly installedAt: string
-  /** Changes on install and upgrade only, so it doubles as a code revision. */
+  /** Moves forward on every install and upgrade, so it doubles as a code
+   * revision. */
   readonly updatedAt: string
   /** Bytes of the stored package's compact JSON. */
   readonly sizeBytes: number
   readonly hasScript: boolean
   readonly hasCss: boolean
   readonly hasTheme: boolean
+  readonly hasSettings: boolean
+  /** Why the stored plugin cannot run (it fails today's checks, or needs a
+   * newer app), or ''. A plugin with a problem stays disabled until it is
+   * reinstalled or removed. */
+  readonly problem: string
 }
 
 /** Everything the runtime needs to run one plugin. */
@@ -32,6 +43,7 @@ export interface PluginDetail {
   readonly script: string
   readonly css: string
   readonly theme: PluginTheme | null
+  readonly settings: readonly PluginSetting[]
 }
 
 /**
@@ -84,6 +96,8 @@ export function normalizeSummary(raw: unknown): PluginSummary {
     version: str(value.version),
     author: str(value.author),
     description: str(value.description),
+    homepage: typeof value.homepage === 'string' && isHomepage(value.homepage) ? value.homepage : '',
+    minAppVersion: str(value.minAppVersion),
     permissions: strings(value.permissions),
     granted: strings(value.granted),
     enabled: value.enabled === true,
@@ -93,7 +107,17 @@ export function normalizeSummary(raw: unknown): PluginSummary {
     hasScript: value.hasScript === true,
     hasCss: value.hasCss === true,
     hasTheme: value.hasTheme === true,
+    hasSettings: value.hasSettings === true,
+    problem: str(value.problem),
   }
+}
+
+/** A stored time as milliseconds, or null when it is missing, unreadable or
+ * the zero time a broken record reports. */
+export function knownTime(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value)) return null
+  const at = Date.parse(value)
+  return Number.isFinite(at) && at > 0 ? at : null
 }
 
 export function normalizeList(raw: unknown): PluginSummary[] {
@@ -110,7 +134,11 @@ export function normalizeDetail(raw: unknown): PluginDetail {
     for (const [name, token] of Object.entries(record(t.tokens))) if (typeof token === 'string') tokens[name] = token
     theme = { name: str(t.name) || 'Plugin theme', scheme: t.scheme === 'light' ? 'light' : 'dark', tokens }
   }
-  return { plugin: normalizeSummary(value.plugin), script: str(value.script), css: str(value.css), theme }
+  // Checked again with the package rules: a declaration the shell cannot
+  // trust gives the plugin no settings rather than half of them.
+  const problems: string[] = []
+  const settings = value.settings === undefined || value.settings === null ? [] : checkSettings(value.settings, problems) ?? []
+  return { plugin: normalizeSummary(value.plugin), script: str(value.script), css: str(value.css), theme, settings }
 }
 
 export function normalizeValues(raw: unknown): Record<string, string> {

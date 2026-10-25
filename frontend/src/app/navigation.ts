@@ -46,6 +46,8 @@ export interface NavigationItem {
 }
 
 export interface NavigationSection {
+  /** Stable slug: the rail's `data-section` and its React key. */
+  readonly id: string
   /** Empty for the first section: no heading above the fold. */
   readonly label: string
   readonly items: readonly NavigationItem[]
@@ -56,6 +58,7 @@ export interface NavigationSection {
 // traffic, tune the routing, inspect safety, publish, configure.
 export const navigation: readonly NavigationSection[] = [
   {
+    id: 'watch',
     label: '',
     items: [
       { id: 'overview', label: 'Overview', icon: CircleGauge, key: '1' },
@@ -64,6 +67,7 @@ export const navigation: readonly NavigationSection[] = [
     ],
   },
   {
+    id: 'routing',
     label: 'Routing',
     items: [
       { id: 'providers', label: 'Providers', icon: Database, key: '4' },
@@ -73,6 +77,7 @@ export const navigation: readonly NavigationSection[] = [
     ],
   },
   {
+    id: 'safety',
     label: 'Safety',
     items: [
       // Everyone inspects provider answers. Every user has the same right
@@ -81,6 +86,7 @@ export const navigation: readonly NavigationSection[] = [
     ],
   },
   {
+    id: 'publishing',
     label: 'Publishing',
     items: [
       { id: 'tunnel', label: 'Tunnel', icon: RadioTower },
@@ -88,6 +94,7 @@ export const navigation: readonly NavigationSection[] = [
     ],
   },
   {
+    id: 'configure',
     label: '',
     items: [
       { id: 'appearance', label: 'Appearance', icon: Palette },

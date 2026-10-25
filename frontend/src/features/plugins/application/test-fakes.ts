@@ -68,16 +68,16 @@ export class FakeControl implements ControlPort {
 
 export function summary(overrides: Partial<PluginSummary> = {}): PluginSummary {
   return {
-    id: 'acme.tools', name: 'Acme tools', version: '1.0.0', author: 'Acme', description: '',
+    id: 'acme.tools', name: 'Acme tools', version: '1.0.0', author: 'Acme', description: '', homepage: '', minAppVersion: '',
     permissions: ['ui:pages'], granted: ['ui:pages'], enabled: true,
     installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 512,
-    hasScript: true, hasCss: false, hasTheme: false,
+    hasScript: true, hasCss: false, hasTheme: false, hasSettings: false, problem: '',
     ...overrides,
   }
 }
 
 export function detail(overrides: Partial<PluginSummary> = {}, assets: Partial<Omit<PluginDetail, 'plugin'>> = {}): PluginDetail {
-  return { plugin: summary(overrides), script: 'switchboard.log("hi")', css: '', theme: null, ...assets }
+  return { plugin: summary({ hasSettings: Boolean(assets.settings?.length), ...overrides }), script: 'switchboard.log("hi")', css: '', theme: null, settings: [], ...assets }
 }
 
 /** A plugin store that behaves like the control plane, in memory. */
@@ -93,21 +93,24 @@ export class MemoryPluginsPort implements PluginsPort {
     return this.#guard(() => {
       const plugin = this.plugins.find((entry) => entry.id === id)
       if (!plugin) throw Object.assign(new Error('not found'), { code: 'plugin_not_found' })
-      return { plugin, ...(this.assets.get(id) ?? { script: '', css: '', theme: null }) }
+      return { plugin, ...(this.assets.get(id) ?? { script: '', css: '', theme: null, settings: [] }) }
     })
   }
   async install(pkg: Parameters<PluginsPort['install']>[0], granted: readonly string[]): Promise<PluginSummary> {
     return this.#guard(() => {
+      this.#installs += 1
       const plugin = summary({
         id: pkg.id, name: pkg.name, version: pkg.version, permissions: pkg.permissions, granted: [...granted],
-        updatedAt: `2026-01-01T00:00:${String(this.plugins.length).padStart(2, '0')}Z`,
-        hasScript: Boolean(pkg.script), hasCss: Boolean(pkg.css), hasTheme: Boolean(pkg.theme),
+        homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '',
+        updatedAt: `2026-01-01T00:00:${String(this.#installs).padStart(2, '0')}Z`,
+        hasScript: Boolean(pkg.script), hasCss: Boolean(pkg.css), hasTheme: Boolean(pkg.theme), hasSettings: Boolean(pkg.settings?.length),
       })
       this.plugins = [...this.plugins.filter((entry) => entry.id !== pkg.id), plugin]
-      this.assets.set(pkg.id, { script: pkg.script ?? '', css: pkg.css ?? '', theme: pkg.theme ?? null })
+      this.assets.set(pkg.id, { script: pkg.script ?? '', css: pkg.css ?? '', theme: pkg.theme ?? null, settings: pkg.settings ?? [] })
       return plugin
     })
   }
+  #installs = 0
   async update(id: string, change: { readonly enabled?: boolean; readonly granted?: readonly string[] }): Promise<PluginSummary> {
     return this.#guard(() => {
       const current = this.plugins.find((entry) => entry.id === id)
@@ -121,12 +124,18 @@ export class MemoryPluginsPort implements PluginsPort {
     this.#guard(() => { this.plugins = this.plugins.filter((entry) => entry.id !== id) })
   }
   async storageGet(id: string): Promise<Record<string, string>> { return { ...(this.values.get(id) ?? {}) } }
-  async storageSet(id: string, key: string, value: string | null): Promise<Record<string, string>> {
-    const values = { ...(this.values.get(id) ?? {}) }
-    if (value === null) delete values[key]
-    else values[key] = value
-    this.values.set(id, values)
-    return { ...values }
+  readonly writes: Record<string, string | null>[] = []
+  async storageUpdate(id: string, changes: Readonly<Record<string, string | null>>): Promise<Record<string, string>> {
+    return this.#guard(() => {
+      const values = { ...(this.values.get(id) ?? {}) }
+      for (const [key, value] of Object.entries(changes)) {
+        if (value === null) delete values[key]
+        else values[key] = value
+      }
+      this.writes.push({ ...changes })
+      this.values.set(id, values)
+      return { ...values }
+    })
   }
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {
     this.listeners.add(listener)

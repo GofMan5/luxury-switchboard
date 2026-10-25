@@ -50,7 +50,7 @@ type harness struct {
 
 func newHarness(t *testing.T, store *memory) harness {
 	t.Helper()
-	service, err := application.NewService(store, platform.MaxPayloadBytes)
+	service, err := application.NewService(store, platform.MaxPayloadBytes, "1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,25 +130,36 @@ func TestTheWireContract(t *testing.T) {
 		t.Fatalf("unexpected install answer: %s", result.Payload)
 	}
 	fields := slices.Sorted(maps.Keys(installed.Plugin))
-	want := []string{"author", "description", "enabled", "granted", "hasCss", "hasScript", "hasTheme", "id", "installedAt", "name", "permissions", "sizeBytes", "updatedAt", "version"}
+	want := []string{
+		"author", "description", "enabled", "granted", "hasCss", "hasScript", "hasSettings", "hasTheme", "homepage", "id",
+		"installedAt", "minAppVersion", "name", "permissions", "problem", "sizeBytes", "updatedAt", "version",
+	}
 	if !slices.Equal(fields, want) {
 		t.Fatalf("summary fields %v, want %v", fields, want)
 	}
-	if string(installed.Plugin["granted"]) != `["ui:theme","storage"]` || string(installed.Plugin["author"]) != `""` || string(installed.Plugin["enabled"]) != "true" {
-		t.Fatalf("unexpected summary: %s", result.Payload)
+	for field, value := range map[string]string{
+		"granted": `["ui:theme","storage"]`, "author": `""`, "enabled": "true", "homepage": `""`, "minAppVersion": `""`,
+		"hasSettings": "false", "problem": `""`,
+	} {
+		if string(installed.Plugin[field]) != value {
+			t.Fatalf("summary %s is %s, want %s: %s", field, installed.Plugin[field], value, result.Payload)
+		}
 	}
 	if len(events) != 1 || events[0].Topic != "plugins.changed" || !bytes.Contains(events[0].Payload, []byte(`"plugins":[{"id":"acme.dusk"`)) {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 
+	answer := h.ok("plugins.get", `{"id":"acme.dusk"}`)
 	var detail struct {
-		Plugin struct{ ID string } `json:"plugin"`
-		Script string              `json:"script"`
-		CSS    string              `json:"css"`
-		Theme  *domain.Theme       `json:"theme"`
+		Plugin   struct{ ID string } `json:"plugin"`
+		Script   string              `json:"script"`
+		CSS      string              `json:"css"`
+		Theme    *domain.Theme       `json:"theme"`
+		Settings json.RawMessage     `json:"settings"`
 	}
-	if json.Unmarshal(h.ok("plugins.get", `{"id":"acme.dusk"}`), &detail) != nil || detail.Plugin.ID != "acme.dusk" || detail.Script != "export default 1" || detail.CSS != ".x{}" || detail.Theme == nil || detail.Theme.Scheme != "dark" {
-		t.Fatalf("unexpected detail: %+v", detail)
+	if json.Unmarshal(answer, &detail) != nil || detail.Plugin.ID != "acme.dusk" || detail.Script != "export default 1" || detail.CSS != ".x{}" ||
+		detail.Theme == nil || detail.Theme.Scheme != "dark" || string(detail.Settings) != "[]" {
+		t.Fatalf("unexpected detail: %s", answer)
 	}
 
 	result, events = h.call("plugins.update", `{"id":"acme.dusk","enabled":false}`)
@@ -196,6 +207,17 @@ func TestRefusalsUseTheContractCodes(t *testing.T) {
 		{"plugins.storage.set", `{"id":"acme.dusk","key":"k"}`, "invalid_plugin"},
 		{"plugins.storage.set", `{"id":"acme.dusk","key":"k","value":1}`, "invalid_plugin"},
 		{"plugins.storage.set", `{"id":"acme.dusk","key":"k","value":"` + strings.Repeat("v", domain.MaxStorageValueBytes+1) + `"}`, "plugin_storage_full"},
+		{"plugins.storage.update", `{"id":"acme.dusk"}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":null}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":[]}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":{}}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":{"k":1}}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":{"bad key":"1"}}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":{"k":"1"},"clear":"yes"}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":{"k":"1"},"extra":1}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"Bad Id","values":{"k":"1"}}`, "invalid_plugin"},
+		{"plugins.storage.update", `{"id":"acme.missing","values":{"k":"1"}}`, "plugin_not_found"},
+		{"plugins.storage.update", `{"id":"acme.dusk","values":{"k":"` + strings.Repeat("v", domain.MaxStorageValueBytes+1) + `"}}`, "plugin_storage_full"},
 	} {
 		h.refused(test.method, test.payload, test.code)
 	}
@@ -230,4 +252,5 @@ func TestStorageFailuresUseTheContractCodes(t *testing.T) {
 	store.fail = true
 	h.refused("plugins.remove", `{"id":"acme.dusk"}`, "plugin_save_failed")
 	h.refused("plugins.storage.set", `{"id":"acme.dusk","key":"k","value":"v"}`, "plugin_save_failed")
+	h.refused("plugins.storage.update", `{"id":"acme.dusk","values":{"k":"v"}}`, "plugin_save_failed")
 }

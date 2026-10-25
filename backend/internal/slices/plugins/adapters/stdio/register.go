@@ -27,6 +27,14 @@ type updatePayload struct {
 	Granted *[]string `json:"granted"`
 }
 
+type storageUpdatePayload struct {
+	ID string `json:"id"`
+	// Values maps each key to its new value, or null to remove it.
+	Values map[string]*string `json:"values"`
+	// Clear removes every key before Values apply.
+	Clear bool `json:"clear"`
+}
+
 type storageSetPayload struct {
 	ID  string `json:"id"`
 	Key string `json:"key"`
@@ -118,6 +126,18 @@ func Register(server *platform.Server, service *application.Service) {
 		}
 		return values, nil
 	})
+	server.Handle("plugins.storage.update", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var request storageUpdatePayload
+		// An absent or null values object is malformed; {} is an empty batch.
+		if platform.DecodePayload(payload, &request) != nil || !domain.ValidID(request.ID) || request.Values == nil {
+			return nil, invalid("Plugin storage update is malformed")
+		}
+		values, err := service.StorageUpdate(ctx, request.ID, request.Values, request.Clear)
+		if err != nil {
+			return nil, failure(err)
+		}
+		return values, nil
+	})
 }
 
 func decodeID(payload json.RawMessage) (string, error) {
@@ -138,6 +158,8 @@ func failure(err error) error {
 	case errors.As(err, &validation):
 		// The domain message names the field and the rule, never the value.
 		return invalid("Plugin " + validation.Error())
+	case errors.Is(err, application.ErrBroken):
+		return invalid("Plugin cannot be used by this version; reinstall it or remove it")
 	case errors.Is(err, application.ErrNotFound):
 		return platform.MethodError{Code: "plugin_not_found", Message: "Plugin is not installed"}
 	case errors.Is(err, application.ErrLimit):

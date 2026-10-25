@@ -1,15 +1,18 @@
 import { useRef, useState, type ChangeEvent } from 'react'
-import { ChevronDown, ClipboardPaste, LifeBuoy, Puzzle, RotateCcw, ShieldCheck, Trash2, Upload, X } from 'lucide-react'
+import { ChevronDown, ClipboardPaste, ExternalLink, LifeBuoy, Puzzle, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
 import { EmptyState, Panel, Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { formatBytes } from '../../../shared/format/metrics'
 import { restartInSafeMode } from '../../../shared/runtime/safe-mode'
+import { openExternal } from '../../../platform/lifecycle/open-external'
+import { useAppServices } from '../../../app/services'
 import { EXAMPLE_PLUGINS } from '../domain/examples'
 import { PLUGIN_LIMIT, parsePackage, type PluginPackage } from '../domain/manifest'
 import { isPluginPermission, permissionSpec } from '../domain/permissions'
-import type { LogEntry, PluginRuntime, PluginSummary, RuntimeState } from '../domain/plugin'
+import { knownTime, type LogEntry, type PluginRuntime, type PluginSummary, type RuntimeState } from '../domain/plugin'
 import { InstallReviewDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
 import { PluginReference } from './PluginReference'
+import { PluginSettingsDialog } from './PluginSettingsDialog'
 import { usePlugins } from './usePlugins'
 import styles from './PluginsPage.module.css'
 
@@ -18,6 +21,7 @@ type Dialog =
   | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string }
   | { readonly kind: 'problems'; readonly title: string; readonly problems: readonly string[] }
   | { readonly kind: 'permissions'; readonly id: string }
+  | { readonly kind: 'settings'; readonly id: string }
   | { readonly kind: 'remove'; readonly id: string }
 
 /** Files larger than this cannot be a valid package (one command frame). */
@@ -25,6 +29,7 @@ const FILE_LIMIT = 512 * 1024
 
 export default function PluginsPage() {
   const { model, state } = usePlugins()
+  const { appVersion } = useAppServices()
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [notice, setNotice] = useState('')
   const [expanded, setExpanded] = useState<string>('')
@@ -64,7 +69,7 @@ export default function PluginsPage() {
     }
   }
 
-  const current = dialog && (dialog.kind === 'permissions' || dialog.kind === 'remove')
+  const current = dialog && (dialog.kind === 'permissions' || dialog.kind === 'settings' || dialog.kind === 'remove')
     ? state.plugins.find((plugin) => plugin.id === dialog.id)
     : undefined
 
@@ -127,6 +132,7 @@ export default function PluginsPage() {
                   onExpand={() => setExpanded(expanded === plugin.id ? '' : plugin.id)}
                   onToggle={() => { setNotice(''); void model.setEnabled(plugin.id, !plugin.enabled) }}
                   onPermissions={() => { model.clearError(); setDialog({ kind: 'permissions', id: plugin.id }) }}
+                  onSettings={() => { model.clearError(); setNotice(''); setDialog({ kind: 'settings', id: plugin.id }) }}
                   onRestart={() => void model.restart(plugin.id)}
                   onRemove={() => { model.clearError(); setDialog({ kind: 'remove', id: plugin.id }) }}
                 />
@@ -157,7 +163,7 @@ export default function PluginsPage() {
           </ul>
         </Panel>
 
-        <Panel title="Developer reference" subtitle="Everything a package can contain and do. The full guide is docs/PLUGINS.md.">
+        <Panel title="Developer reference" subtitle="Everything a package can contain and do.">
           <PluginReference />
         </Panel>
       </div>
@@ -168,6 +174,7 @@ export default function PluginsPage() {
         <InstallReviewDialog
           pkg={dialog.pkg}
           existing={state.plugins.find((plugin) => plugin.id === dialog.pkg.id)}
+          appVersion={appVersion}
           pending={state.pending === 'install'}
           error={dialog.error || (!state.plugins.some((plugin) => plugin.id === dialog.pkg.id) && full ? `At most ${PLUGIN_LIMIT} plugins can be installed; remove one first.` : '')}
           onCancel={() => setDialog(null)}
@@ -185,6 +192,18 @@ export default function PluginsPage() {
             setDialog(null)
             setNotice(`Permissions for ${current.name} saved.`)
           })}
+        />
+      ) : null}
+      {dialog?.kind === 'settings' && current ? (
+        <PluginSettingsDialog
+          plugin={current}
+          model={model}
+          pending={state.pending === current.id}
+          onClose={() => setDialog(null)}
+          onSaved={() => {
+            setDialog(null)
+            setNotice(`Settings for ${current.name} saved.`)
+          }}
         />
       ) : null}
       {dialog?.kind === 'remove' && current ? (
@@ -213,7 +232,7 @@ const STATE: Readonly<Record<RuntimeState, { readonly label: string; readonly to
   stopped: { label: 'Not running', tone: 'neutral' },
 }
 
-function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpand, onToggle, onPermissions, onRestart, onRemove }: {
+function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove }: {
   readonly plugin: PluginSummary
   readonly runtime: PluginRuntime | undefined
   readonly pending: boolean
@@ -223,26 +242,31 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
   readonly onExpand: () => void
   readonly onToggle: () => void
   readonly onPermissions: () => void
+  readonly onSettings: () => void
   readonly onRestart: () => void
   readonly onRemove: () => void
 }) {
-  const state = runtime?.state ?? (plugin.enabled ? 'starting' : 'disabled')
-  const display = STATE[state]
+  // A stored plugin this version cannot use is off whatever its switch says;
+  // turning it on is refused until an update or a newer app fixes it.
+  const blocked = plugin.problem !== ''
+  const state = blocked ? 'disabled' : runtime?.state ?? (plugin.enabled ? 'starting' : 'disabled')
+  const display = blocked ? { label: 'Unavailable', tone: 'warning' as const } : STATE[state]
   const declared = plugin.permissions.filter(isPluginPermission)
   const granted = new Set(plugin.granted)
   const contents = [plugin.hasTheme ? 'theme' : '', plugin.hasCss ? 'stylesheet' : '', plugin.hasScript ? 'script' : ''].filter(Boolean)
-  const canRestart = plugin.enabled && plugin.hasScript && !safeMode && (state === 'crashed' || state === 'running' || state === 'stopped')
+  const canRestart = !blocked && plugin.enabled && plugin.hasScript && !safeMode && (state === 'crashed' || state === 'running' || state === 'stopped')
   const details = `${plugin.id}-details`
   return (
-    <li className={styles.plugin} data-enabled={plugin.enabled || undefined} aria-busy={pending || undefined}>
+    <li className={styles.plugin} data-enabled={(plugin.enabled && !blocked) || undefined} aria-busy={pending || undefined}>
       <div className={styles.pluginMain}>
         <button
           type="button"
           role="switch"
           className={styles.switch}
-          aria-checked={plugin.enabled}
+          aria-checked={plugin.enabled && !blocked}
           aria-label={`${plugin.name} enabled`}
-          disabled={busy}
+          aria-describedby={blocked ? `${plugin.id}-problem` : undefined}
+          disabled={busy || blocked}
           onClick={onToggle}
         >
           <span className={styles.knob} aria-hidden="true" />
@@ -268,7 +292,13 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
               )
             })}
           </div>
-          {state === 'crashed' || (state === 'stopped' && runtime?.reason) ? (
+          {blocked ? (
+            <p id={`${plugin.id}-problem`} className={styles.problemNote}>
+              <TriangleAlert size={13} aria-hidden="true" />
+              <span>{plugin.problem}</span>
+            </p>
+          ) : null}
+          {!blocked && (state === 'crashed' || (state === 'stopped' && runtime?.reason)) ? (
             <p className={styles.reason} data-tone={state === 'crashed' ? 'danger' : undefined}>{runtime?.reason}</p>
           ) : null}
         </div>
@@ -280,6 +310,11 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
           {canRestart ? (
             <Button variant="ghost" disabled={busy} onClick={onRestart} title="Restart the script from its stored code">
               <RotateCcw size={13} aria-hidden="true" />Restart
+            </Button>
+          ) : null}
+          {plugin.hasSettings && !blocked ? (
+            <Button variant="ghost" disabled={busy} onClick={onSettings} aria-label={`${plugin.name} settings`}>
+              <SlidersHorizontal size={13} aria-hidden="true" />Settings
             </Button>
           ) : null}
           <Button variant="ghost" disabled={busy} onClick={onPermissions}>
@@ -304,6 +339,17 @@ function PluginDetails({ id, plugin, runtime }: { readonly id: string; readonly 
     <div id={id} className={styles.details}>
       <dl className={styles.facts}>
         <div><dt>Identifier</dt><dd><code>{plugin.id}</code></dd></div>
+        {plugin.homepage ? (
+          <div>
+            <dt>Homepage</dt>
+            <dd>
+              <button type="button" className={styles.homepage} onClick={() => void openExternal(plugin.homepage)} title="Opens in your browser">
+                <span>{plugin.homepage}</span><ExternalLink size={12} aria-hidden="true" />
+              </button>
+            </dd>
+          </div>
+        ) : null}
+        {plugin.minAppVersion ? <div><dt>Needs app</dt><dd>{plugin.minAppVersion} or later</dd></div> : null}
         <div><dt>Installed</dt><dd>{formatDate(plugin.installedAt)}</dd></div>
         <div><dt>Updated</dt><dd>{formatDate(plugin.updatedAt)}</dd></div>
         {runtime ? (
@@ -349,8 +395,8 @@ function LogView({ logs }: { readonly logs: readonly LogEntry[] }) {
 }
 
 function formatDate(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  const at = knownTime(value)
+  return at === null ? 'Unknown' : new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 function formatTime(at: number): string {

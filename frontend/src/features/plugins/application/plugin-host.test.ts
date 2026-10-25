@@ -4,28 +4,38 @@ import type { PluginPermission } from '../domain/permissions'
 import type { PluginDetail } from '../domain/plugin'
 import { RUNTIME_LIMITS } from '../domain/protocol'
 import { HOST_LIMITS, PluginHost } from './plugin-host'
+import type { ConfirmRequest } from './ports'
 import { FakeControl, FakeWorkers, MemoryPluginsPort, detail } from './test-fakes'
 
-const ALL: PluginPermission[] = ['ui:theme', 'ui:css', 'ui:pages', 'ui:status', 'ui:commands', 'ui:notify', 'control:read', 'control:write', 'storage']
+const ALL_BASE: PluginPermission[] = ['ui:theme', 'ui:css', 'ui:pages', 'ui:status', 'ui:commands', 'ui:notify', 'control:read', 'control:write', 'storage']
 
-function setup(grants: readonly PluginPermission[] = ALL, plugin: PluginDetail = detail({ permissions: [...grants], granted: [...grants] })) {
+const ALL: PluginPermission[] = [...ALL_BASE, 'ui:clipboard']
+
+function setup(
+  grants: readonly PluginPermission[] = ALL,
+  plugin: PluginDetail = detail({ permissions: [...grants], granted: [...grants] }),
+  initial: Record<string, string> | null = null,
+) {
   const workers = new FakeWorkers()
   const control = new FakeControl()
   const storage = new MemoryPluginsPort()
+  if (initial) storage.values.set(plugin.plugin.id, { ...initial })
   const extensions = new ExtensionPoints()
   const notify = vi.fn()
   const navigate = vi.fn()
   const onChange = vi.fn()
+  const confirm = vi.fn(async (_request: ConfirmRequest, _signal: AbortSignal) => true)
+  const clipboard = vi.fn(async (_text: string) => undefined)
   const host = new PluginHost(plugin, grants, {
-    workers, control, storage, extensions, notify, navigate, onChange,
+    workers, control, storage, extensions, notify, navigate, onChange, confirm, clipboard,
     isRoute: (route) => route === 'overview' || route === 'plugin/acme.tools/board',
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
-  })
-  return { host, workers, control, storage, extensions, notify, navigate, onChange }
+  }, initial)
+  return { host, workers, control, storage, extensions, notify, navigate, onChange, confirm, clipboard }
 }
 
-async function running(grants?: readonly PluginPermission[], plugin?: PluginDetail) {
-  const env = setup(grants, plugin)
+async function running(grants?: readonly PluginPermission[], plugin?: PluginDetail, initial: Record<string, string> | null = null) {
+  const env = setup(grants, plugin, initial)
   env.host.start()
   const worker = env.workers.last
   worker.send({ type: 'ready' })
@@ -43,6 +53,7 @@ describe('PluginHost', () => {
     expect(workers.last.context).toEqual({
       plugin: { id: 'acme.tools', name: 'Acme tools', version: '1.0.0', granted: ['ui:pages'] },
       app: { version: '1.0.0', capabilities: ['plugins.manage'] },
+      settings: {},
     })
     workers.last.send({ type: 'ready' })
     expect(host.runtime().state).toBe('running')
@@ -270,6 +281,139 @@ describe('PluginHost', () => {
     host.stop()
     worker.send({ type: 'eval' })
     expect(host.runtime().state).toBe('stopped')
+  })
+
+  it('badges registered pages, keeps the badge across a re-registration and clears it', async () => {
+    const { worker, extensions } = await running(['ui:pages'])
+    expect(await worker.call('ui.setBadge', { pageId: 'board', badge: { text: '3' } })).toMatchObject({ ok: false, error: { code: 'not_found' } })
+    await worker.call('ui.registerPage', { id: 'board', title: 'Board' })
+    expect(await worker.call('ui.setBadge', { pageId: 'board', badge: { text: '3', tone: 'warning' } })).toMatchObject({ ok: true })
+    expect(extensions.snapshot().pages).toEqual([{ id: 'acme.tools/board', title: 'Board', badge: { text: '3', tone: 'warning' } }])
+    await worker.call('ui.registerPage', { id: 'board', title: 'Board 2' })
+    expect(extensions.snapshot().pages[0]).toMatchObject({ title: 'Board 2', badge: { text: '3' } })
+    expect(await worker.call('ui.setBadge', { pageId: 'board', badge: { text: '123456789' } })).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(await worker.call('ui.setBadge', { pageId: 'board', badge: null })).toMatchObject({ ok: true })
+    expect(extensions.snapshot().pages).toEqual([{ id: 'acme.tools/board', title: 'Board 2' }])
+  })
+
+  it('asks the operator only right after they acted, one question at a time', async () => {
+    const { worker, host, confirm } = await running(['ui:pages', 'ui:notify'])
+    expect(await worker.call('ui.confirm', { title: 'Delete?' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+    await worker.call('ui.registerPage', { id: 'board', title: 'Board' })
+    host.dispatch('board', { kind: 'action', action: 'delete', form: {} })
+    let answer: (yes: boolean) => void = () => undefined
+    confirm.mockImplementationOnce(() => new Promise<boolean>((resolve) => { answer = resolve }))
+    worker.send({ type: 'call', id: 500, op: 'ui.confirm', args: { title: 'Delete?', tone: 'danger', confirmText: 'Delete' } })
+    await Promise.resolve()
+    expect(confirm).toHaveBeenCalledWith({ pluginName: 'Acme tools', title: 'Delete?', body: '', confirmText: 'Delete', tone: 'danger' }, expect.any(AbortSignal))
+    expect(await worker.call('ui.confirm', { title: 'Again?' })).toMatchObject({ ok: false, error: { code: 'busy' } })
+    // The operator takes most of the gesture window to answer; the answer
+    // itself counts as acting, so a follow-up is still allowed.
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs - 1)
+    answer(true)
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve()
+    expect(worker.posted).toContainEqual({ type: 'result', id: 500, ok: true, value: true })
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs - 1)
+    expect(await worker.call('ui.confirm', { title: 'Sure?' })).toMatchObject({ ok: true, value: true })
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs + 1)
+    expect(await worker.call('ui.confirm', { title: 'Late?' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+  })
+
+  it('aborts an open question when the plugin stops', async () => {
+    const { worker, host, confirm, extensions } = await running(['ui:commands', 'ui:notify'])
+    await worker.call('commands.register', { id: 'go', title: 'Go' })
+    await extensions.snapshot().commands[0].run()
+    let signal: AbortSignal | undefined
+    confirm.mockImplementationOnce((_request, given) => { signal = given; return new Promise<boolean>(() => undefined) })
+    worker.send({ type: 'call', id: 77, op: 'ui.confirm', args: { title: 'Go?' } })
+    await Promise.resolve()
+    host.stop()
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('writes the clipboard only when granted and right after a command', async () => {
+    const denied = await running(['ui:commands'])
+    expect(await denied.worker.call('clipboard.writeText', { text: 'x' })).toMatchObject({ ok: false, error: { code: 'permission_denied' } })
+
+    const { worker, extensions, clipboard } = await running(['ui:commands', 'ui:clipboard'])
+    expect(await worker.call('clipboard.writeText', { text: 'x' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+    await worker.call('commands.register', { id: 'copy', title: 'Copy' })
+    await extensions.snapshot().commands[0].run()
+    expect(await worker.call('clipboard.writeText', { text: 'sk-fictional' })).toMatchObject({ ok: true })
+    expect(clipboard).toHaveBeenCalledWith('sk-fictional')
+    expect(await worker.call('clipboard.writeText', { text: 'x'.repeat(RUNTIME_LIMITS.clipboardText + 1) })).toMatchObject({ ok: false, error: { code: 'too_large' } })
+    clipboard.mockRejectedValueOnce(new Error('Document is not focused'))
+    expect(await worker.call('clipboard.writeText', { text: 'y' })).toMatchObject({ ok: false, error: { code: 'failed', message: expect.stringContaining('not focused') } })
+  })
+
+  it('binds command shortcuts and refuses one another plugin holds', async () => {
+    const { worker, extensions } = await running(['ui:commands'])
+    extensions.contribute('plugin:other.tools', { commands: [{ id: 'plugin:other.tools:x', title: 'Other', group: 'Other tools', shortcut: 'Alt+K', bind: true, run: () => undefined }] })
+    expect(await worker.call('commands.register', { id: 'go', title: 'Go', shortcut: 'alt+k' })).toMatchObject({ ok: false, error: { code: 'conflict', message: expect.stringContaining('Other') } })
+    expect(await worker.call('commands.register', { id: 'go', title: 'Go', shortcut: 'K' })).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(await worker.call('commands.register', { id: 'go', title: 'Go', shortcut: 'ctrl+shift+g' })).toMatchObject({ ok: true })
+    expect(extensions.snapshot().commands.find((command) => command.id === 'plugin:acme.tools:go')).toMatchObject({ shortcut: 'Ctrl+Shift+G', bind: true })
+    // Registering the same command again keeps its own shortcut.
+    expect(await worker.call('commands.register', { id: 'go', title: 'Go again', shortcut: 'Ctrl+Shift+G' })).toMatchObject({ ok: true })
+  })
+
+  it('turns a failing command into one toast for the operator who ran it', async () => {
+    const { worker, extensions, notify, host } = await running(['ui:commands'])
+    await worker.call('commands.register', { id: 'sync', title: 'Sync now' })
+    worker.send({ type: 'fault', message: 'boom', command: 'sync' })
+    expect(notify).not.toHaveBeenCalled()
+    await extensions.snapshot().commands[0].run()
+    worker.send({ type: 'fault', message: 'TypeError: boom', command: 'sync' })
+    worker.send({ type: 'fault', message: 'again', command: 'sync' })
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith({ kind: 'plugin', severity: 'danger', title: 'Sync now failed', body: 'TypeError: boom\n— Acme tools' })
+    expect(host.runtime().faults).toBe(3)
+  })
+
+  it('writes storage batches atomically, in order, within a budget, and keeps settings out of reach', async () => {
+    const { worker, storage } = await running(['storage'], undefined, { 'setting:limit': '5', kept: '1' })
+    expect(await worker.call('storage.all')).toMatchObject({ ok: true, value: { kept: '1' } })
+    expect(await worker.call('storage.get', { key: 'setting:limit' })).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(await worker.call('storage.setMany', { values: { a: '1', b: '2', kept: null } })).toMatchObject({ ok: true })
+    expect(storage.values.get('acme.tools')).toEqual({ 'setting:limit': '5', a: '1', b: '2' })
+    expect(await worker.call('storage.setMany', { values: { a: '9', 'setting:limit': '1' } })).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(storage.values.get('acme.tools')).toMatchObject({ a: '1' })
+    expect(await worker.call('storage.setMany', { values: {} })).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+
+    expect(await worker.call('storage.clear')).toMatchObject({ ok: true })
+    expect(storage.values.get('acme.tools')).toEqual({ 'setting:limit': '5' })
+
+    // Writes issued together land in the order they were made.
+    for (let index = 0; index < 5; index += 1) worker.send({ type: 'call', id: 900 + index, op: 'storage.set', args: { key: 'n', value: String(index) } })
+    await vi.waitFor(() => expect(worker.posted.filter((message) => message.type === 'result' && message.id >= 900)).toHaveLength(5))
+    expect(storage.values.get('acme.tools')?.n).toBe('4')
+  })
+
+  it('rate-limits storage writes per minute', async () => {
+    const { worker } = await running(['storage'])
+    for (let index = 0; index < RUNTIME_LIMITS.storageWritesPerMinute; index += 1) worker.send({ type: 'call', id: 2000 + index, op: 'storage.set', args: { key: 'k', value: String(index) } })
+    await vi.waitFor(() => expect(worker.posted.filter((message) => message.type === 'result' && message.id >= 2000)).toHaveLength(RUNTIME_LIMITS.storageWritesPerMinute))
+    expect(worker.posted.every((message) => message.type !== 'result' || message.ok)).toBe(true)
+    expect(await worker.call('storage.set', { key: 'k', value: 'late' })).toMatchObject({ ok: false, error: { code: 'rate_limited' } })
+    vi.setSystemTime(Date.now() + 60_001)
+    expect(await worker.call('storage.set', { key: 'k', value: 'later' })).toMatchObject({ ok: true })
+  })
+
+  it('boots with the operator settings and tells the script when they change', async () => {
+    const settings = [
+      { key: 'limit', label: 'Limit', description: '', type: 'number' as const, default: 10, placeholder: '' },
+      { key: 'compact', label: 'Compact', description: '', type: 'toggle' as const, default: false },
+    ]
+    const plugin = detail({ permissions: [], granted: [] }, { settings })
+    const { host, workers } = setup([], plugin, { 'setting:limit': '25', 'setting:compact': '"nonsense"' })
+    host.start()
+    expect(workers.last.context.settings).toEqual({ limit: 25, compact: false })
+    workers.last.send({ type: 'ready' })
+    host.storageChanged({ 'setting:limit': '25', 'setting:compact': 'true' })
+    expect(workers.last.posted).toContainEqual({ type: 'settings', values: { limit: 25, compact: true } })
+    const before = workers.last.posted.length
+    host.storageChanged({ 'setting:limit': '25', 'setting:compact': 'true', unrelated: 'x' })
+    expect(workers.last.posted).toHaveLength(before)
   })
 
   it('delivers page events only for registered pages once running', async () => {

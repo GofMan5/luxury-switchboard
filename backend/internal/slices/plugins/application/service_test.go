@@ -58,9 +58,11 @@ type clock struct{ now time.Time }
 
 func (c *clock) tick() time.Time { c.now = c.now.Add(90 * time.Second); return c.now }
 
+const runningVersion = "1.2.3"
+
 func newService(t *testing.T, store *memory, budget int) (*Service, *clock, *[][]Summary) {
 	t.Helper()
-	service, err := NewService(store, budget)
+	service, err := NewService(store, budget, runningVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,8 +100,9 @@ func TestInstallAnswersTheSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if summary.ID != "acme.dusk" || !summary.Enabled || !slices.Equal(summary.Granted, []string{domain.PermissionStorage}) ||
-		summary.InstalledAt != "2026-03-04T05:07:37Z" || summary.UpdatedAt != summary.InstalledAt ||
-		!summary.HasScript || summary.HasCSS || !summary.HasTheme || summary.SizeBytes <= 0 || summary.Author != "" {
+		summary.InstalledAt != "2026-03-04T05:07:37.123Z" || summary.UpdatedAt != summary.InstalledAt ||
+		!summary.HasScript || summary.HasCSS || !summary.HasTheme || summary.HasSettings || summary.SizeBytes <= 0 || summary.Author != "" ||
+		summary.Problem != "" || summary.Homepage != "" || summary.MinAppVersion != "" {
 		t.Fatalf("unexpected summary %+v", summary)
 	}
 	encoded, _ := encodedSize(store.plugins[0].Package)
@@ -280,6 +283,7 @@ func TestAFailedSaveChangesNothing(t *testing.T) {
 	_, failures["update"] = service.Update(ctx, "acme.a", &disabled, nil)
 	failures["remove"] = service.Remove(ctx, "acme.a")
 	_, failures["storage"] = service.StorageSet(ctx, "acme.a", "k", &value)
+	_, failures["storage batch"] = service.StorageUpdate(ctx, "acme.a", map[string]*string{"k": &value}, false)
 	for name, err := range failures {
 		if err == nil || errors.Is(err, ErrStoreUnavailable) || errors.Is(err, ErrTooLarge) || errors.Is(err, ErrStorageFull) {
 			t.Errorf("%s: unexpected failure %v", name, err)
@@ -305,20 +309,32 @@ func TestAFullDocumentIsReportedAsTooLargeOrStorageFull(t *testing.T) {
 	if _, err := service.StorageSet(ctx, "acme.a", "k", &value); !errors.Is(err, ErrStorageFull) {
 		t.Fatalf("storage into a full document: %v", err)
 	}
+	if _, err := service.StorageUpdate(ctx, "acme.a", map[string]*string{"k": &value}, false); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("a storage batch into a full document: %v", err)
+	}
 }
 
-func TestAnUnreadableStoreRefusesEverything(t *testing.T) {
+// A store fails whole only when it cannot be one set of addressable
+// plugins; one record this version refuses is a broken entry instead.
+func TestAStoreThatIsNotOneSetOfPluginsRefusesEverything(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	valid := domain.Plugin{Package: pkg("acme.a", "A", domain.PermissionTheme), Granted: []string{}, InstalledAt: now, UpdatedAt: now}
 	duplicate := []domain.Plugin{valid, valid}
-	invalid := valid
-	invalid.Granted = []string{domain.PermissionWrite}
+	unnamed := valid
+	unnamed.Package.ID = "Bad Id"
+	tooMany := make([]domain.Plugin, 0, domain.MaxPlugins+1)
+	for index := range domain.MaxPlugins + 1 {
+		record := valid
+		record.Package.ID = fmt.Sprintf("acme.p%02d", index)
+		tooMany = append(tooMany, record)
+	}
 	for name, store := range map[string]*memory{
-		"unreadable": {loadErr: errors.New("locked")},
-		"invalid":    {plugins: []domain.Plugin{invalid}},
-		"duplicate":  {plugins: duplicate},
+		"unreadable":   {loadErr: errors.New("locked")},
+		"unusable id":  {plugins: []domain.Plugin{valid, unnamed}},
+		"duplicate id": {plugins: duplicate},
+		"too many":     {plugins: tooMany},
 	} {
-		service, _ := NewService(store, 1<<20)
+		service, _ := NewService(store, 1<<20, runningVersion)
 		if service.Load(context.Background()) == nil {
 			t.Fatalf("%s: load succeeded", name)
 		}
@@ -332,7 +348,11 @@ func TestAnUnreadableStoreRefusesEverything(t *testing.T) {
 		remove := service.Remove(ctx, "acme.a")
 		_, storageGet := service.StorageGet("acme.a")
 		_, storageSet := service.StorageSet(ctx, "acme.a", "k", &value)
-		for command, err := range map[string]error{"list": list, "get": get, "install": install, "update": update, "remove": remove, "storage.get": storageGet, "storage.set": storageSet} {
+		_, storageUpdate := service.StorageUpdate(ctx, "acme.a", map[string]*string{"k": &value}, true)
+		for command, err := range map[string]error{
+			"list": list, "get": get, "install": install, "update": update, "remove": remove,
+			"storage.get": storageGet, "storage.set": storageSet, "storage.update": storageUpdate,
+		} {
 			if !errors.Is(err, ErrStoreUnavailable) {
 				t.Errorf("%s %s: %v", name, command, err)
 			}
@@ -386,7 +406,14 @@ func TestConcurrentMutationsStaySerialized(t *testing.T) {
 		go func() {
 			defer group.Done()
 			value := fmt.Sprint(index)
-			if _, err := service.StorageSet(ctx, "acme.shared", fmt.Sprintf("k%d", index), &value); err != nil {
+			key := fmt.Sprintf("k%d", index)
+			var err error
+			if index%2 == 0 {
+				_, err = service.StorageSet(ctx, "acme.shared", key, &value)
+			} else {
+				_, err = service.StorageUpdate(ctx, "acme.shared", map[string]*string{key: &value, "absent": nil}, false)
+			}
+			if err != nil {
 				t.Error(err)
 			}
 		}()

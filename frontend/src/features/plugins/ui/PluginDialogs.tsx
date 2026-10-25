@@ -1,12 +1,14 @@
 import { useId, useMemo, useState } from 'react'
-import { AlertTriangle, X } from 'lucide-react'
+import { AlertTriangle, ExternalLink, X } from 'lucide-react'
 import { formatBytes } from '../../../shared/format/metrics'
 import { Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
-import { byteLength, packageBytes, packageSizeProblem, parsePackage, type PluginPackage } from '../domain/manifest'
+import { openExternal } from '../../../platform/lifecycle/open-external'
+import { byteLength, needsNewerApp, packageBytes, packageSizeProblem, parsePackage, type PluginPackage } from '../domain/manifest'
 import { initialGrants, isPluginPermission, permissionSpec, type PermissionRisk, type PluginPermission } from '../domain/permissions'
 import type { PluginSummary } from '../domain/plugin'
+import { useStyleHold } from './useStyleHold'
 import styles from './PluginsPage.module.css'
 
 const RISK: Readonly<Record<PermissionRisk, { readonly label: string; readonly tone: PillTone }>> = {
@@ -103,9 +105,11 @@ function Problems({ id, problems }: { readonly id?: string; readonly problems: r
  * each permission with what granting it means; the operator ticks what the
  * plugin may do. Nothing is installed until Install is pressed.
  */
-export function InstallReviewDialog({ pkg, existing, pending, error, onCancel, onInstall }: {
+export function InstallReviewDialog({ pkg, existing, appVersion = '', pending, error, onCancel, onInstall }: {
   readonly pkg: PluginPackage
   readonly existing: PluginSummary | undefined
+  /** The running app's version; a package that needs a newer one is refused. */
+  readonly appVersion?: string
   readonly pending: boolean
   readonly error: string
   readonly onCancel: () => void
@@ -116,10 +120,13 @@ export function InstallReviewDialog({ pkg, existing, pending, error, onCancel, o
   const [granted, setGranted] = useState<ReadonlySet<PluginPermission>>(() => new Set(initialGrants(pkg.permissions, existing)))
   const ordered = pkg.permissions.filter((permission) => granted.has(permission))
   const sizeProblem = useMemo(() => packageSizeProblem(pkg, ordered), [pkg, ordered])
+  const tooNew = needsNewerApp(pkg.minAppVersion, appVersion)
   const previous = new Set(existing?.permissions ?? [])
+  useStyleHold()
   const upgrade = existing !== undefined
   const contents = [
     pkg.theme ? `Theme “${pkg.theme.name}” (${Object.keys(pkg.theme.tokens).length} tokens)` : '',
+    pkg.settings?.length ? `${pkg.settings.length} ${pkg.settings.length === 1 ? 'setting' : 'settings'} you can change` : '',
     pkg.css ? `Stylesheet (${formatBytes(byteLength(pkg.css))})` : '',
     pkg.script ? `Script (${formatBytes(byteLength(pkg.script))}), runs isolated from the window` : '',
   ].filter(Boolean)
@@ -148,6 +155,17 @@ export function InstallReviewDialog({ pkg, existing, pending, error, onCancel, o
           <dl className={styles.facts}>
             <div><dt>Identifier</dt><dd><code>{pkg.id}</code></dd></div>
             {pkg.author ? <div><dt>Author</dt><dd>{pkg.author}</dd></div> : null}
+            {pkg.homepage ? (
+              <div>
+                <dt>Homepage</dt>
+                <dd>
+                  <button type="button" className={styles.homepage} disabled={pending} onClick={() => void openExternal(pkg.homepage!)} title="Opens in your browser">
+                    <span>{pkg.homepage}</span><ExternalLink size={12} aria-hidden="true" />
+                  </button>
+                </dd>
+              </div>
+            ) : null}
+            {pkg.minAppVersion ? <div><dt>Needs app</dt><dd>{pkg.minAppVersion} or later{appVersion ? ` (this is ${appVersion})` : ''}</dd></div> : null}
             <div><dt>Contains</dt><dd>{contents.length ? contents.join(' · ') : 'Nothing but its name'}</dd></div>
             <div><dt>Size</dt><dd>{formatBytes(packageBytes(pkg))}</dd></div>
           </dl>
@@ -176,12 +194,13 @@ export function InstallReviewDialog({ pkg, existing, pending, error, onCancel, o
           {pkg.permissions.length > 0 && ordered.length < pkg.permissions.length ? (
             <p className={styles.muted}>Calls that need an unticked permission fail inside the plugin; it keeps running. You can change this later.</p>
           ) : null}
+          {tooNew ? <p className={styles.dialogError} role="alert">This plugin needs Luxury Switchboard {pkg.minAppVersion} or later; this is {appVersion}. Update the app first.</p> : null}
           {sizeProblem ? <p className={styles.dialogError} role="alert">{sizeProblem}</p> : null}
           {error ? <p className={styles.dialogError} role="alert">{error}</p> : null}
         </div>
         <footer>
           <Button disabled={pending} onClick={onCancel}>Cancel</Button>
-          <Button variant="primary" data-autofocus disabled={pending || sizeProblem !== ''} aria-busy={pending || undefined} onClick={() => onInstall(ordered)}>
+          <Button variant="primary" data-autofocus disabled={pending || sizeProblem !== '' || tooNew} aria-busy={pending || undefined} onClick={() => onInstall(ordered)}>
             {pending ? (upgrade ? 'Updating…' : 'Installing…') : upgrade ? 'Update' : 'Install'}
           </Button>
         </footer>
@@ -204,6 +223,7 @@ export function PermissionsDialog({ plugin, pending, error, onCancel, onSave }: 
   const [granted, setGranted] = useState<ReadonlySet<string>>(() => new Set(plugin.granted))
   const ordered = declared.filter((permission) => granted.has(permission))
   const changed = ordered.length !== plugin.granted.length || ordered.some((permission) => !plugin.granted.includes(permission))
+  useStyleHold()
   return (
     <div className="ui-scrim">
       <section ref={ref} className={`ui-modal ${styles.dialog} ${styles.reviewDialog}`} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`}>
@@ -270,6 +290,7 @@ export function RemoveDialog({ plugin, pending, error, onCancel, onConfirm }: {
 }) {
   const ref = useModalFocus<HTMLElement>(onCancel, pending)
   const id = useId()
+  useStyleHold()
   return (
     <div className="ui-scrim">
       <section ref={ref} className={`ui-modal ${styles.dialog}`} role="alertdialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-body`}>

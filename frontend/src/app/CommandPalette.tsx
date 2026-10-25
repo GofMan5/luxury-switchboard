@@ -1,4 +1,4 @@
-﻿import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { CornerDownLeft, Search } from 'lucide-react'
 import type { CommandContribution } from '../shared/contracts/extensions'
 import { useModalFocus } from '../shared/ui/useModalFocus'
@@ -52,9 +52,9 @@ export function CommandPalette({ commands, onClose }: { readonly commands: reado
 
   let lastGroup = ''
   return (
-    <div className={styles.scrim} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <div ref={root} className={styles.palette} role="dialog" aria-modal="true" aria-label="Command palette">
-        <label className={styles.search}>
+    <div className={styles.scrim} data-ui="palette-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <div ref={root} className={styles.palette} role="dialog" aria-modal="true" aria-label="Command palette" data-ui="command-palette">
+        <label className={styles.search} data-ui="palette-search">
           <Search size={15} aria-hidden="true" />
           <span className="sr-only">Search commands</span>
           <input
@@ -73,18 +73,20 @@ export function CommandPalette({ commands, onClose }: { readonly commands: reado
           />
           <kbd>Esc</kbd>
         </label>
-        <ul ref={listRef} id={listId} className={styles.results} role="listbox" aria-label="Commands">
+        <ul ref={listRef} id={listId} className={styles.results} role="listbox" aria-label="Commands" data-ui="palette-results">
           {results.map((command, index) => {
             const heading = command.group !== lastGroup ? command.group : ''
             lastGroup = command.group
             return (
               <li key={command.id} role="presentation">
-                {heading ? <span className={styles.group} aria-hidden="true">{heading}</span> : null}
+                {heading ? <span className={styles.group} aria-hidden="true" data-ui="palette-group">{heading}</span> : null}
                 <div
                   id={`${listId}-${index}`}
                   role="option"
                   aria-selected={index === current}
                   data-index={index}
+                  data-ui="palette-option"
+                  data-command={command.id}
                   className={styles.option}
                   onMouseMove={() => { if (index !== current) setActive(index) }}
                   onClick={() => void run(command)}
@@ -98,7 +100,7 @@ export function CommandPalette({ commands, onClose }: { readonly commands: reado
           })}
           {results.length === 0 ? <li className={styles.none} role="presentation">No command matches “{query.trim()}”.</li> : null}
         </ul>
-        <footer className={styles.footer}>
+        <footer className={styles.footer} data-ui="palette-footer">
           <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
           <span><kbd>Enter</kbd> run</span>
           <span className={styles.count}>{failure || `${results.length} of ${commands.length}`}</span>

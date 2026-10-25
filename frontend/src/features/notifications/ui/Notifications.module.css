@@ -7,9 +7,11 @@
 /* Unread count: the accent, cut out of the chrome it sits on. */
 .badge { position: absolute; top: -3px; right: -4px; min-width: 16px; height: 16px; border: 2px solid var(--bg-chrome); border-radius: 8px; padding: 0 3px; color: var(--text-on-action); background: var(--accent); font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; font-weight: 600; line-height: 12px; text-align: center; pointer-events: none; }
 
-/* Floating layers: elevated surface and shadow, no border. */
-.toasts { position: fixed; z-index: 200; top: 52px; right: 12px; display: flex; width: min(340px, calc(100vw - 24px)); flex-direction: column; gap: 6px; pointer-events: none; }
-.toast { position: relative; display: flex; min-width: 0; align-items: flex-start; gap: 10px; overflow: hidden; border-radius: var(--radius-panel); padding: 10px var(--pad) 12px 12px; background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: toast-enter 180ms var(--ease-standard) both, toast-leave 120ms ease-in 5.18s forwards; }
+/* Floating layers: elevated surface and shadow, no border. A toast leaves at
+   5.18s and is gone by 5.3s, when the model drops it (TOAST_TTL_MS +
+   TOAST_EXIT_MS in notifications-model.ts). */
+.toasts { position: fixed; z-index: 200; top: calc(var(--runtime-bar-height) + 8px); right: 12px; display: flex; width: min(340px, calc(100vw - 24px)); flex-direction: column; gap: 6px; pointer-events: none; }
+.toast { position: relative; display: flex; min-width: 0; align-items: flex-start; gap: 10px; overflow: hidden; border-radius: var(--radius-panel); padding: 10px var(--pad) 12px 12px; background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: toast-enter var(--motion-standard) var(--ease-standard) both, toast-leave var(--motion-fast) ease-in 5.18s forwards; }
 .toast svg, .row svg { flex: 0 0 auto; margin-top: 2px; color: var(--status-info); }
 .toast svg[data-severity='danger'], .row svg[data-severity='danger'] { color: var(--status-danger); }
 .toast svg[data-severity='warning'], .row svg[data-severity='warning'] { color: var(--status-warning); }
@@ -18,12 +20,12 @@
 .toastBody strong, .row strong { display: block; color: var(--text-primary); font-size: var(--fs-base); font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
 .toastBody p, .row p { margin-top: 2px; color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
 /* Lifetime readout along the bottom edge, in the severity's hue. */
-.toastTimer { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: color-mix(in srgb, var(--status-info) 70%, transparent); transform-origin: left; animation: toast-drain 5s linear 180ms forwards; }
+.toastTimer { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: color-mix(in srgb, var(--status-info) 70%, transparent); transform-origin: left; animation: toast-drain 5s linear var(--motion-standard) forwards; }
 .toast[data-severity='danger'] .toastTimer { background: color-mix(in srgb, var(--status-danger) 70%, transparent); }
 .toast[data-severity='warning'] .toastTimer { background: color-mix(in srgb, var(--status-warning) 70%, transparent); }
 .toast[data-severity='success'] .toastTimer { background: color-mix(in srgb, var(--status-success) 70%, transparent); }
 
-.panel { position: fixed; z-index: 150; top: 52px; right: 12px; display: flex; width: min(400px, calc(100vw - 24px)); max-height: min(560px, calc(100dvh - 64px)); flex-direction: column; overflow: hidden; border-radius: var(--radius-modal); background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: panel-enter 180ms var(--ease-standard) both; }
+.panel { position: fixed; z-index: 150; top: calc(var(--runtime-bar-height) + 8px); right: 12px; display: flex; width: min(400px, calc(100vw - 24px)); max-height: min(560px, calc(100dvh - var(--runtime-bar-height) - 20px)); flex-direction: column; overflow: hidden; border-radius: var(--radius-modal); background: var(--bg-elevated); box-shadow: var(--shadow-float); animation: panel-enter var(--motion-standard) var(--ease-standard) both; }
 .panel header { display: flex; min-height: 44px; flex: 0 0 auto; align-items: center; gap: 4px; border-bottom: 1px solid var(--border-subtle); padding: 6px 8px 6px var(--pad); }
 .panel h2 { flex: 1; color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
 .panel header :global(.button) { min-height: 28px; padding-inline: 8px; }

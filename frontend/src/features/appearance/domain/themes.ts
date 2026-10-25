@@ -8,6 +8,11 @@ export interface ThemeDefinition {
    * and inherits the rest from the builtin of its scheme. */
   readonly tokens: Readonly<Partial<Record<ColorToken, string>>> & Readonly<Record<string, string>>
   readonly builtin: boolean
+  /** A contributed theme's own tokens as it shipped them (after the safety
+   * filter), without the builtin it inherits from. Where one names a token an
+   * appearance control computes, the theme's value holds while that control
+   * is at its default. Builtins leave it out: their look is the defaults. */
+  readonly own?: Readonly<Record<string, string>>
 }
 
 /**

@@ -174,24 +174,43 @@ func TestStorageBounds(t *testing.T) {
 	}
 }
 
-func TestARestoredPluginIsCheckedWhole(t *testing.T) {
+// Plugin.Validate decides which stored records the service keeps as broken
+// entries; its error is the field and rule the owner is shown.
+func TestValidateNamesWhatMakesAStoredPluginBroken(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	plugin := Plugin{Package: validPackage().Normalized(), Enabled: true, Granted: []string{PermissionTheme}, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}}
+	plugin := Plugin{Package: settingsPackage().Normalized(), Enabled: true, Granted: []string{PermissionTheme}, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}}
 	if err := plugin.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	for name, mutate := range map[string]func(*Plugin){
-		"unordered grant": func(p *Plugin) { p.Granted = []string{PermissionStorage, PermissionTheme} },
-		"undeclared":      func(p *Plugin) { p.Granted = []string{PermissionWrite} },
-		"no install time": func(p *Plugin) { p.InstalledAt = time.Time{} },
-		"time reversed":   func(p *Plugin) { p.UpdatedAt = now.Add(-time.Second) },
-		"bad storage":     func(p *Plugin) { p.Storage = map[string]string{"bad key": "v"} },
-		"bad package":     func(p *Plugin) { p.Package.Schema = 0 },
+	full := map[string]string{}
+	for index := range MaxStorageKeys + 1 {
+		full[fmt.Sprintf("k%d", index)] = "v"
+	}
+	for name, test := range map[string]struct {
+		field  string
+		mutate func(*Plugin)
+	}{
+		"unordered grant":  {"granted", func(p *Plugin) { p.Granted = []string{PermissionStorage, PermissionTheme} }},
+		"undeclared grant": {"granted", func(p *Plugin) { p.Granted = []string{PermissionWrite} }},
+		"no install time":  {"timestamps", func(p *Plugin) { p.InstalledAt = time.Time{} }},
+		"no update time":   {"timestamps", func(p *Plugin) { p.UpdatedAt = time.Time{} }},
+		"time reversed":    {"timestamps", func(p *Plugin) { p.UpdatedAt = now.Add(-time.Millisecond) }},
+		"bad storage key":  {"key", func(p *Plugin) { p.Storage = map[string]string{"bad key": "v"} }},
+		"storage overfull": {"", func(p *Plugin) { p.Storage = full }},
+		"old schema":       {"schema", func(p *Plugin) { p.Package.Schema = 0 }},
+		"retired setting":  {"settings[2].type", func(p *Plugin) { p.Package.Settings[2].Type = "switch" }},
+		"bad homepage":     {"homepage", func(p *Plugin) { p.Package.Homepage = "http://example.test" }},
 	} {
 		copied := plugin
-		mutate(&copied)
-		if copied.Validate() == nil {
-			t.Errorf("%s was accepted", name)
+		copied.Package = plugin.Package.Normalized()
+		test.mutate(&copied)
+		err := copied.Validate()
+		var validation ValidationError
+		switch {
+		case test.field == "" && !errors.Is(err, ErrStorageFull):
+			t.Errorf("%s: want ErrStorageFull, got %v", name, err)
+		case test.field != "" && (!errors.As(err, &validation) || validation.Field != test.field):
+			t.Errorf("%s: want a %s error, got %v", name, test.field, err)
 		}
 	}
 }

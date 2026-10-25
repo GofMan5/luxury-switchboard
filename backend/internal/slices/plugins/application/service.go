@@ -27,6 +27,9 @@ var (
 	// ErrCapacity is returned by a Repository whose encoded document would
 	// exceed what it can protect. Nothing was written.
 	ErrCapacity = errors.New("plugin storage file is full")
+	// ErrBroken refuses every command but install and removal on a stored
+	// plugin this version cannot use; its summary's Problem says why.
+	ErrBroken = errors.New("plugin cannot be used by this version")
 )
 
 type Repository interface {
@@ -39,28 +42,38 @@ type Repository interface {
 
 // Summary is a plugin's metadata, without the code and styles it carries.
 type Summary struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Author      string   `json:"author"`
-	Description string   `json:"description"`
-	Permissions []string `json:"permissions"`
-	Granted     []string `json:"granted"`
-	Enabled     bool     `json:"enabled"`
-	InstalledAt string   `json:"installedAt"`
-	UpdatedAt   string   `json:"updatedAt"`
-	SizeBytes   int      `json:"sizeBytes"`
-	HasScript   bool     `json:"hasScript"`
-	HasCSS      bool     `json:"hasCss"`
-	HasTheme    bool     `json:"hasTheme"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Version       string   `json:"version"`
+	Author        string   `json:"author"`
+	Description   string   `json:"description"`
+	Homepage      string   `json:"homepage"`
+	MinAppVersion string   `json:"minAppVersion"`
+	Permissions   []string `json:"permissions"`
+	Granted       []string `json:"granted"`
+	Enabled       bool     `json:"enabled"`
+	// InstalledAt and UpdatedAt carry milliseconds: UpdatedAt changes on
+	// every install, so the shell can use it as the code's revision.
+	InstalledAt string `json:"installedAt"`
+	UpdatedAt   string `json:"updatedAt"`
+	SizeBytes   int    `json:"sizeBytes"`
+	HasScript   bool   `json:"hasScript"`
+	HasCSS      bool   `json:"hasCss"`
+	HasTheme    bool   `json:"hasTheme"`
+	HasSettings bool   `json:"hasSettings"`
+	// Problem is empty for a usable plugin. Otherwise it tells the owner why
+	// this version refuses the stored plugin and what to do; such a plugin
+	// is listed disabled and can only be reinstalled or removed.
+	Problem string `json:"problem"`
 }
 
 // Detail is the whole of one plugin, as plugins.get answers it.
 type Detail struct {
-	Plugin Summary       `json:"plugin"`
-	Script string        `json:"script"`
-	CSS    string        `json:"css"`
-	Theme  *domain.Theme `json:"theme"`
+	Plugin   Summary          `json:"plugin"`
+	Script   string           `json:"script"`
+	CSS      string           `json:"css"`
+	Theme    *domain.Theme    `json:"theme"`
+	Settings []domain.Setting `json:"settings"`
 }
 
 // Values is a plugin's storage, as the storage commands answer it.
@@ -72,6 +85,10 @@ type Values struct {
 type installed struct {
 	plugin    domain.Plugin
 	sizeBytes int
+	// problem is why this version refuses a stored record, empty when it is
+	// usable. A refused record's plugin is kept exactly as it was loaded so
+	// every save writes it back unchanged until it is reinstalled or removed.
+	problem string
 }
 
 type Service struct {
@@ -87,7 +104,10 @@ type Service struct {
 	// budget is the largest encoded Detail and Values a plugin may have: the
 	// response that carries either has to fit the transport.
 	budget int
-	now    func() time.Time
+	// appVersion is the running release, checked against each package's
+	// minimum.
+	appVersion string
+	now        func() time.Time
 	// changed hears the new list after every install, update and removal.
 	// It runs under opMu, so notifications arrive in mutation order and the
 	// last one always describes the current state.
@@ -95,15 +115,19 @@ type Service struct {
 }
 
 // NewService creates the service. budget bounds the encoded plugins.get and
-// storage answers; the composition root passes the transport's payload limit.
-func NewService(repository Repository, budget int) (*Service, error) {
+// storage answers; the composition root passes the transport's payload limit
+// and the running app version.
+func NewService(repository Repository, budget int, appVersion string) (*Service, error) {
 	if repository == nil {
 		return nil, errors.New("plugin repository is required")
 	}
 	if budget < 1 {
 		return nil, errors.New("plugin response budget is required")
 	}
-	return &Service{repository: repository, budget: budget, now: time.Now, plugins: map[string]installed{}}, nil
+	if !domain.ValidAppVersion(appVersion) {
+		return nil, errors.New("plugin service needs the running app version")
+	}
+	return &Service{repository: repository, budget: budget, appVersion: appVersion, now: time.Now, plugins: map[string]installed{}}, nil
 }
 
 // OnChanged sets the listener told the new list after every install, update
@@ -133,31 +157,59 @@ func (service *Service) Load(ctx context.Context) error {
 	return err
 }
 
+// restore checks every stored record. One that this version refuses is kept
+// as a broken entry rather than failing the store, so one stale plugin does
+// not hide the others. The store as a whole still fails when it cannot be
+// one set of addressable plugins: too many records, a repeated id, or an id
+// no command could name.
 func (service *Service) restore(restored []domain.Plugin) (map[string]installed, error) {
 	if len(restored) > domain.MaxPlugins {
 		return nil, errors.New("stored plugins exceed the plugin limit")
 	}
 	plugins := make(map[string]installed, len(restored))
-	for _, plugin := range restored {
-		plugin.Package = plugin.Package.Normalized()
-		plugin.Granted = append([]string{}, plugin.Granted...)
-		plugin.Storage = maps.Clone(plugin.Storage)
-		if plugin.Storage == nil {
-			plugin.Storage = map[string]string{}
+	for _, record := range restored {
+		id := record.Package.ID
+		if !domain.ValidID(id) {
+			return nil, errors.New("a stored plugin has no usable id")
 		}
-		if err := plugin.Validate(); err != nil {
-			return nil, fmt.Errorf("a stored plugin is invalid: %w", err)
-		}
-		if _, duplicate := plugins[plugin.Package.ID]; duplicate {
+		if _, duplicate := plugins[id]; duplicate {
 			return nil, errors.New("stored plugins repeat an id")
 		}
-		size, err := encodedSize(plugin.Package)
+		entry, err := service.restoreOne(record)
 		if err != nil {
 			return nil, err
 		}
-		plugins[plugin.Package.ID] = installed{plugin: plugin, sizeBytes: size}
+		plugins[id] = entry
 	}
 	return plugins, nil
+}
+
+func (service *Service) restoreOne(record domain.Plugin) (installed, error) {
+	plugin := record
+	plugin.Package = record.Package.Normalized()
+	plugin.Granted = append([]string{}, record.Granted...)
+	plugin.Storage = maps.Clone(record.Storage)
+	if plugin.Storage == nil {
+		plugin.Storage = map[string]string{}
+	}
+	size, sizeErr := encodedSize(plugin.Package)
+	broken := func(problem string) installed {
+		if sizeErr != nil {
+			size = 0
+		}
+		return installed{plugin: record, sizeBytes: size, problem: problem}
+	}
+	if err := plugin.Validate(); err != nil {
+		// Validation messages name the field and the rule, never the value.
+		return broken(fmt.Sprintf("This plugin no longer passes this version's checks (%v). Reinstall a fixed version or remove it.", err)), nil
+	}
+	if plugin.Package.NeedsNewerApp(service.appVersion) {
+		return broken(fmt.Sprintf("Needs Luxury Switchboard %s or later; this is %s. Update the app or install an older version of the plugin.", plugin.Package.MinAppVersion, service.appVersion)), nil
+	}
+	if sizeErr != nil {
+		return installed{}, sizeErr
+	}
+	return installed{plugin: plugin, sizeBytes: size}, nil
 }
 
 // List returns every plugin's metadata, by name then id.
@@ -188,11 +240,16 @@ func (service *Service) StorageGet(id string) (Values, error) {
 
 // Install adds pkg, or upgrades the installed plugin with its id: an upgrade
 // keeps the plugin's storage and install time, enables it and replaces the
-// grant.
+// grant. Installing over a broken entry replaces it, keeping only the stored
+// install time and storage that still pass.
 func (service *Service) Install(ctx context.Context, pkg domain.Package, granted []string) (Summary, error) {
 	pkg = pkg.Normalized()
 	if err := pkg.Validate(); err != nil {
 		return Summary{}, err
+	}
+	if pkg.NeedsNewerApp(service.appVersion) {
+		// The version was validated above, so it is safe to repeat.
+		return Summary{}, domain.ValidationError{Field: "minAppVersion", Reason: "needs Luxury Switchboard " + pkg.MinAppVersion + " or later"}
 	}
 	granted, err := pkg.Grant(granted)
 	if err != nil {
@@ -211,11 +268,7 @@ func (service *Service) Install(ctx context.Context, pkg domain.Package, granted
 	now := service.timestamp()
 	plugin := domain.Plugin{Package: pkg, Enabled: true, Granted: granted, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}}
 	if previous, exists := current[pkg.ID]; exists {
-		plugin.InstalledAt = previous.plugin.InstalledAt
-		plugin.Storage = previous.plugin.Storage
-		if plugin.UpdatedAt.Before(plugin.InstalledAt) {
-			plugin.UpdatedAt = plugin.InstalledAt
-		}
+		plugin.InstalledAt, plugin.UpdatedAt, plugin.Storage = upgraded(previous, now)
 	} else if len(current) >= domain.MaxPlugins {
 		return Summary{}, ErrLimit
 	}
@@ -227,6 +280,29 @@ func (service *Service) Install(ctx context.Context, pkg domain.Package, granted
 		return Summary{}, err
 	}
 	return summary(entry), nil
+}
+
+// upgraded carries an installed plugin's install time and storage into its
+// replacement. The update time always moves forward, even within one
+// millisecond or after the clock went back, so every install is a new
+// revision. A broken record's values are carried only where they still pass.
+func upgraded(previous installed, now time.Time) (installedAt, updatedAt time.Time, storage map[string]string) {
+	old := previous.plugin
+	if previous.problem != "" {
+		installedAt, storage = now, map[string]string{}
+		if !old.InstalledAt.IsZero() && !old.InstalledAt.After(now) {
+			installedAt = old.InstalledAt
+		}
+		if len(old.Storage) > 0 && domain.CheckStorage(old.Storage) == nil {
+			storage = maps.Clone(old.Storage)
+		}
+		return installedAt, now, storage
+	}
+	updatedAt = now
+	if !updatedAt.After(old.UpdatedAt) {
+		updatedAt = old.UpdatedAt.Add(time.Millisecond)
+	}
+	return old.InstalledAt, updatedAt, old.Storage
 }
 
 // Update changes whether a plugin is enabled and what it is granted. A nil
@@ -241,6 +317,9 @@ func (service *Service) Update(ctx context.Context, id string, enabled *bool, gr
 	entry, exists := current[id]
 	if !exists {
 		return Summary{}, ErrNotFound
+	}
+	if entry.problem != "" {
+		return Summary{}, ErrBroken
 	}
 	if enabled != nil {
 		entry.plugin.Enabled = *enabled
@@ -281,8 +360,24 @@ func (service *Service) Remove(ctx context.Context, id string) error {
 }
 
 // StorageSet sets key, or deletes it when value is nil, and returns the
-// plugin's storage afterwards.
+// plugin's storage afterwards. A write that changes nothing is not saved.
 func (service *Service) StorageSet(ctx context.Context, id, key string, value *string) (Values, error) {
+	return service.writeStorage(ctx, id, func(values map[string]string) (map[string]string, error) {
+		return domain.WithStorage(values, key, value)
+	})
+}
+
+// StorageUpdate applies a batch of storage changes in one save, after first
+// removing every key when clear is set, and returns the plugin's storage
+// afterwards. Nothing changes unless the whole batch fits; a batch that
+// changes nothing is not saved.
+func (service *Service) StorageUpdate(ctx context.Context, id string, changes map[string]*string, clear bool) (Values, error) {
+	return service.writeStorage(ctx, id, func(values map[string]string) (map[string]string, error) {
+		return domain.WithStorageChanges(values, changes, clear)
+	})
+}
+
+func (service *Service) writeStorage(ctx context.Context, id string, change func(map[string]string) (map[string]string, error)) (Values, error) {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
 	current, err := service.current()
@@ -293,13 +388,19 @@ func (service *Service) StorageSet(ctx context.Context, id, key string, value *s
 	if !exists {
 		return Values{}, ErrNotFound
 	}
-	values, err := domain.WithStorage(entry.plugin.Storage, key, value)
+	if entry.problem != "" {
+		return Values{}, ErrBroken
+	}
+	values, err := change(entry.plugin.Storage)
 	if err != nil {
 		return Values{}, err
 	}
 	answer := Values{Values: values}
 	if fits, err := service.fits(answer); err != nil || !fits {
 		return Values{}, errors.Join(ErrStorageFull, err)
+	}
+	if maps.Equal(values, entry.plugin.Storage) {
+		return answer, nil
 	}
 	entry.plugin.Storage = values
 	next := maps.Clone(current)
@@ -319,6 +420,9 @@ func (service *Service) lookup(id string) (installed, error) {
 	entry, exists := service.plugins[id]
 	if !exists {
 		return installed{}, ErrNotFound
+	}
+	if entry.problem != "" {
+		return installed{}, ErrBroken
 	}
 	return entry, nil
 }
@@ -376,7 +480,7 @@ func (service *Service) fits(answer any) (bool, error) {
 }
 
 func (service *Service) timestamp() time.Time {
-	return service.now().UTC().Truncate(time.Second)
+	return service.now().UTC().Truncate(time.Millisecond)
 }
 
 func summaries(plugins map[string]installed) []Summary {
@@ -391,34 +495,53 @@ func summaries(plugins map[string]installed) []Summary {
 }
 
 func summary(entry installed) Summary {
-	pkg := entry.plugin.Package
+	plugin := entry.plugin
+	if entry.problem != "" {
+		plugin = listed(plugin)
+	}
+	pkg := plugin.Package
 	return Summary{
-		ID:          pkg.ID,
-		Name:        pkg.Name,
-		Version:     pkg.Version,
-		Author:      pkg.Author,
-		Description: pkg.Description,
-		Permissions: slices.Clone(pkg.Permissions),
-		Granted:     append([]string{}, entry.plugin.Granted...),
-		Enabled:     entry.plugin.Enabled,
-		InstalledAt: entry.plugin.InstalledAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   entry.plugin.UpdatedAt.UTC().Format(time.RFC3339),
-		SizeBytes:   entry.sizeBytes,
-		HasScript:   pkg.Script != "",
-		HasCSS:      pkg.CSS != "",
-		HasTheme:    pkg.Theme != nil,
+		ID:            pkg.ID,
+		Name:          pkg.Name,
+		Version:       pkg.Version,
+		Author:        pkg.Author,
+		Description:   pkg.Description,
+		Homepage:      pkg.Homepage,
+		MinAppVersion: pkg.MinAppVersion,
+		Permissions:   append([]string{}, pkg.Permissions...),
+		Granted:       append([]string{}, plugin.Granted...),
+		Enabled:       plugin.Enabled && entry.problem == "",
+		InstalledAt:   plugin.InstalledAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:     plugin.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		SizeBytes:     entry.sizeBytes,
+		HasScript:     pkg.Script != "",
+		HasCSS:        pkg.CSS != "",
+		HasTheme:      pkg.Theme != nil,
+		HasSettings:   len(pkg.Settings) > 0,
+		Problem:       entry.problem,
 	}
 }
 
-func detail(entry installed) Detail {
-	pkg := entry.plugin.Package
-	var theme *domain.Theme
-	if pkg.Theme != nil {
-		copied := *pkg.Theme
-		copied.Tokens = maps.Clone(copied.Tokens)
-		theme = &copied
+// listed is what of a refused record can be shown: fields that break their
+// own rule are blank and the grant is kept only if it still fits.
+func listed(record domain.Plugin) domain.Plugin {
+	plugin := record
+	plugin.Package = record.Package.Listed()
+	granted, err := plugin.Package.Grant(record.Granted)
+	if err != nil || !slices.Equal(granted, record.Granted) {
+		granted = []string{}
 	}
-	return Detail{Plugin: summary(entry), Script: pkg.Script, CSS: pkg.CSS, Theme: theme}
+	plugin.Granted = granted
+	return plugin
+}
+
+func detail(entry installed) Detail {
+	pkg := entry.plugin.Package.Normalized()
+	settings := pkg.Settings
+	if settings == nil {
+		settings = []domain.Setting{}
+	}
+	return Detail{Plugin: summary(entry), Script: pkg.Script, CSS: pkg.CSS, Theme: pkg.Theme, Settings: settings}
 }
 
 // encodedSize measures value exactly as the stdio server writes it: compact,

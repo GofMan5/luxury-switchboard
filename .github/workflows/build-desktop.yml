@@ -98,6 +98,7 @@ jobs:
           pnpm --dir frontend lint
           pnpm --dir frontend typecheck
           pnpm --dir frontend test
+          node --test scripts/plugin.test.mjs
           go -C backend test ./...
           go -C backend vet ./...
           go -C backend mod verify

@@ -136,6 +136,7 @@ export function ServicesProvider({ children }: PropsWithChildren) {
           workers: new BlobWorkerFactory(),
           extensions,
           notify: (announcement) => notifications.announce(announcement),
+          clipboard: (text) => navigator.clipboard.writeText(text),
           navigate: (route) => { window.location.hash = route },
           // Pages this window shows, so a plugin cannot navigate to a page
           // the control plane did not advertise.

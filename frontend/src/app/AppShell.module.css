@@ -1,6 +1,6 @@
 /* The frame: a darker rail and a one-line instrument bar around the work.
    The rail is separated by a hairline, never a shadow. */
-.shell { display: grid; width: 100%; height: 100dvh; min-width: 0; grid-template-columns: 216px minmax(0, 1fr); background: var(--bg-canvas); }
+.shell { display: grid; width: 100%; height: 100dvh; min-width: 0; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); background: var(--bg-canvas); }
 .sidebar { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border-subtle); background: var(--bg-chrome); }
 
 .brand { display: flex; min-height: 48px; flex-shrink: 0; align-items: center; gap: 9px; padding: 0 14px; }
@@ -26,6 +26,15 @@
 .navItem:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .navItem[data-active='true'] { color: var(--text-primary); background: var(--bg-nav-selected); font-weight: 500; box-shadow: inset 0 0 0 1px var(--border-subtle); }
 .navItem[data-active='true'] svg { color: var(--accent); }
+/* A plugin page's count: quiet unless its owner gives it a tone. A folded rail
+   keeps it as a dot on the icon; the text stays in the accessible name. */
+.navItem .navBadge { --badge-tone: var(--text-muted); flex: none; min-width: 18px; height: 16px; margin-left: auto; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 5px; color: var(--text-muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; font-weight: 500; line-height: 14px; text-align: center; }
+.navItem .navBadge:not([data-tone='neutral']) { border-color: color-mix(in srgb, var(--badge-tone) 32%, transparent); color: var(--badge-tone); background: color-mix(in srgb, var(--badge-tone) 8%, transparent); }
+.navBadge[data-tone='info'] { --badge-tone: var(--status-info); }
+.navBadge[data-tone='success'] { --badge-tone: var(--status-success); }
+.navBadge[data-tone='warning'] { --badge-tone: var(--status-warning); }
+.navBadge[data-tone='danger'] { --badge-tone: var(--status-danger); }
+.navItem .navBadge[data-tone='danger'] { color: var(--text-danger); }
 
 .sidebarFooter { display: flex; min-height: 44px; flex-shrink: 0; align-items: center; gap: 6px; border-top: 1px solid var(--border-subtle); padding: 8px 10px; color: var(--text-muted); font-size: var(--fs-xs); }
 .version { overflow: hidden; margin-left: auto; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -38,7 +47,7 @@
 .updatePill:active { background: var(--accent-soft); }
 
 .workspace { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
-.runtimeBar { display: flex; min-width: 0; height: 44px; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 0 12px 0 var(--gutter); background: var(--bg-chrome); }
+.runtimeBar { display: flex; min-width: 0; height: var(--runtime-bar-height); flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 0 12px 0 var(--gutter); background: var(--bg-chrome); }
 .runtimeState { display: flex; min-width: 0; flex: 1; align-items: center; gap: 10px; overflow: hidden; white-space: nowrap; }
 .relayState { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; }
 .relayState strong { color: var(--text-primary); font-size: var(--fs-sm); font-weight: 600; }
@@ -53,6 +62,9 @@
 .readout[data-tone='success'] .readoutTick { background: var(--status-success); }
 .readout[data-tone='warning'] .readoutTick { background: var(--status-warning); }
 .readout[data-tone='danger'] .readoutTick { background: var(--status-danger); }
+.readoutMore { display: inline-flex; height: 22px; flex: 0 0 auto; align-items: center; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 0 7px; color: var(--text-muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; font-weight: 500; cursor: default; transition: color var(--motion-fast), border-color var(--motion-fast); }
+.readoutMore:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+.readoutMore:focus-visible { outline-offset: -2px; }
 .runtimeActions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .runtimeBar :global(.button) { min-height: 28px; padding: 0 10px; }
 .safeMode { display: inline-flex; min-height: 26px; align-items: center; gap: 6px; border: 1px solid color-mix(in srgb, var(--status-warning) 40%, transparent); border-radius: var(--radius-control); padding: 0 8px; color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 8%, transparent); font: inherit; font-size: var(--fs-xs); font-weight: 500; cursor: pointer; transition: background var(--motion-fast); }
@@ -62,7 +74,7 @@
 .content:focus-visible { outline: 0; }
 
 @media (min-width: 960px) {
-  .shell[data-sidebar='collapsed'] { grid-template-columns: 52px minmax(0, 1fr); }
+  .shell[data-sidebar='collapsed'] { grid-template-columns: var(--sidebar-width-collapsed) minmax(0, 1fr); }
   .shell[data-sidebar='collapsed'] .brand { justify-content: center; padding: 0; }
   .shell[data-sidebar='collapsed'] .brandName,
   .shell[data-sidebar='collapsed'] .navItem span,
@@ -78,9 +90,10 @@
   .shell[data-sidebar='collapsed'] .navItem { justify-content: center; padding: 0; }
   .shell[data-sidebar='collapsed'] .sidebarFooter { flex-direction: column; justify-content: center; padding-inline: 6px; }
   .shell[data-sidebar='collapsed'] .updatePill { padding: 0 6px; }
+  .shell[data-sidebar='collapsed'] .navItem .navBadge { position: absolute; top: 5px; right: 7px; display: block; width: 7px; min-width: 0; height: 7px; margin: 0; overflow: hidden; border: 0; border-radius: 50%; padding: 0; color: transparent; background: var(--badge-tone); box-shadow: 0 0 0 2px var(--bg-chrome); font-size: 0; }
 }
 @media (max-width: 1279px) {
-  .shell { grid-template-columns: 200px minmax(0, 1fr); }
+  .shell { grid-template-columns: min(var(--sidebar-width), 200px) minmax(0, 1fr); }
   .routeLabel { display: none; }
   .readout { max-width: 160px; }
 }
@@ -88,7 +101,7 @@
   .route, .routeDivider { display: none; }
 }
 @media (max-width: 959px) {
-  .shell { grid-template-columns: 52px minmax(0, 1fr); }
+  .shell { grid-template-columns: var(--sidebar-width-collapsed) minmax(0, 1fr); }
   .brand { justify-content: center; padding: 0; }
   .brandName, .navItem span, .version, .updatePill span, .navSectionLabel, .collapse, .paletteTrigger span, .paletteTrigger kbd { display: none; }
   .paletteTrigger { justify-content: center; margin-inline: 8px; padding: 0; }
@@ -96,26 +109,27 @@
   .navSection + .navSection { border-top: 1px solid var(--border-subtle); padding-top: 10px; }
   .navSection:last-child { padding-top: 10px; }
   .navItem { justify-content: center; padding: 0; }
+  /* .shell lifts this past the toned rule above, so the dot keeps full tone. */
+  .shell .navItem .navBadge { position: absolute; top: 5px; right: 7px; display: block; width: 7px; min-width: 0; height: 7px; margin: 0; overflow: hidden; border: 0; border-radius: 50%; padding: 0; color: transparent; background: var(--badge-tone); box-shadow: 0 0 0 2px var(--bg-chrome); font-size: 0; }
   .sidebarFooter { justify-content: center; padding-inline: 6px; }
   .updatePill { padding: 0 6px; }
   .runtimeBar { padding-left: 16px; }
-  .readout:nth-of-type(n+2) { display: none; }
 }
 /* A short window tightens the rail before it ever has to scroll: every page
    stays one glance away at 600px high. Past that the rail still scrolls,
    with a thin bar so the overflow is never invisible. */
 @media (max-height: 760px) {
   .navigation { gap: 8px; scrollbar-width: thin; }
-  .navItem { min-height: 28px; }
+  .navItem { min-height: min(var(--nav-item), 28px); }
   .navSectionLabel { padding-bottom: 2px; }
   .navSection:last-child { padding-top: 8px; }
 }
 @media (max-height: 760px) and (max-width: 959px) {
   .navigation { gap: 6px; }
   .navSection + .navSection, .navSection:last-child { padding-top: 6px; }
-  .navItem { min-height: 26px; }
+  .navItem { min-height: min(var(--nav-item), 26px); }
 }
 @media (max-width: 600px) {
   .runtimeBar { padding-left: 12px; }
-  .address, .runtimeState .divider, .readout { display: none; }
+  .address, .runtimeState .divider { display: none; }
 }

@@ -3,8 +3,9 @@ import { PLUGIN_LIMIT, packageSizeProblem, type PluginPackage } from '../domain/
 import { effectiveGrants } from '../domain/permissions'
 import { IDLE_RUNTIME, splitPageKey, type PluginRuntime, type PluginSummary } from '../domain/plugin'
 import type { PageEvent } from '../domain/protocol'
+import { acceptValue, settingStorageKey, settingValues, valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
 import { PluginHost, revisionOf, type PluginPage } from './plugin-host'
-import type { Announcement, BootContext, ControlPort, PluginsPort, WorkerFactory } from './ports'
+import type { Announcement, BootContext, ConfirmRequest, ControlPort, PluginsPort, WorkerFactory } from './ports'
 
 export interface PluginsState {
   readonly phase: 'loading' | 'ready' | 'error'
@@ -17,7 +18,22 @@ export interface PluginsState {
   readonly error: string
   /** Launched in safe mode: plugins are listed and manageable, never run. */
   readonly safeMode: boolean
+  /** The question a plugin is asking the operator right now, if any; others
+   * wait their turn. */
+  readonly asking: PluginQuestion | null
 }
+
+export interface PluginQuestion extends ConfirmRequest {
+  readonly id: number
+}
+
+/** A plugin's settings as the editor shows them. */
+export interface PluginSettingsView {
+  readonly settings: readonly PluginSetting[]
+  readonly values: Readonly<Record<string, SettingValue>>
+}
+
+export type SaveResult = { readonly ok: true } | { readonly ok: false; readonly message: string }
 
 export type InstallResult = { readonly ok: true; readonly plugin: PluginSummary } | { readonly ok: false; readonly message: string }
 
@@ -27,6 +43,7 @@ export interface PluginsDeps {
   readonly workers: WorkerFactory
   readonly extensions: ExtensionPoints
   readonly notify: (announcement: Announcement) => void
+  readonly clipboard: (text: string) => Promise<void>
   readonly navigate: (route: string) => void
   readonly isRoute: (route: string) => boolean
   readonly app: BootContext['app']
@@ -62,10 +79,12 @@ export class PluginsModel {
   #latest: readonly PluginSummary[] | null = null
   #disposed = false
   #notifyScheduled = false
+  #questions: { readonly question: PluginQuestion; readonly settle: (answer: boolean) => void }[] = []
+  #nextQuestion = 1
 
   constructor(deps: PluginsDeps) {
     this.#deps = deps
-    this.#state = { phase: 'loading', plugins: [], runtimes: {}, pages: {}, pending: '', error: '', safeMode: deps.safeMode }
+    this.#state = { phase: 'loading', plugins: [], runtimes: {}, pages: {}, pending: '', error: '', safeMode: deps.safeMode, asking: null }
   }
 
   snapshot = (): PluginsState => this.#state
@@ -152,6 +171,48 @@ export class PluginsModel {
     this.#hosts.get(parts.pluginId)?.dispatch(parts.pageId, event)
   }
 
+  /** The operator answered the question on screen. */
+  answer(id: number, yes: boolean): void {
+    const index = this.#questions.findIndex((entry) => entry.question.id === id)
+    if (index === -1) return
+    const [entry] = this.#questions.splice(index, 1)
+    entry.settle(yes)
+    this.#showQuestion()
+  }
+
+  /** A plugin's declared settings and their current values. */
+  async loadSettings(id: string): Promise<PluginSettingsView> {
+    const [detail, storage] = await Promise.all([this.#deps.port.get(id), this.#deps.port.storageGet(id)])
+    return { settings: detail.settings, values: settingValues(detail.settings, storage) }
+  }
+
+  /**
+   * Saves the operator's setting values in one write; a value equal to the
+   * default is stored as no value, so a later default change reaches it. A
+   * running plugin hears about the change right away.
+   */
+  async saveSettings(id: string, settings: readonly PluginSetting[], values: Readonly<Record<string, unknown>>): Promise<SaveResult> {
+    if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
+    const changes: Record<string, string | null> = {}
+    for (const setting of settings) {
+      if (!Object.hasOwn(values, setting.key)) continue
+      const value = acceptValue(setting, values[setting.key])
+      if (value === null) return { ok: false, message: `${setting.label}: ${valueProblem(setting, values[setting.key])}` }
+      changes[settingStorageKey(setting.key)] = value === setting.default ? null : JSON.stringify(value)
+    }
+    if (Object.keys(changes).length === 0) return { ok: true }
+    this.#set({ ...this.#state, pending: id, error: '' })
+    try {
+      const stored = await this.#deps.port.storageUpdate(id, changes)
+      this.#hosts.get(id)?.storageChanged(stored)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
   clearError(): void {
     if (this.#state.error) this.#set({ ...this.#state, error: '' })
   }
@@ -162,6 +223,7 @@ export class PluginsModel {
     this.#unsubscribe = null
     for (const host of this.#hosts.values()) host.stop()
     this.#hosts.clear()
+    for (const entry of this.#questions.splice(0)) entry.settle(false)
     this.#listeners.clear()
   }
 
@@ -210,7 +272,8 @@ export class PluginsModel {
     for (const plugin of plugins) {
       if (this.#disposed) return
       const host = this.#hosts.get(plugin.id)
-      if (!plugin.enabled) {
+      // A plugin this version cannot use never runs, whatever its switch says.
+      if (!plugin.enabled || plugin.problem) {
         if (host) {
           host.stop('disabled')
           this.#hosts.delete(plugin.id)
@@ -219,7 +282,7 @@ export class PluginsModel {
       }
       if (this.#deps.safeMode) continue
       const grants = effectiveGrants(plugin.permissions, plugin.granted)
-      const revision = revisionOf(plugin.updatedAt, grants)
+      const revision = revisionOf(plugin, grants)
       if (host && host.revision === revision && (host.runtime().state !== 'crashed' || !restartCrashed)) continue
       host?.stop()
       this.#hosts.delete(plugin.id)
@@ -230,8 +293,12 @@ export class PluginsModel {
 
   async #start(plugin: PluginSummary, grants: ReturnType<typeof effectiveGrants>): Promise<void> {
     let detail
+    let storage: Record<string, string> | null = null
     try {
       detail = await this.#deps.port.get(plugin.id)
+      // Settings are part of the boot facts, so a plugin that has them
+      // starts with the operator's values, never the defaults first.
+      if (detail.settings.length > 0) storage = await this.#deps.port.storageGet(plugin.id)
     } catch (error) {
       this.#loadFailures.set(plugin.id, `The plugin could not be loaded: ${describe(error)}.`)
       return
@@ -244,13 +311,34 @@ export class PluginsModel {
       storage: this.#deps.port,
       extensions: this.#deps.extensions,
       notify: this.#deps.notify,
+      confirm: (request, signal) => this.#ask(request, signal),
+      clipboard: this.#deps.clipboard,
       navigate: this.#deps.navigate,
       isRoute: this.#deps.isRoute,
       app: this.#deps.app,
       onChange: () => this.#schedulePublish(),
-    })
+    }, storage)
     this.#hosts.set(plugin.id, host)
     host.start()
+  }
+
+  /** Queues a plugin's question; it resolves false when the plugin stops
+   * before the operator answers. Hosts allow one open question each, so the
+   * queue is bounded by the number of plugins. */
+  #ask(request: ConfirmRequest, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted || this.#disposed) return Promise.resolve(false)
+    return new Promise<boolean>((resolve) => {
+      const question: PluginQuestion = { ...request, id: this.#nextQuestion++ }
+      const abort = () => this.answer(question.id, false)
+      signal.addEventListener('abort', abort, { once: true })
+      this.#questions.push({ question, settle: (answer) => { signal.removeEventListener('abort', abort); resolve(answer) } })
+      this.#showQuestion()
+    })
+  }
+
+  #showQuestion(): void {
+    const asking = this.#questions[0]?.question ?? null
+    if (asking !== this.#state.asking) this.#set({ ...this.#state, asking })
   }
 
   /** Hosts change state in bursts (a render, a log line, a status); one

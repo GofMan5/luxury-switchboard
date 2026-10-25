@@ -399,6 +399,7 @@ fn allowed_method(method: &str) -> bool {
             | "plugins.remove"
             | "plugins.storage.get"
             | "plugins.storage.set"
+            | "plugins.storage.update"
             | "guardrails.status"
             | "guardrails.findings"
             | "guardrails.clear"

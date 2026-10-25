@@ -128,7 +128,36 @@
 .problems strong { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .problems ul { display: grid; gap: 3px; margin: 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.5; }
 .problems li { overflow-wrap: anywhere; }
-.reviewDescription { color: var(--text-secondary); line-height: 1.55; overflow-wrap: anywhere; text-wrap: pretty; }
+.reviewDescription { color: var(--text-secondary); line-height: 1.55; overflow-wrap: anywhere; text-wrap: pretty; white-space: pre-line; }
+.asker { color: var(--text-secondary); font-weight: 600; overflow-wrap: anywhere; }
+.footerStart { margin-right: auto; }
+
+/* Settings editor: label and control share a row; hint and problem sit under. */
+.settingsDialog { --dialog-width: 600px; }
+.settingsError { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--text-danger); font-size: var(--fs-sm); }
+.settingsError p { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.settingList { display: grid; }
+.setting { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 240px); align-items: center; gap: 4px 16px; border-bottom: 1px solid var(--border-subtle); padding: 10px 0; }
+.setting:first-child { padding-top: 0; }
+.setting:last-child { border-bottom: 0; padding-bottom: 0; }
+.settingLabel { min-width: 0; color: var(--text-primary); font-weight: 500; overflow-wrap: anywhere; }
+.setting[data-changed='true'] .settingLabel::after { display: inline-block; width: 5px; height: 5px; margin-left: 7px; border-radius: 50%; background: var(--accent); content: ''; vertical-align: middle; }
+.settingControl { display: flex; min-width: 0; justify-content: flex-end; }
+.settingControl input, .settingControl select { width: 100%; }
+.setting[data-type='toggle'] .settingControl { justify-content: flex-end; }
+.settingNumber { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.settingHint, .settingProblem { grid-column: 1 / -1; max-width: 72ch; font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; text-wrap: pretty; }
+.settingHint { color: var(--text-muted); }
+.settingProblem { color: var(--text-danger); }
+.setting[data-invalid='true'] .settingLabel { color: var(--text-danger); }
+
+/* A stored plugin this version cannot use. */
+.problemNote { display: flex; align-items: flex-start; gap: 6px; color: var(--status-warning); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.problemNote svg { flex: 0 0 auto; margin-top: 3px; }
+.homepage { display: inline-flex; max-width: 100%; align-items: center; gap: 4px; border: 0; padding: 0; color: var(--text-secondary); background: none; font: inherit; text-align: left; text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; cursor: pointer; overflow-wrap: anywhere; }
+.homepage:hover { color: var(--text-primary); text-decoration-color: currentColor; }
+.homepage:focus-visible { border-radius: 2px; outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.homepage svg { flex: 0 0 auto; }
 .grants { display: grid; min-width: 0; margin: 0; border: 0; padding: 0; }
 .grants legend { margin-bottom: 4px; padding: 0; color: var(--text-muted); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .grant { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 9px 0; }
@@ -152,6 +181,9 @@
 }
 @media (max-width: 600px) {
   .banner { padding-inline: min(var(--gutter), 14px); }
+  .setting { grid-template-columns: minmax(0, 1fr); }
+  .setting:not([data-type='toggle']) .settingControl { justify-content: stretch; }
+  .setting[data-type='toggle'] { grid-template-columns: minmax(0, 1fr) auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .knob, .chevron { transition: none; }

@@ -8,7 +8,9 @@ import {
   normalizeAppearance,
   resolveTheme,
   themeChoices,
+  themeControls,
   tokensStylesheet,
+  UI_FONT_STACKS,
 } from './appearance'
 import { parseAppearanceFile, serializeAppearance } from './appearance-file'
 import { BUILTIN_THEMES, builtinTheme } from './themes'
@@ -128,6 +130,72 @@ describe('computeTokens', () => {
     const appearance = { ...APPEARANCE_DEFAULTS, tokens: { '--row-height': '26px' } }
     expect(computeTokens(appearance, graphite)['--row-height']).toBe('26px')
     expect(computeTokens(appearance, graphite, false)['--row-height']).toBe('34px')
+  })
+
+  describe('with a contributed theme', () => {
+    const contribution = {
+      id: 'plugin:slab',
+      name: 'Slab',
+      scheme: 'dark' as const,
+      tokens: {
+        '--accent': '#9b8cf5',
+        '--radius-control': '0px',
+        '--radius-panel': '0px',
+        '--font-ui': 'Georgia, serif',
+        '--fs-base': '15px',
+        '--nav-item': '40px',
+        '--focus-ring': '#ffffff',
+        '--accent-line': '#9b8cf5',
+      },
+    }
+    const slab = resolveTheme('plugin:slab', [contribution], false)
+
+    it('keeps the control-owned tokens the theme set while each control is at its default', () => {
+      const tokens = computeTokens(APPEARANCE_DEFAULTS, slab)
+      expect(tokens['--radius-control']).toBe('0px')
+      expect(tokens['--radius-panel']).toBe('0px')
+      // What the theme left out still comes from the control.
+      expect(tokens['--radius-modal']).toBe('12px')
+      expect(tokens['--font-ui']).toBe('Georgia, serif')
+      expect(tokens['--fs-base']).toBe('15px')
+      expect(tokens['--fs-sm']).toBe('12px')
+      expect(tokens['--nav-item']).toBe('40px')
+      expect(tokens['--row-height']).toBe('34px')
+    })
+
+    it('hands the tokens back to a control the user moved off its default', () => {
+      const tokens = computeTokens({ ...APPEARANCE_DEFAULTS, radius: 'round', uiFont: 'system', textSize: 12, density: 'compact' }, slab)
+      expect(tokens['--radius-control']).toBe('9px')
+      expect(tokens['--font-ui']).toBe(UI_FONT_STACKS.system)
+      expect(tokens['--fs-base']).toBe('12px')
+      expect(tokens['--nav-item']).toBe('28px')
+    })
+
+    it('keeps the accent shades it set until the user picks an accent', () => {
+      expect(computeTokens(APPEARANCE_DEFAULTS, slab)['--focus-ring']).toBe('#ffffff')
+      expect(computeTokens(APPEARANCE_DEFAULTS, slab)['--accent-line']).toBe('#9b8cf5')
+      // Shades it did not set derive from its accent as usual.
+      expect(computeTokens(APPEARANCE_DEFAULTS, slab)['--action-primary']).toBe('#9b8cf5')
+      const picked = computeTokens({ ...APPEARANCE_DEFAULTS, accent: '#5ea3f7' }, slab)
+      expect(picked['--focus-ring']).toContain('#5ea3f7')
+      expect(picked['--accent-line']).toContain('#5ea3f7')
+    })
+
+    it('still lets the user override any of them by name', () => {
+      expect(computeTokens({ ...APPEARANCE_DEFAULTS, tokens: { '--radius-control': '4px' } }, slab)['--radius-control']).toBe('4px')
+    })
+
+    it('names the controls the theme sets, and none for a builtin', () => {
+      expect(themeControls(slab)).toEqual(['accent', 'density', 'textSize', 'uiFont', 'radius'])
+      expect(themeControls(graphite)).toEqual([])
+      expect(themeControls(resolveTheme('plugin:dusk', [{ id: 'plugin:dusk', name: 'Dusk', scheme: 'dark', tokens: { '--accent': '#9b8cf5' } }], false))).toEqual([])
+    })
+
+    it('does not let a token the safety filter refused hold a control', () => {
+      const sneaky = resolveTheme('plugin:x', [{ id: 'plugin:x', name: 'X', scheme: 'dark', tokens: { '--radius-panel': 'url(x)' } }], false)
+      expect(computeTokens(APPEARANCE_DEFAULTS, sneaky)['--radius-panel']).toBe('8px')
+      expect(themeControls(sneaky)).toEqual([])
+    })
   })
 
   it('writes one doubled-specificity root rule carrying the scheme', () => {

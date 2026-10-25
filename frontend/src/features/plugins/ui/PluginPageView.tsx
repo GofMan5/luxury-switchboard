@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { LifeBuoy, Puzzle, RotateCcw } from 'lucide-react'
 import { pluginIcon } from '../../../app/plugin-icons'
 import { EmptyState } from '../../../shared/ui/chrome'
@@ -6,7 +6,7 @@ import { Button } from '../../../shared/ui/Button'
 import { restartInSafeMode } from '../../../shared/runtime/safe-mode'
 import type { PageEvent } from '../domain/protocol'
 import { splitPageKey } from '../domain/plugin'
-import { PluginTree } from './PluginTree'
+import { PluginTree, type FormValues } from './PluginTree'
 import { usePlugins } from './usePlugins'
 import styles from './PluginsPage.module.css'
 
@@ -25,12 +25,19 @@ export default function PluginPageView({ pageId }: { readonly pageId: string }) 
   const registered = page !== undefined
 
   const send = useCallback((event: PageEvent) => model.sendPageEvent(pageId, event), [model, pageId])
+  // The page owns its form so show and hide tell the plugin what the operator
+  // has entered, like every other event from the page. Fields fill it in their
+  // layout effects, before this effect runs, and leave it only after hide has
+  // read it. A different page starts with an empty form.
+  const [form, setForm] = useState(() => ({ pageId, values: new Map() as FormValues }))
+  if (form.pageId !== pageId) setForm({ pageId, values: new Map() })
+  const values = form.values
 
   useEffect(() => {
     if (!registered || !running) return
-    send({ kind: 'show', form: {} })
-    return () => send({ kind: 'hide', form: {} })
-  }, [registered, running, send])
+    send({ kind: 'show', form: Object.fromEntries(values) })
+    return () => send({ kind: 'hide', form: Object.fromEntries(values) })
+  }, [registered, running, send, values])
 
   if (!page) {
     const reason = !parts ? 'This address does not name a plugin page.'
@@ -81,7 +88,7 @@ export default function PluginPageView({ pageId }: { readonly pageId: string }) 
       </header>
       <div className="page-body">
         {page.problem ? <p className={styles.notice} data-tone="danger" role="alert">The plugin sent a page this window cannot draw: {page.problem}</p> : null}
-        {page.tree ? <PluginTree tree={page.tree} disabled={!running} onEvent={send} /> : (
+        {page.tree ? <PluginTree tree={page.tree} disabled={!running} onEvent={send} values={values} /> : (
           <EmptyState icon={Icon} title={`${page.title} is loading`} hint="The plugin has not drawn this page yet." height={240} />
         )}
       </div>

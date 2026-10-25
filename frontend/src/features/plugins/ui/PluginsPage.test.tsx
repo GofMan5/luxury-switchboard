@@ -4,12 +4,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ServicesContext, type AppServices } from '../../../app/services'
 import { ExtensionPoints } from '../../../shared/contracts/extensions'
 import { PluginsModel } from '../application/plugins-model'
-import { FakeControl, FakeWorkers, MemoryPluginsPort } from '../application/test-fakes'
+import { FakeControl, FakeWorkers, MemoryPluginsPort, summary } from '../application/test-fakes'
 import { EXAMPLE_PLUGINS } from '../domain/examples'
 import type { PluginPackage } from '../domain/manifest'
 import { checkTree } from '../domain/ui-tree'
 import type { PageEvent } from '../domain/protocol'
+import type { PluginSetting } from '../domain/settings'
 import { InstallReviewDialog } from './PluginDialogs'
+import { QuestionDialog } from './PluginQuestion'
 import { PluginTree } from './PluginTree'
 import PluginsPage from './PluginsPage'
 
@@ -41,11 +43,7 @@ describe('InstallReviewDialog', () => {
 
   it('keeps earlier choices on an update and marks new permissions', () => {
     const onInstall = vi.fn()
-    const existing = {
-      id: 'acme.tools', name: 'Acme tools', version: '1.0.0', author: 'Acme', description: '',
-      permissions: ['ui:pages', 'control:sensitive'], granted: ['control:sensitive'], enabled: true,
-      installedAt: '', updatedAt: '', sizeBytes: 1, hasScript: true, hasCss: false, hasTheme: false,
-    }
+    const existing = summary({ version: '1.0.0', permissions: ['ui:pages', 'control:sensitive'], granted: ['control:sensitive'] })
     render(<InstallReviewDialog pkg={pkg} existing={existing} pending={false} error="" onCancel={() => undefined} onInstall={onInstall} />)
     expect(screen.getByText('1.0.0 → 2.0.0. Its stored data is kept and it is turned on.')).toBeTruthy()
     expect((screen.getByRole('checkbox', { name: /Credentials and exposure/u }) as HTMLInputElement).checked).toBe(true)
@@ -91,21 +89,33 @@ describe('PluginTree', () => {
     ])
   })
 
-  it('makes table rows keyboard-activatable and disables controls while the plugin is not running', () => {
+  it('gives each actionable table row a real button and disables controls while the plugin is not running', () => {
     const onEvent = vi.fn()
     const raw = { type: 'stack', children: [
-      { type: 'table', columns: [{ key: 'name', label: 'Name' }], rows: [{ id: 'n1', name: 'North' }], rowAction: 'open' },
+      { type: 'table', columns: [{ key: 'name', label: 'Name' }, { key: 'ms', label: 'ms' }], rows: [{ id: 'n1', name: 'North', ms: 12 }, { id: 2, name: '', ms: 3 }], rowAction: 'open' },
       { type: 'button', text: 'Go', action: 'go' },
     ] }
     const { rerender } = render(<PluginTree disabled={false} onEvent={onEvent} tree={tree(raw)} />)
-    const row = screen.getByText('North').closest('tr') as HTMLElement
-    expect(row.tabIndex).toBe(0)
-    fireEvent.keyDown(row, { key: 'Enter' })
-    expect(onEvent).toHaveBeenCalledWith({ kind: 'action', action: 'open', row: 'n1', form: {} })
+    // The keyboard reaches a row through the button in its first cell; the row itself is not a tab stop.
+    const open = screen.getByRole('button', { name: 'North' }) as HTMLButtonElement
+    expect(open.closest('td')?.cellIndex).toBe(0)
+    expect(open.closest('tr')?.hasAttribute('tabindex')).toBe(false)
+    open.focus()
+    expect(document.activeElement).toBe(open)
+    // Enter and Space on a focused <button> are clicks; jsdom does not synthesise them, so click directly.
+    fireEvent.click(open)
+    expect(onEvent).toHaveBeenLastCalledWith({ kind: 'action', action: 'open', row: 'n1', form: {} })
+    // A row whose first cell is empty is still named, and the mouse may click anywhere on it.
+    expect(screen.getByRole('button', { name: 'Row 2' })).toBeTruthy()
+    fireEvent.click(screen.getByText('3'))
+    expect(onEvent).toHaveBeenLastCalledWith({ kind: 'action', action: 'open', row: 2, form: {} })
+    expect(onEvent).toHaveBeenCalledTimes(2)
 
     rerender(<PluginTree disabled onEvent={onEvent} tree={tree(raw)} />)
     expect((screen.getByRole('button', { name: 'Go' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByText('North').closest('tr') as HTMLElement).hasAttribute('tabindex')).toBe(false)
+    expect((screen.getByRole('button', { name: 'North' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByText('12'))
+    expect(onEvent).toHaveBeenCalledTimes(2)
   })
 
   it('renders text as text, never markup', () => {
@@ -120,7 +130,7 @@ async function page(safeMode = false) {
   const workers = new FakeWorkers()
   const model = new PluginsModel({
     port, control: new FakeControl(), workers, extensions: new ExtensionPoints(), safeMode,
-    notify: () => undefined, navigate: () => undefined, isRoute: () => true,
+    notify: () => undefined, navigate: () => undefined, isRoute: () => true, clipboard: async () => undefined,
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   })
   await model.connect()
@@ -176,5 +186,81 @@ describe('PluginsPage', () => {
     expect(screen.getByRole('status').textContent).toContain('Safe mode is on')
     expect(screen.getByRole('button', { name: 'Leave safe mode' })).toBeTruthy()
     model.dispose()
+  })
+})
+
+const SETTINGS: readonly PluginSetting[] = [
+  { key: 'limit', label: 'Row limit', description: 'Rows on the board.', type: 'number', default: 5, placeholder: '', min: 1, max: 50 },
+  { key: 'compact', label: 'Compact rows', description: '', type: 'toggle', default: false },
+  { key: 'period', label: 'Period', description: '', type: 'select', default: '1h', options: [{ value: '1h', label: 'Last hour' }, { value: '24h', label: 'Last day' }] },
+]
+
+describe('plugin settings, problems and questions', () => {
+  it('edits declared settings, refuses a bad value and saves the rest in one write', async () => {
+    const { port, model } = await page()
+    await act(() => model.install({ ...pkg, permissions: ['ui:pages'], settings: SETTINGS }, ['ui:pages']))
+    fireEvent.click(await screen.findByRole('button', { name: 'Acme tools settings' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Acme tools settings' })
+    const limit = await within(dialog).findByRole('textbox', { name: 'Row limit' }) as HTMLInputElement
+    expect(limit.value).toBe('5')
+    expect(within(dialog).getByText('Rows on the board. Default: 5.')).toBeTruthy()
+    const save = within(dialog).getByRole('button', { name: 'Save' }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+
+    fireEvent.change(limit, { target: { value: '500' } })
+    fireEvent.click(within(dialog).getByRole('switch', { name: /Compact rows/u }))
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Period' }), { target: { value: '24h' } })
+    fireEvent.click(save)
+    expect(await within(dialog).findByText('Enter a number from 1 to 50.')).toBeTruthy()
+    expect(limit.getAttribute('aria-invalid')).toBe('true')
+    expect(port.writes).toEqual([])
+
+    fireEvent.change(limit, { target: { value: '12' } })
+    fireEvent.click(save)
+    await waitFor(() => expect(screen.getByText('Settings for Acme tools saved.')).toBeTruthy())
+    expect(port.writes).toEqual([{ 'setting:limit': '12', 'setting:compact': 'true', 'setting:period': '"24h"' }])
+    model.dispose()
+  })
+
+  it('stores a value equal to the default as no value', async () => {
+    const { port, model } = await page()
+    await act(() => model.install({ ...pkg, permissions: ['ui:pages'], settings: SETTINGS }, ['ui:pages']))
+    port.values.set('acme.tools', { 'setting:limit': '9' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Acme tools settings' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Acme tools settings' })
+    expect((await within(dialog).findByRole('textbox', { name: /Row limit/u }) as HTMLInputElement).value).toBe('9')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reset to defaults' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(port.writes).toEqual([{ 'setting:limit': null, 'setting:compact': null, 'setting:period': null }]))
+    model.dispose()
+  })
+
+  it('shows why a stored plugin cannot run and keeps it off', async () => {
+    const { port, model } = await page()
+    port.plugins = [summary({ enabled: false, problem: 'Needs Luxury Switchboard 9.0.0 or later; this is 1.0.0.' })]
+    await act(() => model.refresh())
+    const toggle = screen.getByRole('switch', { name: 'Acme tools enabled' }) as HTMLButtonElement
+    expect(toggle.disabled).toBe(true)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText('Unavailable')).toBeTruthy()
+    expect(screen.getByText('Needs Luxury Switchboard 9.0.0 or later; this is 1.0.0.')).toBeTruthy()
+    model.dispose()
+  })
+
+  it('refuses a package that needs a newer app', () => {
+    render(<InstallReviewDialog pkg={{ ...pkg, minAppVersion: '9.0.0' }} existing={undefined} appVersion="1.0.65" pending={false} error="" onCancel={() => undefined} onInstall={() => undefined} />)
+    expect((screen.getByRole('button', { name: 'Install' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('alert').textContent).toContain('needs Luxury Switchboard 9.0.0 or later; this is 1.0.65')
+  })
+
+  it('names the asking plugin and answers with the chosen button', () => {
+    const onAnswer = vi.fn()
+    render(<QuestionDialog question={{ id: 1, pluginName: 'Acme tools', title: 'Ban 3 clients?', body: 'They lose access now.', confirmText: 'Ban', tone: 'danger' }} onAnswer={onAnswer} />)
+    const dialog = screen.getByRole('alertdialog', { name: 'Ban 3 clients?' })
+    expect(within(dialog).getByText('Acme tools')).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban' }))
+    expect(onAnswer).toHaveBeenLastCalledWith(true)
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(onAnswer).toHaveBeenLastCalledWith(false)
   })
 })

@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luxury-switchboard.local/schemas/plugin-package-1.json",
+  "title": "Luxury Switchboard plugin package (schema 1)",
+  "description": "One JSON file carrying the manifest and every asset. Editor help only: the app's own checks (pnpm plugin validate) are the authority, and some rules (byte sizes, which permissions need a script, CSS content) are not expressible here. In a source directory, plugin.json is this object without \"script\" and \"css\"; wire the schema up through editor settings, not a \"$schema\" key, which packages refuse.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "name", "version", "permissions"],
+  "properties": {
+    "schema": {
+      "description": "The package format version.",
+      "const": 1
+    },
+    "id": {
+      "description": "A stable, unique id: lowercase letters, digits, dots and dashes, 3–64 characters, starting and ending with a letter or digit. Reverse-domain style reads best (acme.latency-board).",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{1,62}[a-z0-9]$"
+    },
+    "name": {
+      "description": "Shown in the sidebar, the palette and the Plugins page.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*[^\\s\\u0000-\\u001f\\u007f-\\u009f][^\\u0000-\\u001f\\u007f-\\u009f]*$"
+    },
+    "version": {
+      "description": "The plugin's own version, e.g. \"1.2.0\".",
+      "type": "string",
+      "pattern": "^[0-9A-Za-z.+-]{1,32}$"
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+    },
+    "description": {
+      "description": "One or two sentences; line breaks are allowed.",
+      "type": "string",
+      "maxLength": 280,
+      "pattern": "^[^\\u0000-\\u0009\\u000b-\\u001f\\u007f-\\u009f]*$"
+    },
+    "homepage": {
+      "description": "An https:// page about the plugin, at most 200 bytes, without credentials. Shown as a link, never fetched. May be empty.",
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^(?:|https://[^\\s\\u0000-\\u001f\\u007f-\\u009f@/?#]+(?:[/?#][^\\s\\u0000-\\u001f\\u007f-\\u009f]*)?)$"
+    },
+    "minAppVersion": {
+      "description": "The oldest Luxury Switchboard it runs on, major.minor.patch.",
+      "type": "string",
+      "pattern": "^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$"
+    },
+    "permissions": {
+      "description": "What the plugin asks for; the operator grants each one on install. Every permission except ui:theme and ui:css needs a script.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/permission" }
+    },
+    "settings": {
+      "description": "Options the operator edits on the Plugins page; the script reads them with switchboard.settings. Non-empty settings need a script.",
+      "type": "array",
+      "maxItems": 24,
+      "items": { "$ref": "#/$defs/setting" }
+    },
+    "theme": {
+      "description": "A colour theme the operator can pick in Appearance. Needs ui:theme.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "scheme", "tokens"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*[^\\s\\u0000-\\u001f\\u007f-\\u009f][^\\u0000-\\u001f\\u007f-\\u009f]*$"
+        },
+        "scheme": { "enum": ["dark", "light"] },
+        "tokens": {
+          "description": "CSS custom properties (design tokens) and their values, e.g. \"--accent\": \"#7aa2f7\".",
+          "type": "object",
+          "maxProperties": 96,
+          "propertyNames": { "pattern": "^--[a-z][a-z0-9-]{0,47}$" },
+          "additionalProperties": { "$ref": "#/$defs/tokenValue" }
+        }
+      }
+    },
+    "css": {
+      "description": "A stylesheet applied to the whole window while enabled, at most 64 KiB (65536 bytes of UTF-8), without @import or </style. Needs ui:css. In a source directory this is style.css.",
+      "type": "string",
+      "maxLength": 65536,
+      "not": { "pattern": "@[iI][mM][pP][oO][rR][tT]|</[sS][tT][yY][lL][eE]" }
+    },
+    "script": {
+      "description": "The plugin's JavaScript, at most 128 KiB (131072 bytes of UTF-8), run in an isolated worker with the switchboard API. In a source directory this is main.js.",
+      "type": "string",
+      "maxLength": 131072
+    }
+  },
+  "$defs": {
+    "permission": {
+      "enum": [
+        "ui:theme",
+        "ui:css",
+        "ui:pages",
+        "ui:status",
+        "ui:commands",
+        "ui:notify",
+        "ui:clipboard",
+        "control:read",
+        "control:write",
+        "control:sensitive",
+        "storage"
+      ]
+    },
+    "tokenValue": {
+      "description": "A CSS value of at most 120 bytes; no ; { } < > \\ ` or control characters (byte limit; maxLength here is the character bound), and no url(, expression(, @import or javascript:.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[^;{}<>\\\\`\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "not": { "pattern": "[uU][rR][lL]\\(|[eE][xX][pP][rR][eE][sS][sS][iI][oO][nN]\\(|@[iI][mM][pP][oO][rR][tT]|[jJ][aA][vV][aA][sS][cC][rR][iI][pP][tT]:" }
+    },
+    "settingKey": {
+      "description": "A lowercase letter, then up to 31 letters, digits or underscores.",
+      "type": "string",
+      "pattern": "^[a-z][A-Za-z0-9_]{0,31}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*[^\\s\\u0000-\\u001f\\u007f-\\u009f][^\\u0000-\\u001f\\u007f-\\u009f]*$"
+    },
+    "settingDescription": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+    },
+    "placeholder": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+    },
+    "setting": {
+      "type": "object",
+      "required": ["key", "label", "type", "default"],
+      "properties": {
+        "type": { "enum": ["text", "number", "toggle", "select"] }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/textSetting" },
+        { "$ref": "#/$defs/numberSetting" },
+        { "$ref": "#/$defs/toggleSetting" },
+        { "$ref": "#/$defs/selectSetting" }
+      ]
+    },
+    "textSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/settingKey" },
+        "label": { "$ref": "#/$defs/label" },
+        "description": { "$ref": "#/$defs/settingDescription" },
+        "type": { "const": "text" },
+        "default": {
+          "description": "At most maxLength characters, no control characters.",
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+        },
+        "placeholder": { "$ref": "#/$defs/placeholder" },
+        "maxLength": { "type": "integer", "minimum": 1, "maximum": 256, "default": 256 }
+      }
+    },
+    "numberSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/settingKey" },
+        "label": { "$ref": "#/$defs/label" },
+        "description": { "$ref": "#/$defs/settingDescription" },
+        "type": { "const": "number" },
+        "default": { "description": "Within min and max when they are set.", "type": "number" },
+        "placeholder": { "$ref": "#/$defs/placeholder" },
+        "min": { "type": "number" },
+        "max": { "type": "number" }
+      }
+    },
+    "toggleSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/settingKey" },
+        "label": { "$ref": "#/$defs/label" },
+        "description": { "$ref": "#/$defs/settingDescription" },
+        "type": { "const": "toggle" },
+        "default": { "type": "boolean" }
+      }
+    },
+    "selectSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/settingKey" },
+        "label": { "$ref": "#/$defs/label" },
+        "description": { "$ref": "#/$defs/settingDescription" },
+        "type": { "const": "select" },
+        "default": { "description": "One of the option values.", "type": "string" },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "label"],
+            "properties": {
+              "value": { "$ref": "#/$defs/label" },
+              "label": { "$ref": "#/$defs/label" }
+            }
+          }
+        }
+      },
+      "required": ["options"]
+    }
+  }
+}

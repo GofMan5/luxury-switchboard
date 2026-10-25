@@ -1,4 +1,6 @@
-import type { ContributionTone } from '../../../shared/contracts/extensions'
+import type { BadgeContribution, ContributionTone } from '../../../shared/contracts/extensions'
+import { parseShortcut } from '../../../shared/keyboard/shortcuts'
+import { SETTING_PREFIX, type SettingValue } from './settings'
 
 /**
  * The message protocol between a plugin's worker and the host window. The
@@ -26,9 +28,20 @@ export const RUNTIME_LIMITS = {
   tooltip: 200,
   notifyTitle: 120,
   notifyBody: 1000,
+  badgeText: 8,
+  confirmText: 24,
+  clipboardText: 32_768,
   logText: 2000,
   /** Notifications a plugin may raise per minute. */
   notifyPerMinute: 6,
+  /** Storage writes a plugin may make per minute; each one is an encrypted
+   * save of the plugin store. */
+  storageWritesPerMinute: 120,
+  /** Entries in one storage.setMany. */
+  storageBatch: 64,
+  /** How long after the operator touched a plugin it may ask for
+   * confirmation or write to the clipboard. */
+  gestureMs: 10_000,
 } as const
 
 export const OPS = [
@@ -36,9 +49,12 @@ export const OPS = [
   'ui.unregisterPage',
   'ui.render',
   'ui.setStatus',
+  'ui.setBadge',
+  'ui.confirm',
   'commands.register',
   'commands.unregister',
   'notify',
+  'clipboard.writeText',
   'control.call',
   'events.subscribe',
   'events.unsubscribe',
@@ -46,6 +62,8 @@ export const OPS = [
   'storage.set',
   'storage.remove',
   'storage.all',
+  'storage.setMany',
+  'storage.clear',
   'navigate',
 ] as const
 
@@ -55,7 +73,9 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type WorkerMessage =
   | { readonly type: 'ready' }
   | { readonly type: 'fail'; readonly message: string }
-  | { readonly type: 'fault'; readonly message: string }
+  /** An uncaught error after start-up; `command` names the command whose
+   * handler threw, so the operator who ran it hears about it. */
+  | { readonly type: 'fault'; readonly message: string; readonly command?: string }
   | { readonly type: 'log'; readonly level: LogLevel; readonly text: string }
   | { readonly type: 'pong'; readonly seq: number }
   | { readonly type: 'call'; readonly id: number; readonly op: Op; readonly args: Record<string, unknown> }
@@ -79,6 +99,7 @@ export type HostMessage =
   | { readonly type: 'ui'; readonly pageId: string; readonly event: PageEvent }
   | { readonly type: 'topic'; readonly topic: string; readonly payload: unknown }
   | { readonly type: 'command'; readonly id: string }
+  | { readonly type: 'settings'; readonly values: Readonly<Record<string, SettingValue>> }
   | { readonly type: 'ping'; readonly seq: number }
 
 const LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error']
@@ -90,8 +111,11 @@ export function parseWorkerMessage(data: unknown): WorkerMessage | null {
   switch (data.type) {
     case 'ready': return { type: 'ready' }
     case 'fail':
+      return typeof data.message === 'string' ? { type: 'fail', message: clip(data.message, RUNTIME_LIMITS.logText) } : null
     case 'fault':
-      return typeof data.message === 'string' ? { type: data.type, message: clip(data.message, RUNTIME_LIMITS.logText) } : null
+      if (typeof data.message !== 'string') return null
+      if (data.command !== undefined && (typeof data.command !== 'string' || !LOCAL_ID_PATTERN.test(data.command))) return null
+      return { type: 'fault', message: clip(data.message, RUNTIME_LIMITS.logText), ...(data.command ? { command: data.command as string } : {}) }
     case 'log':
       return typeof data.text === 'string' && LEVELS.includes(data.level as LogLevel)
         ? { type: 'log', level: data.level as LogLevel, text: clip(data.text, RUNTIME_LIMITS.logText) }
@@ -124,6 +148,7 @@ export interface PageSpec { readonly id: string; readonly title: string; readonl
 export interface CommandSpec { readonly id: string; readonly title: string; readonly group?: string; readonly keywords?: readonly string[]; readonly shortcut?: string }
 export interface StatusSpec { readonly text: string; readonly tone?: ContributionTone; readonly tooltip?: string }
 export interface NotifySpec { readonly title: string; readonly body: string; readonly tone: ContributionTone }
+export interface ConfirmSpec { readonly title: string; readonly body: string; readonly confirmText: string; readonly tone: 'neutral' | 'danger' }
 
 export function pageSpec(args: Record<string, unknown>): PageSpec {
   const id = pattern(args.id, PAGE_ID_PATTERN, 'id', 'a page id: lowercase letters, digits, dashes and underscores, up to 48')
@@ -138,13 +163,62 @@ export function commandSpec(args: Record<string, unknown>): CommandSpec {
   const group = args.group === undefined ? undefined : string(args.group, 'group', 32)
   let keywords: string[] | undefined
   if (args.keywords !== undefined) {
-    if (!Array.isArray(args.keywords) || args.keywords.length > 8 || args.keywords.some((word) => typeof word !== 'string' || word.length === 0 || word.length > 32)) {
+    if (!Array.isArray(args.keywords) || args.keywords.length > 8 || args.keywords.some((word) => typeof word !== 'string' || word.trim().length === 0 || runes(word) > 32)) {
       throw new CallError('invalid_argument', 'keywords must be up to 8 words of at most 32 characters.')
     }
     keywords = args.keywords as string[]
   }
-  const shortcut = args.shortcut === undefined ? undefined : string(args.shortcut, 'shortcut', 24)
+  let shortcut: string | undefined
+  if (args.shortcut !== undefined) {
+    // A shortcut is a real key, never a decorative hint: it either binds or
+    // the registration is refused.
+    const parsed = typeof args.shortcut === 'string' ? parseShortcut(args.shortcut) : null
+    if (!parsed?.ok) throw new CallError('invalid_argument', `shortcut: ${parsed ? parsed.problem : 'must be a string.'}`)
+    shortcut = parsed.shortcut.text
+  }
   return { id, title, ...(group ? { group } : {}), ...(keywords ? { keywords } : {}), ...(shortcut ? { shortcut } : {}) }
+}
+
+export function badgeSpec(args: Record<string, unknown>): { pageId: string; badge: BadgeContribution | null } {
+  const pageId = pattern(args.pageId, PAGE_ID_PATTERN, 'pageId', 'a registered page id')
+  if (args.badge === null || args.badge === undefined) return { pageId, badge: null }
+  if (!isRecord(args.badge)) throw new CallError('invalid_argument', 'badge must be { text, tone? } or null.')
+  const text = string(args.badge.text, 'badge.text', RUNTIME_LIMITS.badgeText)
+  if (/[\r\n]/u.test(text)) throw new CallError('invalid_argument', 'badge.text must be one line.')
+  const tone = args.badge.tone === undefined ? undefined : tone_(args.badge.tone, 'badge.tone')
+  return { pageId, badge: { text, ...(tone ? { tone } : {}) } }
+}
+
+export function confirmSpec(args: Record<string, unknown>): ConfirmSpec {
+  const tone = args.tone === undefined ? 'neutral' : args.tone
+  if (tone !== 'neutral' && tone !== 'danger') throw new CallError('invalid_argument', 'tone must be neutral or danger.')
+  return {
+    title: string(args.title, 'title', RUNTIME_LIMITS.notifyTitle),
+    body: args.body === undefined ? '' : string(args.body, 'body', RUNTIME_LIMITS.notifyBody, true),
+    confirmText: args.confirmText === undefined ? 'Continue' : string(args.confirmText, 'confirmText', RUNTIME_LIMITS.confirmText),
+    tone,
+  }
+}
+
+export function clipboardText(args: Record<string, unknown>): string {
+  if (typeof args.text !== 'string') throw new CallError('invalid_argument', 'text must be a string.')
+  if (runes(args.text) > RUNTIME_LIMITS.clipboardText) throw new CallError('too_large', `Clipboard text is at most ${RUNTIME_LIMITS.clipboardText} characters.`)
+  return args.text
+}
+
+/** One storage.setMany batch: values to write, `null` to delete. */
+export function storageBatch(args: Record<string, unknown>): Record<string, string | null> {
+  if (!isRecord(args.values)) throw new CallError('invalid_argument', 'values must be an object of keys to strings or null.')
+  const entries = Object.entries(args.values)
+  if (entries.length === 0 || entries.length > RUNTIME_LIMITS.storageBatch) throw new CallError('invalid_argument', `values must hold 1 to ${RUNTIME_LIMITS.storageBatch} keys.`)
+  const batch: Record<string, string | null> = {}
+  for (const [key, value] of entries) {
+    storageKey({ key })
+    if (value !== null && typeof value !== 'string') throw new CallError('invalid_argument', `values["${key}"] must be a string or null; use JSON.stringify for anything else.`)
+    if (typeof value === 'string' && encoder.encode(value).length > STORAGE_VALUE_BYTES) throw new CallError('too_large', `values["${key}"] is over ${STORAGE_VALUE_BYTES / 1024} KiB.`)
+    batch[key] = value
+  }
+  return batch
 }
 
 export function statusSpec(args: Record<string, unknown>): { id: string; status: StatusSpec | null } {
@@ -165,8 +239,13 @@ export function notifySpec(args: Record<string, unknown>): NotifySpec {
   }
 }
 
+/** A key the plugin may use in its own storage. `setting:` keys hold the
+ * operator's settings: the plugin reads them through `settings`, never here,
+ * so it cannot overwrite what the operator chose. */
 export function storageKey(args: Record<string, unknown>): string {
-  return pattern(args.key, STORAGE_KEY_PATTERN, 'key', '1–64 letters, digits, dots, colons, dashes or underscores')
+  const key = pattern(args.key, STORAGE_KEY_PATTERN, 'key', '1–64 letters, digits, dots, colons, dashes or underscores')
+  if (key.startsWith(SETTING_PREFIX)) throw new CallError('invalid_argument', `Keys starting with "${SETTING_PREFIX}" hold the operator's settings; read them with switchboard.settings.`)
+  return key
 }
 
 export function localId(args: Record<string, unknown>, field = 'id', shape: RegExp = LOCAL_ID_PATTERN): string {
@@ -184,8 +263,16 @@ function pattern(value: unknown, shape: RegExp, field: string, description: stri
 
 function string(value: unknown, field: string, limit: number, allowEmpty = false): string {
   if (typeof value !== 'string' || (!allowEmpty && value.trim().length === 0)) throw new CallError('invalid_argument', `${field} must be a non-empty string.`)
-  if (value.length > limit) throw new CallError('invalid_argument', `${field} is longer than ${limit} characters.`)
+  if (runes(value) > limit) throw new CallError('invalid_argument', `${field} is longer than ${limit} characters.`)
   return value
+}
+
+const encoder = new TextEncoder()
+
+/** Length in code points, so an emoji counts once, as the control plane
+ * counts it. */
+function runes(value: string): number {
+  return [...value].length
 }
 
 function tone_(value: unknown, field: string): ContributionTone {
@@ -194,7 +281,9 @@ function tone_(value: unknown, field: string): ContributionTone {
 }
 
 function clip(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value
+  if (value.length <= limit) return value
+  // Never cut a surrogate pair in half.
+  return `${Array.from(value.slice(0, limit)).slice(0, limit - 1).join('').replace(/[\uD800-\uDBFF]$/u, '')}…`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

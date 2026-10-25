@@ -1,6 +1,7 @@
 import type { PluginPackage } from '../domain/manifest'
 import type { PluginDetail, PluginSummary } from '../domain/plugin'
 import type { HostMessage } from '../domain/protocol'
+import type { SettingValue } from '../domain/settings'
 
 /** The control plane's plugin store. */
 export interface PluginsPort {
@@ -10,8 +11,9 @@ export interface PluginsPort {
   update(id: string, change: { readonly enabled?: boolean; readonly granted?: readonly string[] }): Promise<PluginSummary>
   remove(id: string): Promise<void>
   storageGet(id: string): Promise<Record<string, string>>
-  /** `null` deletes the key. Answers with every value the plugin now has. */
-  storageSet(id: string, key: string, value: string | null): Promise<Record<string, string>>
+  /** Applies every change (`null` deletes) in one encrypted write, or none of
+   * them. Answers with every value the plugin now has. */
+  storageUpdate(id: string, values: Readonly<Record<string, string | null>>): Promise<Record<string, string>>
   /** Installs, upgrades, updates and removals — from this window or another. */
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void
 }
@@ -26,6 +28,17 @@ export interface ControlPort {
 export interface BootContext {
   readonly plugin: { readonly id: string; readonly name: string; readonly version: string; readonly granted: readonly string[] }
   readonly app: { readonly version: string; readonly capabilities: readonly string[] }
+  /** The operator's current setting values, defaults filled in. */
+  readonly settings: Readonly<Record<string, SettingValue>>
+}
+
+/** A question a plugin asks the operator before it does something. */
+export interface ConfirmRequest {
+  readonly pluginName: string
+  readonly title: string
+  readonly body: string
+  readonly confirmText: string
+  readonly tone: 'neutral' | 'danger'
 }
 
 /** One isolated execution context for one plugin's script. */

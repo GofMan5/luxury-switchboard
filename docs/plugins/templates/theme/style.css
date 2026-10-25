@@ -1,0 +1,5 @@
+/* Scoped to this plugin's theme, so picking another theme turns it off too.
+   Safe mode (Ctrl+Alt+Shift+S) turns every plugin stylesheet off. */
+:root[data-theme="plugin:acme.hello-theme"] .page-header h1 {
+  letter-spacing: -0.02em;
+}

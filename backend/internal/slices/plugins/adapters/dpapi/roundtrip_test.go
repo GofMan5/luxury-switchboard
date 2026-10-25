@@ -5,6 +5,7 @@ package dpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,13 +22,19 @@ func TestPluginsRoundTripEncrypted(t *testing.T) {
 	if plugins, err := repository.Load(context.Background()); err != nil || len(plugins) != 0 {
 		t.Fatalf("a missing file is not an empty store: %v %v", plugins, err)
 	}
-	installed := time.Date(2026, 2, 3, 4, 5, 6, 0, time.FixedZone("fixture", 3*3600))
+	installed := time.Date(2026, 2, 3, 4, 5, 6, 789_000_000, time.FixedZone("fixture", 3*3600))
+	limit := 10.0
 	plugins := []domain.Plugin{{
 		Package: domain.Package{
 			Schema: 1, ID: "acme.dusk", Name: "Dusk", Version: "1.0.0", Author: "Fixture", Description: "Fixture plugin",
+			Homepage: "https://example.test/dusk", MinAppVersion: "1.0.0",
 			Permissions: []string{domain.PermissionTheme, domain.PermissionStorage},
 			Theme:       &domain.Theme{Name: "Dusk", Scheme: "dark", Tokens: map[string]string{"--bg": "#101010"}},
 			Script:      "export default 'fixture-private-script'",
+			Settings: []domain.Setting{
+				{Key: "greeting", Label: "Greeting", Type: domain.SettingText, Default: json.RawMessage(`"<fixture-private-default>"`)},
+				{Key: "limit", Label: "Limit", Type: domain.SettingNumber, Default: json.RawMessage(`2.5`), Max: &limit},
+			},
 		},
 		Enabled:     true,
 		Granted:     []string{domain.PermissionStorage},
@@ -52,7 +59,11 @@ func TestPluginsRoundTripEncrypted(t *testing.T) {
 	if !loaded[0].InstalledAt.Equal(installed) || loaded[0].InstalledAt.Location() != time.UTC {
 		t.Fatalf("times were not stored as UTC: %v", loaded[0].InstalledAt)
 	}
+	// The file encoder escapes HTML inside setting defaults; normalizing, as
+	// the service does on load, gives back the installed bytes.
+	loaded[0].Package = loaded[0].Package.Normalized()
 	want := plugins[0]
+	want.Package = want.Package.Normalized()
 	want.InstalledAt, want.UpdatedAt = want.InstalledAt.UTC(), want.UpdatedAt.UTC()
 	if !reflect.DeepEqual(loaded[0], want) {
 		t.Fatalf("restored plugin differs:\n%+v\n%+v", loaded[0], want)

@@ -34,8 +34,8 @@ export class StdioPluginsPort implements PluginsPort {
     return normalizeValues(await this.#session.call('plugins.storage.get', { id }))
   }
 
-  async storageSet(id: string, key: string, value: string | null): Promise<Record<string, string>> {
-    return normalizeValues(await this.#session.call('plugins.storage.set', { id, key, value }))
+  async storageUpdate(id: string, values: Readonly<Record<string, string | null>>): Promise<Record<string, string>> {
+    return normalizeValues(await this.#session.call('plugins.storage.update', { id, values }))
   }
 
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {

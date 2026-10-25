@@ -111,12 +111,14 @@ export function resolveTheme(id: string, contributed: readonly ThemeContribution
   const contribution = contributed.find((theme) => theme.id === id)
   if (!contribution) return builtinTheme(DEFAULT_THEME_ID) as ThemeDefinition
   const base = baseTheme(contribution.scheme)
+  const own = safeTokens(contribution.tokens)
   return {
     id: contribution.id,
     name: contribution.name,
     scheme: contribution.scheme,
     builtin: false,
-    tokens: { ...base.tokens, ...safeTokens(contribution.tokens) },
+    tokens: { ...base.tokens, ...own },
+    own,
   }
 }
 
@@ -153,9 +155,53 @@ export function luminance(hex: string): number {
   return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
 }
 
+/** The appearance controls that compute tokens a theme may also set. */
+export type ThemeControl = 'accent' | 'density' | 'textSize' | 'uiFont' | 'monoFont' | 'radius'
+
+const FONT_SIZE_TOKENS = ['--fs-xs', '--fs-sm', '--fs-base', '--fs-md', '--fs-lg', '--fs-xl', '--fs-2xl'] as const
+const ACCENT_DERIVED_TOKENS = ['--action-primary', '--action-hover', '--action-pressed', '--text-on-action', '--accent-soft', '--accent-line', '--focus-ring', '--selection'] as const
+
+/** Which tokens each control owns. `--accent` itself is not listed: the
+ * theme's accent is already the fallback whenever the user picked none. */
+const CONTROL_TOKENS: Readonly<Record<ThemeControl, readonly string[]>> = {
+  accent: ACCENT_DERIVED_TOKENS,
+  density: Object.keys(DENSITY_TOKENS.comfortable),
+  textSize: FONT_SIZE_TOKENS,
+  uiFont: ['--font-ui'],
+  monoFont: ['--font-mono'],
+  radius: Object.keys(RADIUS_TOKENS.default),
+}
+
+const CONTROLS = Object.keys(CONTROL_TOKENS) as ThemeControl[]
+
+/** The controls whose tokens a contributed theme sets itself, in a stable
+ * order. Empty for builtins, which are designed around the defaults. */
+export function themeControls(theme: ThemeDefinition): ThemeControl[] {
+  const own = theme.own
+  if (!own) return []
+  return CONTROLS.filter((control) => CONTROL_TOKENS[control].some((name) => own[name] !== undefined))
+}
+
+/** The control-owned tokens a contributed theme set and still holds: the user
+ * left that control at its default (for the accent: picked none). Choosing
+ * any other value hands the tokens back to the control. */
+function heldThemeTokens(appearance: Appearance, theme: ThemeDefinition): Record<string, string> {
+  const own = theme.own
+  const held: Record<string, string> = {}
+  if (!own) return held
+  for (const control of CONTROLS) {
+    if (appearance[control] !== APPEARANCE_DEFAULTS[control]) continue
+    for (const name of CONTROL_TOKENS[control]) {
+      if (own[name] !== undefined) held[name] = own[name]
+    }
+  }
+  return held
+}
+
 /** Every custom property the document carries for this record, in the order
- * they win: theme, controls, derived accent shades, then the user's own
- * overrides. */
+ * they win: theme, controls and derived accent shades, the control-owned
+ * tokens a contributed theme set while their control is at its default, then
+ * the user's own overrides. */
 export function computeTokens(appearance: Appearance, theme: ThemeDefinition, includeOverrides = true): Record<string, string> {
   const tokens: Record<string, string> = { ...theme.tokens }
   const accent = appearance.accent || tokens['--accent'] || '#ff8a3d'
@@ -181,7 +227,7 @@ export function computeTokens(appearance: Appearance, theme: ThemeDefinition, in
     '--fs-lg': `${base + 3}px`,
     '--fs-xl': `${base + 5}px`,
     '--fs-2xl': `${base + 7}px`,
-  })
+  }, heldThemeTokens(appearance, theme))
   if (includeOverrides) Object.assign(tokens, safeTokens(appearance.tokens))
   return tokens
 }

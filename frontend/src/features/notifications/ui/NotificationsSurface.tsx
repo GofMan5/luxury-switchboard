@@ -24,6 +24,7 @@ export function NotificationsSurface() {
       <button
         type="button"
         className={styles.bell}
+        data-ui="notifications-bell"
         aria-label={`Notifications${state.unread > 0 ? `, ${state.unread} unread` : ''}`}
         onClick={() => {
           setPanelOpen((open) => !open)
@@ -31,11 +32,11 @@ export function NotificationsSurface() {
         }}
       >
         <Bell size={16} aria-hidden="true" />
-        {state.unread > 0 ? <span className={styles.badge} aria-hidden="true">{state.unread > 9 ? '9+' : state.unread}</span> : null}
+        {state.unread > 0 ? <span className={styles.badge} aria-hidden="true" data-ui="notifications-badge">{state.unread > 9 ? '9+' : state.unread}</span> : null}
       </button>
       {panelOpen ? <NotificationsPanel onClose={() => setPanelOpen(false)} /> : null}
       {toasts.length > 0 ? (
-        <div className={styles.toasts} role="region" aria-label="Notifications" aria-live="polite">
+        <div className={styles.toasts} role="region" aria-label="Notifications" aria-live="polite" data-ui="toast-stack">
           {toasts.map((notification) => <Toast key={notification.id} notification={notification} />)}
         </div>
       ) : null}
@@ -46,7 +47,7 @@ export function NotificationsSurface() {
 function Toast({ notification }: { notification: Notification }) {
   const Icon = severityIcon[notification.severity] ?? Info
   return (
-    <div className={styles.toast} data-severity={notification.severity}>
+    <div className={styles.toast} data-severity={notification.severity} data-ui="toast">
       <Icon size={15} aria-hidden="true" data-severity={notification.severity} />
       <div className={styles.toastBody}>
         <strong>{notification.title}</strong>
@@ -67,6 +68,7 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
     <section
       ref={dialogRef}
       className={styles.panel}
+      data-ui="notifications-panel"
       role="dialog"
       aria-modal="true"
       aria-label="Notifications"
@@ -98,7 +100,7 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
 function PanelRow({ notification }: { notification: Notification }) {
   const Icon = severityIcon[notification.severity] ?? Info
   return (
-    <article className={styles.row} data-severity={notification.severity}>
+    <article className={styles.row} data-severity={notification.severity} data-ui="notification">
       <Icon size={15} aria-hidden="true" data-severity={notification.severity} />
       <div>
         <strong>{notification.title}</strong>

@@ -15,7 +15,7 @@ import type { Settings } from '../features/settings/domain/settings'
 import type { GuardrailRecord } from '../features/guardrails/domain/guardrail'
 import type { InsightsReport, HistoryRequest, ModelPrice } from '../features/insights/domain/insights'
 import { ControlPlaneError } from '../shared/contracts/protocol'
-import { PLUGIN_LIMIT, checkPackage, type PluginPackage } from '../features/plugins/domain/manifest'
+import { PLUGIN_LIMIT, checkPackage, needsNewerApp, type PluginPackage } from '../features/plugins/domain/manifest'
 
 interface FixturePlugin {
   package: PluginPackage
@@ -444,13 +444,32 @@ export class FixtureSession implements ControlPlaneSession {
 
   #pluginSummary(record: FixturePlugin) {
     const pkg = record.package
+    const problem = needsNewerApp(pkg.minAppVersion ?? '', appVersion) ? `Needs Luxury Switchboard ${pkg.minAppVersion} or later; this is ${appVersion}. Update the app or install an older version of the plugin.` : ''
     return {
       id: pkg.id, name: pkg.name, version: pkg.version, author: pkg.author ?? '', description: pkg.description ?? '',
+      homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '',
       permissions: [...pkg.permissions], granted: record.granted.filter((permission) => pkg.permissions.includes(permission as never)),
-      enabled: record.enabled, installedAt: record.installedAt, updatedAt: record.updatedAt,
+      enabled: record.enabled && !problem, installedAt: record.installedAt, updatedAt: record.updatedAt,
       sizeBytes: new TextEncoder().encode(JSON.stringify(pkg)).length,
-      hasScript: Boolean(pkg.script?.trim()), hasCss: Boolean(pkg.css?.trim()), hasTheme: pkg.theme !== undefined,
+      hasScript: Boolean(pkg.script?.trim()), hasCss: Boolean(pkg.css?.trim()), hasTheme: pkg.theme !== undefined, hasSettings: Boolean(pkg.settings?.length),
+      problem,
     }
+  }
+
+  #pluginStore(record: FixturePlugin, changes: Record<string, unknown>, clear: boolean): Record<string, string> {
+    const next = clear ? {} : { ...record.storage }
+    for (const [key, value] of Object.entries(changes)) {
+      if (!/^[A-Za-z0-9._:-]{1,64}$/u.test(key)) throw new ControlPlaneError('invalid_plugin', 'Plugin storage key is invalid')
+      if (typeof value === 'string') next[key] = value
+      else if (value === null) delete next[key]
+      else throw new ControlPlaneError('invalid_plugin', 'Plugin storage value must be a string or null')
+    }
+    if (Object.keys(next).length > 64 || Object.values(next).some((value) => new TextEncoder().encode(value).length > 8192) || new TextEncoder().encode(JSON.stringify(next)).length > 65_536) {
+      throw new ControlPlaneError('plugin_storage_full', 'Plugin storage is full')
+    }
+    record.storage = next
+    this.#pluginSave()
+    return { ...next }
   }
 
   #pluginList() {
@@ -473,7 +492,7 @@ export class FixtureSession implements ControlPlaneSession {
       case 'plugins.list': return { plugins: this.#pluginList() }
       case 'plugins.get': {
         const record = this.#pluginFind(body.id)
-        return { plugin: this.#pluginSummary(record), script: record.package.script ?? '', css: record.package.css ?? '', theme: record.package.theme ?? null }
+        return { plugin: this.#pluginSummary(record), script: record.package.script ?? '', css: record.package.css ?? '', theme: record.package.theme ?? null, settings: record.package.settings ?? [] }
       }
       case 'plugins.install': {
         const checked = checkPackage(body.package)
@@ -482,10 +501,11 @@ export class FixtureSession implements ControlPlaneSession {
         const existing = this.#plugins.get(pkg.id)
         if (!existing && this.#plugins.size >= PLUGIN_LIMIT) throw new ControlPlaneError('plugin_limit', `At most ${PLUGIN_LIMIT} plugins can be installed`)
         const granted = Array.isArray(body.granted) ? body.granted.filter((permission): permission is string => typeof permission === 'string' && pkg.permissions.includes(permission as never)) : []
-        // Whole seconds, like the control plane; a same-second reinstall still
-        // gets a new revision so the runtime restarts it.
-        let stamp = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace('.000Z', 'Z')
-        if (existing && existing.updatedAt === stamp) stamp = new Date(Date.parse(stamp) + 1000).toISOString().replace('.000Z', 'Z')
+        if (needsNewerApp(pkg.minAppVersion ?? '', appVersion)) throw new ControlPlaneError('invalid_plugin', `Plugin minAppVersion needs Luxury Switchboard ${pkg.minAppVersion} or later`)
+        // Milliseconds, like the control plane; a reinstall always gets a
+        // later revision so the runtime restarts it.
+        let stamp = new Date().toISOString()
+        if (existing && Date.parse(stamp) <= Date.parse(existing.updatedAt)) stamp = new Date(Date.parse(existing.updatedAt) + 1).toISOString()
         const record: FixturePlugin = { package: pkg, granted, enabled: true, installedAt: existing?.installedAt ?? stamp, updatedAt: stamp, storage: existing?.storage ?? {} }
         this.#plugins.set(pkg.id, record)
         this.#pluginChanged()
@@ -508,14 +528,15 @@ export class FixtureSession implements ControlPlaneSession {
       case 'plugins.storage.set': {
         const record = this.#pluginFind(body.id)
         const key = typeof body.key === 'string' ? body.key : ''
-        if (!/^[A-Za-z0-9._:-]{1,64}$/u.test(key)) throw new ControlPlaneError('invalid_plugin', 'Plugin storage key is invalid')
-        const next = { ...record.storage }
-        if (typeof body.value === 'string') next[key] = body.value
-        else delete next[key]
-        if (Object.keys(next).length > 64 || new TextEncoder().encode(JSON.stringify(next)).length > 65_536) throw new ControlPlaneError('plugin_storage_full', 'Plugin storage is full')
-        record.storage = next
-        this.#pluginSave()
-        return { values: { ...next } }
+        return { values: this.#pluginStore(record, { [key]: body.value === undefined ? 0 : body.value }, false) }
+      }
+      case 'plugins.storage.update': {
+        const record = this.#pluginFind(body.id)
+        const values = body.values
+        if (typeof values !== 'object' || values === null || Array.isArray(values)) throw new ControlPlaneError('invalid_plugin', 'Plugin storage update is malformed')
+        const count = Object.keys(values).length
+        if (count > 64 || (count === 0 && body.clear !== true)) throw new ControlPlaneError('invalid_plugin', 'Plugin values must list at most 64 keys, and at least one unless clearing')
+        return { values: this.#pluginStore(record, values as Record<string, unknown>, body.clear === true) }
       }
       default: throw new Error(`fixture session has no answer for ${method}`)
     }

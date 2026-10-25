@@ -34,9 +34,10 @@ const __switchboardStart = (function (scope, boot) {
     try { Object.defineProperty(target, name, { value: value, writable: false, configurable: false, enumerable: false }); } catch (ignored) { /* already sealed */ }
   };
   const BLOCKED = ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importScripts', 'indexedDB', 'caches',
-    'Worker', 'SharedWorker', 'BroadcastChannel', 'WebTransport', 'RTCPeerConnection', 'Notification', 'postMessage'];
+    'Worker', 'SharedWorker', 'BroadcastChannel', 'WebTransport', 'WebSocketStream', 'RTCPeerConnection', 'Notification',
+    'fetchLater', 'postMessage'];
   for (const name of BLOCKED) seal(scope, name, refuse(name));
-  if (scope.navigator) for (const name of ['storage', 'serviceWorker', 'sendBeacon']) seal(scope.navigator, name, undefined);
+  if (scope.navigator) for (const name of ['storage', 'serviceWorker', 'sendBeacon', 'locks']) seal(scope.navigator, name, undefined);
 
   const describe = function (error) {
     if (error && typeof error === 'object') {
@@ -79,13 +80,19 @@ const __switchboardStart = (function (scope, boot) {
   });
   seal(scope, 'console', logger);
 
-  const fault = function (error) { post({ type: 'fault', message: describe(error) }); };
-  const guard = function (handler, value) {
+  // A fault names the command it came from, so the operator who ran it
+  // hears that it failed.
+  const reporter = function (command) {
+    return function (error) { post(command ? { type: 'fault', message: describe(error), command: command } : { type: 'fault', message: describe(error) }); };
+  };
+  const fault = reporter('');
+  const guard = function (handler, value, extra, command) {
+    const report = command ? reporter(command) : fault;
     try {
-      const result = handler(value);
-      if (result && typeof result.then === 'function') result.then(undefined, fault);
+      const result = handler(value, extra);
+      if (result && typeof result.then === 'function') result.then(undefined, report);
     } catch (error) {
-      fault(error);
+      report(error);
     }
   };
   listen('error', function (event) { event.preventDefault(); fault(event.error || event.message); });
@@ -114,6 +121,8 @@ const __switchboardStart = (function (scope, boot) {
   const topics = new Map();
   const commands = new Map();
   const activateHandlers = [];
+  const settingHandlers = new Set();
+  let settings = freeze(Object.assign({}, boot.settings));
   let active = false;
 
   listen('message', function (event) {
@@ -150,7 +159,15 @@ const __switchboardStart = (function (scope, boot) {
       }
       case 'command': {
         const handler = commands.get(message.id);
-        if (handler) guard(handler);
+        if (handler) guard(handler, undefined, undefined, String(message.id));
+        return;
+      }
+      case 'settings': {
+        const next = freeze(Object.assign({}, message.values));
+        const changed = freeze(Object.keys(next).filter(function (key) { return next[key] !== settings[key]; }));
+        settings = next;
+        if (changed.length === 0) return;
+        for (const handler of Array.from(settingHandlers)) guard(handler, next, changed);
         return;
       }
       default:
@@ -179,6 +196,21 @@ const __switchboardStart = (function (scope, boot) {
         return function () { pageHandlers.delete(entry); };
       },
       setStatus: function (id, status) { return call('ui.setStatus', { id: id, status: status === undefined ? null : status }); },
+      setBadge: function (pageId, badge) { return call('ui.setBadge', { pageId: pageId, badge: badge === undefined ? null : badge }); },
+      confirm: function (spec) { return call('ui.confirm', spec); },
+    }),
+    settings: freeze({
+      get: function (key) { return hasOwn.call(settings, key) ? settings[key] : undefined; },
+      all: function () { return settings; },
+      onChange: function (handler) {
+        needFunction(handler, 'handler');
+        const entry = function (values, changed) { return handler(values, changed); };
+        settingHandlers.add(entry);
+        return function () { settingHandlers.delete(entry); };
+      },
+    }),
+    clipboard: freeze({
+      writeText: function (text) { return call('clipboard.writeText', { text: text }); },
     }),
     commands: freeze({
       register: function (spec, handler) {
@@ -234,6 +266,8 @@ const __switchboardStart = (function (scope, boot) {
       set: function (key, value) { return call('storage.set', { key: key, value: value }); },
       remove: function (key) { return call('storage.remove', { key: key }); },
       all: function () { return call('storage.all'); },
+      setMany: function (values) { return call('storage.setMany', { values: values }); },
+      clear: function () { return call('storage.clear'); },
     }),
     navigate: function (route) { return call('navigate', { route: route }); },
     log: logger,

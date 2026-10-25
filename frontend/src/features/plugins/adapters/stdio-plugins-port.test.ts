@@ -6,7 +6,8 @@ const PLUGIN = {
   id: 'acme.tools', name: 'Acme tools', version: '1.0.0', author: 'Acme', description: '',
   permissions: ['ui:pages'], granted: ['ui:pages'], enabled: true,
   installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 64,
-  hasScript: true, hasCss: false, hasTheme: false,
+  hasScript: true, hasCss: false, hasTheme: false, homepage: 'https://example.com/acme', minAppVersion: '1.0.65',
+  hasSettings: true, problem: '',
 }
 
 type Listener = (event: { payload: unknown }) => void
@@ -26,19 +27,20 @@ describe('StdioPluginsPort', () => {
   it('sends the documented commands and normalizes the answers', async () => {
     const { session, call } = fakeSession({
       'plugins.list': { plugins: [PLUGIN] },
-      'plugins.get': { plugin: PLUGIN, script: 'x', css: '', theme: null },
+      'plugins.get': { plugin: PLUGIN, script: 'x', css: '', theme: null, settings: [{ key: 'limit', label: 'Limit', type: 'number', default: 5 }] },
       'plugins.install': { plugin: PLUGIN },
       'plugins.update': { plugin: { ...PLUGIN, enabled: false } },
       'plugins.remove': { removed: true },
       'plugins.storage.get': { values: { a: '1', bad: 2 } },
-      'plugins.storage.set': { values: { a: '2' } },
+      'plugins.storage.update': { values: { a: '2' } },
     })
     const port = new StdioPluginsPort(session)
     const signal = new AbortController().signal
 
     expect(await port.list(signal)).toEqual([PLUGIN])
     expect(call).toHaveBeenLastCalledWith('plugins.list', {}, signal)
-    expect(await port.get('acme.tools')).toEqual({ plugin: PLUGIN, script: 'x', css: '', theme: null })
+    // Omitted setting attributes are filled with their defaults.
+    expect(await port.get('acme.tools')).toEqual({ plugin: PLUGIN, script: 'x', css: '', theme: null, settings: [{ key: 'limit', label: 'Limit', description: '', type: 'number', default: 5, placeholder: '' }] })
     expect(call).toHaveBeenLastCalledWith('plugins.get', { id: 'acme.tools' }, undefined)
 
     const pkg = { schema: 1, id: 'acme.tools', name: 'Acme tools', version: '1.0.0', permissions: ['ui:pages'] } as const
@@ -52,8 +54,8 @@ describe('StdioPluginsPort', () => {
     expect(call).toHaveBeenLastCalledWith('plugins.remove', { id: 'acme.tools' })
 
     expect(await port.storageGet('acme.tools')).toEqual({ a: '1' })
-    expect(await port.storageSet('acme.tools', 'a', null)).toEqual({ a: '2' })
-    expect(call).toHaveBeenLastCalledWith('plugins.storage.set', { id: 'acme.tools', key: 'a', value: null })
+    expect(await port.storageUpdate('acme.tools', { a: '2', b: null })).toEqual({ a: '2' })
+    expect(call).toHaveBeenLastCalledWith('plugins.storage.update', { id: 'acme.tools', values: { a: '2', b: null } })
   })
 
   it('refuses an answer without a plugin', async () => {

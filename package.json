@@ -1,7 +1,7 @@
 {
   "name": "provider-switchboard",
   "private": true,
-  "version": "1.0.64",
+  "version": "1.0.65",
   "packageManager": "pnpm@10.26.2",
   "scripts": {
     "dev": "tauri dev",
@@ -12,7 +12,9 @@
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "version:set": "node scripts/set-version.mjs",
     "version:check": "node scripts/check-version.mjs",
-    "check": "pnpm version:check && pnpm frontend:check && pnpm backend:check && cargo check --manifest-path src-tauri/Cargo.toml",
+    "check": "pnpm version:check && pnpm frontend:check && pnpm backend:check && cargo check --manifest-path src-tauri/Cargo.toml && pnpm plugin:test",
+    "plugin": "node scripts/plugin.mjs",
+    "plugin:test": "node --test scripts/plugin.test.mjs",
     "frontend:check": "pnpm --dir frontend check",
     "frontend:test": "pnpm --dir frontend test",
     "backend:check": "go -C backend test ./...",

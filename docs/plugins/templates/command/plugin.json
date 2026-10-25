@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "acme.hello-command",
+  "name": "Hello command",
+  "version": "0.1.0",
+  "author": "Your name",
+  "description": "Command palette (Ctrl+K) actions: one shows a notification, one copies a timestamp.",
+  "permissions": [
+    "ui:commands",
+    "ui:notify",
+    "ui:clipboard"
+  ]
+}

@@ -1,5 +1,6 @@
 import { TOKEN_LIMIT, tokenProblem } from '../../../shared/contracts/tokens'
 import { isPluginPermission, permissionSpec, type PluginPermission } from './permissions'
+import { checkSettings, type PluginSetting } from './settings'
 
 /**
  * The plugin package format, schema 1: one JSON file that carries the
@@ -22,8 +23,13 @@ export const FRAME_BYTES = 262_144
  * be larger than one result payload. */
 export const PAYLOAD_BYTES = 258_048
 export const PLUGIN_LIMIT = 24
+export const HOMEPAGE_BYTES = 200
+const APP_VERSION_PATTERN = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/u
 
-const PACKAGE_FIELDS = new Set(['schema', 'id', 'name', 'version', 'author', 'description', 'permissions', 'theme', 'css', 'script'])
+const PACKAGE_FIELDS = new Set(['schema', 'id', 'name', 'version', 'author', 'description', 'homepage', 'minAppVersion', 'permissions', 'settings', 'theme', 'css', 'script'])
+// Go's unicode.IsSpace or unicode.IsControl.
+// eslint-disable-next-line no-control-regex -- control characters are exactly what this refuses
+const SPACE_OR_CONTROL = /[\p{White_Space}\u0000-\u001f\u007f-\u009f]/u
 const THEME_FIELDS = new Set(['name', 'scheme', 'tokens'])
 // Go's unicode.IsControl: C0, DEL and C1.
 // eslint-disable-next-line no-control-regex -- control characters are exactly what this refuses
@@ -45,7 +51,13 @@ export interface PluginPackage {
   readonly version: string
   readonly author?: string
   readonly description?: string
+  /** An https:// page about the plugin; shown as a link, never fetched. */
+  readonly homepage?: string
+  /** The oldest Luxury Switchboard it runs on, `major.minor.patch`. */
+  readonly minAppVersion?: string
   readonly permissions: readonly PluginPermission[]
+  /** Options the operator edits on the Plugins page; the script reads them. */
+  readonly settings?: readonly PluginSetting[]
   readonly theme?: PluginTheme
   readonly css?: string
   readonly script?: string
@@ -105,6 +117,14 @@ export function checkPackage(value: unknown): PackageCheck {
     else if (CONTROL_EXCEPT_NEWLINE.test(value.description)) problems.push('"description" contains control characters other than line breaks.')
   }
 
+  if (value.homepage !== undefined && (typeof value.homepage !== 'string' || (value.homepage !== '' && !isHomepage(value.homepage)))) {
+    problems.push(`"homepage" must be an https:// address of at most ${HOMEPAGE_BYTES} characters.`)
+  }
+
+  if (value.minAppVersion !== undefined && (typeof value.minAppVersion !== 'string' || !APP_VERSION_PATTERN.test(value.minAppVersion))) {
+    problems.push('"minAppVersion" must be a version such as "1.0.65".')
+  }
+
   const permissions: PluginPermission[] = []
   if (!Array.isArray(value.permissions)) {
     problems.push('"permissions" must be a list (it may be empty).')
@@ -145,6 +165,12 @@ export function checkPackage(value: unknown): PackageCheck {
     problems.push(`${scripted.map((permission) => `"${permission}"`).join(', ')} ${scripted.length === 1 ? 'needs' : 'need'} a "script".`)
   }
 
+  let settings: PluginSetting[] | null = null
+  if (value.settings !== undefined) {
+    settings = checkSettings(value.settings, problems)
+    if (Array.isArray(value.settings) && value.settings.length > 0 && !script.trim()) problems.push('"settings" need a "script" to read them.')
+  }
+
   if (problems.length > 0) return { ok: false, problems }
   const result: PluginPackage = {
     schema: PACKAGE_SCHEMA,
@@ -153,7 +179,10 @@ export function checkPackage(value: unknown): PackageCheck {
     version: version as string,
     ...(value.author !== undefined ? { author: value.author as string } : {}),
     ...(value.description !== undefined ? { description: value.description as string } : {}),
+    ...(value.homepage !== undefined ? { homepage: value.homepage as string } : {}),
+    ...(value.minAppVersion !== undefined ? { minAppVersion: value.minAppVersion as string } : {}),
     permissions,
+    ...(settings ? { settings } : {}),
     ...(theme ? { theme } : {}),
     ...(value.css !== undefined ? { css: value.css as string } : {}),
     ...(value.script !== undefined ? { script } : {}),
@@ -200,14 +229,48 @@ export function packageSizeProblem(pkg: PluginPackage, granted: readonly string[
   const answer = JSON.stringify({
     plugin: {
       id: pkg.id, name: pkg.name, version: pkg.version, author: pkg.author ?? '', description: pkg.description ?? '',
+      homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '',
       permissions: pkg.permissions, granted: pkg.permissions, enabled: true,
-      installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 999_999,
-      hasScript: true, hasCss: true, hasTheme: true,
+      installedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', sizeBytes: 999_999,
+      hasScript: true, hasCss: true, hasTheme: true, hasSettings: true, problem: '',
     },
-    script: pkg.script ?? '', css: pkg.css ?? '', theme: pkg.theme ?? null,
+    script: pkg.script ?? '', css: pkg.css ?? '', theme: pkg.theme ?? null, settings: pkg.settings ?? [],
   })
   if (byteLength(answer) > PAYLOAD_BYTES) return `This package is too large to load back (${formatKiB(byteLength(answer))}; at most ${Math.floor(PAYLOAD_BYTES / 1024)} KiB).`
   return ''
+}
+
+/** Whether value is an address the homepage link may open: the same rules
+ * the control plane applies. */
+export function isHomepage(value: string): boolean {
+  if (byteLength(value) > HOMEPAGE_BYTES || SPACE_OR_CONTROL.test(value) || !value.startsWith('https://')) return false
+  const rest = value.slice('https://'.length)
+  const end = rest.search(/[/?#]/u)
+  // A userinfo part, even an empty one the URL parser would drop.
+  if ((end === -1 ? rest : rest.slice(0, end)).includes('@')) return false
+  try {
+    return new URL(value).hostname !== ''
+  } catch {
+    return false
+  }
+}
+
+/** Whether the running app is older than a package's minAppVersion. An
+ * unknown running version (an old control plane) is not held against it. */
+export function needsNewerApp(minAppVersion: string | undefined, appVersion: string): boolean {
+  if (!minAppVersion) return false
+  const need = versionParts(minAppVersion)
+  const have = versionParts(appVersion)
+  if (!need || !have) return false
+  for (let index = 0; index < 3; index += 1) {
+    if (have[index] !== need[index]) return have[index] < need[index]
+  }
+  return false
+}
+
+function versionParts(version: string): [number, number, number] | null {
+  const match = /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})/u.exec(version)
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null
 }
 
 /** The byte size the control plane will report for the stored package. */

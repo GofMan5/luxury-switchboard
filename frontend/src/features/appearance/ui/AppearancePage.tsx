@@ -11,12 +11,14 @@ import {
   MONO_FONT_STACKS,
   resolveTheme,
   themeChoices,
+  themeControls,
   UI_FONT_STACKS,
   type Appearance,
   type Density,
   type MonoFont,
   type RadiusScale,
   type TextSize,
+  type ThemeControl,
   type UiFont,
 } from '../domain/appearance'
 import { parseAppearanceFile, serializeAppearance } from '../domain/appearance-file'
@@ -113,7 +115,7 @@ export default function AppearancePage() {
           <ThemePicker choices={choices} value={appearance.theme} onChange={(id) => set({ theme: id })} />
         </Panel>
 
-        <Panel title="Interface" subtitle="Accent, density, type and corners">
+        <Panel title="Interface" subtitle={themeNote(theme.name, themeControls(theme)) || 'Accent, density, type and corners'}>
           <div className={styles.rows}>
             <Row label="Accent" hint="Primary actions, focus, selection and the active page.">
               <div className={styles.accents} role="radiogroup" aria-label="Accent colour">
@@ -156,6 +158,24 @@ export default function AppearancePage() {
       </div>
     </section>
   )
+}
+
+const CONTROL_NAMES: Readonly<Record<ThemeControl, string>> = {
+  accent: 'accent shades',
+  density: 'density',
+  textSize: 'text size',
+  uiFont: 'fonts',
+  monoFont: 'fonts',
+  radius: 'corners',
+}
+
+/** "Slab sets corners and fonts; choosing a value here overrides it." — or ''
+ * when the theme leaves every control to this panel. */
+function themeNote(themeName: string, controls: readonly ThemeControl[]): string {
+  const names = [...new Set(controls.map((control) => CONTROL_NAMES[control]))]
+  if (names.length === 0) return ''
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
+  return `${themeName} sets its own ${list}; choosing a value here overrides it.`
 }
 
 function Row({ label, hint, children }: { readonly label: string; readonly hint: string; readonly children: ReactNode }) {

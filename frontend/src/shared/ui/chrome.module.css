@@ -1,6 +1,7 @@
 /* Panel: the one framed shape in the workspace. Elevation is the hairline;
-   no shadow, no tint — the content carries the weight. */
-.panel { min-width: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); }
+   no tint, and no shadow unless a theme sets --shadow-panel — the content
+   carries the weight. */
+.panel { min-width: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--bg-surface); box-shadow: var(--shadow-panel); }
 .panelHeader { display: flex; min-width: 0; min-height: 44px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); }
 .panelTitle { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 1px; }
 .panelTitle h2 { flex: 0 0 auto; color: var(--text-primary); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; line-height: 1.35; }

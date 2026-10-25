@@ -7,5 +7,5 @@ type ButtonProps = PropsWithChildren<
 >
 
 export function Button({ variant = 'secondary', className = '', ...props }: ButtonProps) {
-  return <button className={`button button-${variant} ${className}`} {...props} />
+  return <button className={`button button-${variant} ${className}`} data-variant={variant} {...props} />
 }

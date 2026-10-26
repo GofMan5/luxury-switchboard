@@ -11,7 +11,7 @@ import { Pill, Segmented } from '../../../shared/ui/chrome'
 import chrome from '../../../shared/ui/chrome.module.css'
 import { ReasoningLevel } from '../../../shared/ui/ReasoningLevel'
 import { StatusDot } from '../../../shared/ui/StatusDot'
-import { isLive, type ActivityRequest, type ActivityState } from '../domain/activity'
+import { isLive, latencyPhases, requestKind, type ActivityRequest, type RequestKind, type ActivityState } from '../domain/activity'
 import { activityLabel } from './activity-view'
 import { Elapsed } from './Elapsed'
 import { useActivity } from './useActivity'
@@ -245,6 +245,7 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
   const { actions } = useContributed(undefined, 'activity')
   const { capabilities } = useAppServices()
   // A retry rule is the answer to a failure; the link opens a prefilled editor.
+  const kind = requestKind(request)
   const retryRule = request.state === 'failed' && (capabilities ?? []).includes('rules.manage')
   // Non-modal side panel: live updates continue behind it, so modal semantics would lie.
   return (
@@ -268,7 +269,10 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
         <InspectorTabs scope="activity" id={request.id} label="Request inspector sections">
         <div className={styles.inspectorStatus}>
           <Pill tone={statePillTone[request.state]}>{activityLabel(request)}</Pill>
-          <span className={styles.inspectorMeta}>{request.method} {request.path}{request.status ? ` · HTTP ${request.status}` : ''}</span>
+          <span className={styles.inspectorMeta}>
+            <span className={styles.kind}>{requestKindLabels[kind]}</span>
+            {request.method} {request.path}{request.status ? ` · HTTP ${request.status}` : ''}
+          </span>
         </div>
 
         {retryRule || actions.length > 0 ? (
@@ -298,35 +302,48 @@ function RequestInspector({ request, frozenAt, onClose }: { request: ActivityReq
 
         <section className={styles.inspectorSection} aria-label="Timing">
           <dl className={styles.details}>
-            <Detail label="Model" value={request.model || '—'} />
-            <Detail label="Reasoning" value={reasoningDetail(request)} />
+            {kind !== 'service' || request.model ? <Detail label="Model" value={request.model || '—'} /> : null}
+            {kind === 'generation' ? <Detail label="Reasoning" value={reasoningDetail(request)} /> : null}
             <Detail label="Route" value={request.providerName || '—'} />
             {isLive(request)
               ? <Detail label="Running for" value={<Elapsed request={request} frozenAt={frozenAt} />} />
               : <Detail label="Latency" value={formatDuration(request.latencyMs)} />}
-            <Detail label="Queue / retries" value={`${formatDuration(request.queueMs)} · ${request.retries}`} />
-            <Detail label="Traffic" value={`${formatBytes(request.bytesIn)} in · ${formatBytes(request.bytesOut)} out`} />
-            <Detail label="First token" value={request.ttftMs && request.ttftMs > 0 ? formatDuration(request.ttftMs) : '—'} />
-            <Detail label="Generation" value={request.tokensPerSecond > 0 ? `${formatDecimal(request.tokensPerSecond)} tok/s` : '—'} />
+            {request.queueMs > 0 ? <Detail label="Queue" value={formatDuration(request.queueMs)} /> : null}
+            {request.retries > 0 ? <Detail label="Retries" value={formatInteger(request.retries)} /> : null}
+            <Detail label="Traffic" value={trafficDetail(request)} />
+            {kind === 'generation' ? (
+              <>
+                <Detail label="First token" value={request.ttftMs && request.ttftMs > 0 ? formatDuration(request.ttftMs) : '—'} />
+                <Detail label="Generation" value={request.tokensPerSecond > 0 ? `${formatDecimal(request.tokensPerSecond)} tok/s` : '—'} />
+              </>
+            ) : null}
+            {kind === 'count' ? <Detail label="Prompt size" value={request.contextTokens > 0 ? `${formatInteger(request.contextTokens)} tokens` : '—'} /> : null}
           </dl>
+          {isLive(request) ? null : <LatencyBreakdown request={request} />}
         </section>
 
-        <section className={styles.inspectorSection} aria-label="Tokens">
-          <div className={styles.tokenGrid}>
-            <TokenStat label="Input" value={request.inputTokens} />
-            <TokenStat label="Output" value={request.outputTokens} />
-            <TokenStat label="Cached" value={request.cachedTokens} />
-            <TokenStat label="Reasoning" value={request.reasoningTokens} />
-            <TokenStat label="Processed" value={request.totalTokens} />
-            <TokenStat label="Context" value={request.contextTokens} />
-          </div>
-        </section>
+        {kind === 'generation' ? (
+          <section className={styles.inspectorSection} aria-label="Tokens">
+            {request.totalTokens + request.contextTokens > 0 ? (
+              <div className={styles.tokenGrid}>
+                <TokenStat label="Input" value={request.inputTokens} />
+                <TokenStat label="Output" value={request.outputTokens} />
+                <TokenStat label="Cached" value={request.cachedTokens} />
+                <TokenStat label="Reasoning" value={request.reasoningTokens} />
+                <TokenStat label="Processed" value={request.totalTokens} />
+                <TokenStat label="Context" value={request.contextTokens} />
+              </div>
+            ) : (
+              <p className={styles.quiet}>{isLive(request) ? 'Token usage arrives with the answer.' : 'The provider reported no token usage.'}</p>
+            )}
+          </section>
+        ) : null}
 
         <section className={styles.inspectorSection} aria-label="Status timeline">
           <h3 className={styles.sectionTitle}>Timeline</h3>
           <TimelineRow label="Received" value={formatClock(request.startedAt)} done />
           <TimelineRow label="Routed" value={request.providerName || '—'} done />
-          {request.retries > 0 ? <TimelineRow label="Retried" value={`${request.retries} attempts`} warning /> : null}
+          {request.retries > 0 ? <TimelineRow label="Retried" value={request.retries === 1 ? 'once' : `${formatInteger(request.retries)} times`} warning /> : null}
           <TimelineRow label={activityLabel(request)} value={formatClock(request.updatedAt)} state={request.state} />
         </section>
 
@@ -353,6 +370,47 @@ function reasoningDetail(request: ActivityRequest): string {
   const spent = request.thinkingMs && request.thinkingMs > 0 ? `${formatDuration(request.thinkingMs)} thinking` : ''
   const now = request.state === 'active' && request.thinking ? 'thinking now' : ''
   return [level || (spent || now ? '' : 'Provider default'), spent, now].filter(Boolean).join(' · ')
+}
+
+const requestKindLabels: Record<RequestKind, string> = {
+  generation: 'Model call',
+  count: 'Token count',
+  service: 'Service request',
+}
+
+/** Only the directions that carried bytes: a probe that sent no body has
+ * nothing "in", and a dash there reads as missing data. */
+function trafficDetail(request: ActivityRequest): string {
+  const parts = [
+    request.bytesIn > 0 ? `${formatBytes(request.bytesIn)} in` : '',
+    request.bytesOut > 0 ? `${formatBytes(request.bytesOut)} out` : '',
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : 'No body'
+}
+
+/** Where a finished request's time went, drawn only when there is more than
+ * one phase to compare; a single phase is already the latency row. */
+function LatencyBreakdown({ request }: { request: ActivityRequest }) {
+  const phases = latencyPhases(request)
+  const total = phases.queue + phases.provider + phases.streaming
+  const parts = ([
+    ['queue', 'Queue', phases.queue],
+    ['provider', 'Provider', phases.provider],
+    ['streaming', 'Streaming', phases.streaming],
+  ] as const).filter(([, , value]) => value > 0)
+  if (total <= 0 || parts.length < 2) return null
+  return (
+    <figure className={styles.breakdown} aria-label="Latency breakdown">
+      <div className={styles.breakdownBar} aria-hidden="true">
+        {parts.map(([id, , value]) => <span key={id} data-phase={id} style={{ flexGrow: value }} />)}
+      </div>
+      <figcaption>
+        {parts.map(([id, label, value]) => (
+          <span key={id} data-phase={id}>{label} <strong>{formatDuration(value)}</strong></span>
+        ))}
+      </figcaption>
+    </figure>
+  )
 }
 
 function TokenStat({ label, value }: { label: string; value: number }) {

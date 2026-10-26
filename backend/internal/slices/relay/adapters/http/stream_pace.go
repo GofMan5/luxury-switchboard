@@ -59,6 +59,7 @@ func (meter *paceMeter) settle(serving *attemptMetadata, usage relayapp.TokenUsa
 		return
 	}
 	serving.firstToken = meter.sample.Opened
+	meter.sample.ReasoningRequested = serving.reasoningRequested
 	serving.tokensPerSecond = meter.rate(usage)
 }
 

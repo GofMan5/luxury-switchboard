@@ -50,6 +50,11 @@ func sample(sent, opened, answer, last time.Duration, reasoningEvents, answerEve
 	return result
 }
 
+func requested(value PaceSample, asked bool) PaceSample {
+	value.ReasoningRequested = asked
+	return value
+}
+
 func TestPaceSampleMeasuresTheWindowItsTokensWereGeneratedIn(t *testing.T) {
 	const second = time.Second
 	cases := map[string]struct {
@@ -79,6 +84,25 @@ func TestPaceSampleMeasuresTheWindowItsTokensWereGeneratedIn(t *testing.T) {
 			value.Sent = time.Time{}
 			return value
 		}(), 1001, 0, 0},
+		// Reasoning asked for, then hidden entirely: no reasoning text, no
+		// reported size, the answer burst after a long silent wait. The
+		// billed output may hold the reasoning, so the burst's window alone
+		// cannot time it.
+		"reasoning requested, hidden, unreported, short window": {requested(sample(0, 6*second, 6*second, 7*second, 0, 40, 0, 400), true), 473, 0, 0},
+		// Every billed token streamed as text: nothing was hidden.
+		"reasoning requested, none hidden, short window":       {requested(sample(0, 6*second, 6*second, 7*second, 0, 40, 0, 1600), true), 101, 0, 100},
+		"reasoning requested, hidden, unreported, long window": {requested(sample(0, 2*second, 2*second, 12*second, 0, 200, 0, 2000), true), 1001, 0, 100},
+		"reasoning requested, hidden, unreported, no send time": {func() PaceSample {
+			value := requested(sample(0, 2*second, 2*second, 12*second, 0, 200, 0, 2000), true)
+			value.Sent = time.Time{}
+			return value
+		}(), 1001, 0, 0},
+		// Reasoning asked for and shown in full, or its size reported: the
+		// cases above already measure it.
+		"reasoning requested, shown in full":    {requested(sample(0, 6*second, 7*second, 8*second, 40, 40, 1600, 800), true), 201, 0, 100},
+		"reasoning requested, hidden, reported": {requested(sample(0, 4*second, 4*second, 5*second, 0, 40, 0, 400), true), 401, 300, 100},
+		// Not asked for: a long prefill before a fast answer hides nothing.
+		"reasoning not requested, short window": {sample(0, 6*second, 6*second, 7*second, 0, 40, 0, 100), 101, 0, 100},
 		// Reasoning reported, no answer after it: nothing left to measure.
 		"reasoning only, hidden": {sample(0, second, 0, 5*second, 20, 0, 40, 0), 401, 401, 0},
 		"no token":               {PaceSample{}, 401, 0, 0},

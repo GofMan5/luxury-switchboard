@@ -39,7 +39,7 @@ func TestProbeConnectionFailureDoesNotPersistTheRequestURL(t *testing.T) {
 	if err == nil || report.ErrorCode != "transport" || row.State != activitydomain.StateFailed || row.ErrorCode != "transport" {
 		t.Fatalf("connection failure was lost: report=%+v row=%+v err=%v", report, row, err)
 	}
-	if row.ErrorDetail != "Provider connection failed" {
+	if row.ErrorDetail != "Provider connection failed: closed before the answer ended" {
 		t.Fatalf("request URL/query entered history: %q", row.ErrorDetail)
 	}
 	if len(credentials.outcomes) != 1 || credentials.outcomes[0].Kind != relayapp.AttemptTransport {
@@ -95,7 +95,7 @@ func TestProbeReadFailureKeepsUsageButNotPrivateTransportText(t *testing.T) {
 	if report.ErrorCode != "transport" || row.ErrorCode != "transport" || row.State != activitydomain.StateFailed {
 		t.Fatalf("read failure was lost: report=%+v row=%+v", report, row)
 	}
-	if report.ErrorDetail != "Provider connection failed" || row.ErrorDetail != report.ErrorDetail {
+	if report.ErrorDetail != "Provider connection failed: closed before the answer ended" || row.ErrorDetail != report.ErrorDetail {
 		t.Fatalf("private read text entered report/history: report=%+v row=%+v", report, row)
 	}
 	if report.TTFTMs <= 0 || row.InputTokens != 100 || row.OutputTokens != 17 || row.TotalTokens != 117 || row.GenerationMS <= 0 || row.BytesOut == 0 {

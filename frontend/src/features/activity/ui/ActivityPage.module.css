@@ -81,6 +81,21 @@
 .details dt { color: var(--text-muted); font-size: var(--fs-sm); }
 .details dd { min-width: 0; margin: 0; color: var(--text-secondary); font-size: var(--fs-base); font-variant-numeric: tabular-nums; line-height: 1.45; overflow-wrap: anywhere; }
 .details .mono { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.kind { display: block; font-family: var(--font-ui); margin-bottom: 1px; color: var(--text-secondary); font-size: var(--fs-sm); font-weight: 500; }
+.quiet { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
+/* Three greys, darkest where the provider spent the time: the bar compares
+ * phases, it does not grade them, so no status colors. */
+.breakdown { margin: 12px 0 0; }
+.breakdownBar { display: flex; height: 6px; gap: 2px; overflow: hidden; border-radius: 999px; }
+.breakdownBar span { min-width: 3px; flex-basis: 0; }
+.breakdown [data-phase='queue'] { --phase: color-mix(in srgb, var(--text-muted) 35%, transparent); }
+.breakdown [data-phase='provider'] { --phase: var(--text-secondary); }
+.breakdown [data-phase='streaming'] { --phase: color-mix(in srgb, var(--text-muted) 65%, transparent); }
+.breakdownBar span { background: var(--phase); }
+.breakdown figcaption { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 7px; color: var(--text-muted); font-size: var(--fs-xs); }
+.breakdown figcaption span { display: inline-flex; align-items: center; gap: 5px; }
+.breakdown figcaption span::before { width: 8px; height: 8px; border-radius: 2px; background: var(--phase); content: ''; }
+.breakdown figcaption strong { color: var(--text-secondary); font-variant-numeric: tabular-nums; font-weight: 500; }
 .tokenGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .tokenStat { min-width: 0; }
 .tokenStat span { display: block; overflow: hidden; color: var(--text-muted); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }

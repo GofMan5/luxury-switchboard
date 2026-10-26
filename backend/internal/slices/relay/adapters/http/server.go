@@ -126,6 +126,9 @@ type attemptMetadata struct {
 	// (paceMeter.settle); zero when the answer streamed no token.
 	firstToken      time.Time
 	tokensPerSecond float64
+	// reasoningRequested is whether the client asked for reasoning, which a
+	// provider may then spend without streaming or reporting it.
+	reasoningRequested bool
 }
 
 type Config struct {
@@ -344,7 +347,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	errorDetail := ""
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
-	serving := attemptMetadata{route: route}
+	serving := attemptMetadata{route: route, reasoningRequested: reasoningEffort != "" && reasoningEffort != "none"}
 	defer func() {
 		server.activity.Finish(activityID, relayapp.ActivityFinish{
 			Status: status, BytesOut: bytesOut, Cancelled: cancelled, ErrorCode: errorCode,
@@ -1015,7 +1018,7 @@ func (server *Server) Dispatch(ctx context.Context, request relayapp.DispatchReq
 	usage := relayapp.TokenUsage{}
 	generation := time.Duration(0)
 	var upstreamDetail string
-	serving := attemptMetadata{route: route}
+	serving := attemptMetadata{route: route, reasoningRequested: reasoningEffort != "" && reasoningEffort != "none"}
 	// Same contract as ServeHTTP's dispatch: one JSON object is an answer
 	// only for the caller that asked for one.
 	wholeJSONExpected := statelessJSON || (responsesCompat && !streamRequested)
@@ -1685,7 +1688,11 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					response.Header.Set("Content-Length", strconv.Itoa(len(buffered)))
 				}
 				response.Header.Del("Content-Encoding")
-				setUsageHeaders(response.Header, usageWith(discarded, usageFromJSON(buffered)), generatedDuration)
+				answered := usageFromJSON(buffered)
+				if countTokensPath(canonicalPath(incoming.URL.Path)) {
+					answered = tokenCountUsage(buffered)
+				}
+				setUsageHeaders(response.Header, usageWith(discarded, answered), generatedDuration)
 				server.noteLearnedShape(route.ProviderID, learned)
 				return response, nil
 			}
@@ -4729,4 +4736,20 @@ func writeError(writer http.ResponseWriter, status int, message string) {
 	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	writer.WriteHeader(status)
 	_, _ = writer.Write(body)
+}
+
+func countTokensPath(path string) bool {
+	return path == "/v1/messages/count_tokens" || path == "/messages/count_tokens"
+}
+
+// A token count answers how large the prompt is: nothing was generated or
+// billed, so the counted size is the request's context, not its spend.
+func tokenCountUsage(body []byte) relayapp.TokenUsage {
+	var payload struct {
+		InputTokens any `json:"input_tokens"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return relayapp.TokenUsage{}
+	}
+	return relayapp.TokenUsage{ContextTokens: positiveInt(payload.InputTokens)}
 }

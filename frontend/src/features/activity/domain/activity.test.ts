@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { elapsedMs, liveFirst, type ActivityRequest } from './activity'
+import { elapsedMs, latencyPhases, liveFirst, requestKind, type ActivityRequest } from './activity'
 
 const row = (id: string, state: ActivityRequest['state'], startedAt: string): ActivityRequest => ({
   id, startedAt, updatedAt: startedAt, state, model: 'model', providerId: 'p', providerName: 'P', method: 'POST',
@@ -35,5 +35,32 @@ describe('elapsedMs', () => {
     expect(elapsedMs({ startedAt: '2026-01-01T00:00:00Z', latencyMs: 9_000 }, started + 4_200)).toBe(9_000)
     expect(elapsedMs({ startedAt: '2026-01-01T00:00:00Z', latencyMs: 0 }, started - 500)).toBe(0)
     expect(elapsedMs({ startedAt: '', latencyMs: 1_500 }, started)).toBe(1_500)
+  })
+})
+
+describe('requestKind', () => {
+  const kind = (path: string, tokens = 0) => requestKind({ path, inputTokens: tokens, outputTokens: 0, totalTokens: 0 })
+
+  it('tells a token count, a model call and a service request apart', () => {
+    expect(kind('/v1/messages/count_tokens')).toBe('count')
+    expect(kind('/V1/Messages/Count_Tokens/')).toBe('count')
+    expect(kind('/v1/messages')).toBe('generation')
+    expect(kind('/v1/chat/completions?stream=true')).toBe('generation')
+    expect(kind('/responses/')).toBe('generation')
+    expect(kind('/api/hello')).toBe('service')
+    expect(kind('/v1/models')).toBe('service')
+    // Usage proves a model call on a path the relay does not name.
+    expect(kind('/v1/custom', 12)).toBe('generation')
+  })
+})
+
+describe('latencyPhases', () => {
+  it('splits the wall-clock into queue, provider wait and streaming', () => {
+    expect(latencyPhases({ queueMs: 200, latencyMs: 3_000, ttftMs: 700 })).toEqual({ queue: 200, provider: 500, streaming: 2_300 })
+    // Nothing streamed: the provider held the whole answer.
+    expect(latencyPhases({ queueMs: 0, latencyMs: 900 })).toEqual({ queue: 0, provider: 900, streaming: 0 })
+    // Clock skew never yields a negative or oversized phase.
+    expect(latencyPhases({ queueMs: 5_000, latencyMs: 1_000, ttftMs: 400 })).toEqual({ queue: 1_000, provider: 0, streaming: 0 })
+    expect(latencyPhases({ queueMs: 100, latencyMs: 1_000, ttftMs: 9_000 })).toEqual({ queue: 100, provider: 900, streaming: 0 })
   })
 })

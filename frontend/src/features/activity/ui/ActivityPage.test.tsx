@@ -180,6 +180,45 @@ describe('ActivityPage pace', () => {
   })
 })
 
+describe('ActivityPage request kinds', () => {
+  const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')]
+  const inspect = (value: ActivityRequest) => {
+    show({ phase: 'ready', available: 1, summary, error: '', requests: [value] })
+    fireEvent.click(rows()[0])
+    return screen.getByRole('complementary', { name: 'Request inspector' })
+  }
+
+  it('shows a token count as the prompt size it measured, without generation figures', () => {
+    const inspector = inspect({ ...request('a', 'completed'), path: '/v1/messages/count_tokens', status: 200, latencyMs: 10, bytesIn: 41_779, bytesOut: 23, contextTokens: 12_345 })
+    expect(inspector.textContent).toContain('Token count')
+    expect(inspector.textContent).toContain(`Prompt size${(12_345).toLocaleString()} tokens`)
+    expect(inspector.textContent).not.toContain('First token')
+    expect(screen.queryByRole('region', { name: 'Tokens' })).toBeNull()
+  })
+
+  it('shows a probe without model, token or body-less traffic noise, and counts one retry as once', () => {
+    const inspector = inspect({ ...request('a', 'failed'), model: '', method: 'HEAD', path: '/api/hello', status: 404, latencyMs: 275, retries: 1, bytesOut: 46 })
+    const text = inspector.textContent ?? ''
+    expect(text).toContain('Service request')
+    expect(text).toContain('Traffic46 B out')
+    expect(text).toContain('Retries1')
+    expect(text).toContain('Retriedonce')
+    for (const noise of ['Model—', 'Reasoning', 'First token', '— in', 'Queue / retries', 'attempts']) expect(text).not.toContain(noise)
+    expect(screen.queryByRole('region', { name: 'Tokens' })).toBeNull()
+  })
+
+  it('says a finished model call reported no usage instead of a grid of zeros', () => {
+    inspect({ ...request('a', 'completed'), latencyMs: 900 })
+    expect(screen.getByRole('region', { name: 'Tokens' }).textContent).toBe('The provider reported no token usage.')
+  })
+
+  it('splits a streamed answer into queue, provider wait and streaming', () => {
+    inspect({ ...request('a', 'completed'), queueMs: 200, latencyMs: 3_000, ttftMs: 700, inputTokens: 10, totalTokens: 20, outputTokens: 10 })
+    const breakdown = screen.getByRole('figure', { name: 'Latency breakdown' })
+    expect(breakdown.querySelector('figcaption')?.textContent).toBe(`Queue 200 msProvider 500 msStreaming ${(2.3).toLocaleString(undefined, { minimumFractionDigits: 2 })} s`)
+  })
+})
+
 describe('ActivityPage reasoning', () => {
   const rows = () => [...screen.getByRole('table').querySelectorAll<HTMLTableRowElement>('tbody tr[data-row]')]
 

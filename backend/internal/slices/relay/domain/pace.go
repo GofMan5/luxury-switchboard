@@ -49,6 +49,9 @@ type PaceSample struct {
 	StreamedBytes, ReasoningBytes int64
 	// OutputTokens and ReasoningTokens are the provider's usage report.
 	OutputTokens, ReasoningTokens int64
+	// ReasoningRequested is whether the request asked for reasoning: a
+	// provider may then reason without streaming or reporting any of it.
+	ReasoningRequested bool
 }
 
 // DecodeRate is the sample's decode speed, or zero when the stream cannot
@@ -63,7 +66,10 @@ type PaceSample struct {
 //     that wait, which bounds the overstatement at double, and is withheld
 //     otherwise.
 //
-// An answer that never reasoned has nothing to hide, however dense its text.
+// A request that asked for reasoning may have reasoned without streaming a
+// byte of it, so it counts as reasoning when its text falls short of its
+// billing. An answer that never reasoned has nothing to hide, however dense
+// its text.
 func (sample PaceSample) DecodeRate() float64 {
 	if sample.Opened.IsZero() || sample.Last.IsZero() {
 		return 0
@@ -77,7 +83,7 @@ func (sample PaceSample) DecodeRate() float64 {
 			}
 			return DecodeRate(sample.OutputTokens-sample.ReasoningTokens, sample.AnswerEvents, sample.Last.Sub(sample.Answer))
 		}
-	case sample.ReasoningEvents > 0 && sample.StreamedBytes < MinStreamedBytesPerToken*sample.OutputTokens:
+	case (sample.ReasoningEvents > 0 || sample.ReasoningRequested) && sample.StreamedBytes < MinStreamedBytesPerToken*sample.OutputTokens:
 		if sample.Sent.IsZero() || window < sample.Opened.Sub(sample.Sent) {
 			return 0
 		}

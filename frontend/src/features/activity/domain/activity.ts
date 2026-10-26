@@ -100,3 +100,27 @@ export interface ActivitySummary {
   readonly p95Ms: number
   readonly rpm: number
 }
+
+/** What the request asked the provider for: an answer to generate, a prompt
+ * to size, or neither (model lists, probes, health checks). */
+export type RequestKind = 'generation' | 'count' | 'service'
+
+const GENERATION_PATH = /\/(responses|chat\/completions|completions|messages|embeddings)$/u
+
+export function requestKind(request: Pick<ActivityRequest, 'path' | 'inputTokens' | 'outputTokens' | 'totalTokens'>): RequestKind {
+  const path = request.path.toLowerCase().split('?')[0].replace(/\/+$/u, '')
+  if (path.endsWith('/messages/count_tokens')) return 'count'
+  if (GENERATION_PATH.test(path) || request.inputTokens + request.outputTokens + request.totalTokens > 0) return 'generation'
+  return 'service'
+}
+
+/** Where the wall-clock went, in milliseconds: the relay's queue, the wait for
+ * the provider's first token (or its whole answer when nothing streamed) and
+ * the streaming that followed. First token is measured from arrival, so it
+ * already contains the queue. */
+export function latencyPhases(request: Pick<ActivityRequest, 'queueMs' | 'latencyMs' | 'ttftMs'>): { queue: number; provider: number; streaming: number } {
+  const total = Math.max(request.latencyMs, 0)
+  const queue = Math.min(Math.max(request.queueMs, 0), total)
+  const first = request.ttftMs && request.ttftMs > queue ? Math.min(request.ttftMs, total) : total
+  return { queue, provider: first - queue, streaming: total - first }
+}

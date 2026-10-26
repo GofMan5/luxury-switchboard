@@ -122,7 +122,13 @@ function fixtureReasoning(index: number, state: ActivityRequest['state'], output
   }
 }
 
-const activity: ActivityRequest[] = Array.from({ length: 42 }, (_, index) => fixtureRequest(index, index * 96_000 + 4_000))
+const generated: ActivityRequest[] = Array.from({ length: 42 }, (_, index) => fixtureRequest(index, index * 96_000 + 4_000))
+// Requests that generate nothing: a prompt-size count and a client's probe.
+const nonGeneration: ActivityRequest[] = [
+  { ...generated[2], id: `req-count-${now.toString(36)}`, model: 'claude-fixture', path: '/v1/messages/count_tokens', status: 200, queueMs: 0, latencyMs: 10, retries: 0, bytesIn: 41_779, bytesOut: 23, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, totalTokens: 0, contextTokens: 10_412, generationMs: 0, tokensPerSecond: 0, ttftMs: undefined, tags: undefined, reasoningEffort: undefined, reasoningBudget: undefined, thinking: undefined, thinkingMs: undefined },
+  { ...generated[6], id: `req-probe-${now.toString(36)}`, model: '', method: 'HEAD', path: '/api/hello', status: 404, queueMs: 0, latencyMs: 275, retries: 1, bytesIn: 0, bytesOut: 46, errorCode: 'upstream_status', errorDetail: 'Provider answered 404', inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, totalTokens: 0, contextTokens: 0, generationMs: 0, tokensPerSecond: 0, ttftMs: undefined, tags: undefined, reasoningEffort: undefined, reasoningBudget: undefined, thinking: undefined, thinkingMs: undefined },
+]
+const activity: ActivityRequest[] = [...generated.slice(0, 3), ...nonGeneration, ...generated.slice(3)]
 
 const relayRoutes: ModelRoute[] = [
   { target: 'relay', publicModel: 'glm', upstreamModel: 'glm-5.3', providerId: 'north-relay', contextLimitKiB: 0, aliases: [], enabled: true, priority: 0 },

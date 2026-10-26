@@ -260,6 +260,38 @@ func TestRelayMeasuresTheAnswerPhaseBehindHiddenReasoning(t *testing.T) {
 	}
 }
 
+// A request that asked for reasoning, answered by a provider that reasoned
+// in silence and reported none of it: the billed output, reasoning
+// included, burst out in a window far shorter than the wait. Dividing it by
+// that window filed tens of thousands of tokens per second; without the
+// reasoning's size nothing in the stream can time it.
+func TestRelayFilesNoRateForUnreportedSilentReasoning(t *testing.T) {
+	const wait, gap, chunks, output = 400 * time.Millisecond, 12 * time.Millisecond, 12, 2_000
+	answer := func(effort string) relayapp.StreamPace {
+		frames := []scriptedFrame{{0, `{"choices":[{"index":0,"delta":{"role":"assistant"}}]}`}}
+		for index := 1; index <= chunks; index++ {
+			pause := gap
+			if index == 1 {
+				pause = wait
+			}
+			frames = append(frames, scriptedFrame{pause, fmt.Sprintf(`{"choices":[{"index":0,"delta":{"content":"%d %s"}}]}`, index, strings.Repeat("and then ", 8))})
+		}
+		frames = append(frames,
+			scriptedFrame{0, fmt.Sprintf(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":%d}}`, output)},
+			scriptedFrame{0, "[DONE]"},
+		)
+		return relayChatPace(t, scriptedStream(frames), `{"model":"glm-5.3","stream":true,`+effort+`"messages":[{"role":"user","content":"think"}]}`)
+	}
+	if pace := answer(`"reasoning_effort":"xhigh",`); pace.FirstToken < wait || pace.TokensPerSecond != 0 {
+		t.Fatalf("silent reasoning filed %+v, want the first token and no rate", pace)
+	}
+	// The same stream without reasoning asked for hides nothing it could
+	// have reasoned in: its rate stands, however dense.
+	if pace := answer(`"reasoning_effort":"none",`); pace.TokensPerSecond <= 0 {
+		t.Fatalf("an answer that reasoned not at all filed no rate: %+v", pace)
+	}
+}
+
 // A tool call is generated output like text: an answer that only called a
 // tool used to file no first token and no speed.
 func TestRelayMeasuresAToolCallOnlyAnswer(t *testing.T) {

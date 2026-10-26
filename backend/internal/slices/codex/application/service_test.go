@@ -202,8 +202,11 @@ type fakeAuthorizer struct {
 	refreshBlock  chan struct{}
 	exchangeCalls []exchangeCall
 	refreshCalls  []string
-	states        []string
-	challenges    []string
+	// refreshCtxErrs records each Refresh ctx state once the call ends:
+	// a refresh cut off mid-rotation loses the token the server rotated.
+	refreshCtxErrs []error
+	states         []string
+	challenges     []string
 	// deviceStartErr makes RequestDeviceUserCode fail before any flow
 	// state exists; the service must surface it and change nothing.
 	deviceStartErr error
@@ -264,6 +267,9 @@ func (authorizer *fakeAuthorizer) Refresh(ctx context.Context, refreshToken stri
 		session = authorizer.session
 		authorizer.mu.Unlock()
 	}
+	authorizer.mu.Lock()
+	authorizer.refreshCtxErrs = append(authorizer.refreshCtxErrs, ctx.Err())
+	authorizer.mu.Unlock()
 	if err != nil {
 		return domain.Session{}, err
 	}
@@ -1784,5 +1790,33 @@ func TestAQuotaCallerThatStopsWaitingGetsTheLastSettledAnswer(t *testing.T) {
 	}
 	if count := env.authorizer.usageProbeCount(); count != 1 {
 		t.Fatalf("usage probes = %d, want 1: the departing waiter must not have probed", count)
+	}
+}
+
+// A refresh rotates the refresh token on the server, so cutting it off when
+// the waiting request goes away can strand the account: the server already
+// consumed the old token and the answer carrying the new one is dropped.
+func TestARefreshOutlivesTheRequestThatStartedIt(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(staleSession())
+	env.restore(t)
+	block := make(chan struct{})
+	env.authorizer.setRefreshBlock(block)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.service.AcquireAccessToken(ctx, "account-1")
+		done <- err
+	}()
+	waitFor(t, "the refresh to start", func() bool { return len(env.authorizer.refreshes()) >= 1 })
+	cancel()
+	close(block)
+	<-done
+	waitFor(t, "the rotation to be stored", func() bool { return len(env.store.savedSessions()) >= 1 })
+	env.authorizer.mu.Lock()
+	defer env.authorizer.mu.Unlock()
+	if err := env.authorizer.refreshCtxErrs[0]; err != nil {
+		t.Fatalf("the refresh was cut off with its caller: %v", err)
 	}
 }

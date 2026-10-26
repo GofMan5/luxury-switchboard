@@ -194,7 +194,7 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 	if body.completed {
 		return 0, io.EOF
 	}
-	if len(body.source.prefix) == 0 && len(body.source.pending) == 0 && body.source.pendingErr == nil {
+	for len(body.source.prefix) == 0 && len(body.source.pending) == 0 && body.source.pendingErr == nil {
 		select {
 		case value, open := <-body.source.reads:
 			if !open {
@@ -215,6 +215,11 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 			// data chunk resets it, so these ride gaps only.
 			if body.keepAlive != nil {
 				body.keepAlive.Reset(body.keepAliveFor)
+			}
+			// Only between events: inside one, the keep-alive would land in
+			// the half-written line or end the event early.
+			if !body.inspector.betweenEvents() {
+				continue
 			}
 			count := copy(into, body.keepAliveMsg)
 			return count, nil
@@ -243,6 +248,9 @@ func (body *liveStreamBody) Read(into []byte) (int, error) {
 				count = body.inspector.consumed
 				err = io.EOF
 				if body.inspector.terminal == "response.invalid" {
+					// The invalid event never reaches the client: it claims a
+					// completion the failure event is about to deny.
+					count = body.inspector.eventStart
 					err = errIncompleteSSE
 				}
 			}

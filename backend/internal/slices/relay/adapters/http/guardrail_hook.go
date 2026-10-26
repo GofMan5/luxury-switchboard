@@ -54,6 +54,8 @@ func (server *Server) reviewResponse(response *http.Response, path string, subje
 	// ceiling first.
 	if err != nil || int64(len(buffered)) > limit {
 		response.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buffered), response.Body), Closer: response.Body}
+		// The client receives the unread tail too, so the review is of a prefix.
+		subject.Truncated = true
 		verdict := server.guardrail.Review(buffered, bodyLooksLikeEventStream(buffered), subject)
 		return verdict.Code, verdict.Blocked
 	}

@@ -116,6 +116,18 @@ describe('PluginsModel', () => {
     expect(workers.created).toHaveLength(2)
   })
 
+  it('restarts only the crashed plugin the operator picked', async () => {
+    const { model, workers } = setup()
+    await model.connect()
+    await model.install(pkg, ['ui:pages'])
+    await model.install({ ...pkg, id: 'acme.other', name: 'Acme other' }, ['ui:pages'])
+    for (const worker of workers.created) worker.send({ type: 'not-a-message' })
+    await vi.waitFor(() => expect(model.snapshot().runtimes['acme.other'].state).toBe('crashed'))
+    await model.restart('acme.tools')
+    expect(workers.created.slice(2).map((worker) => worker.context.plugin.id)).toEqual(['acme.tools'])
+    expect(model.snapshot().runtimes['acme.other'].state).toBe('crashed')
+  })
+
   it('reports a plugin it could not load as crashed with the reason', async () => {
     const { model, port } = setup()
     await port.install(pkg, ['ui:pages'])

@@ -260,10 +260,11 @@ func TestRefreshWithoutARotatedRefreshTokenStillDeliversTheAccessToken(t *testin
 	if session.Identity != (domain.Identity{}) {
 		t.Fatalf("Refresh() identity = %+v, want zero", session.Identity)
 	}
-	// The session's expiry comes from the id_token's claims alone, so a
-	// response without one leaves it zero despite the expires_in field.
-	if !session.AccessExpiry.IsZero() {
-		t.Fatalf("Refresh() expiry = %v, want zero", session.AccessExpiry)
+	// Without an id_token the expiry comes from expires_in: a zero expiry
+	// reads as "always refresh", and the merge would otherwise keep the
+	// lapsed one, so every request would pay a token round-trip.
+	if until := time.Until(session.AccessExpiry); until < 59*time.Minute || until > time.Hour {
+		t.Fatalf("Refresh() expiry = %v, want about an hour from now", session.AccessExpiry)
 	}
 }
 

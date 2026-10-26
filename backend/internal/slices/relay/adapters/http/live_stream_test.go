@@ -2,6 +2,7 @@ package relayhttp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -531,5 +532,77 @@ func TestARepairableStreamStaysBufferedPastTheProbation(t *testing.T) {
 	// a completed announcement makes the client drop every delta after it.
 	if !strings.Contains(body, `"in_progress"`) {
 		t.Fatalf("the raw completed announcement reached the client unrepaired: %s", body)
+	}
+}
+
+// A provider that stalls in the middle of an event: the keep-alive must wait
+// for the event boundary, or it lands inside the half-written data line and
+// the client parses neither the keep-alive nor the delta.
+func TestALiveStreamNeverSplitsAnEventWithAKeepAlive(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi \"}}]}\n\n"))
+		writer.(http.Flusher).Flush()
+		time.Sleep(60 * time.Millisecond)
+		_, _ = writer.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel"))
+		writer.(http.Flusher).Flush()
+		time.Sleep(150 * time.Millisecond)
+		_, _ = writer.Write([]byte("lo\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		writer.(http.Flusher).Flush()
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, &recordingActivity{})
+	server.config.HeartbeatInterval = 25 * time.Millisecond
+	server.config.LiveStreamProbation = 20 * time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if !strings.Contains(body, `"content":"hello"`) {
+		t.Fatalf("a keep-alive split the event: %q", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if ok && data != "[DONE]" && !json.Valid([]byte(data)) {
+			t.Fatalf("the client received a broken data line %q in %q", data, body)
+		}
+	}
+}
+
+// A live Responses stream whose completion is malformed fails the answer:
+// the client must see that one failure, not the provider's "completed" and
+// then a failure a client stopping at the first terminal never reads.
+func TestALiveStreamWithAnInvalidCompletionEndsInOneFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = writer.Write([]byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"i1\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n"))
+		_, _ = writer.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hi\"}\n\n"))
+		writer.(http.Flusher).Flush()
+		time.Sleep(80 * time.Millisecond)
+		_, _ = writer.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":\"not-an-object\"}\n\n"))
+		writer.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+	server, _ := guardedServerWatchedBy(t, guardraildomain.ModeMonitor, upstream.URL, &recordingActivity{})
+	server.config.LiveStreamProbation = 20 * time.Millisecond
+	server.config.RetryMax = 5 * time.Millisecond
+
+	request := httptest.NewRequest(http.MethodPost, "http://relay/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"go"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if !strings.Contains(body, "response.output_item.added") {
+		t.Fatalf("the stream was not live: %q", body)
+	}
+	if strings.Contains(body, "response.completed") || strings.Count(body, "event: response.failed") != 1 {
+		t.Fatalf("want exactly one terminal, response.failed: %q", body)
 	}
 }

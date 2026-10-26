@@ -1018,3 +1018,67 @@ func TestAProxyHostTooShortToRedactIsNotAMarker(t *testing.T) {
 		}
 	}
 }
+
+// A live answer keeps flowing past the review's copy ceiling, so the review
+// reads a prefix of what the client received. The unread tail must be named,
+// or "nothing found" reads as "nothing there".
+func TestALiveAnswerPastTheReviewCeilingIsRecordedAsTruncated(t *testing.T) {
+	pad := strings.Repeat("a", 64*1024)
+	delta := `data: {"type":"response.output_text.delta","item_id":"i1","delta":"x","logprobs":"` + pad + "\"}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"i1","type":"message","status":"in_progress","role":"assistant","content":[]}}`+"\n\n")
+		writer.(http.Flusher).Flush()
+		time.Sleep(60 * time.Millisecond)
+		for written := 0; written < 9*1024*1024; written += len(delta) {
+			if _, err := io.WriteString(writer, delta); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(writer, `data: {"type":"response.completed","response":{"status":"completed"}}`+"\n\n")
+	}))
+	defer upstream.Close()
+	server, inspector := guardedServer(t, guardraildomain.ModeMonitor, upstream.URL)
+	server.config.LiveStreamProbation = 20 * time.Millisecond
+	server.config.MaxRequestBytes = 1024
+
+	response := postThrough(server, `{"model":"gpt-test","stream":true,"input":"go"}`)
+	if !strings.Contains(response.Body.String(), "response.completed") {
+		t.Fatalf("the answer did not stream through: %d bytes", response.Body.Len())
+	}
+	for _, record := range inspector.Records(0) {
+		for _, finding := range record.Findings {
+			if finding.RuleID == guardraildomain.RuleInspectionTruncated {
+				return
+			}
+		}
+	}
+	t.Fatalf("no truncation finding: %+v", inspector.Records(0))
+}
+
+// Padding the extractor never reads spends none of its text budget, so only
+// the relay knows the tail went unread: it must say so itself.
+func TestAReviewPastTheBufferCeilingIsRecordedAsTruncated(t *testing.T) {
+	server, inspector := guardedServer(t, guardraildomain.ModeMonitor, "http://127.0.0.1:1")
+	server.config.MaxRequestBytes = 1024
+	limit := int(responseBufferLimit(server.configSnapshot()))
+	// Every event parses on its own, so the extractor's text budget is never
+	// touched: the padding sits in a field it does not read.
+	event := `data: {"type":"response.output_text.delta","delta":"x","logprobs":"` + strings.Repeat("a", 64*1024) + `"}` + "\n\n"
+	huge := strings.Repeat(event, limit/len(event)+2)
+	response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(huge))}
+
+	server.reviewResponse(response, "/v1/responses", relayapp.GuardrailSubject{ProviderID: "echo", Model: "gpt-test"})
+	forwarded, _ := io.ReadAll(response.Body)
+	if len(forwarded) != len(huge) {
+		t.Fatalf("the answer was truncated: %d of %d bytes", len(forwarded), len(huge))
+	}
+	for _, record := range inspector.Records(0) {
+		for _, finding := range record.Findings {
+			if finding.RuleID == guardraildomain.RuleInspectionTruncated {
+				return
+			}
+		}
+	}
+	t.Fatalf("the unread tail was not reported: %+v", inspector.Records(0))
+}

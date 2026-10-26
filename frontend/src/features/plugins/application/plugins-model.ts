@@ -185,7 +185,7 @@ export class PluginsModel {
     return this.#enqueue(async () => {
       this.#hosts.get(id)?.stop()
       this.#hosts.delete(id)
-      await this.#sync(this.#state.plugins, true)
+      await this.#sync(this.#state.plugins)
     })
   }
 
@@ -361,7 +361,7 @@ export class PluginsModel {
       const latest = this.#latest
       if (!latest) return
       this.#latest = null
-      await this.#sync(latest, false)
+      await this.#sync(latest)
     })
   }
 
@@ -371,7 +371,7 @@ export class PluginsModel {
     return run
   }
 
-  async #sync(plugins: readonly PluginSummary[], restartCrashed: boolean): Promise<void> {
+  async #sync(plugins: readonly PluginSummary[]): Promise<void> {
     const ids = new Set(plugins.map((plugin) => plugin.id))
     for (const [id, host] of this.#hosts) {
       if (!ids.has(id)) {
@@ -394,7 +394,7 @@ export class PluginsModel {
       if (this.#deps.safeMode) continue
       const grants = effectiveGrants(plugin.permissions, plugin.granted)
       const revision = revisionOf(plugin, grants)
-      if (host && host.revision === revision && (host.runtime().state !== 'crashed' || !restartCrashed)) continue
+      if (host && host.revision === revision) continue
       host?.stop()
       this.#hosts.delete(plugin.id)
       await this.#start(plugin, grants)

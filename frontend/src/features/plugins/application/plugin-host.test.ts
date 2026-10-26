@@ -334,6 +334,16 @@ describe('PluginHost', () => {
     expect(signal?.aborted).toBe(true)
   })
 
+  it('does not treat a page being shown or hidden as the operator acting', async () => {
+    const { host, worker } = await running(['ui:pages', 'ui:clipboard'])
+    await worker.call('ui.registerPage', { id: 'board', title: 'Board' })
+    host.dispatch('board', { kind: 'show', form: {} })
+    host.dispatch('board', { kind: 'hide', form: {} })
+    expect(await worker.call('clipboard.writeText', { text: 'x' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+    host.dispatch('board', { kind: 'change', form: {} })
+    expect(await worker.call('clipboard.writeText', { text: 'x' })).toMatchObject({ ok: true })
+  })
+
   it('writes the clipboard only when granted and right after a command', async () => {
     const denied = await running(['ui:commands'])
     expect(await denied.worker.call('clipboard.writeText', { text: 'x' })).toMatchObject({ ok: false, error: { code: 'permission_denied' } })
@@ -635,6 +645,12 @@ describe('PluginHost data and surface APIs', () => {
     const late = vi.fn()
     host.canvas.subscribe('widget:load', 'c', late)
     expect(late).toHaveBeenCalledWith(draw.mock.calls[0]?.[0])
+    // A surface registered again starts blank, not with the old picture.
+    await worker.call('ui.unregister', { id: 'widget:load' })
+    await worker.call('ui.registerWidget', { id: 'load', title: 'Load' })
+    const fresh = vi.fn()
+    host.canvas.subscribe('widget:load', 'c', fresh)
+    expect(fresh).not.toHaveBeenCalled()
 
     for (let index = 0; index < DATA_LIMITS.tonesPerSecond + 5; index += 1) worker.send({ type: 'tone', spec: { frequency: 440, durationMs: 50 } })
     expect(sound).toHaveBeenCalledTimes(DATA_LIMITS.tonesPerSecond)

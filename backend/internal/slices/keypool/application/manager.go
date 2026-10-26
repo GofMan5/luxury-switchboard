@@ -43,6 +43,8 @@ type Manager struct {
 	userKeys      []domain.Key
 	loadMu        sync.RWMutex
 	loadErr       error
+	// probeTimeout bounds one key's pool probe.
+	probeTimeout time.Duration
 }
 
 // Rate is a provider's request budget: how many requests fit in one window. A
@@ -90,6 +92,7 @@ func NewManager(scheduler *Scheduler, repository Repository, providerRates map[s
 	manager := &Manager{
 		scheduler: scheduler, repository: repository,
 		providerRates: cloneRates(providerRates), builtins: slices.Clone(builtins),
+		probeTimeout: 15 * time.Second,
 	}
 	if err := manager.apply(nil); err != nil {
 		return nil, err

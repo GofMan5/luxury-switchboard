@@ -869,7 +869,7 @@ func (service *Service) importCandidate(ctx context.Context, candidate Credentia
 // identity is read from wherever it survives best — the fresh tokens
 // first, then the candidate's id token, then the access token's claims.
 func (service *Service) importViaRefresh(ctx context.Context, candidate CredentialCandidate) (domain.Session, error) {
-	refreshCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	refreshed, err := service.authorizer.Refresh(refreshCtx, candidate.RefreshToken)
 	cancel()
 	if err != nil {
@@ -1386,10 +1386,12 @@ func (service *Service) AcquireAccessToken(ctx context.Context, accountID string
 		return "", errNeedsSignIn
 	}
 
-	// The refresh is latency-bound to the caller's request, so it takes
-	// the caller's ctx (with the protocol timeout) rather than
-	// Background: the waiting relay request wants its cancellation.
-	refreshCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	// The refresh does not inherit the caller's cancellation: the token
+	// endpoint rotates the refresh token, so a refresh cut off after the
+	// server consumed the old token but before its answer lands strands
+	// the account until a fresh login. A departed caller waits at most
+	// refreshTimeout for the rotation to be stored.
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	refreshed, err := service.authorizer.Refresh(refreshCtx, report.session.RefreshToken)
 	cancel()
 	if err != nil {

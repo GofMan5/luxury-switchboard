@@ -193,3 +193,37 @@ func TestCheckPoolCancellationDoesNotWaitForContextIgnoringProber(t *testing.T) 
 		t.Fatalf("late prober result filed after cancellation: %+v", state)
 	}
 }
+
+// slowKeysPoolProber stalls the named keys until their probe times out and
+// answers every other one at once, honouring cancellation like the real one.
+type slowKeysPoolProber struct{ slow map[string]bool }
+
+func (p slowKeysPoolProber) ProbeKey(ctx context.Context, _ string, key domain.Key) int {
+	if p.slow[key.Label] {
+		<-ctx.Done()
+		return 0
+	}
+	return 200
+}
+
+// A probe that times out on its own deadline says nothing about the next key:
+// three blackholed keys must not retire all three workers and leave the rest
+// of the pool undispatched until the whole check's deadline.
+func TestTimedOutProbesDoNotRetireTheWorkers(t *testing.T) {
+	manager, _ := poolFixture(t, 6)
+	manager.probeTimeout = 20 * time.Millisecond
+	prober := slowKeysPoolProber{slow: map[string]bool{"key0": true, "key1": true, "key2": true}}
+	done := make(chan PoolReport, 1)
+	go func() {
+		report, _ := manager.CheckPool(context.Background(), "fixture", prober)
+		done <- report
+	}()
+	select {
+	case report := <-done:
+		if report.Checked != 6 || report.Accepted != 3 || report.Inconclusive != 3 || report.Skipped != 0 {
+			t.Fatalf("timed-out probes stopped the check: %+v", report)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the check stalled after three probes timed out")
+	}
+}

@@ -382,8 +382,16 @@ export class PluginHost {
     if (!this.#ready) return
     const known = pageId.startsWith('dialog:') ? this.#dialog?.id === pageId.slice('dialog:'.length) : this.#knownSurface(pageId)
     if (!known) return
-    this.#gestureAt = Date.now()
+    // Mounting and unmounting a surface is the window acting, not the operator.
+    if (event.kind === 'action' || event.kind === 'change') this.#gestureAt = Date.now()
     this.#post({ type: 'ui', pageId, event })
+  }
+
+  /** A removed surface keeps no picture to replay and asks for no frames. */
+  #forgetCanvases(surface: string): void {
+    const prefix = canvasKey(surface, '')
+    for (const key of [...this.#draws.keys()]) if (key.startsWith(prefix)) this.#draws.delete(key)
+    for (const key of [...this.#frames]) if (key.startsWith(prefix)) this.#frames.delete(key)
   }
 
   /** A registered page id or slot surface. */
@@ -711,8 +719,11 @@ export class PluginHost {
       }
       case 'ui.unregisterPage': {
         this.#need('ui:pages')
-        const key = pageKey(this.id, localId(args, 'id', PAGE_ID_PATTERN))
-        if (this.#pages.delete(key)) this.#publishPages()
+        const id = localId(args, 'id', PAGE_ID_PATTERN)
+        if (this.#pages.delete(pageKey(this.id, id))) {
+          this.#forgetCanvases(id)
+          this.#publishPages()
+        }
         return null
       }
       case 'ui.render': {
@@ -932,7 +943,10 @@ export class PluginHost {
         this.#need('ui:slots')
         const id = typeof args.id === 'string' ? args.id : ''
         if (id.includes(':')) {
-          if (this.#surfaces.delete(id)) this.#publishSlots()
+          if (this.#surfaces.delete(id)) {
+            this.#forgetCanvases(id)
+            this.#publishSlots()
+          }
         } else if (this.#actions.delete(id)) {
           this.#deps.extensions.contribute(this.#owner, { actions: [...this.#actions.values()] })
         }

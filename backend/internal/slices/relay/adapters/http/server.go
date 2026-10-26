@@ -753,6 +753,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				server.guardrail.Review(collected, true, relayapp.GuardrailSubject{
 					ProviderID: serving.route.ProviderID, ProviderName: serving.route.ProviderName, Model: model,
 					ClientDeclaredTools: clientDeclaredTools, Secrets: secrets,
+					Truncated: live.delivered > int64(len(collected)),
 				})
 				// Only when nothing more specific was already filed: a client
 				// that walked away mid-stream already carries the real cause,
@@ -3034,6 +3035,9 @@ type sseInspector struct {
 	limit     int64
 	overflow  bool
 	consumed  int
+	// eventStart is where, in the last fed chunk, the event in progress
+	// began: 0 when it began in an earlier chunk.
+	eventStart int
 	// onThinking receives the stream's reasoning-phase transitions; nil
 	// for the inspectors that only re-read a finished body.
 	onThinking    func(bool)
@@ -3046,7 +3050,7 @@ type sseInspector struct {
 
 func (inspector *sseInspector) Feed(chunk []byte) string {
 	originalLen := len(chunk)
-	inspector.consumed = 0
+	inspector.consumed, inspector.eventStart = 0, 0
 	if inspector.terminal != "" {
 		return inspector.terminal
 	}
@@ -3063,15 +3067,24 @@ func (inspector *sseInspector) Feed(chunk []byte) string {
 		if newline < 0 {
 			break
 		}
-		inspector.consumeLine(bytes.TrimSuffix(inspector.line, []byte{'\r'}))
+		line := bytes.TrimSuffix(inspector.line, []byte{'\r'})
+		inspector.consumeLine(line)
 		inspector.line = inspector.line[:0]
 		chunk = chunk[newline+1:]
 		inspector.consumed = originalLen - len(chunk)
 		if inspector.terminal != "" {
 			return inspector.terminal
 		}
+		if len(line) == 0 {
+			inspector.eventStart = inspector.consumed
+		}
 	}
 	return ""
+}
+
+// betweenEvents reports that the bytes fed so far end on an event boundary.
+func (inspector *sseInspector) betweenEvents() bool {
+	return len(inspector.line) == 0 && len(inspector.event) == 0 && inspector.eventName == ""
 }
 
 func (inspector *sseInspector) parserLimit() int64 {

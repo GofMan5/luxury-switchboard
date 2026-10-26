@@ -61,6 +61,9 @@ type Subject struct {
 	// recorded as evidence. The findings page shows excerpts of the answer,
 	// and an excerpt is the answer.
 	Secrets []string
+	// Truncated says the body is only a prefix of the answer: the relay
+	// delivered the rest unread.
+	Truncated bool
 }
 
 // Decision is the outcome for one answer.
@@ -231,7 +234,7 @@ func (inspector *Inspector) Inspect(body []byte, eventStream bool, subject Subje
 	// An answer that outgrew the budget was partly forwarded unread. Saying so is the
 	// difference between "nothing was found" and "nothing was looked at", and padding
 	// past the ceiling is the cheapest evasion there is.
-	if extraction.Truncated {
+	if extraction.Truncated || subject.Truncated {
 		findings = append(findings, domain.TruncatedInspectionFinding())
 	}
 	// Sort BEFORE capping. Capping first would make the cap a first-come limit, and

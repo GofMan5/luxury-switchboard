@@ -30,9 +30,16 @@ type PoolReport struct {
 
 const maxPoolCheckDuration = 2 * time.Minute
 
+// poolProbeSettleGrace is how long a timed-out probe gets to honour its
+// cancellation before its worker counts it as still running.
+const poolProbeSettleGrace = time.Second
+
 // runPoolProbe keeps the worker responsive when a PoolProber ignores cancellation.
 // Only its buffered result channel can be touched after the worker stops.
-func runPoolProbe(ctx context.Context, prober PoolProber, providerID string, key domain.Key) (int, bool) {
+// settled says no call is left behind, so the worker may start another one;
+// waiting for it only when the whole check is still live keeps cancellation
+// prompt.
+func runPoolProbe(ctx, checkCtx context.Context, prober PoolProber, providerID string, key domain.Key) (status int, completed, settled bool) {
 	result := make(chan int, 1)
 	go func() {
 		result <- prober.ProbeKey(ctx, providerID, key)
@@ -40,11 +47,19 @@ func runPoolProbe(ctx context.Context, prober PoolProber, providerID string, key
 	select {
 	case status := <-result:
 		if ctx.Err() != nil {
-			return 0, false
+			return 0, false, true
 		}
-		return status, true
+		return status, true, true
 	case <-ctx.Done():
-		return 0, false
+	}
+	if checkCtx.Err() != nil {
+		return 0, false, false
+	}
+	select {
+	case <-result:
+		return 0, false, true
+	case <-time.After(poolProbeSettleGrace):
+		return 0, false, false
 	}
 }
 
@@ -95,15 +110,18 @@ func (manager *Manager) CheckPool(ctx context.Context, providerID string, prober
 				if current == nil || current.generation != lease.generation {
 					continue
 				}
-				probeCtx, probeCancel := context.WithTimeout(checkCtx, 15*time.Second)
+				probeCtx, probeCancel := context.WithTimeout(checkCtx, manager.probeTimeout)
 				attempted[index] = true
-				status, completed := runPoolProbe(probeCtx, prober, providerID, lease.Key())
+				status, completed, settled := runPoolProbe(probeCtx, checkCtx, prober, providerID, lease.Key())
 				probeCancel()
 				if !completed {
+					statuses[index] = 0
+					if settled {
+						continue
+					}
 					// A context-ignoring prober may still be running in its detached
 					// call. Do not start another one on this worker: three workers
 					// means three is the maximum number of calls left behind.
-					statuses[index] = 0
 					return
 				}
 				statuses[index] = status

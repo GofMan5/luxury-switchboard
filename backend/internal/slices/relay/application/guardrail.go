@@ -37,6 +37,8 @@ type GuardrailSubject struct {
 	Model               string
 	ClientDeclaredTools bool
 	Secrets             []string
+	// Truncated says the body is a prefix of what the client received.
+	Truncated bool
 }
 
 // GuardrailVerdict is what the relay acts on.

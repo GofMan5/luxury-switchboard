@@ -510,6 +510,10 @@ func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (domain.S
 	session := domain.Session{
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
+		// The id_token's exp wins below; expires_in dates an answer that
+		// carries none. Left zero, the merge would keep the previous,
+		// lapsed date and every request would refresh again.
+		AccessExpiry: expiryFromSeconds(payload.ExpiresIn, time.Now()),
 	}
 	if payload.IDToken == "" {
 		return session, nil
@@ -524,12 +528,12 @@ func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (domain.S
 		// delivered: its expiry must not stand in for the new access
 		// token's unknown one, and neither must its identity overwrite
 		// a live one. The merge keeps the previous id_token, identity
-		// and expiry instead.
+		// instead, and the expiry falls to expires_in when it was sent.
 		return session, nil
 	}
 	session.IDToken = payload.IDToken
 	session.Identity = identity
-	if expiry, expErr := domain.ParseTokenExpiry(payload.IDToken); expErr == nil {
+	if expiry, expErr := domain.ParseTokenExpiry(payload.IDToken); expErr == nil && !expiry.IsZero() {
 		session.AccessExpiry = expiry
 	}
 	return session, nil
@@ -738,6 +742,9 @@ type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	IDToken      string `json:"id_token"`
+	// ExpiresIn stays raw so an odd shape drops only the date, never the
+	// tokens the same answer delivered.
+	ExpiresIn json.RawMessage `json:"expires_in"`
 }
 
 // deviceUserCodeRequest is the JSON body that starts the device flow:
@@ -771,6 +778,16 @@ type deviceGrantResponse struct {
 	AuthorizationCode string `json:"authorization_code"`
 	CodeVerifier      string `json:"code_verifier"`
 	CodeChallenge     string `json:"code_challenge"`
+}
+
+// expiryFromSeconds reads an OAuth expires_in. Anything but a positive
+// whole number of at most a year is no date at all.
+func expiryFromSeconds(raw json.RawMessage, now time.Time) time.Time {
+	var seconds uint64
+	if err := json.Unmarshal(raw, &seconds); err != nil || seconds == 0 || seconds > 365*24*60*60 {
+		return time.Time{}
+	}
+	return now.Add(time.Duration(seconds) * time.Second).UTC()
 }
 
 // devicePollIntervalSeconds reads the polling cadence the endpoint

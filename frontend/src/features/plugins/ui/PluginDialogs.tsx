@@ -119,15 +119,17 @@ export function DevLinkDialog({ pending, error, onCancel, onLink }: {
 
 /** Downloads a package from a link — a GitHub repository, folder, file or
  * release asset, or any public HTTPS address — for the usual review. */
-export function LinkDialog({ pending, error, problems = [], onCancel, onDownload }: {
+export function LinkDialog({ pending, error, problems = [], initialUrl = '', onCancel, onDownload }: {
   readonly pending: boolean
+  /** Prefills the field, e.g. with the link an installed plugin came from. */
+  readonly initialUrl?: string
   readonly error: string
   readonly problems?: readonly string[]
   readonly onCancel: () => void
   readonly onDownload: (url: string) => void
 }) {
   const ref = useModalFocus<HTMLElement>(onCancel, pending)
-  const [url, setUrl] = useState('')
+  const [url, setUrl] = useState(initialUrl)
   const field = useId()
   const ready = url.trim() !== '' && !pending
   return (

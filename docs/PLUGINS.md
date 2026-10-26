@@ -345,8 +345,11 @@ and bodies, never in the URL. A service that puts its credential in the URL
   `settings.get(key)` and `settings.all()` never include secrets.
 - **Using a secret.** Write `{{secret:KEY}}` in a header value or the body of a
   [`net.fetch`](#network-and-secrets) request. The Switchboard substitutes it
-  on its own side, and replaces the value with `[secret]` wherever it shows up
-  in the response. An unset key fails the request with `missing_secret`.
+  on its own side, and replaces the value with `[secret]` wherever it shows
+  up in the response headers or body: raw, base64 (including inside a longer
+  run such as `Basic base64(user:secret)`), hex, percent-encoded or
+  JSON-escaped (`\/` and `\uXXXX` forms too). A secret shorter than four
+  bytes is replaced only in its raw form, so ordinary text survives. An unset key fails the request with `missing_secret`.
 - **Storage.** Encrypted with the plugin, never in plaintext. Secrets are
   **left out of backup exports**, so re-enter them after a restore. They are
   removed with the plugin, and when an upgrade stops declaring that key.
@@ -522,13 +525,14 @@ Some calls reach the operator directly, so they only work **within 10 seconds
 of the operator using the plugin**: `ui.confirm`, `clipboard.writeText`, and
 since 1.0.66 `ui.dialog`, `files.open` and `files.save`.
 Any page event (an action, a change, even `show`/`hide`), running one of the
-plugin's commands (from the palette or by its shortcut), answering a
-confirm or dialog, clicking one of its registered actions or header buttons,
+plugin's commands (from the palette or by its shortcut), accepting a confirm,
+completing a file pick or save, answering a dialog, clicking one of its registered actions or header buttons,
 and key or pointer input on its canvas all count. Outside that window the call rejects with
 `needs_gesture` — *Writing to the clipboard only works within 10 seconds of
 the operator using the plugin's page or command.* Call them from
 `ui.onEvent` and command handlers, never from timers or event-topic
-handlers.
+handlers. Declining a confirm or cancelling a file pick does not count: the
+operator saying *no* never opens the window for another prompt.
 
 ### Status bar — `ui:status`
 
@@ -634,7 +638,7 @@ Storage survives restarts and upgrades and is deleted with the plugin.
 
 | Member | Description |
 | --- | --- |
-| `navigate(route)` | Opens a page of this window: `overview`, `activity`, `insights`, `providers`, `keys`, `routes`, `rules`, `tests`, `guardrails`, `tunnel`, `clients`, `appearance`, `plugins`, `settings`, or `plugin/<id>/<page>`. A leading `#/` is ignored. A route the window does not show rejects with `not_found`. No permission needed. |
+| `navigate(route)` | Opens a page of this window: `overview`, `activity`, `insights`, `providers`, `keys`, `routes`, `rules`, `tests`, `guardrails`, `tunnel`, `clients`, `appearance`, `plugins`, `settings`, or `plugin/<id>/<page>`. `#/x`, `/x` and `x` are the same route. A route the window does not show rejects with `not_found`. No permission needed. |
 | `log.debug/info/warn/error(…)`, `console.*` | Written to the plugin's log (**Plugins → Details**, last 200 lines), up to 100 lines per 5 seconds, each cut at 2000 characters. Uncaught errors in handlers are counted as *faults* and logged with their stack; the plugin keeps running. Refused calls (`permission_denied`, `not_allowed`) are logged as warnings. |
 
 ## Pages and nodes
@@ -1156,7 +1160,11 @@ Runs before routing, for each matching local request.
 
 - **Request.** The handler gets `{ activityId, model, endpoint, method, path,
   bytes, body? }`. `body` is the request text when it is at most 192 KiB;
-  otherwise `bodyOmitted: true` and it cannot be rewritten.
+  otherwise `bodyOmitted: true` and it cannot be rewritten. `activityId` is the
+  same ID `relay.onResponse` gets and the request's row in Activity shows, so a
+  plugin can pair the two. A request that never reaches Activity (for example
+  one the route cannot serve) leaves its ID unused, so `relay.onResponse` may
+  never arrive for an `activityId`: do not hold state for it forever.
 - **Decision.** The handler returns one of:
   - `{ action: 'continue' }`;
   - `{ action: 'rewrite', body?, model?, tags? }`. The body must be valid
@@ -1164,7 +1172,9 @@ Runs before routing, for each matching local request.
   - `{ action: 'block', block: { status, message } }`, answered like a
     request-rule block.
 - **Order.** Hooks run one after another in the order they registered,
-  inside a 5-second budget shared by all of them.
+  inside a 5-second budget shared by all of them. A hook still running when
+  that shared budget runs out counts as timed out; a client that hangs up does
+  not count against any hook.
 - **Timeouts.** `timeoutMs` is 100–5000 (the default is 2000). A hook that
   times out lets the request through unchanged (**fail-open**). After 3
   timeouts in a row it is removed.
@@ -1203,6 +1213,10 @@ until someone decides where they belong.
 `routes.list`, `tunnel.get`, `clients.list`, `clients.events`,
 `codex.status`, `codex.quota`, `codex.quota.all`, `updates.status`,
 `appearance.get`.
+
+Without `control:sensitive`, provider results and the `providers.changed`
+topic leave out `baseUrl`, `authHeader`, `modelsPath` and `chatPath`: a
+read-only plugin sees which providers exist, never where they point.
 
 **`control:write`** — `relay.start`, `relay.stop`, `providers.activate`,
 `routes.upsert`, `routes.upsertMany`, `routes.delete`, `routes.remove`,
@@ -1356,6 +1370,9 @@ Load from folder…** takes the folder's absolute path.
 - **Scope.** The plugin's row shows a **Dev** badge, the folder and
   **Unlink**. At most 4 folders can be linked, and links survive restarts.
   Only that folder is read, never anything outside it.
+- **Linking over an installed plugin.** Linking a folder whose `id` is already
+  installed (and not already linked to that folder) starts it **ungranted**:
+  grant its permissions again from the row.
 - **Leaving.** Unlinking keeps the last loaded version installed as a normal
   plugin. Installing a package file over a linked plugin also ends the link.
 
@@ -1385,7 +1402,23 @@ The download runs in the sidecar with the `net.fetch` rules: public HTTPS on
 the standard port only, no user name or password in the link, no private or
 local addresses (redirects included, at most 5), 256 KiB per file and
 30 seconds in all. Nothing is sent but a plain `GET` with the app's user
-agent. Upgrades are not automatic: install the link again to update.
+agent.
+
+**Updating.** The plugin remembers the link it came from (shown as
+*Installed from* in Details). **Update from link** on its row fills that link
+in and opens the same review: nothing changes until you confirm, and new
+permissions arrive ungranted. Upgrades are never automatic. Installing from a
+file or linking a dev folder forgets the link, and so does a link with a
+query or fragment (`?token=…`), which may carry a credential: such a plugin
+has no **Update from link**.
+
+### Save package
+
+**Save package** on a plugin's row saves the installed package as
+`<id>-<version>.json`, in the format `pnpm plugin pack` writes, so it installs
+again anywhere with **Install from file**. It holds the manifest, script and
+stylesheet only: never setting values, secrets, storage or collections, and
+never the link it came from.
 
 ## Recipes
 
@@ -1470,18 +1503,19 @@ Rejected calls carry `error.code` and `error.message`:
 | Code | Meaning |
 | --- | --- |
 | `permission_denied` | The permission this needs was not granted. |
-| `not_allowed` | The method or topic is not available to plugins at all. |
+| `not_allowed` | The method or topic is not available to plugins at all; for `net.fetch`, a URL that is not `https` on port 443 or whose host is not in `network.hosts`. |
 | `invalid_argument` | An argument has the wrong shape; the message names the field. |
 | `invalid_tree` | `ui.render` got a tree it cannot draw; the message has the path. |
 | `not_found` | Unknown page, surface or route. |
 | `limit` | Too many pages (8), commands (32), status readouts (3), topics (24), widgets, tabs, sections, actions, header buttons, rules or hooks. |
 | `busy` | 16 control calls are already in flight, or a `ui.confirm` or dialog is already open. |
 | `rate_limited` | Over a rate: notifications (6), storage writes (120), collection writes (300), bus messages (120) or fetches (60) a minute, or 4 fetches at once. |
-| `too_large` | A stored value or document, clipboard text, a file, a fetch body or answer, a bus message or the call's arguments are too large. |
+| `too_large` | A stored value or document, clipboard text, a file, a fetch body or answer, a bus message or the call's arguments are too large. Oversized arguments, page trees (256 KiB), draws (512 KiB) and tones (1 KiB) are refused inside the plugin before anything is sent; a call over the 252 KiB sidecar payload budget is refused too. |
 | `plugin_storage_full` | Storage would exceed 64 keys / 64 KiB, or collections 2 MiB. |
 | `needs_gesture` | `ui.confirm`, `clipboard.writeText`, `ui.dialog`, `files.open` or `files.save` outside [the gesture window](#the-gesture-rule). |
 | `conflict` | The command's shortcut is already bound, or another plugin holds the layout. |
-| `blocked_address` | `net.fetch`: the host resolved to a loopback, private or otherwise internal address. |
+| `blocked_address` | `net.fetch`: the host resolved to a loopback, private, documentation, reserved or otherwise internal address. |
+| `invalid_plugin` | `net.fetch`: a malformed request — an unknown method, `timeoutMs` out of range, more than 32 headers, a header over 8 KiB (after secrets are filled in), a bad header name or a line break in a value. |
 | `missing_secret` | `net.fetch`: a `{{secret:KEY}}` that is not declared or not set. |
 | `timeout` | `net.fetch` ran out of time. |
 | `network` | `net.fetch` could not connect or the connection failed. |

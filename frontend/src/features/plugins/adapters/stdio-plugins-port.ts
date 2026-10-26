@@ -16,8 +16,8 @@ export class StdioPluginsPort implements PluginsPort {
     return normalizeDetail(await this.#session.call('plugins.get', { id }, signal))
   }
 
-  async install(pkg: PluginPackage, granted: readonly string[]): Promise<PluginSummary> {
-    const answer = await this.#session.call<{ plugin?: unknown }>('plugins.install', { package: pkg, granted })
+  async install(pkg: PluginPackage, granted: readonly string[], source?: string): Promise<PluginSummary> {
+    const answer = await this.#session.call<{ plugin?: unknown }>('plugins.install', { package: pkg, granted, ...(source ? { source } : {}) })
     return normalizeSummary(answer?.plugin)
   }
 
@@ -54,6 +54,11 @@ export class StdioPluginsPort implements PluginsPort {
   async download(url: string): Promise<{ readonly package: unknown; readonly source: string }> {
     const answer = await this.#session.call<{ package?: unknown; source?: unknown }>('plugins.download', { url })
     return { package: answer?.package, source: typeof answer?.source === 'string' ? answer.source : '' }
+  }
+
+  async export(id: string): Promise<unknown> {
+    const answer = await this.#session.call<{ package?: unknown }>('plugins.export', { id })
+    return answer?.package
   }
 
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {

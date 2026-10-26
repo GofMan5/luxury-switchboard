@@ -56,21 +56,39 @@ func TestBlockedAddresses(t *testing.T) {
 		"169.254.0.0":              true,
 		"fe80::a:b:c:d":            true,
 		"0.255.255.255":            true,
-		"203.0.113.9":              false, // documentation, but not reachable harm
-		"2001:db8::1":              false,
+		"203.0.113.9":              true,
+		"2001:db8::1":              true,
 		"::ffff:169.254.169.254":   true,
 		"::ffff:100.64.0.1":        true,
 		"::ffff:0:0":               true,
-		"fec0::1":                  false,
+		"fec0::1":                  true,
 		"febf::1":                  true,
 		"64:ff9b:1:ffff::1":        true,
 		"2002::":                   true,
 		"2002:ffff:ffff::":         true,
-		"2001::1":                  false,
-		"100::1":                   false,
+		"2001::1":                  true,
+		"100::1":                   true, // discard-only
+		"100:0:0:1::1":             false,
+		"2001:2::1":                true, // benchmarking
+		"2001:1f::1":               true, // ORCHIDv2
+		"2001:200::1":              false,
+		"3fff::1":                  true, // documentation
+		"3fff:1000::1":             false,
 		"::127.0.0.1":              true,
 		"::0.0.0.1":                true,
 		"0:0:0:0:0:ffff:7f00:0001": true,
+		"192.0.2.1":                true,
+		"192.0.3.1":                false,
+		"198.51.100.1":             true,
+		"198.51.101.1":             false,
+		"203.0.112.1":              false,
+		"192.88.99.1":              true,
+		"192.88.98.1":              false,
+		"2001:0:4136:e378::1":      true, // Teredo
+		"2001:1::1":                true, // PCP anycast, inside 2001::/23
+		"2001:db9::1":              false,
+		"feff::1":                  true,
+		"fc00::":                   true,
 	} {
 		if got := Blocked(netip.MustParseAddr(address)); got != want {
 			t.Errorf("Blocked(%s) = %v, want %v", address, got, want)

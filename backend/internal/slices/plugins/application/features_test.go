@@ -29,7 +29,7 @@ func tuned() domain.Package {
 func TestSettingsHomepageAndMinimumReachTheAnswers(t *testing.T) {
 	store := &memory{}
 	service, _, _ := newService(t, store, 1<<20)
-	summary, err := service.Install(context.Background(), tuned(), nil)
+	summary, err := service.Install(context.Background(), tuned(), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestSettingsHomepageAndMinimumReachTheAnswers(t *testing.T) {
 		t.Fatalf("settings did not survive a restart:\n%+v\n%+v", again, detail)
 	}
 
-	if _, err := service.Install(context.Background(), pkg("acme.plain", "Plain", domain.PermissionTheme), nil); err != nil {
+	if _, err := service.Install(context.Background(), pkg("acme.plain", "Plain", domain.PermissionTheme), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	plain, _ := service.Get("acme.plain")
@@ -62,14 +62,14 @@ func TestAPackageForANewerAppIsRefused(t *testing.T) {
 	future := tuned()
 	future.MinAppVersion = "1.2.4"
 	want := domain.ValidationError{Field: "minAppVersion", Reason: "needs Luxury Switchboard 1.2.4 or later"}
-	if _, err := service.Install(context.Background(), future, nil); err != want {
+	if _, err := service.Install(context.Background(), future, nil, ""); err != want {
 		t.Fatalf("want %v, got %v", want, err)
 	}
 	if store.saves != 0 || len(*notifications) != 0 {
 		t.Fatal("a refused install reached storage or listeners")
 	}
 	future.MinAppVersion = "1.2.03"
-	if _, err := service.Install(context.Background(), future, nil); err != nil {
+	if _, err := service.Install(context.Background(), future, nil, ""); err != nil {
 		t.Fatalf("an equal minimum written with a leading zero: %v", err)
 	}
 }
@@ -81,7 +81,7 @@ func TestEveryInstallIsANewRevision(t *testing.T) {
 	service.now = func() time.Time { return at }
 	install := func(id string) Summary {
 		t.Helper()
-		summary, err := service.Install(ctx, pkg(id, "A", domain.PermissionTheme), nil)
+		summary, err := service.Install(ctx, pkg(id, "A", domain.PermissionTheme), nil, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -213,7 +213,7 @@ func TestABrokenPluginCanBeReinstalledOrRemoved(t *testing.T) {
 
 	fixed := pkg("acme.stale", "Stale", domain.PermissionStorage)
 	fixed.Version = "2.0.0"
-	summary, err := service.Install(ctx, fixed, []string{domain.PermissionStorage})
+	summary, err := service.Install(ctx, fixed, []string{domain.PermissionStorage}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestABrokenPluginCanBeReinstalledOrRemoved(t *testing.T) {
 	}
 
 	// Nothing of the mangled record passes, so its reinstall starts fresh.
-	summary, err = service.Install(ctx, pkg("acme.mangled", "Mangled", domain.PermissionStorage), nil)
+	summary, err = service.Install(ctx, pkg("acme.mangled", "Mangled", domain.PermissionStorage), nil, "")
 	if err != nil || summary.Problem != "" || summary.InstalledAt != summary.UpdatedAt || summary.InstalledAt != "2026-03-04T05:09:07.123Z" {
 		t.Fatalf("unexpected fresh reinstall %+v %v", summary, err)
 	}
@@ -253,7 +253,7 @@ func TestAWriteThatChangesNothingIsNotSaved(t *testing.T) {
 	store := &memory{}
 	service, _, _ := newService(t, store, 1<<20)
 	ctx := context.Background()
-	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil)
+	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil, "")
 	value := "v"
 	if _, err := service.StorageSet(ctx, "acme.a", "k", &value); err != nil {
 		t.Fatal(err)
@@ -285,7 +285,7 @@ func TestAStorageBatchAppliesWhole(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
 	ctx := context.Background()
-	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil)
+	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil, "")
 	announced := len(*notifications)
 	text := func(value string) *string { return &value }
 
@@ -352,7 +352,7 @@ func TestAStorageBatchMustFitItsAnswer(t *testing.T) {
 	values := map[string]string{"a": strings.Repeat("v", 100)}
 	service, _, _ := newService(t, store, 1<<20)
 	ctx := context.Background()
-	if _, err := service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil); err != nil {
+	if _, err := service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Only storage answers are measured from here on.

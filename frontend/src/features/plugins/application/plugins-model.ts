@@ -4,7 +4,7 @@ import type { CanvasChannel } from '../domain/canvas'
 import { PLUGIN_LIMIT, checkPackage, packageSizeProblem, type PluginPackage } from '../domain/manifest'
 import { effectiveGrants } from '../domain/permissions'
 import { IDLE_RUNTIME, splitPageKey, type PluginRuntime, type PluginSummary } from '../domain/plugin'
-import type { PageEvent } from '../domain/protocol'
+import { isRecord, type PageEvent } from '../domain/protocol'
 import { acceptValue, isSecretSetting, secretProblem, settingStorageKey, settingValues, valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
 import type { ToneSpec } from '../domain/specs'
 import { PluginBus } from './plugin-bus'
@@ -119,8 +119,9 @@ export class PluginsModel {
 
   async connect(): Promise<void> {
     this.#unsubscribe ??= this.#deps.port.subscribe((plugins) => this.#reconcile(plugins))
-    // Hooks a previous window registered have no host answering them any more.
-    if (!this.#deps.safeMode) await this.#deps.control.call('relayhooks.reset', {}).catch(() => undefined)
+    // Hooks a previous window registered have no host answering them any more,
+    // safe mode included: the sidecar outlives the reload.
+    await this.#deps.control.call('relayhooks.reset', {}).catch(() => undefined)
     await this.refresh()
   }
 
@@ -134,8 +135,10 @@ export class PluginsModel {
   }
 
   /** Installs or upgrades a package with the permissions the operator ticked.
-   * Grants are trimmed to what the package declares before they are sent. */
-  async install(pkg: PluginPackage, granted: readonly string[]): Promise<InstallResult> {
+   * Grants are trimmed to what the package declares before they are sent.
+   * `source` is the link a downloaded package came from; any other install
+   * makes the control plane forget the previous link. */
+  async install(pkg: PluginPackage, granted: readonly string[], source?: string): Promise<InstallResult> {
     if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
     const grants = effectiveGrants(pkg.permissions, granted)
     const upgrade = this.#state.plugins.some((plugin) => plugin.id === pkg.id)
@@ -144,7 +147,7 @@ export class PluginsModel {
     if (sizeProblem) return { ok: false, message: sizeProblem }
     this.#set({ ...this.#state, pending: 'install', error: '' })
     try {
-      const plugin = await this.#deps.port.install(pkg, grants)
+      const plugin = await this.#deps.port.install(pkg, grants, source || undefined)
       await this.refresh()
       return { ok: true, plugin }
     } catch (error) {
@@ -303,6 +306,25 @@ export class PluginsModel {
       return { ok: true, pkg: checked.package, source: answer.source }
     } catch (error) {
       return { ok: false, message: describe(error) }
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  /** Saves an installed plugin as a package file in the `plugin pack` format,
+   * so the file installs again as the same package. Settings values and
+   * storage are never part of it. False when it failed or was cancelled. */
+  async savePackage(id: string): Promise<boolean> {
+    if (this.#state.pending) return false
+    this.#set({ ...this.#state, pending: id, error: '' })
+    try {
+      const raw = await this.#deps.port.export(id)
+      const checked = checkPackage(raw)
+      if (!checked.ok || !isRecord(raw)) throw new Error('The stored package is not valid, so it cannot be saved')
+      return await this.#deps.files.save({ name: `${checked.package.id}-${checked.package.version}.json`, text: packedText(checked.package, raw), mime: 'application/json' })
+    } catch (error) {
+      this.#set({ ...this.#state, error: describe(error) })
+      return false
     } finally {
       this.#set({ ...this.#state, pending: '' })
     }
@@ -505,6 +527,12 @@ function reuse<T>(previous: Readonly<Record<string, T>>, next: Record<string, T>
   const keys = Object.keys(next)
   if (keys.length !== Object.keys(previous).length) return next
   return keys.every((key) => previous[key] === next[key]) ? previous : next
+}
+
+/** The checked fields in package order with their values as written, two-space
+ * indented with a final newline: what `scripts/plugin/package.mjs` packs. */
+function packedText(pkg: PluginPackage, raw: Record<string, unknown>): string {
+  return `${JSON.stringify(Object.fromEntries(Object.keys(pkg).map((key) => [key, raw[key]])), null, 2)}\n`
 }
 
 export function describe(error: unknown): string {

@@ -1,8 +1,12 @@
 package application
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -11,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/domain"
@@ -152,7 +157,7 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, request FetchRequest) (FetchR
 		if err != nil {
 			return FetchResult{}, err
 		}
-		if strings.ContainsAny(filled, "\r\n\x00") || !utf8.ValidString(filled) {
+		if len(filled) > MaxFetchHeaderBytes || strings.ContainsAny(filled, "\r\n\x00") || !utf8.ValidString(filled) {
 			return FetchResult{}, fetchInvalidRequest
 		}
 		headers[name] = filled
@@ -286,18 +291,93 @@ func responseHeaders(headers map[string][]string, secrets map[string]string) map
 	return result
 }
 
-// redact replaces every secret value, longest first so a value containing
-// another is not left half visible.
+// redact replaces every secret value and its base64 and JSON-escaped
+// forms, longest first so a value containing another is not left half
+// visible.
 func redact(text string, secrets map[string]string) string {
-	values := make([]string, 0, len(secrets))
+	forms := map[string]bool{}
 	for _, value := range secrets {
-		if value != "" {
-			values = append(values, value)
+		if value == "" {
+			continue
+		}
+		forms[value] = true
+		for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+			forms[encoding.EncodeToString([]byte(value))] = true
+		}
+		forms[jsonEscaped(value, true)] = true
+		forms[jsonEscaped(value, false)] = true
+		if len(value) < minEncodedSecret {
+			continue
+		}
+		escaped := jsonEscaped(value, false)
+		slashed := strings.ReplaceAll(escaped, "/", `\/`) // PHP's default
+		for _, form := range []string{
+			hex.EncodeToString([]byte(value)), strings.ToUpper(hex.EncodeToString([]byte(value))),
+			url.QueryEscape(value), url.PathEscape(value),
+			slashed, asciiEscaped(escaped), asciiEscaped(slashed),
+		} {
+			forms[form] = true
+		}
+		for _, form := range alignedBase64(value) {
+			if len(form) >= minAlignedBase64 { // shorter fragments match ordinary words
+				forms[form] = true
+			}
 		}
 	}
+	values := slices.Collect(maps.Keys(forms))
 	slices.SortFunc(values, func(left, right string) int { return cmp.Compare(len(right), len(left)) })
 	for _, value := range values {
 		text = strings.ReplaceAll(text, value, redactedSecret)
 	}
 	return text
+}
+
+// Encoded forms of shorter secrets would mostly match ordinary text; the raw
+// value is still redacted at every length.
+const minEncodedSecret = 4
+
+const minAlignedBase64 = 8
+
+// alignedBase64 is value as base64 inside a longer encoded run, such as
+// Basic base64("user:" + secret), at each of the three byte alignments, with
+// the boundary characters that also carry neighbouring bytes trimmed.
+func alignedBase64(value string) []string {
+	var forms []string
+	for _, encoding := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+		for offset, drop := range []int{0, 2, 3} {
+			encoded := encoding.EncodeToString(append(make([]byte, offset), value...))[drop:]
+			if (offset+len(value))%3 != 0 {
+				encoded = encoded[:len(encoded)-1]
+			}
+			forms = append(forms, encoded)
+		}
+	}
+	return forms
+}
+
+// asciiEscaped is a JSON-escaped string with every non-ASCII character as a
+// \uXXXX escape (Python's default ensure_ascii, for one).
+func asciiEscaped(escaped string) string {
+	var out strings.Builder
+	for _, char := range escaped {
+		if char < utf8.RuneSelf {
+			out.WriteRune(char)
+			continue
+		}
+		for _, unit := range utf16.Encode([]rune{char}) {
+			fmt.Fprintf(&out, `\u%04x`, unit)
+		}
+	}
+	return out.String()
+}
+
+// jsonEscaped is value as it appears inside a JSON string, with or without
+// HTML escaping (Go escapes <, > and &; most other encoders do not).
+func jsonEscaped(value string, escapeHTML bool) string {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(escapeHTML)
+	_ = encoder.Encode(value)
+	quoted := bytes.TrimSpace(encoded.Bytes()) // Encode ends with a newline
+	return string(quoted[1 : len(quoted)-1])
 }

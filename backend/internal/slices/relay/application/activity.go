@@ -3,6 +3,9 @@ package application
 import "time"
 
 type ActivityStart struct {
+	// ID is one Reserve returned, so the request keeps the name it was given
+	// before it was filed; empty files under a fresh ID.
+	ID           string
 	Model        string
 	ProviderID   string
 	ProviderName string
@@ -60,6 +63,9 @@ type TokenUsage struct {
 }
 
 type ActivitySink interface {
+	// Reserve names a request before Begin files it. A reservation never
+	// begun files nothing.
+	Reserve() string
 	Begin(ActivityStart) string
 	Waiting(string)
 	Resume(string, time.Duration)
@@ -72,6 +78,7 @@ type ActivitySink interface {
 
 type NoopActivity struct{}
 
+func (NoopActivity) Reserve() string               { return "" }
 func (NoopActivity) Begin(ActivityStart) string    { return "" }
 func (NoopActivity) Waiting(string)                {}
 func (NoopActivity) Resume(string, time.Duration)  {}

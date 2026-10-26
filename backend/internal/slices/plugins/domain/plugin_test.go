@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ func validPackage() Package {
 		Description: "A fixture theme.\nSecond line.",
 		Permissions: []string{PermissionTheme, PermissionCSS, PermissionStorage},
 		Theme:       &Theme{Name: "Dusk", Scheme: "dark", Tokens: map[string]string{"--bg": "#101010"}},
-		CSS:         ".fixture { color: var(--bg); }",
+		CSS:         new(".fixture { color: var(--bg); }"),
 		Script:      "export default () => {}",
 	}
 }
@@ -74,12 +75,14 @@ func TestEachPackageRuleIsEnforced(t *testing.T) {
 		"theme name":          {"theme.name", func(p *Package) { p.Theme.Name = "" }},
 		"theme scheme":        {"theme.scheme", func(p *Package) { p.Theme.Scheme = "dim" }},
 		"theme tokens":        {"theme.tokens", func(p *Package) { p.Theme.Tokens = map[string]string{"--bg": "url(x)"} }},
-		"css size":            {"css", func(p *Package) { p.CSS = strings.Repeat("a", MaxCSSBytes+1) }},
-		"css import":          {"css", func(p *Package) { p.CSS = "@import 'x';" }},
+		"css size":            {"css", func(p *Package) { p.CSS = new(strings.Repeat("a", MaxCSSBytes+1)) }},
+		"css import":          {"css", func(p *Package) { p.CSS = new("@import 'x';") }},
 		"script size":         {"script", func(p *Package) { p.Script = strings.Repeat("a", MaxScriptBytes+1) }},
 		"theme without grant": {"theme", func(p *Package) { p.Permissions = []string{PermissionCSS, PermissionStorage} }},
 		"css without grant":   {"css", func(p *Package) { p.Permissions = []string{PermissionTheme, PermissionStorage} }},
 		"script capabilities": {"permissions", func(p *Package) { p.Script = "" }},
+		"blank script":        {"permissions", func(p *Package) { p.Script = string([]rune{0x20, 0x0a, 0x09, 0xa0, 0xfeff, 0x2028}) }},
+		"empty css, no grant": {"css", func(p *Package) { p.Permissions = []string{PermissionTheme, PermissionStorage}; p.CSS = new("") }},
 		"control without code": {"permissions", func(p *Package) {
 			p.Script = ""
 			p.Permissions = []string{PermissionTheme, PermissionCSS, PermissionRead}
@@ -99,7 +102,7 @@ func TestEachPackageRuleIsEnforced(t *testing.T) {
 	}
 	atLimits := validPackage()
 	atLimits.Name = strings.Repeat("é", MaxNameRunes)
-	atLimits.CSS = strings.Repeat("a", MaxCSSBytes)
+	atLimits.CSS = new(strings.Repeat("a", MaxCSSBytes))
 	atLimits.Script = strings.Repeat("a", MaxScriptBytes)
 	if err := atLimits.Validate(); err != nil {
 		t.Fatalf("values at their limits were refused: %v", err)
@@ -182,6 +185,16 @@ func TestValidateNamesWhatMakesAStoredPluginBroken(t *testing.T) {
 	if err := plugin.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	sourced := plugin
+	sourced.Source = "https://example.test/acme/p.json"
+	if err := sourced.Validate(); err != nil {
+		t.Fatalf("a link source is refused: %v", err)
+	}
+	for _, link := range []string{"https://example.test/p.json?token=fixture", "https://example.test/p.json#x"} {
+		if sourced.Source = link; sourced.Validate() == nil {
+			t.Errorf("source %q with a query or fragment is accepted", link)
+		}
+	}
 	full := map[string]string{}
 	for index := range MaxStorageKeys + 1 {
 		full[fmt.Sprintf("k%d", index)] = "v"
@@ -200,6 +213,12 @@ func TestValidateNamesWhatMakesAStoredPluginBroken(t *testing.T) {
 		"old schema":       {"schema", func(p *Plugin) { p.Package.Schema = 0 }},
 		"retired setting":  {"settings[2].type", func(p *Plugin) { p.Package.Settings[2].Type = "switch" }},
 		"bad homepage":     {"homepage", func(p *Plugin) { p.Package.Homepage = "http://example.test" }},
+		"plain source":     {"source", func(p *Plugin) { p.Source = "http://example.test/p.json" }},
+		"source with user": {"source", func(p *Plugin) { p.Source = "https://fixture@example.test/p.json" }},
+		"long source":      {"source", func(p *Plugin) { p.Source = "https://example.test/" + strings.Repeat("a", MaxSourceBytes) }},
+		"dev with source": {"source", func(p *Plugin) {
+			p.Source, p.Dev = "https://example.test/p.json", &DevLink{Path: filepath.Join(t.TempDir(), "p"), LoadedAt: now}
+		}},
 	} {
 		copied := plugin
 		copied.Package = plugin.Package.Normalized()

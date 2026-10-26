@@ -1,4 +1,8 @@
+import { HOST_LIMITS } from '../application/plugin-host'
 import type { BootContext } from '../application/ports'
+import { CANVAS_LIMITS } from '../domain/canvas'
+import { DATA_LIMITS } from '../domain/specs'
+import { TREE_LIMITS } from '../domain/ui-tree'
 
 /**
  * The code that runs in a plugin's worker before the plugin's own script.
@@ -12,7 +16,9 @@ import type { BootContext } from '../application/ports'
  * instead of a CSP report.
  *
  * Plain JavaScript in a string: it runs in another global, not in this
- * bundle. It must not contain backticks, backslashes or template holes.
+ * bundle. It must not contain backticks or backslashes; its only template
+ * holes are the byte caps below, so the worker refuses an oversized message
+ * before it is cloned across, with the host's own `too_large` wording.
  */
 const PRELUDE = `'use strict';
 const __switchboardStart = (function (scope, boot) {
@@ -98,13 +104,26 @@ const __switchboardStart = (function (scope, boot) {
   listen('error', function (event) { event.preventDefault(); fault(event.error || event.message); });
   listen('unhandledrejection', function (event) { event.preventDefault(); fault(event.reason); });
 
+  const encoder = new TextEncoder();
+  const oversize = function (text, limit, subject, unit) {
+    if (text === undefined || text.length * 3 <= limit) return null;
+    const size = encoder.encode(text).length;
+    if (size <= limit) return null;
+    const error = new Error(subject + ' ' + Math.ceil(size / 1024) + ' KiB; ' + unit + ' carries at most ' + limit / 1024 + ' KiB.');
+    error.code = 'too_large';
+    return error;
+  };
+
   let nextId = 1;
   const pending = new Map();
   const call = function (op, args) {
     return new Promise(function (resolve, reject) {
       let data = {};
       if (args !== undefined) {
-        try { data = JSON.parse(JSON.stringify(args)); } catch (error) { reject(new TypeError('Arguments must be plain JSON data: ' + describe(error))); return; }
+        let text;
+        try { text = JSON.stringify(args); data = JSON.parse(text); } catch (error) { reject(new TypeError('Arguments must be plain JSON data: ' + describe(error))); return; }
+        const large = oversize(text, op === 'ui.render' ? ${TREE_LIMITS.bytes} : ${HOST_LIMITS.argsBytes}, 'The arguments are', op === 'ui.render' ? 'a page tree' : 'a call');
+        if (large) { reject(large); return; }
       }
       const id = nextId;
       nextId += 1;
@@ -306,7 +325,10 @@ const __switchboardStart = (function (scope, boot) {
       sound: freeze({
         tone: function (spec) {
           if (!spec || typeof spec !== 'object') throw new TypeError('tone needs a spec object');
-          post({ type: 'tone', spec: JSON.parse(JSON.stringify(spec)) });
+          const text = JSON.stringify(spec);
+          const large = oversize(text, ${DATA_LIMITS.toneBytes}, 'The tone spec is', 'a tone');
+          if (large) throw large;
+          post({ type: 'tone', spec: JSON.parse(text) });
         },
       }),
       theme: function () { return call('ui.theme'); },
@@ -318,7 +340,13 @@ const __switchboardStart = (function (scope, boot) {
       },
       draw: function (surfaceId, canvasId, ops) {
         if (typeof surfaceId !== 'string' || typeof canvasId !== 'string' || surfaceId.length > 64 || canvasId.length > 64) throw new TypeError('draw needs a surface id and a canvas id');
-        post({ type: 'draw', surface: surfaceId, canvas: canvasId, ops: ops });
+        let text;
+        try { text = JSON.stringify(ops); } catch (error) { throw new TypeError('Draw ops must be plain JSON data: ' + describe(error)); }
+        const large = oversize(text, ${CANVAS_LIMITS.bytes}, 'The draw ops are', 'a draw');
+        if (large) throw large;
+        // Post what was measured: a typed array, Map or getter would otherwise
+        // stringify small and copy large.
+        post({ type: 'draw', surface: surfaceId, canvas: canvasId, ops: text === undefined ? undefined : JSON.parse(text) });
       },
       onFrame: function (handler) {
         const entry = function (dtMs, tMs) { return handler(dtMs, tMs); };

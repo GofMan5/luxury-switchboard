@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import type { ActionContribution, BadgeContribution, CommandContribution, ExtensionPoints, SlotContext, SlotContribution, SlotScope, StatusContribution } from '../../../shared/contracts/extensions'
 import { validateDrawOps, type CanvasChannel, type DrawOp } from '../domain/canvas'
-import { controlAccess, stampsActor, topicAccess } from '../domain/control-access'
+import { controlAccess, redactUpstream, stampsActor, topicAccess } from '../domain/control-access'
 import type { PluginPermission } from '../domain/permissions'
 import { IDLE_RUNTIME, LOG_LIMIT, pageKey, pluginOwner, type LogEntry, type PluginDetail, type PluginRuntime, type PluginSummary, type RuntimeState } from '../domain/plugin'
 import {
@@ -45,6 +45,7 @@ import {
   inspectorTabSpec,
   layoutSpec,
   listSpec,
+  normalizeRoute,
   openSpec,
   saveSpec,
   settingsSectionSpec,
@@ -55,6 +56,7 @@ import {
   type DialogActionSpec,
   type ToneSpec,
 } from '../domain/specs'
+import { PAYLOAD_BYTES } from '../domain/manifest'
 import { checkTree, type UiNode } from '../domain/ui-tree'
 import type { PluginBus } from './plugin-bus'
 import type { Announcement, BootContext, ConfirmRequest, ControlPort, FilesPort, PluginWorker, PluginsPort, ThemePort, WorkerFactory } from './ports'
@@ -580,6 +582,12 @@ export class PluginHost {
     this.#deps.control.call('relayhooks.respond', { callId, ...decision }).catch(() => undefined)
   }
 
+  /** Removes one relay hook without waiting; hooks fail open, so a failed
+   * removal only costs the relay a round trip. */
+  #dropHook(hookId: string): void {
+    this.#deps.control.call('relayhooks.unregister', { pluginId: this.id, hookId }).catch(() => undefined)
+  }
+
   /** Follows the relay's hook topics for this plugin, once. Requests the
    * plugin cannot answer continue untouched (hooks fail open). */
   #followHooks(): void {
@@ -592,6 +600,9 @@ export class PluginHost {
         if (!mine(payload) || typeof payload.callId !== 'string' || !payload.callId || payload.callId.length > 128) return
         const now = Date.now()
         for (const [callId, at] of this.#pendingHooks) if (now - at > DATA_LIMITS.hookTimeoutMs.max * 2) this.#pendingHooks.delete(callId)
+        // A hook this host never registered is an orphan (its register landed
+        // after a stop): remove it so the relay stops asking.
+        if (!this.#hooks.has(payload.hookId)) this.#dropHook(payload.hookId)
         if (!this.#ready || !this.#hooks.has(payload.hookId) || this.#pendingHooks.size >= HOST_LIMITS.pendingHooks) {
           this.#respond(payload.callId, { action: 'continue' })
           return
@@ -609,6 +620,12 @@ export class PluginHost {
         this.#note('warn', `The relay removed hook ${payload.hookId}${reason}`)
       }),
     ]
+  }
+
+  /** A control-plane answer or event as this plugin may see it: upstream
+   * URLs and auth header names only with `control:sensitive`. */
+  #reveal(value: unknown): unknown {
+    return this.#grants.has('control:sensitive') ? value : redactUpstream(value)
   }
 
   /** One control-plane command for the plugin, within the in-flight cap and
@@ -695,8 +712,14 @@ export class PluginHost {
       const value = await this.#perform(op, args)
       this.#post({ type: 'result', id, ok: true, value: value ?? null })
     } catch (error) {
-      const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'failed'
-      const message = error instanceof DOMException && error.name === 'AbortError' ? 'The plugin was stopped.' : messageOf(error)
+      let code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'failed'
+      let message = error instanceof DOMException && error.name === 'AbortError' ? 'The plugin was stopped.' : messageOf(error)
+      // A forwarded call is one sidecar command, whose payload budget is below
+      // argsBytes once the host adds its own fields.
+      if (code === 'command_too_large') {
+        code = 'too_large'
+        message = `The call is too large for one Switchboard command (at most ${Math.floor(PAYLOAD_BYTES / 1024)} KiB of payload, including what the host adds). Send less at once.`
+      }
       if (code === 'permission_denied' || code === 'not_allowed') this.#note('warn', message)
       this.#post({ type: 'result', id, ok: false, error: { code, message } })
     }
@@ -773,13 +796,15 @@ export class PluginHost {
         this.#confirming = controller
         this.#inflight.add(controller)
         try {
-          return await this.#deps.confirm({ pluginName: this.name, ...spec }, controller.signal)
+          const accepted = await this.#deps.confirm({ pluginName: this.name, ...spec }, controller.signal)
+          // Accepting is itself an operator action: the plugin may follow up
+          // (copy a result, ask again) right away. Declining is not, or a
+          // plugin could re-raise the question forever after one click.
+          if (accepted && !controller.signal.aborted) this.#gestureAt = Date.now()
+          return accepted
         } finally {
           this.#inflight.delete(controller)
           if (this.#confirming === controller) this.#confirming = null
-          // Answering is itself an operator action: the plugin may follow up
-          // (copy a result, ask again) right away.
-          if (!controller.signal.aborted) this.#gestureAt = Date.now()
         }
       }
       case 'clipboard.writeText': {
@@ -861,11 +886,11 @@ export class PluginHost {
         const method = typeof args.method === 'string' ? args.method : ''
         const access = controlAccess(method, this.#grants)
         if (!access.allowed) throw new CallError(access.code, access.message)
-        if (!stampsActor(method)) return this.#invoke(method, args.payload)
+        if (!stampsActor(method)) return this.#reveal(await this.#invoke(method, args.payload))
         // Rule changes record who made them; the plugin cannot pass itself
         // off as the operator, so a payload that is not an object is refused.
         if (!isRecord(args.payload)) throw new CallError('invalid_argument', `${method} takes an object payload.`)
-        return this.#invoke(method, { ...args.payload, actor: `plugin:${this.id}` })
+        return this.#reveal(await this.#invoke(method, { ...args.payload, actor: `plugin:${this.id}` }))
       }
       case 'events.subscribe': {
         const topic = typeof args.topic === 'string' ? args.topic : ''
@@ -873,7 +898,7 @@ export class PluginHost {
         if (!access.allowed) throw new CallError(access.code, access.message)
         if (this.#topics.has(topic)) return null
         if (this.#topics.size >= RUNTIME_LIMITS.topics) throw new CallError('limit', `A plugin can follow at most ${RUNTIME_LIMITS.topics} topics.`)
-        this.#topics.set(topic, this.#deps.control.subscribe(topic, (payload) => this.#post({ type: 'topic', topic, payload: payload ?? null })))
+        this.#topics.set(topic, this.#deps.control.subscribe(topic, (payload) => this.#post({ type: 'topic', topic, payload: this.#reveal(payload ?? null) })))
         return null
       }
       case 'events.unsubscribe': {
@@ -1049,10 +1074,12 @@ export class PluginHost {
           if (!file) return null
           const name = file.name.slice(0, DATA_LIMITS.fileName)
           if (file.size > spec.maxBytes) throw new CallError('too_large', `${name} is ${Math.ceil(file.size / 1024)} KiB; the plugin reads at most ${Math.floor(spec.maxBytes / 1024)} KiB.`)
-          return { name, text: await file.read(), size: file.size }
+          const text = await file.read()
+          // Only a completed pick counts as acting; a cancel does not re-arm the picker.
+          if (!controller.signal.aborted) this.#gestureAt = Date.now()
+          return { name, text, size: file.size }
         } finally {
           this.#inflight.delete(controller)
-          if (!controller.signal.aborted) this.#gestureAt = Date.now()
         }
       }
       case 'files.save': {
@@ -1060,7 +1087,7 @@ export class PluginHost {
         const spec = saveSpec(args)
         this.#needGesture('Saving a file')
         const saved = await this.#deps.files.save(spec)
-        this.#gestureAt = Date.now()
+        if (saved) this.#gestureAt = Date.now()
         return saved
       }
       case 'bus.publish': {
@@ -1093,14 +1120,21 @@ export class PluginHost {
         // Known before the relay can call it, so the first request is not
         // waved through.
         this.#hooks.add(spec.hookId)
+        const worker = this.#worker
         try {
           await this.#invoke('relayhooks.register', {
             pluginId: this.id, hookId: spec.hookId, phase: spec.phase, models: spec.models, endpoints: spec.endpoints,
             ...(spec.phase === 'request' ? { timeoutMs: spec.timeoutMs } : {}),
           })
         } catch (error) {
-          if (!known) this.#hooks.delete(spec.hookId)
+          if (!known && this.#worker === worker) this.#hooks.delete(spec.hookId)
           throw error
+        } finally {
+          // Stopped while the relay was registering: #halt's unregister may
+          // have run first, so the hook it just added would be an orphan —
+          // unless the restarted worker already registered the same id, which
+          // then owns it.
+          if (this.#worker !== worker && !this.#hooks.has(spec.hookId)) this.#dropHook(spec.hookId)
         }
         return null
       }
@@ -1113,7 +1147,7 @@ export class PluginHost {
         return null
       }
       case 'navigate': {
-        const route = typeof args.route === 'string' ? args.route.replace(/^#\/?/u, '') : ''
+        const route = typeof args.route === 'string' ? normalizeRoute(args.route) : ''
         if (!route || route.length > 160 || !this.#deps.isRoute(route)) throw new CallError('not_found', `"${route.slice(0, 160)}" is not a page in this window.`)
         this.#deps.navigate(route)
         return null

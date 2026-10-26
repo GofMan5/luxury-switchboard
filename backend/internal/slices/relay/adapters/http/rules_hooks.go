@@ -19,10 +19,10 @@ const hookBodyLimit = 192 * 1024
 // runRequestHooks asks the plugin request hooks about the client's body. It
 // returns the body to forward (rewritten or not), the hooks' tags, and the
 // block decision when a hook refused the request.
-func (server *Server) runRequestHooks(ctx context.Context, request *http.Request, body []byte, endpoint string) ([]byte, []string, relayapp.HookDecision, bool) {
+func (server *Server) runRequestHooks(ctx context.Context, request *http.Request, body []byte, endpoint, activityID string) ([]byte, []string, relayapp.HookDecision, bool) {
 	contentType := request.Header.Get("Content-Type")
 	hookRequest := relayapp.HookRequest{
-		Model: requestModel(body, contentType), Endpoint: endpoint,
+		ActivityID: activityID, Model: requestModel(body, contentType), Endpoint: endpoint,
 		Method: request.Method, Path: request.URL.Path, Bytes: int64(len(body)),
 	}
 	if len(body) <= hookBodyLimit && utf8.Valid(body) {
@@ -64,8 +64,9 @@ func (server *Server) observeResponse(request relayapp.HookRequest, status int, 
 }
 
 // answerLocally answers a request a rule or hook stopped before routing, and
-// files it in history like any other request.
-func (server *Server) answerLocally(writer http.ResponseWriter, request *http.Request, model string, bytesIn int, tags []string, status int, message string, retryAfter time.Duration, errorCode, endpoint string) {
+// files it in history like any other request, under activityID when the
+// request hooks already saw that name.
+func (server *Server) answerLocally(writer http.ResponseWriter, request *http.Request, activityID, model string, bytesIn int, tags []string, status int, message string, retryAfter time.Duration, errorCode, endpoint string) {
 	if status < 400 || status > 599 {
 		status = http.StatusForbidden
 	}
@@ -73,8 +74,8 @@ func (server *Server) answerLocally(writer http.ResponseWriter, request *http.Re
 		message = "The request was blocked by a rule"
 	}
 	started := time.Now()
-	activityID := server.activity.Begin(relayapp.ActivityStart{
-		Model: model, Method: request.Method, Path: request.URL.Path, BytesIn: int64(bytesIn), Tags: tags,
+	activityID = server.activity.Begin(relayapp.ActivityStart{
+		ID: activityID, Model: model, Method: request.Method, Path: request.URL.Path, BytesIn: int64(bytesIn), Tags: tags,
 	})
 	payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": message, "type": "switchboard_rule"}})
 	writer.Header().Set("Content-Type", "application/json")

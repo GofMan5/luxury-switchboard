@@ -34,6 +34,8 @@ const (
 	MaxCSSBytes         = 64 * 1024
 	MaxScriptBytes      = 128 * 1024
 	MaxHomepageBytes    = 200
+	// MaxSourceBytes bounds the link a plugin was installed from.
+	MaxSourceBytes = 2048
 
 	MaxStorageKeys       = 64
 	MaxStorageValueBytes = 8 * 1024
@@ -124,9 +126,10 @@ type Package struct {
 	Permissions   []string `json:"permissions"`
 	// Network lists the only hosts net:fetch may reach. It is present
 	// exactly when net:fetch is declared.
-	Network  *Network  `json:"network,omitempty"`
-	Theme    *Theme    `json:"theme,omitempty"`
-	CSS      string    `json:"css,omitempty"`
+	Network *Network `json:"network,omitempty"`
+	Theme   *Theme   `json:"theme,omitempty"`
+	// CSS is nil when absent; present, even empty, it needs ui:css.
+	CSS      *string   `json:"css,omitempty"`
 	Script   string    `json:"script,omitempty"`
 	Settings []Setting `json:"settings,omitempty"`
 }
@@ -144,6 +147,9 @@ type Plugin struct {
 	Secrets map[string]string
 	// Dev is set while the plugin is loaded from a source folder.
 	Dev *DevLink
+	// Source is the https link the package was downloaded from, empty for a
+	// file install or a dev link. Only the owner's control plane reads it.
+	Source string
 }
 
 // ValidID reports whether id can name a plugin.
@@ -156,6 +162,10 @@ func (pkg Package) Normalized() Package {
 	pkg.Permissions = cloneList(pkg.Permissions)
 	if pkg.Network != nil {
 		pkg.Network = &Network{Hosts: cloneList(pkg.Network.Hosts)}
+	}
+	if pkg.CSS != nil {
+		css := *pkg.CSS
+		pkg.CSS = &css
 	}
 	if pkg.Theme != nil {
 		theme := *pkg.Theme
@@ -206,7 +216,7 @@ func (pkg Package) Validate() error {
 			return err
 		}
 	}
-	if err := cssguard.CheckStylesheet(pkg.CSS, MaxCSSBytes); err != nil {
+	if err := cssguard.CheckStylesheet(pkg.Stylesheet(), MaxCSSBytes); err != nil {
 		return ValidationError{"css", err.Error()}
 	}
 	if err := validateSettings(pkg.Settings); err != nil {
@@ -216,28 +226,53 @@ func (pkg Package) Validate() error {
 	switch {
 	case pkg.Theme != nil && !slices.Contains(declared, PermissionTheme):
 		return ValidationError{"theme", "requires the ui:theme permission"}
-	case pkg.CSS != "" && !slices.Contains(declared, PermissionCSS):
+	case pkg.CSS != nil && !slices.Contains(declared, PermissionCSS):
 		return ValidationError{"css", "requires the ui:css permission"}
 	case pkg.Network != nil && !slices.Contains(declared, PermissionNetFetch):
 		return ValidationError{"network", "applies only with the net:fetch permission"}
 	case pkg.Network == nil && slices.Contains(declared, PermissionNetFetch):
 		return ValidationError{"network", "must list the hosts net:fetch may reach"}
-	case pkg.Script == "" && slices.ContainsFunc(declared, isScriptPermission):
+	case blankScript(pkg.Script) && slices.ContainsFunc(declared, isScriptPermission):
 		return ValidationError{"permissions", "declare script capabilities without a script"}
-	case pkg.Script == "" && len(pkg.Settings) > 0:
+	case blankScript(pkg.Script) && len(pkg.Settings) > 0:
 		return ValidationError{"settings", "need a script to read them"}
 	}
 	return nil
 }
 
+// Stylesheet is the package's CSS, empty when it has none.
+func (pkg Package) Stylesheet() string {
+	if pkg.CSS == nil {
+		return ""
+	}
+	return *pkg.CSS
+}
+
+// blankScript matches the shell's !script.trim(): JavaScript trims U+FEFF
+// but not U+0085, which unicode.IsSpace treats the other way round.
+func blankScript(script string) bool {
+	return strings.TrimFunc(script, func(r rune) bool {
+		return r == 0xfeff || (r != 0x85 && unicode.IsSpace(r))
+	}) == ""
+}
+
 // validHomepage accepts nothing or an absolute https address with a host and
 // no credentials. The literal prefix refuses the forms a URL parser would
 // still read as https, such as an upper-case scheme or no slashes.
-func validHomepage(value string) bool {
+func validHomepage(value string) bool { return validAddress(value, MaxHomepageBytes) }
+
+// ValidSource reports whether value can be kept as an install link: nothing,
+// or an https address held to the same rules as a homepage, without a query
+// or fragment, where a link may carry a token.
+func ValidSource(value string) bool {
+	return validAddress(value, MaxSourceBytes) && !strings.ContainsAny(value, "?#")
+}
+
+func validAddress(value string, limit int) bool {
 	if value == "" {
 		return true
 	}
-	if len(value) > MaxHomepageBytes || !utf8.ValidString(value) || !strings.HasPrefix(value, addressPrefix) ||
+	if len(value) > limit || !utf8.ValidString(value) || !strings.HasPrefix(value, addressPrefix) ||
 		strings.ContainsFunc(value, func(character rune) bool { return unicode.IsSpace(character) || unicode.IsControl(character) }) {
 		return false
 	}
@@ -340,6 +375,12 @@ func (plugin Plugin) Validate() error {
 		if err := plugin.Dev.validate(); err != nil {
 			return err
 		}
+	}
+	switch {
+	case !ValidSource(plugin.Source):
+		return ValidationError{"source", fmt.Sprintf("must be an https:// link of at most %d characters", MaxSourceBytes)}
+	case plugin.Source != "" && plugin.Dev != nil:
+		return ValidationError{"source", "does not apply to a dev link"}
 	}
 	return CheckStorage(plugin.Storage)
 }

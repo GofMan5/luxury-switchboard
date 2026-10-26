@@ -70,6 +70,8 @@ type Request struct {
 }
 
 type Start struct {
+	// ID is one Reserve handed out; any other value files under a fresh ID.
+	ID              string
 	Model           string
 	ProviderID      string
 	ProviderName    string

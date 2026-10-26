@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { HOST_LIMITS } from '../application/plugin-host'
 import type { BootContext } from '../application/ports'
+import { CANVAS_LIMITS } from '../domain/canvas'
+import { DATA_LIMITS } from '../domain/specs'
+import { TREE_LIMITS } from '../domain/ui-tree'
 import { workerSource } from './worker-source'
 
 const BOOT: BootContext = {
@@ -157,5 +161,44 @@ describe('workerSource', () => {
     ])
     expect(worker.posted).toContainEqual({ type: 'tone', spec: { frequency: 440, durationMs: 50 } })
     expect(worker.posted).toContainEqual({ type: 'draw', surface: 'widget:w', canvas: 'c', ops: [{ op: 'clear' }] })
+  })
+
+  it('refuses oversized arguments in the worker, before they are posted', async () => {
+    const worker = boot(`
+      const settle = (promise) => promise.then(() => 'ok', (error) => error.code + ': ' + error.message)
+      // Multi-byte text: the cap counts UTF-8 bytes, not characters.
+      self.big = settle(switchboard.ui.registerWidget({ id: 'w', title: 'W', pad: 'é'.repeat(${HOST_LIMITS.argsBytes / 2 + 1}) }))
+      self.fits = settle(switchboard.ui.registerWidget({ id: 'w', title: 'W', pad: 'x'.repeat(${HOST_LIMITS.argsBytes - 1024}) }))
+      self.tree = settle(switchboard.ui.render('p', { type: 'text', text: 'x'.repeat(${TREE_LIMITS.bytes}) }))
+      self.treeFits = settle(switchboard.ui.render('p', { type: 'text', text: 'x'.repeat(${TREE_LIMITS.bytes - 1024}) }))`)
+    await tick()
+    expect(await worker.scope.big).toBe(`too_large: The arguments are ${Math.ceil((HOST_LIMITS.argsBytes + 2 + 44) / 1024)} KiB; a call carries at most ${HOST_LIMITS.argsBytes / 1024} KiB.`)
+    expect(await worker.scope.tree).toBe(`too_large: The arguments are ${TREE_LIMITS.bytes / 1024 + 1} KiB; a page tree carries at most ${TREE_LIMITS.bytes / 1024} KiB.`)
+    expect(worker.calls('ui.registerWidget')).toHaveLength(1)
+    expect(worker.calls('ui.render')).toHaveLength(1)
+  })
+
+  it('refuses oversized draws and tones in the worker', async () => {
+    const worker = boot(`
+      const thrown = (run) => { try { run(); return 'ok' } catch (error) { return error.code + ': ' + error.message } }
+      self.draw = thrown(() => switchboard.ui.draw('widget:w', 'c', [{ op: 'text', text: 'x'.repeat(${CANVAS_LIMITS.bytes}) }]))
+      self.tone = thrown(() => switchboard.ui.sound.tone({ frequency: 440, durationMs: 50, pad: 'x'.repeat(${DATA_LIMITS.toneBytes}) }))
+      self.cyclic = thrown(() => { const ops = []; ops.push(ops); switchboard.ui.draw('widget:w', 'c', ops) })`)
+    await tick()
+    expect(worker.scope.draw).toBe(`too_large: The draw ops are ${CANVAS_LIMITS.bytes / 1024 + 1} KiB; a draw carries at most ${CANVAS_LIMITS.bytes / 1024} KiB.`)
+    expect(worker.scope.tone).toMatch(/^too_large: The tone spec is 2 KiB; a tone carries at most 1 KiB\.$/u)
+    expect(worker.scope.cyclic).toMatch(/^undefined: Draw ops must be plain JSON data/u)
+    expect(worker.posted.filter((message) => message.type === 'draw' || message.type === 'tone')).toEqual([])
+  })
+
+  it('posts the draw it measured, not values that stringify small', async () => {
+    const worker = boot(`
+      let reads = 0
+      const op = { op: 'clear', map: new Map([[1, 'x'.repeat(${CANVAS_LIMITS.bytes})]]) }
+      Object.defineProperty(op, 'color', { enumerable: true, get: () => (reads++ === 0 ? '#fff' : 'x'.repeat(${CANVAS_LIMITS.bytes} * 2)) })
+      switchboard.ui.draw('widget:w', 'c', [op])`)
+    await tick()
+    const draws = worker.posted.filter((message) => message.type === 'draw')
+    expect(draws).toEqual([{ type: 'draw', surface: 'widget:w', canvas: 'c', ops: [{ op: 'clear', map: {}, color: '#fff' }] }])
   })
 })

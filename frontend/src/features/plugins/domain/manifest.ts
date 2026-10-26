@@ -24,6 +24,8 @@ export const FRAME_BYTES = 262_144
 export const PAYLOAD_BYTES = 258_048
 export const PLUGIN_LIMIT = 24
 export const HOMEPAGE_BYTES = 200
+/** The longest install link the control plane keeps. */
+export const SOURCE_BYTES = 2048
 /** Permissions one package may list. */
 export const PERMISSION_LIMIT = 24
 /** Hosts in `network.hosts`. */
@@ -311,9 +313,10 @@ export function packageSizeProblem(pkg: PluginPackage, granted: readonly string[
 }
 
 /** Whether value is an address the homepage link may open: the same rules
- * the control plane applies. */
-export function isHomepage(value: string): boolean {
-  if (byteLength(value) > HOMEPAGE_BYTES || SPACE_OR_CONTROL.test(value) || !value.startsWith('https://')) return false
+ * the control plane applies. `limit` lets a longer install link pass the
+ * same checks. */
+export function isHomepage(value: string, limit = HOMEPAGE_BYTES): boolean {
+  if (byteLength(value) > limit || SPACE_OR_CONTROL.test(value) || !value.startsWith('https://')) return false
   const rest = value.slice('https://'.length)
   const end = rest.search(/[/?#]/u)
   // A userinfo part, even an empty one the URL parser would drop.

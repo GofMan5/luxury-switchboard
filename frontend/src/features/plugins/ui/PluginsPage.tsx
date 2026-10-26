@@ -1,5 +1,5 @@
 import { useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
-import { ChevronDown, ClipboardPaste, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2, Link2Off, Puzzle, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
+import { ChevronDown, ClipboardPaste, Download, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2, Link2Off, Puzzle, RefreshCw, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
 import { EmptyState, Panel, Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { formatBytes } from '../../../shared/format/metrics'
@@ -19,7 +19,7 @@ import styles from './PluginsPage.module.css'
 type Dialog =
   | { readonly kind: 'paste' }
   | { readonly kind: 'dev'; readonly error: string }
-  | { readonly kind: 'link'; readonly error: string; readonly problems: readonly string[] }
+  | { readonly kind: 'link'; readonly error: string; readonly problems: readonly string[]; readonly url?: string }
   | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string; readonly source?: string }
   | { readonly kind: 'problems'; readonly title: string; readonly problems: readonly string[] }
   | { readonly kind: 'permissions'; readonly id: string }
@@ -36,6 +36,7 @@ export default function PluginsPage() {
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [notice, setNotice] = useState('')
   const [expanded, setExpanded] = useState<string>('')
+  const [saving, setSaving] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
   const busy = state.pending !== ''
   const full = state.plugins.length >= PLUGIN_LIMIT
@@ -69,13 +70,21 @@ export default function PluginsPage() {
 
   const install = async (pkg: PluginPackage, granted: readonly string[], source?: string) => {
     const upgrade = state.plugins.some((plugin) => plugin.id === pkg.id)
-    const result = await model.install(pkg, granted)
+    const result = await model.install(pkg, granted, source)
     if (result.ok) {
       setDialog(null)
       setNotice(`${result.plugin.name} ${result.plugin.version} ${upgrade ? 'updated' : 'installed'}.`)
     } else {
       setDialog({ kind: 'review', pkg, error: result.message, source })
     }
+  }
+
+  const savePackage = async (plugin: PluginSummary) => {
+    setNotice('')
+    setSaving(plugin.id)
+    const saved = await model.savePackage(plugin.id)
+    setSaving('')
+    if (saved) setNotice(`${plugin.name} ${plugin.version} saved as a package file. Settings values and stored data are not included.`)
   }
 
   const link = async (path: string) => {
@@ -169,6 +178,11 @@ export default function PluginsPage() {
                   onSettings={() => { model.clearError(); setNotice(''); setDialog({ kind: 'settings', id: plugin.id }) }}
                   onRestart={() => void model.restart(plugin.id)}
                   onRemove={() => { model.clearError(); setDialog({ kind: 'remove', id: plugin.id }) }}
+                  onUpdate={plugin.source && !plugin.dev && capabilities.includes('plugins.download')
+                    ? () => { model.clearError(); setNotice(''); setDialog({ kind: 'link', error: '', problems: [], url: plugin.source }) }
+                    : undefined}
+                  saving={saving === plugin.id}
+                  onSave={capabilities.includes('plugins.export') ? () => void savePackage(plugin) : undefined}
                   onUnlink={() => { setNotice(''); void model.devUnlink(plugin.id).then((ok) => { if (ok) setNotice(`${plugin.name} is no longer loaded from its folder; the last loaded version stays installed.`) }) }}
                 />
               ))}
@@ -204,7 +218,7 @@ export default function PluginsPage() {
       </div>
 
       {dialog?.kind === 'dev' ? <DevLinkDialog pending={state.pending === 'install'} error={dialog.error} onCancel={() => setDialog(null)} onLink={(path) => void link(path)} /> : null}
-      {dialog?.kind === 'link' ? <LinkDialog pending={state.pending === 'install'} error={dialog.error} problems={dialog.problems} onCancel={() => setDialog(null)} onDownload={(url) => void download(url)} /> : null}
+      {dialog?.kind === 'link' ? <LinkDialog pending={state.pending === 'install'} error={dialog.error} problems={dialog.problems} initialUrl={dialog.url} onCancel={() => setDialog(null)} onDownload={(url) => void download(url)} /> : null}
       {dialog?.kind === 'paste' ? <PasteDialog onCancel={() => setDialog(null)} onReview={review} /> : null}
       {dialog?.kind === 'problems' ? <ProblemsDialog title={dialog.title} problems={dialog.problems} onClose={() => setDialog(null)} /> : null}
       {dialog?.kind === 'review' ? (
@@ -270,7 +284,7 @@ const STATE: Readonly<Record<RuntimeState, { readonly label: string; readonly to
   stopped: { label: 'Not running', tone: 'neutral' },
 }
 
-function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove, onUnlink }: {
+function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove, onUnlink, onUpdate, onSave }: {
   readonly plugin: PluginSummary
   readonly runtime: PluginRuntime | undefined
   readonly pending: boolean
@@ -284,6 +298,11 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
   readonly onRestart: () => void
   readonly onRemove: () => void
   readonly onUnlink: () => void
+  readonly saving: boolean
+  /** Reinstalls from the link the plugin came from; absent without one. */
+  readonly onUpdate?: () => void
+  /** Saves the installed package as a file; absent when unsupported. */
+  readonly onSave?: () => void
 }) {
   // A stored plugin this version cannot use is off whatever its switch says;
   // turning it on is refused until an update or a newer app fixes it.
@@ -369,6 +388,16 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, onExpan
               <Link2Off size={13} aria-hidden="true" />Unlink
             </Button>
           ) : null}
+          {onUpdate ? (
+            <Button variant="ghost" disabled={busy} onClick={onUpdate} title="Download the package again from the link it was installed from and review it">
+              <RefreshCw size={13} aria-hidden="true" />Update from link
+            </Button>
+          ) : null}
+          {onSave && !blocked ? (
+            <Button variant="ghost" disabled={busy} aria-busy={saving || undefined} onClick={onSave} aria-label={`Save ${plugin.name} package`} title="Save the installed package as a file, without settings values or stored data">
+              <Download size={13} aria-hidden="true" />{saving ? 'Saving…' : 'Save package'}
+            </Button>
+          ) : null}
           <Button variant="ghost" disabled={busy} onClick={onPermissions}>
             <ShieldCheck size={13} aria-hidden="true" />Permissions
           </Button>
@@ -397,6 +426,16 @@ function PluginDetails({ id, plugin, runtime }: { readonly id: string; readonly 
             <dd>
               <button type="button" className={styles.homepage} onClick={() => void openExternal(plugin.homepage)} title="Opens in your browser">
                 <span>{plugin.homepage}</span><ExternalLink size={12} aria-hidden="true" />
+              </button>
+            </dd>
+          </div>
+        ) : null}
+        {plugin.source ? (
+          <div>
+            <dt>Installed from</dt>
+            <dd>
+              <button type="button" className={styles.homepage} onClick={() => void openExternal(plugin.source)} title="Opens in your browser">
+                <span>{plugin.source}</span><ExternalLink size={12} aria-hidden="true" />
               </button>
             </dd>
           </div>

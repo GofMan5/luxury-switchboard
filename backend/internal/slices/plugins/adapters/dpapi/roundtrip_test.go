@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/luxuryprivate/switchboard/backend/internal/platform/encryptedfile"
 	"github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/domain"
 )
 
@@ -74,5 +75,36 @@ func TestPluginsRoundTripEncrypted(t *testing.T) {
 	}
 	if err := loaded[0].Validate(); err != nil {
 		t.Fatalf("the restored plugin is invalid: %v", err)
+	}
+}
+
+func TestTheInstallLinkRoundTripsAndOlderRecordsHaveNone(t *testing.T) {
+	useTestKeyring()
+	path := filepath.Join(t.TempDir(), "plugins.dpapi")
+	repository := New(path)
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	linked := domain.Plugin{
+		Package: domain.Package{Schema: 1, ID: "acme.linked", Name: "Linked", Version: "1.0.0", Permissions: []string{}},
+		Enabled: true, Granted: []string{}, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{},
+		Source: "https://example.test/acme/linked.json",
+	}
+	if err := repository.Save(context.Background(), []domain.Plugin{linked}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := repository.Load(context.Background())
+	if err != nil || len(loaded) != 1 || loaded[0].Source != linked.Source || loaded[0].Validate() != nil {
+		t.Fatalf("the install link did not round trip: %+v %v", loaded, err)
+	}
+
+	// A record written before the link was kept has no "source" key.
+	older := map[string]any{"version": fileVersion, "plugins": []map[string]any{{
+		"package": linked.Package, "enabled": true, "granted": []string{}, "installedAt": now, "updatedAt": now, "storage": map[string]string{},
+	}}}
+	if err := encryptedfile.Save(path, magic, maxPlaintext, older); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = repository.Load(context.Background())
+	if err != nil || len(loaded) != 1 || loaded[0].Source != "" || loaded[0].Validate() != nil {
+		t.Fatalf("an older record did not load without a link: %+v %v", loaded, err)
 	}
 }

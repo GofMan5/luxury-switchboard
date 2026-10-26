@@ -41,6 +41,8 @@ type storedPlugin struct {
 	// encrypted with the plugin, and are never part of a backup.
 	Secrets map[string]string `json:"secrets,omitempty"`
 	Dev     *domain.DevLink   `json:"dev,omitempty"`
+	// Source is absent in records saved before 1.0.70 and for file installs.
+	Source string `json:"source,omitempty"`
 }
 
 func New(path string) *Repository { return &Repository{path: path} }
@@ -82,6 +84,7 @@ func (repository *Repository) Load(ctx context.Context) ([]domain.Plugin, error)
 			Storage:     saved.Storage,
 			Secrets:     saved.Secrets,
 			Dev:         saved.Dev,
+			Source:      saved.Source,
 		})
 	}
 	return plugins, nil
@@ -105,6 +108,7 @@ func (repository *Repository) Save(ctx context.Context, plugins []domain.Plugin)
 			Storage:     plugin.Storage,
 			Secrets:     plugin.Secrets,
 			Dev:         plugin.Dev,
+			Source:      plugin.Source,
 		})
 	}
 	// encryptedfile refuses an oversized document without saying why; measure

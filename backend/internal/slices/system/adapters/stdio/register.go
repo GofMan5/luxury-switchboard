@@ -7,7 +7,7 @@ import (
 	platform "github.com/luxuryprivate/switchboard/backend/internal/platform/stdio"
 )
 
-const AppVersion = "1.0.69"
+const AppVersion = "1.0.70"
 
 // The handshake states which edition answers, so a client never offers a workspace
 // this binary has no handler for.
@@ -43,5 +43,6 @@ var baseCapabilities = []string{
 	"appearance.manage",
 	"plugins.manage",
 	"plugins.download",
+	"plugins.export",
 	"rules.manage",
 }

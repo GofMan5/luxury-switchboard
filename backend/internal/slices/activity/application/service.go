@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,9 +78,36 @@ func (service *Service) SetCapacity(capacity int) {
 	service.mu.Unlock()
 }
 
+// Reserve hands out the ID a later Start will use, so callers can name the
+// request before it is filed. A reservation never started leaves a gap.
+func (service *Service) Reserve() string {
+	return fmt.Sprintf("%s_%016x", service.namespace, service.sequence.Add(1))
+}
+
+// reservedLocked reports whether id is one this service reserved and has not
+// filed yet.
+// ponytail: an ID whose row was already trimmed out of the ring passes again;
+// track open reservations if a caller ever replays IDs.
+func (service *Service) reservedLocked(id string) bool {
+	suffix, ok := strings.CutPrefix(id, service.namespace+"_")
+	if !ok || len(suffix) != 16 {
+		return false
+	}
+	sequence, err := strconv.ParseUint(suffix, 16, 64)
+	if err != nil || sequence == 0 || sequence > service.sequence.Load() {
+		return false
+	}
+	_, filed := service.requests[id]
+	return !filed
+}
+
 func (service *Service) Start(value domain.Start) string {
 	now := service.now().UTC()
-	id := fmt.Sprintf("%s_%016x", service.namespace, service.sequence.Add(1))
+	service.mu.Lock()
+	id := value.ID
+	if !service.reservedLocked(id) {
+		id = service.Reserve()
+	}
 	request := domain.Request{
 		ID: id, StartedAt: now, UpdatedAt: now, State: domain.StateActive,
 		Model: clean(value.Model, 128), ProviderID: clean(value.ProviderID, 64),
@@ -89,7 +117,6 @@ func (service *Service) Start(value domain.Start) string {
 		ReasoningBudget: min(max(value.ReasoningBudget, 0), maxReasoningBudget),
 		Tags:            mergeTags(nil, value.Tags),
 	}
-	service.mu.Lock()
 	service.requests[id] = request
 	service.order = append([]string{id}, service.order...)
 	service.trimLocked()

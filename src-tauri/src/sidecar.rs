@@ -397,6 +397,7 @@ fn allowed_method(method: &str) -> bool {
             | "plugins.install"
             | "plugins.update"
             | "plugins.remove"
+            | "plugins.export"
             | "plugins.storage.get"
             | "plugins.storage.set"
             | "plugins.storage.update"

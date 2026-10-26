@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -87,7 +88,7 @@ func pkg(id, name string, permissions ...string) domain.Package {
 		p.Theme = &domain.Theme{Name: name, Scheme: "dark", Tokens: map[string]string{"--bg": "#000000"}}
 	}
 	if slices.Contains(permissions, domain.PermissionCSS) {
-		p.CSS = ".x{}"
+		p.CSS = new(".x{}")
 	}
 	if slices.ContainsFunc(permissions, func(permission string) bool {
 		return permission != domain.PermissionTheme && permission != domain.PermissionCSS
@@ -100,7 +101,7 @@ func pkg(id, name string, permissions ...string) domain.Package {
 func TestInstallAnswersTheSummary(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
-	summary, err := service.Install(context.Background(), pkg("acme.dusk", "Dusk", domain.PermissionTheme, domain.PermissionStorage), []string{domain.PermissionStorage})
+	summary, err := service.Install(context.Background(), pkg("acme.dusk", "Dusk", domain.PermissionTheme, domain.PermissionStorage), []string{domain.PermissionStorage}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +128,7 @@ func TestUpgradeKeepsStorageAndInstallTime(t *testing.T) {
 	store := &memory{}
 	service, _, _ := newService(t, store, 1<<20)
 	ctx := context.Background()
-	first, _ := service.Install(ctx, pkg("acme.tool", "Tool", domain.PermissionStorage, domain.PermissionRead), []string{domain.PermissionStorage, domain.PermissionRead})
+	first, _ := service.Install(ctx, pkg("acme.tool", "Tool", domain.PermissionStorage, domain.PermissionRead), []string{domain.PermissionStorage, domain.PermissionRead}, "")
 	value := "kept"
 	if _, err := service.StorageSet(ctx, "acme.tool", "k", &value); err != nil {
 		t.Fatal(err)
@@ -138,7 +139,7 @@ func TestUpgradeKeepsStorageAndInstallTime(t *testing.T) {
 	}
 	upgrade := pkg("acme.tool", "Tool 2", domain.PermissionStorage)
 	upgrade.Version = "2.0.0"
-	second, err := service.Install(ctx, upgrade, nil)
+	second, err := service.Install(ctx, upgrade, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,14 +156,14 @@ func TestOnlyNewIDsCountAgainstTheLimit(t *testing.T) {
 	service, _, _ := newService(t, &memory{}, 1<<20)
 	ctx := context.Background()
 	for index := range domain.MaxPlugins {
-		if _, err := service.Install(ctx, pkg(fmt.Sprintf("plugin-%02d", index), "P", domain.PermissionTheme), nil); err != nil {
+		if _, err := service.Install(ctx, pkg(fmt.Sprintf("plugin-%02d", index), "P", domain.PermissionTheme), nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.Install(ctx, pkg("plugin-extra", "P", domain.PermissionTheme), nil); !errors.Is(err, ErrLimit) {
+	if _, err := service.Install(ctx, pkg("plugin-extra", "P", domain.PermissionTheme), nil, ""); !errors.Is(err, ErrLimit) {
 		t.Fatalf("the 25th plugin: %v", err)
 	}
-	if _, err := service.Install(ctx, pkg("plugin-00", "Upgraded", domain.PermissionTheme), nil); err != nil {
+	if _, err := service.Install(ctx, pkg("plugin-00", "Upgraded", domain.PermissionTheme), nil, ""); err != nil {
 		t.Fatalf("an upgrade at the limit was refused: %v", err)
 	}
 }
@@ -173,11 +174,11 @@ func TestAPluginThatCannotBeAnsweredIsRefused(t *testing.T) {
 	small, _ := encodedSize(detail(installed{plugin: domain.Plugin{Package: probe.Normalized(), Granted: []string{}, Storage: map[string]string{}}}))
 	service, _, _ := newService(t, store, small+64)
 	probe.Script = strings.Repeat("a", 200)
-	if _, err := service.Install(context.Background(), probe, nil); !errors.Is(err, ErrTooLarge) || store.saves != 0 {
+	if _, err := service.Install(context.Background(), probe, nil, ""); !errors.Is(err, ErrTooLarge) || store.saves != 0 {
 		t.Fatalf("an unanswerable plugin: %v, saves %d", err, store.saves)
 	}
 	probe.Script = "x"
-	if _, err := service.Install(context.Background(), probe, nil); err != nil {
+	if _, err := service.Install(context.Background(), probe, nil, ""); err != nil {
 		t.Fatalf("a plugin within the budget: %v", err)
 	}
 }
@@ -186,10 +187,10 @@ func TestInvalidInstallsAreRefusedBeforeSaving(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
 	var validation domain.ValidationError
-	if _, err := service.Install(context.Background(), domain.Package{Schema: 1, ID: "x"}, nil); !errors.As(err, &validation) {
+	if _, err := service.Install(context.Background(), domain.Package{Schema: 1, ID: "x"}, nil, ""); !errors.As(err, &validation) {
 		t.Fatalf("an invalid package: %v", err)
 	}
-	if _, err := service.Install(context.Background(), pkg("acme.a", "A", domain.PermissionTheme), []string{domain.PermissionWrite}); !errors.As(err, &validation) {
+	if _, err := service.Install(context.Background(), pkg("acme.a", "A", domain.PermissionTheme), []string{domain.PermissionWrite}, ""); !errors.As(err, &validation) {
 		t.Fatalf("an undeclared grant: %v", err)
 	}
 	if store.saves != 0 || len(*notifications) != 0 {
@@ -201,7 +202,7 @@ func TestUpdateAndRemove(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
 	ctx := context.Background()
-	installed, _ := service.Install(ctx, pkg("acme.a", "A", domain.PermissionRead, domain.PermissionWrite), []string{domain.PermissionRead})
+	installed, _ := service.Install(ctx, pkg("acme.a", "A", domain.PermissionRead, domain.PermissionWrite), []string{domain.PermissionRead}, "")
 	granted := []string{domain.PermissionWrite, domain.PermissionRead}
 	updated, err := service.Update(ctx, "acme.a", nil, &granted)
 	if err != nil || !updated.Enabled || !slices.Equal(updated.Granted, []string{domain.PermissionRead, domain.PermissionWrite}) || updated.UpdatedAt != installed.UpdatedAt {
@@ -236,7 +237,7 @@ func TestStorageReadsAndWritesQuietly(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
 	ctx := context.Background()
-	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil)
+	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil, "")
 	before := len(*notifications)
 	value := "v"
 	values, err := service.StorageSet(ctx, "acme.a", "k", &value)
@@ -276,15 +277,15 @@ func TestAFailedSaveChangesNothing(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
 	ctx := context.Background()
-	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), []string{domain.PermissionStorage})
+	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), []string{domain.PermissionStorage}, "")
 	before, _ := service.List()
 	announced := len(*notifications)
 	store.fail = true
 	value := "v"
 	disabled := false
 	failures := map[string]error{}
-	_, failures["install"] = service.Install(ctx, pkg("acme.b", "B", domain.PermissionTheme), nil)
-	_, failures["upgrade"] = service.Install(ctx, pkg("acme.a", "A2", domain.PermissionStorage), nil)
+	_, failures["install"] = service.Install(ctx, pkg("acme.b", "B", domain.PermissionTheme), nil, "")
+	_, failures["upgrade"] = service.Install(ctx, pkg("acme.a", "A2", domain.PermissionStorage), nil, "")
 	_, failures["update"] = service.Update(ctx, "acme.a", &disabled, nil)
 	failures["remove"] = service.Remove(ctx, "acme.a")
 	_, failures["storage"] = service.StorageSet(ctx, "acme.a", "k", &value)
@@ -305,9 +306,9 @@ func TestAFullDocumentIsReportedAsTooLargeOrStorageFull(t *testing.T) {
 	store := &memory{}
 	service, _, _ := newService(t, store, 1<<20)
 	ctx := context.Background()
-	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil)
+	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil, "")
 	store.capacity = true
-	if _, err := service.Install(ctx, pkg("acme.b", "B", domain.PermissionTheme), nil); !errors.Is(err, ErrTooLarge) {
+	if _, err := service.Install(ctx, pkg("acme.b", "B", domain.PermissionTheme), nil, ""); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("install into a full document: %v", err)
 	}
 	value := "v"
@@ -348,7 +349,7 @@ func TestAStoreThatIsNotOneSetOfPluginsRefusesEverything(t *testing.T) {
 		enabled := true
 		_, list := service.List()
 		_, get := service.Get("acme.a")
-		_, install := service.Install(ctx, pkg("acme.b", "B", domain.PermissionTheme), nil)
+		_, install := service.Install(ctx, pkg("acme.b", "B", domain.PermissionTheme), nil, "")
 		_, update := service.Update(ctx, "acme.a", &enabled, nil)
 		remove := service.Remove(ctx, "acme.a")
 		_, storageGet := service.StorageGet("acme.a")
@@ -373,7 +374,7 @@ func TestListIsSortedAndSurvivesARestart(t *testing.T) {
 	service, _, _ := newService(t, store, 1<<20)
 	ctx := context.Background()
 	for _, p := range []domain.Package{pkg("zeta.b", "Same", domain.PermissionTheme), pkg("alpha.z", "Zed", domain.PermissionTheme), pkg("alpha.a", "Same", domain.PermissionTheme)} {
-		if _, err := service.Install(ctx, p, []string{domain.PermissionTheme}); err != nil {
+		if _, err := service.Install(ctx, p, []string{domain.PermissionTheme}, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -398,13 +399,13 @@ func TestConcurrentMutationsStaySerialized(t *testing.T) {
 	store := &memory{}
 	service, _, _ := newService(t, store, 1<<20)
 	ctx := context.Background()
-	_, _ = service.Install(ctx, pkg("acme.shared", "Shared", domain.PermissionStorage), nil)
+	_, _ = service.Install(ctx, pkg("acme.shared", "Shared", domain.PermissionStorage), nil, "")
 	var group sync.WaitGroup
 	for index := range 12 {
 		group.Add(3)
 		go func() {
 			defer group.Done()
-			if _, err := service.Install(ctx, pkg(fmt.Sprintf("acme.p%02d", index), "P", domain.PermissionTheme), nil); err != nil {
+			if _, err := service.Install(ctx, pkg(fmt.Sprintf("acme.p%02d", index), "P", domain.PermissionTheme), nil, ""); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -434,5 +435,91 @@ func TestConcurrentMutationsStaySerialized(t *testing.T) {
 	values, _ := service.StorageGet("acme.shared")
 	if len(list) != 13 || len(values.Values) != 12 || len(store.plugins) != 13 || len(store.plugins[0].Storage)+len(store.plugins[12].Storage) != 12 {
 		t.Fatalf("lost a mutation: %d plugins, %d values, %d stored", len(list), len(values.Values), len(store.plugins))
+	}
+}
+
+func TestInstallKeepsTheLinkItCameFrom(t *testing.T) {
+	store := &memory{}
+	service, _, _ := newService(t, store, 1<<20)
+	ctx := context.Background()
+	summary, err := service.Install(ctx, pkg("acme.dusk", "Dusk", domain.PermissionTheme), nil, "https://Example.TEST/acme/dusk.json#readme")
+	if err != nil || summary.Source != "https://example.test/acme/dusk.json" || store.plugins[0].Source != summary.Source {
+		t.Fatalf("the link was not kept canonically: %q %v", summary.Source, err)
+	}
+	if detail, err := service.Get("acme.dusk"); err != nil || detail.Plugin.Source != summary.Source {
+		t.Fatalf("detail source %q %v", detail.Plugin.Source, err)
+	}
+	// An upgrade from a file drops the link: it no longer says where this
+	// version came from.
+	if summary, err = service.Install(ctx, pkg("acme.dusk", "Dusk", domain.PermissionTheme), nil, ""); err != nil || summary.Source != "" || store.plugins[0].Source != "" {
+		t.Fatalf("a file upgrade kept the link: %q %v", summary.Source, err)
+	}
+	if summary, err = service.Install(ctx, pkg("acme.dusk", "Dusk", domain.PermissionTheme), nil, "https://example.test/v2.json"); err != nil || summary.Source != "https://example.test/v2.json" {
+		t.Fatalf("a link upgrade did not record its link: %q %v", summary.Source, err)
+	}
+	// A query may carry a token: the plugin installs, but keeps no link.
+	if summary, err = service.Install(ctx, pkg("acme.dusk", "Dusk", domain.PermissionTheme), nil, "https://example.test/v3.json?token=fixture"); err != nil || summary.Source != "" || store.plugins[0].Source != "" {
+		t.Fatalf("a query link was kept: %q %v", summary.Source, err)
+	}
+	if _, err = service.Install(ctx, pkg("acme.dusk", "Dusk", domain.PermissionTheme), nil, "https://example.test/v2.json"); err != nil {
+		t.Fatal(err)
+	}
+	saves := store.saves
+	for _, source := range []string{
+		"http://example.test/p.json", "https://fixture:pw@example.test/p.json", "https://example.test:8443/p.json",
+		"https://127.0.0.1/p.json", "https://localhost/p.json", "example.test/p.json", "https://example.test/" + strings.Repeat("a", MaxFetchURLBytes),
+	} {
+		var validation domain.ValidationError
+		if _, err := service.Install(ctx, pkg("acme.dusk", "Dusk", domain.PermissionTheme), nil, source); !errors.As(err, &validation) || validation.Field != "source" {
+			t.Errorf("source %.40q: want a source error, got %v", source, err)
+		}
+	}
+	if store.saves != saves || store.plugins[0].Source != "https://example.test/v2.json" {
+		t.Fatal("a refused source changed the store")
+	}
+}
+
+func TestExportIsThePackageWithoutTheInstallation(t *testing.T) {
+	store := &memory{}
+	service, _, _ := newService(t, store, 1<<20)
+	ctx := context.Background()
+	installed := pkg("acme.vault", "Vault", domain.PermissionStorage, domain.PermissionCSS)
+	installed.CSS = new("")
+	installed.Settings = []domain.Setting{{Key: "token", Label: "Token", Type: domain.SettingSecret}}
+	if _, err := service.Install(ctx, installed, []string{domain.PermissionStorage}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetSecret(ctx, "acme.vault", "token", new("fixture-secret-value")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StorageSet(ctx, "acme.vault", "k", new("fixture-storage-value")); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := service.Export("acme.vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(exported)
+	want, _ := json.Marshal(installed.Normalized())
+	if string(encoded) != string(want) || strings.Contains(string(encoded), "fixture-") {
+		t.Fatalf("export differs from the installed package: %s, want %s", encoded, want)
+	}
+	// A saved package installs again as the same package and saves the same.
+	if _, err := service.Install(ctx, exported, []string{domain.PermissionStorage}, ""); err != nil {
+		t.Fatal(err)
+	}
+	again, err := service.Export("acme.vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reencoded, _ := json.Marshal(again); string(reencoded) != string(encoded) {
+		t.Fatalf("a reinstalled export changed: %s, want %s", reencoded, encoded)
+	}
+	if _, err := service.Export("acme.missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a missing plugin: %v", err)
+	}
+	tight, _, _ := newService(t, &memory{plugins: store.plugins}, 64)
+	if _, err := tight.Export("acme.vault"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("an export over the frame budget: %v", err)
 	}
 }

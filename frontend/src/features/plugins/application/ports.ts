@@ -9,7 +9,9 @@ import type { OpenSpec, SaveSpec } from '../domain/specs'
 export interface PluginsPort {
   list(signal?: AbortSignal): Promise<PluginSummary[]>
   get(id: string, signal?: AbortSignal): Promise<PluginDetail>
-  install(pkg: PluginPackage, granted: readonly string[]): Promise<PluginSummary>
+  /** `source` is the https link the package was downloaded from; without it
+   * the control plane forgets any earlier link. */
+  install(pkg: PluginPackage, granted: readonly string[], source?: string): Promise<PluginSummary>
   update(id: string, change: { readonly enabled?: boolean; readonly granted?: readonly string[] }): Promise<PluginSummary>
   remove(id: string): Promise<void>
   storageGet(id: string): Promise<Record<string, string>>
@@ -26,6 +28,9 @@ export interface PluginsPort {
   /** Fetches a package from a link without installing it; `package` is
    * unchecked JSON and `source` is where it was read from. */
   download(url: string): Promise<{ readonly package: unknown; readonly source: string }>
+  /** The installed package as stored, without settings values or storage;
+   * unchecked JSON. */
+  export(id: string): Promise<unknown>
   /** Installs, upgrades, updates and removals — from this window or another. */
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void
 }

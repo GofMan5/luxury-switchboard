@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import pluginsGuide from '../../../../../docs/PLUGINS.md?raw'
-import { CONTROL_METHODS, CONTROL_TOPICS, controlAccess, methodsFor, topicAccess } from './control-access'
+import type { Provider } from '../../providers/domain/provider'
+import { CONTROL_METHODS, CONTROL_TOPICS, controlAccess, methodsFor, redactUpstream, topicAccess, UPSTREAM_FIELDS } from './control-access'
 import { PLUGIN_PERMISSIONS } from './permissions'
 
 const ALL = new Set<string>(PLUGIN_PERMISSIONS)
@@ -55,5 +56,24 @@ describe('topicAccess', () => {
     for (const topic of ['plugins.changed', 'system.ready', 'backup.progress', 'nonsense']) {
       expect(topicAccess(topic, ALL)).toMatchObject({ allowed: false, code: 'not_allowed' })
     }
+  })
+})
+
+describe('redactUpstream', () => {
+  // Every provider field is classified here: a new one fails typecheck until
+  // someone decides whether it says where the provider points.
+  const upstream: Record<keyof Provider, boolean> = {
+    id: false, name: false, baseUrl: true, authMode: false, authHeader: true, dialect: false, modelsPath: true,
+    format: false, chatPath: true, imageCompat: false, rpm: false, rateUnit: false, cacheTtl: false,
+    enabled: false, keyConfigured: false, keyCount: false, builtin: false, preset: false,
+  }
+
+  it('hides exactly the provider fields that say where traffic goes', () => {
+    expect([...UPSTREAM_FIELDS].sort()).toEqual(Object.entries(upstream).filter(([, hidden]) => hidden).map(([key]) => key).sort())
+  })
+
+  it('removes them at any depth and keeps everything else', () => {
+    const answer = { providers: [{ id: 'p1', baseUrl: 'https://upstream.example.test', nested: { chatPath: '/c', rpm: 5 } }], activeId: 'p1' }
+    expect(redactUpstream(answer)).toEqual({ providers: [{ id: 'p1', nested: { rpm: 5 } }], activeId: 'p1' })
   })
 })

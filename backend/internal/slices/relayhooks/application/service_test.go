@@ -429,6 +429,62 @@ func TestTotalBudget(t *testing.T) {
 	}
 }
 
+// A hook whose own timeout outlasts the shared budget must still be counted
+// and removed when the budget is what ends its call.
+func TestBudgetExpiryCountsAsTimeout(t *testing.T) {
+	service, _, host := setup(t)
+	service.budget = 150 * time.Millisecond
+	register(t, service, domain.Hook{PluginID: "fast.one", HookID: "h", TimeoutMS: domain.MaxTimeoutMS})
+	register(t, service, domain.Hook{PluginID: "slow.one", HookID: "h", TimeoutMS: domain.MaxTimeoutMS})
+	host.answer("fast.one", "h", func(domain.Invocation) *domain.Decision {
+		time.Sleep(30 * time.Millisecond)
+		return &domain.Decision{Action: domain.ActionContinue}
+	})
+	for round := range domain.MaxConsecutiveTimeouts {
+		if decision := service.Before(context.Background(), chatRequest); decision.Action != domain.ActionContinue {
+			t.Fatalf("round %d: decision = %+v", round, decision)
+		}
+	}
+	host.mu.Lock()
+	removals := append([]Removal(nil), host.removals...)
+	host.mu.Unlock()
+	if len(removals) != 1 || removals[0] != (Removal{PluginID: "slow.one", HookID: "h", Phase: domain.PhaseRequest, Reason: RemovalTimeouts}) {
+		t.Fatalf("removals = %+v", removals)
+	}
+	started := time.Now()
+	service.Before(context.Background(), chatRequest)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("requests still wait for the removed hook: %v", elapsed)
+	}
+}
+
+// A client that leaves while the budget is running does not count against a
+// silent hook, even after several requests.
+func TestClientCancelWithinBudgetDoesNotCount(t *testing.T) {
+	service, _, host := setup(t)
+	service.budget = time.Second
+	register(t, service, domain.Hook{PluginID: "slow.one", HookID: "h", TimeoutMS: domain.MaxTimeoutMS})
+	for range domain.MaxConsecutiveTimeouts {
+		ctx, cancel := context.WithCancel(context.Background())
+		host.answer("slow.one", "h", func(domain.Invocation) *domain.Decision {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+			return nil
+		})
+		service.Before(ctx, chatRequest)
+		cancel()
+	}
+	service.mu.Lock()
+	timeouts := -1
+	if len(service.hooks) == 1 {
+		timeouts = service.hooks[0].timeouts
+	}
+	service.mu.Unlock()
+	if timeouts != 0 {
+		t.Fatalf("client cancellations counted against the hook: timeouts=%d", timeouts)
+	}
+}
+
 func TestUnregisterReleasesWaitingRequests(t *testing.T) {
 	service, _, host := setup(t)
 	register(t, service, domain.Hook{PluginID: "acme.tools", HookID: "h", TimeoutMS: domain.MaxTimeoutMS})

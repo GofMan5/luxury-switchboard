@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExtensionPoints } from '../../../shared/contracts/extensions'
+import { PAYLOAD_BYTES } from '../domain/manifest'
 import type { PluginPermission } from '../domain/permissions'
 import type { PluginDetail } from '../domain/plugin'
 import { RUNTIME_LIMITS } from '../domain/protocol'
@@ -194,10 +195,51 @@ describe('PluginHost', () => {
     expect(await worker.call('notify', { title: 'Later' })).toMatchObject({ ok: true })
   })
 
+  it('hides upstream URLs and auth header names from plugins without control:sensitive', async () => {
+    const provider = { id: 'p1', name: 'Main', baseUrl: 'https://upstream.example.test/v1', authHeader: 'X-Api-Key', authMode: 'header', modelsPath: '/models', chatPath: '/chat', enabled: true }
+    const listed = { activeId: 'p1', providers: [provider] }
+    const readOnly = await running(['control:read'])
+    readOnly.control.call.mockResolvedValueOnce(listed)
+    expect(await readOnly.worker.call('control.call', { method: 'providers.list' })).toMatchObject({ ok: true, value: { activeId: 'p1', providers: [{ id: 'p1', name: 'Main', authMode: 'header', enabled: true }] } })
+    expect(JSON.stringify(readOnly.worker.posted)).not.toMatch(/upstream\.example|X-Api-Key|baseUrl|authHeader|modelsPath|chatPath/u)
+    await readOnly.worker.call('events.subscribe', { topic: 'providers.changed' })
+    readOnly.control.listeners.get('providers.changed')?.({ activeId: 'p1', provider })
+    expect(readOnly.worker.posted.at(-1)).toEqual({ type: 'topic', topic: 'providers.changed', payload: { activeId: 'p1', provider: { id: 'p1', name: 'Main', authMode: 'header', enabled: true } } })
+
+    const sensitive = await running(['control:read', 'control:sensitive'])
+    sensitive.control.call.mockResolvedValueOnce(listed)
+    expect(await sensitive.worker.call('control.call', { method: 'providers.list' })).toMatchObject({ ok: true, value: listed })
+    await sensitive.worker.call('events.subscribe', { topic: 'providers.changed' })
+    sensitive.control.listeners.get('providers.changed')?.({ activeId: 'p1', provider })
+    expect(sensitive.worker.posted.at(-1)).toEqual({ type: 'topic', topic: 'providers.changed', payload: { activeId: 'p1', provider } })
+  })
+
+  it('maps a sidecar command_too_large to too_large with the payload budget', async () => {
+    const { worker, control } = await running(['control:read'])
+    control.call.mockRejectedValueOnce(Object.assign(new Error('Command payload exceeds 258048 bytes'), { code: 'command_too_large' }))
+    expect(await worker.call('control.call', { method: 'activity.summary', payload: {} })).toMatchObject({
+      ok: false, error: { code: 'too_large', message: `The call is too large for one Switchboard command (at most ${Math.floor(PAYLOAD_BYTES / 1024)} KiB of payload, including what the host adds). Send less at once.` },
+    })
+  })
+
+  it('does not count a declined question as the operator acting', async () => {
+    const { worker, host, confirm } = await running(['ui:pages', 'ui:notify'])
+    await worker.call('ui.registerPage', { id: 'board', title: 'Board' })
+    host.dispatch('board', { kind: 'action', action: 'delete', form: {} })
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs - 1)
+    confirm.mockResolvedValueOnce(false)
+    expect(await worker.call('ui.confirm', { title: 'Delete?' })).toMatchObject({ ok: true, value: false })
+    vi.setSystemTime(Date.now() + 2)
+    expect(await worker.call('ui.confirm', { title: 'Really?' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+  })
+
   it('navigates only to routes the shell has', async () => {
     const { worker, navigate } = await running([])
     expect(await worker.call('navigate', { route: '#overview' })).toMatchObject({ ok: true })
     expect(navigate).toHaveBeenCalledWith('overview')
+    expect(await worker.call('navigate', { route: '/overview' })).toMatchObject({ ok: true })
+    expect(await worker.call('navigate', { route: '#/overview' })).toMatchObject({ ok: true })
+    expect(navigate.mock.calls).toEqual([['overview'], ['overview'], ['overview']])
     expect(await worker.call('navigate', { route: 'https://example.test' })).toMatchObject({ ok: false, error: { code: 'not_found' } })
   })
 
@@ -580,6 +622,31 @@ describe('PluginHost data and surface APIs', () => {
     expect(files.saved).toEqual([{ name: 'out.json', text: '[]' }])
   })
 
+  it('extends the gesture window only for a completed pick or save', async () => {
+    const { host, worker, files } = await running(DATA)
+    await act(host, worker)
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs - 1)
+    files.next = null
+    expect(await worker.call('files.open', {})).toMatchObject({ ok: true, value: null })
+    vi.setSystemTime(Date.now() + 2)
+    expect(await worker.call('files.save', { name: 'a.json', text: '1' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+
+    await act(host, worker)
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs - 1)
+    files.saveAnswer = false
+    expect(await worker.call('files.save', { name: 'a.json', text: '1' })).toMatchObject({ ok: true, value: false })
+    vi.setSystemTime(Date.now() + 2)
+    expect(await worker.call('files.save', { name: 'a.json', text: '1' })).toMatchObject({ ok: false, error: { code: 'needs_gesture' } })
+
+    await act(host, worker)
+    vi.setSystemTime(Date.now() + RUNTIME_LIMITS.gestureMs - 1)
+    files.next = { name: 'n.json', size: 2, read: async () => '{}' }
+    expect(await worker.call('files.open', {})).toMatchObject({ ok: true })
+    vi.setSystemTime(Date.now() + 2)
+    files.saveAnswer = true
+    expect(await worker.call('files.save', { name: 'b.json', text: '2' })).toMatchObject({ ok: true, value: true })
+  })
+
   it('carries bus messages between plugins but not back to the sender', async () => {
     const env = await running(DATA)
     const other = neighbour(env)
@@ -622,6 +689,40 @@ describe('PluginHost data and surface APIs', () => {
     control.listeners.get('relayhooks.changed')?.({ pluginId: 'acme.tools', hookId: 'h1', removed: true, reason: 'timed out' })
     invoke?.({ pluginId: 'acme.tools', hookId: 'h1', callId: 'c5', request: {} })
     expect(responses().at(-1)).toEqual({ callId: 'c5', action: 'continue' })
+    // Hooks the relay still calls but this host does not know are orphans:
+    // the relay is told to drop them rather than ask again on every request.
+    const unregistered = control.call.mock.calls.filter(([method]) => method === 'relayhooks.unregister').map(([, payload]) => payload)
+    expect(unregistered).toEqual([{ pluginId: 'acme.tools', hookId: 'h9' }, { pluginId: 'acme.tools', hookId: 'h1' }])
+  })
+
+  it('drops a hook whose registration lands after the plugin stopped', async () => {
+    const { worker, control, host } = await running(DATA)
+    let registered: (value: unknown) => void = () => undefined
+    control.call.mockImplementationOnce(() => new Promise((resolve) => { registered = resolve }))
+    worker.send({ type: 'call', id: 900, op: 'relay.register', args: { hookId: 'h1', phase: 'request' } })
+    await settle()
+    host.stop()
+    const unregisters = () => control.call.mock.calls.filter(([method]) => method === 'relayhooks.unregister').map(([, payload]) => payload)
+    expect(unregisters()).toEqual([{ pluginId: 'acme.tools', hookId: '' }])
+    registered(null)
+    await settle()
+    expect(unregisters()).toEqual([{ pluginId: 'acme.tools', hookId: '' }, { pluginId: 'acme.tools', hookId: 'h1' }])
+  })
+
+  it('keeps a hook the restarted worker owns when the old registration lands late', async () => {
+    const { worker, control, host, workers } = await running(DATA)
+    let registered: (value: unknown) => void = () => undefined
+    control.call.mockImplementationOnce(() => new Promise((resolve) => { registered = resolve }))
+    worker.send({ type: 'call', id: 900, op: 'relay.register', args: { hookId: 'h1', phase: 'request' } })
+    await settle()
+    host.stop()
+    host.start()
+    workers.last.send({ type: 'ready' })
+    await workers.last.call('relay.register', { hookId: 'h1', phase: 'request' })
+    registered(null)
+    await settle()
+    const unregisters = control.call.mock.calls.filter(([method]) => method === 'relayhooks.unregister').map(([, payload]) => payload)
+    expect(unregisters).toEqual([{ pluginId: 'acme.tools', hookId: '' }])
   })
 
   it('stamps the plugin as the actor on rule changes only', async () => {

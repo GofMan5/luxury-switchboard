@@ -137,7 +137,7 @@ async function page(safeMode = false, capabilities: readonly string[] = ['plugin
   })
   await model.connect()
   render(<ServicesContext value={{ plugins: model, extensions, appVersion: '1.0.66', capabilities } as unknown as AppServices}><PluginsPage /></ServicesContext>)
-  return { port, workers, model, extensions }
+  return { port, workers, model, extensions, files: extras.files }
 }
 
 describe('PluginsPage', () => {
@@ -243,6 +243,62 @@ describe('PluginsPage', () => {
     expect(port.plugins).toEqual([])
     fireEvent.click(within(review).getByRole('button', { name: 'Install' }))
     await waitFor(() => expect(screen.getByText('Acme tools 2.0.0 installed.')).toBeTruthy())
+    model.dispose()
+  })
+
+  it('updates a plugin from the link it came from, only after the review', async () => {
+    const { model, port } = await page(false, ['plugins.manage', 'plugins.download'])
+    const link = 'https://example.test/acme/tools.json'
+    await model.install({ ...pkg, version: '1.0.0' }, ['ui:pages'], link)
+    await model.install({ ...pkg, id: 'acme.file', name: 'Acme file' }, [])
+    port.downloads[link] = pkg
+    expect(within(screen.getByText('Acme file').closest('li') as HTMLElement).queryByRole('button', { name: 'Update from link' })).toBeNull()
+
+    const row = screen.getByText('Acme tools').closest('li') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Details' }))
+    expect(within(row).getByText('Installed from')).toBeTruthy()
+    expect(within(row).getByText(link)).toBeTruthy()
+    fireEvent.click(within(row).getByRole('button', { name: 'Update from link' }))
+    expect((screen.getByLabelText('Link') as HTMLInputElement).value).toBe(link)
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    const review = await screen.findByRole('dialog', { name: 'Update Acme tools?' })
+    expect(port.plugins.find((plugin) => plugin.id === 'acme.tools')?.version).toBe('1.0.0')
+    fireEvent.click(within(review).getByRole('button', { name: 'Update' }))
+    await waitFor(() => expect(screen.getByText('Acme tools 2.0.0 updated.')).toBeTruthy())
+    expect(port.plugins.find((plugin) => plugin.id === 'acme.tools')?.source).toBe(link)
+    model.dispose()
+  })
+
+  it('offers no update from a link without download support or for a folder plugin', async () => {
+    const { model } = await page()
+    await model.install(pkg, [], 'https://example.test/acme/tools.json')
+    await waitFor(() => expect(screen.getByText('Acme tools')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Update from link' })).toBeNull()
+    model.dispose()
+  })
+
+  it('saves an installed package in the plugin pack format', async () => {
+    const { model, port, files } = await page(false, ['plugins.manage', 'plugins.export'])
+    const example = EXAMPLE_PLUGINS.find((entry) => entry.file === 'dusk-theme.json')
+    if (!example) throw new Error('missing example')
+    await model.install(example.package, example.package.permissions)
+    const save = await screen.findByRole('button', { name: `Save ${example.package.name} package` })
+    fireEvent.click(save)
+    await waitFor(() => expect(screen.getByText(/saved as a package file/u)).toBeTruthy())
+    expect(files.saved.at(-1)).toEqual({ name: 'example.dusk-theme-1.0.0.json', text: `${JSON.stringify(example.package, null, 2)}
+` })
+
+    port.failNext = Object.assign(new Error('gone'), { code: 'plugin_not_found' })
+    fireEvent.click(save)
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('That plugin is no longer installed'))
+    model.dispose()
+  })
+
+  it('hides save package when the control plane cannot export', async () => {
+    const { model } = await page()
+    await model.install(pkg, [])
+    await waitFor(() => expect(screen.getByText('Acme tools')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: /Save .* package/u })).toBeNull()
     model.dispose()
   })
 

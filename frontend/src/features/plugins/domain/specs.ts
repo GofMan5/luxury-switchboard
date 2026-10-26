@@ -43,6 +43,9 @@ export const DATA_LIMITS = {
   busPerMinute: 120,
   busSubscriptions: 32,
   tonesPerSecond: 20,
+  /** A tone spec is four numbers; anything past this is junk the worker
+   * refuses before posting. */
+  toneBytes: 1024,
   toneVolume: 0.3,
   dialogTitle: 120,
   dialogActions: 4,
@@ -122,6 +125,12 @@ export function headerButtonSpec(args: Record<string, unknown>): ActionSpec {
   return { id: surfaceId(args), title: title(args), scope: 'header', icon: optionalIcon(args.icon) }
 }
 
+/** A route as the shell names it: `#/providers`, `/providers` and
+ * `providers` are the same page. */
+export function normalizeRoute(route: string): string {
+  return route.replace(/^#?\/?/u, '')
+}
+
 /** A layout over built-in routes. Unknown ids are ignored, as the shell
  * ignores them; `plugins` and `settings` are never hidden. */
 export function layoutSpec(args: Record<string, unknown>, isRoute: (route: string) => boolean): LayoutSpec {
@@ -137,7 +146,7 @@ export function layoutSpec(args: Record<string, unknown>, isRoute: (route: strin
   let startPage: string | undefined
   if (args.startPage !== undefined) {
     if (typeof args.startPage !== 'string' || args.startPage.length > 160) throw new CallError('invalid_argument', 'startPage must be a route.')
-    startPage = args.startPage.replace(/^#?\/?/u, '')
+    startPage = normalizeRoute(args.startPage)
     if (!isRoute(startPage)) throw new CallError('not_found', 'startPage is not a page of this window.')
   }
   return { hidden, order, ...(startPage ? { startPage } : {}) }

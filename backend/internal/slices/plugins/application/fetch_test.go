@@ -2,8 +2,11 @@ package application
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -59,7 +62,7 @@ func fetching() domain.Package {
 func newFetcher(t *testing.T) (*Service, *Fetcher, *fakeTransport) {
 	t.Helper()
 	service, _, _ := newService(t, &memory{}, 1<<20)
-	if _, err := service.Install(context.Background(), fetching(), []string{domain.PermissionNetFetch}); err != nil {
+	if _, err := service.Install(context.Background(), fetching(), []string{domain.PermissionNetFetch}, ""); err != nil {
 		t.Fatal(err)
 	}
 	token := "tok-123456"
@@ -200,6 +203,9 @@ func TestFetchRefusals(t *testing.T) {
 	}
 	_, err := fetcher.Fetch(ctx, FetchRequest{ID: "acme.fetch", URL: "https://api.example.com/", Body: strings.Repeat("{{secret:spare}}", MaxFetchRequestBytes/16)})
 	refusedWith(t, err, "too_large")
+	// A header under its cap that the filled secrets push over it.
+	_, err = fetcher.Fetch(ctx, FetchRequest{ID: "acme.fetch", URL: "https://api.example.com/", Headers: map[string]string{"X-A": strings.Repeat("{{secret:spare}}", MaxFetchHeaderBytes/32)}})
+	refusedWith(t, err, "invalid_plugin")
 
 	off := false
 	if _, err := service.Update(ctx, "acme.fetch", &off, nil); err != nil {
@@ -286,7 +292,7 @@ func TestSecretsAreNamedNeverShown(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)
 	ctx := context.Background()
-	if _, err := service.Install(ctx, fetching(), nil); err != nil {
+	if _, err := service.Install(ctx, fetching(), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	before := len(*notifications)
@@ -325,11 +331,82 @@ func TestSecretsAreNamedNeverShown(t *testing.T) {
 	next := fetching()
 	next.Version = "2.0.0"
 	next.Settings = next.Settings[1:]
-	summary, err := service.Install(ctx, next, nil)
+	summary, err := service.Install(ctx, next, nil, "")
 	if err != nil || len(summary.Secrets) != 0 || len(store.plugins[0].Secrets) != 0 {
 		t.Fatalf("after the setting went: %+v %v %v", summary.Secrets, store.plugins[0].Secrets, err)
 	}
 	if names, err := service.SetSecret(ctx, "acme.fetch", "spare", nil); err != nil || len(names) != 0 {
 		t.Fatalf("clearing an unset secret: %v %v", names, err)
+	}
+}
+
+func TestFetchRedactsEncodedSecrets(t *testing.T) {
+	service, fetcher, transport := newFetcher(t)
+	ctx := context.Background()
+	quoted := `p"w<1>&\x`
+	if _, err := service.SetSecret(ctx, "acme.fetch", "spare", &quoted); err != nil {
+		t.Fatal(err)
+	}
+	short := "k"
+	if _, err := service.SetSecret(ctx, "acme.fetch", "token", &short); err != nil {
+		t.Fatal(err)
+	}
+	const bs = string(rune(0x5c)) // a backslash, spelled out to keep the escapes legible
+	encoded := []string{
+		base64.StdEncoding.EncodeToString([]byte(quoted)),
+		base64.RawStdEncoding.EncodeToString([]byte(quoted)),
+		base64.URLEncoding.EncodeToString([]byte(quoted)),
+		"p" + bs + `"w` + bs + "u003c1" + bs + "u003e" + bs + "u0026" + bs + bs + "x", // Go's HTML-escaping encoder
+		"p" + bs + `"w<1>&` + bs + bs + "x",                                           // other encoders
+	}
+	transport.answer = InboundResponse{Status: 200, Headers: map[string][]string{"X-Echo": {encoded[0]}}, Body: []byte(strings.Join(encoded, " "))}
+	result, err := fetcher.Fetch(ctx, FetchRequest{ID: "acme.fetch", URL: "https://api.example.com/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The one-byte "k" is redacted like any other: there is no minimum length.
+	if want := strings.TrimSpace(strings.Repeat("[secret] ", len(encoded))); result.Body != want || result.Headers["x-echo"] != "[secret]" {
+		t.Fatalf("body %q headers %v", result.Body, result.Headers)
+	}
+}
+
+// Hex, percent, `\/`, ensure_ascii and offset base64 (Basic auth) forms are
+// redacted too; a secret under four bytes only in its raw form.
+func TestFetchRedactsTransportEncodedSecrets(t *testing.T) {
+	service, fetcher, transport := newFetcher(t)
+	ctx := context.Background()
+	secret := "s/é k+1~fictional"
+	if _, err := service.SetSecret(ctx, "acme.fetch", "spare", &secret); err != nil {
+		t.Fatal(err)
+	}
+	short := "k"
+	if _, err := service.SetSecret(ctx, "acme.fetch", "token", &short); err != nil {
+		t.Fatal(err)
+	}
+	escaped := strings.ReplaceAll(secret, "/", `\/`)
+	forms := map[string]string{
+		"hex":          hex.EncodeToString([]byte(secret)),
+		"HEX":          strings.ToUpper(hex.EncodeToString([]byte(secret))),
+		"query":        url.QueryEscape(secret),
+		"path":         url.PathEscape(secret),
+		"json slash":   escaped,
+		"ensure_ascii": strings.ReplaceAll(secret, "é", string(rune(0x5c))+"u00e9"),
+		"php default":  strings.ReplaceAll(escaped, "é", string(rune(0x5c))+"u00e9"),
+		"basic":        base64.StdEncoding.EncodeToString([]byte("user:" + secret)),
+		"basic url":    base64.RawURLEncoding.EncodeToString([]byte("me:" + secret + "!")),
+		"offset 1":     base64.StdEncoding.EncodeToString([]byte("x" + secret)),
+	}
+	for name, form := range forms {
+		transport.answer = InboundResponse{Status: 200, Body: []byte("6b " + form + " 6b")}
+		result, err := fetcher.Fetch(ctx, FetchRequest{ID: "acme.fetch", URL: "https://api.example.com/"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Body, "[secret]") || strings.Contains(result.Body, form) || !strings.HasPrefix(result.Body, "6b ") {
+			t.Errorf("%s: %q became %q", name, form, result.Body)
+		}
+		if leftover := strings.Trim(strings.ReplaceAll(result.Body, "[secret]", ""), "6b "); len(leftover) > 10 { // the "user:" prefix, boundary characters and padding
+			t.Errorf("%s: %q leaves %q", name, form, leftover)
+		}
 	}
 }

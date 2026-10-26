@@ -227,7 +227,7 @@ func TestDevLinkRefusals(t *testing.T) {
 		t.Fatalf("relink: %v", err)
 	}
 	// A manual install over a linked plugin ends the link.
-	summary, err := service.Install(ctx, pkg("acme.p1", "P", domain.PermissionTheme), nil)
+	summary, err := service.Install(ctx, pkg("acme.p1", "P", domain.PermissionTheme), nil, "")
 	if err != nil || summary.Dev != nil {
 		t.Fatalf("install over a link: %+v %v", summary.Dev, err)
 	}
@@ -246,5 +246,38 @@ func TestDevWatchStopsWithItsContext(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Watch did not stop")
+	}
+}
+
+func TestDevLinkOverAnInstalledPluginStartsUngranted(t *testing.T) {
+	service, links, source, _, _ := newDevLinks(t)
+	ctx := context.Background()
+	trusted := pkg("acme.trusted", "Trusted", domain.PermissionStorage, domain.PermissionSensitive)
+	if _, err := service.Install(ctx, trusted, []string{domain.PermissionStorage, domain.PermissionSensitive}, "https://example.test/trusted.json"); err != nil {
+		t.Fatal(err)
+	}
+	// A folder naming the installed plugin's id was never reviewed.
+	path := devPath("impostor")
+	source.set(path, trusted)
+	summary, err := links.Link(ctx, path)
+	if err != nil || len(summary.Granted) != 0 {
+		t.Fatalf("a folder took over the grant: %v %v", summary.Granted, err)
+	}
+	// The folder replaces the link the plugin was installed from.
+	if summary.Source != "" {
+		t.Fatalf("a dev link kept the install link %q", summary.Source)
+	}
+	// Relinking the folder it is already loaded from keeps the owner's grant.
+	granted := []string{domain.PermissionStorage}
+	if _, err := service.Update(ctx, "acme.trusted", nil, &granted); err != nil {
+		t.Fatal(err)
+	}
+	if summary, err = links.Link(ctx, path); err != nil || !slices.Equal(summary.Granted, granted) {
+		t.Fatalf("a relink dropped the grant: %v %v", summary.Granted, err)
+	}
+	// Moving the link to another folder starts over.
+	source.set(devPath("moved"), trusted)
+	if summary, err = links.Link(ctx, devPath("moved")); err != nil || len(summary.Granted) != 0 {
+		t.Fatalf("another folder kept the grant: %v %v", summary.Granted, err)
 	}
 }

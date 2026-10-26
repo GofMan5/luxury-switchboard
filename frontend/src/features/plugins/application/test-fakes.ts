@@ -73,7 +73,7 @@ export function summary(overrides: Partial<PluginSummary> = {}): PluginSummary {
     id: 'acme.tools', name: 'Acme tools', version: '1.0.0', author: 'Acme', description: '', homepage: '', minAppVersion: '',
     permissions: ['ui:pages'], granted: ['ui:pages'], enabled: true,
     installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 512,
-    hasScript: true, hasCss: false, hasTheme: false, hasSettings: false, problem: '', secrets: [], hosts: [],
+    hasScript: true, hasCss: false, hasTheme: false, hasSettings: false, problem: '', secrets: [], hosts: [], source: '',
     ...overrides,
   }
 }
@@ -98,12 +98,14 @@ export class MemoryPluginsPort implements PluginsPort {
       return { plugin, ...(this.assets.get(id) ?? { script: '', css: '', theme: null, settings: [] }) }
     })
   }
-  async install(pkg: Parameters<PluginsPort['install']>[0], granted: readonly string[]): Promise<PluginSummary> {
+  readonly packages = new Map<string, unknown>()
+  async install(pkg: Parameters<PluginsPort['install']>[0], granted: readonly string[], source = ''): Promise<PluginSummary> {
     return this.#guard(() => {
       this.#installs += 1
+      this.packages.set(pkg.id, structuredClone(pkg))
       const plugin = summary({
         id: pkg.id, name: pkg.name, version: pkg.version, permissions: pkg.permissions, granted: [...granted],
-        homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '',
+        homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '', source,
         updatedAt: `2026-01-01T00:00:${String(this.#installs).padStart(2, '0')}Z`,
         hasScript: Boolean(pkg.script), hasCss: Boolean(pkg.css), hasTheme: Boolean(pkg.theme), hasSettings: Boolean(pkg.settings?.length),
       })
@@ -162,6 +164,12 @@ export class MemoryPluginsPort implements PluginsPort {
     return this.#guard(() => {
       if (!(url in this.downloads)) throw Object.assign(new Error('Nothing was found at that link.'), { code: 'download_failed' })
       return { package: this.downloads[url], source: url }
+    })
+  }
+  async export(id: string): Promise<unknown> {
+    return this.#guard(() => {
+      if (!this.packages.has(id)) throw Object.assign(new Error('not found'), { code: 'plugin_not_found' })
+      return structuredClone(this.packages.get(id))
     })
   }
   async devUnlink(id: string): Promise<PluginSummary> {

@@ -19,6 +19,9 @@ type idPayload struct {
 type installPayload struct {
 	Package domain.Package `json:"package"`
 	Granted []string       `json:"granted"`
+	// Source is the https link the package was downloaded from; absent for
+	// a file install.
+	Source string `json:"source"`
 }
 
 type updatePayload struct {
@@ -73,11 +76,22 @@ func Register(server *platform.Server, service *application.Service) {
 		if platform.DecodePayload(payload, &request) != nil {
 			return nil, invalid("Plugin package is malformed")
 		}
-		plugin, err := service.Install(ctx, request.Package, request.Granted)
+		plugin, err := service.Install(ctx, request.Package, request.Granted, request.Source)
 		if err != nil {
 			return nil, failure(err)
 		}
 		return map[string]any{"plugin": plugin}, nil
+	})
+	server.Handle("plugins.export", func(_ context.Context, payload json.RawMessage) (any, error) {
+		id, err := decodeID(payload)
+		if err != nil {
+			return nil, err
+		}
+		pkg, err := service.Export(id)
+		if err != nil {
+			return nil, failure(err)
+		}
+		return map[string]any{"package": pkg}, nil
 	})
 	server.Handle("plugins.update", func(ctx context.Context, payload json.RawMessage) (any, error) {
 		var request updatePayload

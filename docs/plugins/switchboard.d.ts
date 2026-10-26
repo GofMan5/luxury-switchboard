@@ -79,6 +79,9 @@ declare namespace Switchboard {
    *   300 collection writes, 60 fetches, 120 bus messages), or 4 fetches already in flight.
    *   An over-budget call fails at once; nothing is queued.
    * - `too_large`: a value, clipboard text, file, document, fetch body or call is over its size limit.
+   *   Oversized call arguments, page trees, draws and tones are refused inside the plugin, before
+   *   anything is sent. A call whose payload, with what the host adds, is over the 252 KiB
+   *   sidecar budget is refused with `too_large` too.
    * - `plugin_storage_full`: storage would go over 64 keys or 64 KiB, or collections over 2 MiB.
    * - `needs_gesture`: a call that needs the operator (`ui.confirm`, `ui.dialog`,
    *   `clipboard.writeText`, `files.open`, `files.save`) came more than 10 s after the
@@ -86,7 +89,8 @@ declare namespace Switchboard {
    * - `conflict`: a command shortcut is already bound, or another plugin holds the layout.
    * - `not_allowed` (fetch): the URL is not `https`, has a port other than 443, or its host is not in `network.hosts`.
    * - `blocked_address` (fetch): the host resolved to a loopback, private, link-local, CGNAT,
-   *   multicast or unspecified address, `::/8`, `2002::/16` or an IPv4-mapped form of one.
+   *   multicast, unspecified, documentation or otherwise reserved address (including `::/8`,
+   *   `100::/64`, `2001::/23`, `2002::/16`, `3fff::/20`, `fec0::/10`) or an IPv4-mapped form of one.
    * - `missing_secret` (fetch): a `{{secret:KEY}}` placeholder names a secret with no value.
    * - `invalid_plugin` (fetch): a malformed request: an unknown method, `timeoutMs` out of range,
    *   more than 32 headers, a header over 8 KiB, a bad header name, or a line break in a value.
@@ -981,9 +985,13 @@ declare namespace Switchboard {
      * Needs `net:fetch`.
      * - The URL is `https://`, port 443 or none, and its host is in the package's `network.hosts`
      *   (otherwise `not_allowed`). `{{secret:KEY}}` is **not** replaced in the URL.
-     * - Hosts that resolve to loopback, private, link-local, CGNAT, multicast or unspecified
-     *   addresses (including `::/8`, `2002::/16` and IPv4-mapped forms) are refused when
-     *   connecting (`blocked_address`).
+     * - Hosts that resolve to loopback, private, link-local, CGNAT, multicast, unspecified,
+     *   documentation or reserved addresses (including `::/8`, `100::/64`, `2001::/23`,
+     *   `2002::/16`, `3fff::/20`, `fec0::/10` and IPv4-mapped forms) are refused when connecting (`blocked_address`).
+     * - Secret values are filled into headers only; a header over 8 KiB after filling is
+     *   refused (`invalid_plugin`). Secrets that come back in the response, raw, base64 (also
+     *   inside a longer run such as Basic auth), hex, percent-encoded or JSON-escaped, are
+     *   replaced with `[secret]`; a secret under four bytes only in its raw form.
      * - Redirects are not followed: a 3xx comes back as it is, without `location`.
      * - The response body is at most 192 KiB (`too_large`).
      * - At most 60 requests a minute and 4 at once; a 5th concurrent request fails at once with
@@ -1150,6 +1158,8 @@ declare namespace Switchboard {
     readonly endpoints?: readonly Endpoint[]
   }
   interface HookRequestInfo {
+    /** Pairs with the `activityId` `relay.onResponse` gets. A request that never reaches
+     *  Activity leaves it unused, so a response for it may never arrive. */
     readonly activityId: string
     readonly model: string
     readonly endpoint: Endpoint

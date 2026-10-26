@@ -172,3 +172,15 @@ export function topicsFor(permission: PluginPermission): string[] {
 export function methodsFor(permission: PluginPermission): string[] {
   return Object.entries(CONTROL_METHODS).filter(([, needed]) => needed === permission).map(([method]) => method)
 }
+
+/** Where a provider sends traffic and how it authenticates: owner-only
+ * metadata (AGENTS: upstream URLs stay on the Providers screen). */
+export const UPSTREAM_FIELDS: ReadonlySet<string> = new Set(['baseUrl', 'authHeader', 'modelsPath', 'chatPath'])
+
+/** A control-plane answer or event as a plugin without `control:sensitive`
+ * may see it: every upstream field removed, wherever it sits. */
+export function redactUpstream(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactUpstream)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !UPSTREAM_FIELDS.has(key)).map(([key, item]) => [key, redactUpstream(item)]))
+}

@@ -261,11 +261,14 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// Plugin request hooks see the client's own body, before any relay
 	// normalization, and may rewrite it; the rewrite is normalized like the
 	// original would have been.
+	// The hooks name the request by the ID history files it under later.
 	var tags []string
+	reservedID := ""
 	hookBlock, hookBlocked := relayapp.HookDecision{}, false
 	if server.hooks != nil && server.hooks.Active(relayapp.HookPhaseRequest, requestModel(body, contentType), endpoint) {
 		var hookTags []string
-		body, hookTags, hookBlock, hookBlocked = server.runRequestHooks(ctx, request, body, endpoint)
+		reservedID = server.activity.Reserve()
+		body, hookTags, hookBlock, hookBlocked = server.runRequestHooks(ctx, request, body, endpoint, reservedID)
 		tags = append(tags, hookTags...)
 	}
 	body, clientTools := normalizeResponsesTools(request.Method, request.URL.Path, contentType, body)
@@ -274,7 +277,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	clientDeclaredTools := server.guardrail.ClientDeclaredTools(body)
 	model := requestModel(body, contentType)
 	if hookBlocked {
-		server.answerLocally(writer, request, model, len(body), tags, hookBlock.BlockStatus, hookBlock.BlockMessage, 0, "hook_blocked", endpoint)
+		server.answerLocally(writer, request, reservedID, model, len(body), tags, hookBlock.BlockStatus, hookBlock.BlockMessage, 0, "hook_blocked", endpoint)
 		return
 	}
 	var rule relayapp.RuleOutcome
@@ -283,10 +286,10 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		tags = append(tags, rule.Tags...)
 		switch {
 		case rule.Block != nil:
-			server.answerLocally(writer, request, model, len(body), tags, rule.Block.Status, rule.Block.Message, 0, "rule_blocked", endpoint)
+			server.answerLocally(writer, request, reservedID, model, len(body), tags, rule.Block.Status, rule.Block.Message, 0, "rule_blocked", endpoint)
 			return
 		case rule.Limit != nil:
-			server.answerLocally(writer, request, model, len(body), tags, http.StatusTooManyRequests, fmt.Sprintf("Rule %q limit reached", rule.Limit.RuleName), rule.Limit.RetryAfter, "rule_limited", endpoint)
+			server.answerLocally(writer, request, reservedID, model, len(body), tags, http.StatusTooManyRequests, fmt.Sprintf("Rule %q limit reached", rule.Limit.RuleName), rule.Limit.RetryAfter, "rule_limited", endpoint)
 			return
 		}
 	}
@@ -335,7 +338,7 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	// and retries included.
 	requestStarted := time.Now()
 	activityID := server.activity.Begin(relayapp.ActivityStart{
-		Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
+		ID: reservedID, Model: model, ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Method: request.Method, Path: request.URL.Path, BytesIn: int64(len(body)),
 		ReasoningEffort: reasoningEffort, ReasoningBudget: reasoningBudget,
 		Tags: tags,

@@ -1,4 +1,4 @@
-import { isHomepage, type PluginTheme } from './manifest'
+import { isHomepage, SOURCE_BYTES, type PluginTheme } from './manifest'
 import { checkSettings, type PluginSetting } from './settings'
 
 /** An installed plugin as the control plane lists it. Every field is always
@@ -40,6 +40,9 @@ export interface PluginSummary {
   readonly hosts: readonly string[]
   /** Set while the plugin is loaded from a folder for development. */
   readonly dev?: PluginDev
+  /** The https:// link it was installed from, or '' (a file, a dev link, an
+   * older control plane). */
+  readonly source: string
 }
 
 /** A plugin linked from a local folder: the control plane re-reads it there
@@ -129,6 +132,7 @@ export function normalizeSummary(raw: unknown): PluginSummary {
     secrets: strings(value.secrets),
     hosts: strings(value.hosts),
     ...devLink(value.dev),
+    source: typeof value.source === 'string' && isHomepage(value.source, SOURCE_BYTES) ? value.source : '',
   }
 }
 

@@ -15,12 +15,13 @@ function setup(safeMode = false) {
   const workers = new FakeWorkers()
   const extensions = new ExtensionPoints()
   const { bus: _bus, ...extras } = hostExtras()
+  const control = new FakeControl()
   const model = new PluginsModel({
-    ...extras, port, control: new FakeControl(), workers, extensions, safeMode,
+    ...extras, port, control, workers, extensions, safeMode,
     notify: vi.fn(), navigate: vi.fn(), isRoute: () => true, clipboard: vi.fn(async () => undefined),
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   })
-  return { port, workers, extensions, model }
+  return { port, workers, extensions, model, control }
 }
 
 const withSettings: PluginPackage = {
@@ -97,10 +98,12 @@ describe('PluginsModel', () => {
   })
 
   it('lists but never runs plugins in safe mode', async () => {
-    const { model, port, workers } = setup(true)
+    const { model, port, workers, control } = setup(true)
     await port.install(pkg, ['ui:pages'])
     await model.connect()
     expect(workers.created).toHaveLength(0)
+    // The sidecar outlived the reload: hooks the previous window left go.
+    expect(control.call).toHaveBeenCalledWith('relayhooks.reset', {})
     expect(model.snapshot()).toMatchObject({ safeMode: true, runtimes: { 'acme.tools': { state: 'stopped', reason: expect.stringContaining('Safe mode') } } })
   })
 

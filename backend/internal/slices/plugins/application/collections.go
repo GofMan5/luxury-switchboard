@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -257,8 +258,10 @@ func (collections *Collections) write(ctx context.Context, id string, change fun
 	} else {
 		err = collections.store.Save(ctx, id, next)
 	}
+	// The quota was checked by change; a store failure is a failed write, as
+	// Service.persist reports it, not a full store.
 	if err != nil {
-		return errors.Join(ErrStorageFull, err)
+		return fmt.Errorf("plugin data could not be saved: %w", err)
 	}
 	collections.loaded[id] = next
 	return nil

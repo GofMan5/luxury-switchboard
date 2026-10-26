@@ -7,7 +7,7 @@ const PLUGIN = {
   permissions: ['ui:pages'], granted: ['ui:pages'], enabled: true,
   installedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', sizeBytes: 64,
   hasScript: true, hasCss: false, hasTheme: false, homepage: 'https://example.com/acme', minAppVersion: '1.0.65',
-  hasSettings: true, problem: '', secrets: [], hosts: [],
+  hasSettings: true, problem: '', secrets: [], hosts: [], source: 'https://example.test/acme/tools.json',
 }
 
 type Listener = (event: { payload: unknown }) => void
@@ -56,6 +56,18 @@ describe('StdioPluginsPort', () => {
     expect(await port.storageGet('acme.tools')).toEqual({ a: '1' })
     expect(await port.storageUpdate('acme.tools', { a: '2', b: null })).toEqual({ a: '2' })
     expect(call).toHaveBeenLastCalledWith('plugins.storage.update', { id: 'acme.tools', values: { a: '2', b: null } })
+  })
+
+  it('sends the link a package came from and exports the stored package', async () => {
+    const pkg = { schema: 1 as const, id: 'acme.tools', name: 'Acme tools', version: '1.0.0', permissions: [] }
+    const { session, call } = fakeSession({ 'plugins.install': { plugin: PLUGIN }, 'plugins.export': { package: pkg } })
+    const port = new StdioPluginsPort(session)
+    await port.install(pkg, [], 'https://example.test/acme/tools.json')
+    expect(call).toHaveBeenLastCalledWith('plugins.install', { package: pkg, granted: [], source: 'https://example.test/acme/tools.json' })
+    expect(await port.export('acme.tools')).toEqual(pkg)
+    expect(call).toHaveBeenLastCalledWith('plugins.export', { id: 'acme.tools' })
+    const { session: plain } = fakeSession({ 'plugins.list': { plugins: [{ ...PLUGIN, source: 'http://example.test/x.json' }] } })
+    expect((await new StdioPluginsPort(plain).list())[0]?.source).toBe('')
   })
 
   it('downloads a package without installing it', async () => {

@@ -179,3 +179,32 @@ func TestTagsAreValidatedMergedAndBounded(t *testing.T) {
 		t.Fatalf("an untagged request carries tags: %q", tags)
 	}
 }
+
+func TestStartFilesUnderAReservedID(t *testing.T) {
+	service := NewService(10)
+	reserved := service.Reserve()
+	skipped := service.Reserve()
+	if reserved == "" || reserved == skipped || len(service.List(10)) != 0 {
+		t.Fatalf("reserving must name without filing: %q %q %+v", reserved, skipped, service.List(10))
+	}
+	if id := service.Start(domain.Start{ID: reserved, Path: "/v1/responses"}); id != reserved {
+		t.Fatalf("Start ignored the reservation: %q != %q", id, reserved)
+	}
+	// A reused, forged, foreign or empty ID files under a fresh one.
+	other := NewService(10).Reserve()
+	for _, id := range []string{reserved, "req_forged", other, service.namespace + "_ffffffffffffffff", ""} {
+		if got := service.Start(domain.Start{ID: id}); got == id || got == reserved || got == skipped {
+			t.Fatalf("Start(%q) = %q", id, got)
+		}
+	}
+	ids := map[string]bool{}
+	for _, request := range service.List(10) {
+		if ids[request.ID] {
+			t.Fatalf("duplicate ID %q", request.ID)
+		}
+		ids[request.ID] = true
+	}
+	if len(ids) != 6 || ids[skipped] {
+		t.Fatalf("rows = %v", ids)
+	}
+}

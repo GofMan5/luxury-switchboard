@@ -61,7 +61,7 @@ func copyData(data CollectionData) CollectionData {
 func newCollections(t *testing.T) (*Service, *Collections, *fakeCollections) {
 	t.Helper()
 	service, _, _ := newService(t, &memory{}, 1<<20)
-	if _, err := service.Install(context.Background(), pkg("acme.notes", "Notes", domain.PermissionStorage), nil); err != nil {
+	if _, err := service.Install(context.Background(), pkg("acme.notes", "Notes", domain.PermissionStorage), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	store := &fakeCollections{files: map[string]CollectionData{}}
@@ -131,7 +131,8 @@ func TestCollectionsStoreAndAnswer(t *testing.T) {
 		t.Fatalf("absent plugin: %v", err)
 	}
 	store.fail = true
-	if err := collections.Put(ctx, id, "notes", "z", json.RawMessage(`1`)); !errors.Is(err, ErrStorageFull) {
+	// A disk that refuses the write is a failed save, not a full store.
+	if err := collections.Put(ctx, id, "notes", "z", json.RawMessage(`1`)); err == nil || errors.Is(err, ErrStorageFull) {
 		t.Fatalf("a failed save: %v", err)
 	}
 	if doc, _ := collections.Get(ctx, id, "notes", "z"); doc != nil {
@@ -259,7 +260,7 @@ func TestCollectionListPages(t *testing.T) {
 
 	// A page stops at the response budget even under its limit.
 	service, _, _ := newService(t, &memory{}, 4096)
-	if _, err := service.Install(ctx, pkg(id, "Notes", domain.PermissionStorage), nil); err != nil {
+	if _, err := service.Install(ctx, pkg(id, "Notes", domain.PermissionStorage), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	small, err := NewCollections(service, &fakeCollections{files: map[string]CollectionData{}})

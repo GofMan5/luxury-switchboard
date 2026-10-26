@@ -23,17 +23,30 @@ import (
 
 // blockedPrefixes are ranges plugins may not reach beyond what netip's own
 // predicates cover: CGNAT, "this network", IETF protocol assignments,
-// benchmarking, reserved space and the IPv6 prefixes that embed IPv4:
-// 6to4 and the reserved ::/8, which holds the IPv4-compatible ::a.b.c.d and
-// both NAT64 prefixes (64:ff9b::/96 and 64:ff9b:1::/48).
+// benchmarking, documentation (TEST-NET-1/2/3, 2001:db8::/32, 3fff::/20), the
+// 6to4 relay anycast, reserved space, the IPv6 discard prefix 100::/64, the
+// IETF protocol assignments 2001::/23 (Teredo, benchmarking, ORCHID and
+// service anycast), deprecated site-local fec0::/10 and the IPv6
+// prefixes that embed IPv4: Teredo, 6to4 and the reserved ::/8, which holds
+// the IPv4-compatible ::a.b.c.d and both NAT64 prefixes (64:ff9b::/96 and
+// 64:ff9b:1::/48).
 var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
 	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("::/8"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 // Blocked reports whether a plugin must not connect to address.

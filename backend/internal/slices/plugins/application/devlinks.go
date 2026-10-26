@@ -54,8 +54,10 @@ func NewDevLinks(plugins *Service, source DevSource) (*DevLinks, error) {
 }
 
 // Link loads the folder at path and installs or replaces the plugin it
-// names. The folder must load cleanly the first time. Permissions the
-// installed version was not granted arrive ungranted.
+// names. The folder must load cleanly the first time. Relinking the folder
+// the plugin is already loaded from keeps what the owner granted that is
+// still declared; linking any other folder over an installed plugin starts
+// with nothing granted, as the owner never reviewed it.
 func (links *DevLinks) Link(ctx context.Context, path string) (Summary, error) {
 	if !domain.ValidDevPath(path) {
 		return Summary{}, domain.ValidationError{Field: "path", Reason: "must be an absolute folder path"}
@@ -92,8 +94,15 @@ func (links *DevLinks) Link(ctx context.Context, path string) (Summary, error) {
 	plugin := domain.Plugin{Package: pkg, Enabled: true, Granted: []string{}, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}}
 	if exists {
 		plugin = reloaded(previous, pkg, now)
+		// Only a relink of the same folder keeps the grant; any other folder
+		// naming this id was never reviewed and may not inherit it.
+		if previous.plugin.Dev == nil || previous.plugin.Dev.Path != path {
+			plugin.Granted = []string{}
+		}
 	}
 	plugin.Dev = &domain.DevLink{Path: path, LoadedAt: now}
+	// A folder replaces the link the plugin came from.
+	plugin.Source = ""
 	return links.save(ctx, current, plugin)
 }
 

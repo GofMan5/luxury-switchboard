@@ -15,9 +15,13 @@ func NewRecorder(service *activityapp.Service) *Recorder {
 	return &Recorder{service: service}
 }
 
+func (recorder *Recorder) Reserve() string {
+	return recorder.service.Reserve()
+}
+
 func (recorder *Recorder) Begin(value relayapp.ActivityStart) string {
 	return recorder.service.Start(activitydomain.Start{
-		Model: value.Model, ProviderID: value.ProviderID, ProviderName: value.ProviderName,
+		ID: value.ID, Model: value.Model, ProviderID: value.ProviderID, ProviderName: value.ProviderName,
 		Method: value.Method, Path: value.Path, BytesIn: value.BytesIn,
 		ReasoningEffort: value.ReasoningEffort, ReasoningBudget: value.ReasoningBudget,
 		Tags: value.Tags,

@@ -26,6 +26,7 @@ interface FixturePlugin {
   updatedAt: string
   storage: Record<string, string>
   secrets?: Record<string, string>
+  source?: string
 }
 
 const FIXTURE_PLUGINS_KEY = 'switchboard.fixture.plugins'
@@ -283,7 +284,7 @@ export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = appVersion
   /** The fixture advertises the Codex preset flow, its usage probes and the
    * fleet wake, like a current control plane. */
-  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'plugins.download', 'rules.manage']
+  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'plugins.download', 'plugins.export', 'rules.manage']
   readonly #listeners = new Map<string, Set<EventListener>>()
   readonly #rules = new FixtureRules((topic, payload) => this.#emit(topic, payload))
   // The appearance store survives a dev reload in browser storage, like the
@@ -463,7 +464,7 @@ export class FixtureSession implements ControlPlaneSession {
       enabled: record.enabled && !problem, installedAt: record.installedAt, updatedAt: record.updatedAt,
       sizeBytes: new TextEncoder().encode(JSON.stringify(pkg)).length,
       hasScript: Boolean(pkg.script?.trim()), hasCss: Boolean(pkg.css?.trim()), hasTheme: pkg.theme !== undefined, hasSettings: Boolean(pkg.settings?.length),
-      problem, secrets: Object.keys(record.secrets ?? {}).sort(), hosts: pkg.network?.hosts ?? [],
+      problem, secrets: Object.keys(record.secrets ?? {}).sort(), hosts: pkg.network?.hosts ?? [], source: record.source ?? '',
     }
   }
 
@@ -562,11 +563,12 @@ export class FixtureSession implements ControlPlaneSession {
         // later revision so the runtime restarts it.
         let stamp = new Date().toISOString()
         if (existing && Date.parse(stamp) <= Date.parse(existing.updatedAt)) stamp = new Date(Date.parse(existing.updatedAt) + 1).toISOString()
-        const record: FixturePlugin = { package: pkg, granted, enabled: true, installedAt: existing?.installedAt ?? stamp, updatedAt: stamp, storage: existing?.storage ?? {} }
+        const record: FixturePlugin = { package: pkg, granted, enabled: true, installedAt: existing?.installedAt ?? stamp, updatedAt: stamp, storage: existing?.storage ?? {}, ...(typeof body.source === 'string' && body.source ? { source: body.source } : {}) }
         this.#plugins.set(pkg.id, record)
         this.#pluginChanged()
         return { plugin: this.#pluginSummary(record) }
       }
+      case 'plugins.export': return { package: this.#pluginFind(body.id).package }
       case 'plugins.update': {
         const record = this.#pluginFind(body.id)
         if (typeof body.enabled === 'boolean') record.enabled = body.enabled

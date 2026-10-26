@@ -55,6 +55,7 @@ describe('checkPackage', () => {
     const theme = { name: 'Ink', scheme: 'dark', tokens: { '--accent': '#88aaff' } }
     expect(problems({ ...base, theme })).toContain('A theme needs the "ui:theme" permission.')
     expect(problems({ ...base, css: 'a{}' })).toContain('A stylesheet needs the "ui:css" permission.')
+    expect(problems({ ...base, css: '' })).toContain('A stylesheet needs the "ui:css" permission.') // the backend refuses it too
     expect(checkPackage({ ...base, permissions: ['ui:theme', 'ui:css'], theme, css: 'a{}' }).ok).toBe(true)
   })
 

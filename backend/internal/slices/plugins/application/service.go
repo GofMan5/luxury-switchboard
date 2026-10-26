@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,8 @@ type Summary struct {
 	Hosts []string `json:"hosts"`
 	// Dev is set while the plugin is loaded from a source folder.
 	Dev *domain.DevLink `json:"dev,omitempty"`
+	// Source is the link the plugin was installed from, empty otherwise.
+	Source string `json:"source"`
 }
 
 // Detail is the whole of one plugin, as plugins.get answers it.
@@ -268,6 +271,21 @@ func (service *Service) Get(id string) (Detail, error) {
 	return detail(entry), nil
 }
 
+// Export returns the installed package as the owner would install it again.
+// Secret values and storage belong to the installation, not the package, so
+// they are never part of it.
+func (service *Service) Export(id string) (domain.Package, error) {
+	entry, err := service.lookup(id)
+	if err != nil {
+		return domain.Package{}, err
+	}
+	pkg := entry.plugin.Package.Normalized()
+	if fits, err := service.fits(map[string]any{"package": pkg}); err != nil || !fits {
+		return domain.Package{}, errors.Join(ErrTooLarge, err)
+	}
+	return pkg, nil
+}
+
 func (service *Service) StorageGet(id string) (Values, error) {
 	entry, err := service.lookup(id)
 	if err != nil {
@@ -280,11 +298,24 @@ func (service *Service) StorageGet(id string) (Values, error) {
 // keeps the plugin's storage, the secrets the new version still declares and
 // the install time, enables it and replaces the grant. A manual install ends
 // a dev link. Installing over a broken entry replaces it, keeping only the
-// stored install time and storage that still pass.
-func (service *Service) Install(ctx context.Context, pkg domain.Package, granted []string) (Summary, error) {
+// stored install time and storage that still pass. source is the link the
+// package was downloaded from, or empty for a file: an upgrade keeps a
+// source only when it brings one. A link with a query or fragment, where a
+// token may ride, is not kept: such a plugin has no update link.
+func (service *Service) Install(ctx context.Context, pkg domain.Package, granted []string, source string) (Summary, error) {
 	pkg = pkg.Normalized()
 	if err := pkg.Validate(); err != nil {
 		return Summary{}, err
+	}
+	if source != "" {
+		checked, err := checkedURL(source)
+		if err == nil && strings.ContainsAny(checked, "?#") {
+			checked = ""
+		}
+		if err != nil || !domain.ValidSource(checked) {
+			return Summary{}, domain.ValidationError{Field: "source", Reason: fmt.Sprintf("must be an https:// link of at most %d characters", domain.MaxSourceBytes)}
+		}
+		source = checked
 	}
 	if pkg.NeedsNewerApp(service.appVersion) {
 		// The version was validated above, so it is safe to repeat.
@@ -305,7 +336,7 @@ func (service *Service) Install(ctx context.Context, pkg domain.Package, granted
 		return Summary{}, err
 	}
 	now := service.timestamp()
-	plugin := domain.Plugin{Package: pkg, Enabled: true, Granted: granted, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}}
+	plugin := domain.Plugin{Package: pkg, Enabled: true, Granted: granted, InstalledAt: now, UpdatedAt: now, Storage: map[string]string{}, Source: source}
 	if previous, exists := current[pkg.ID]; exists {
 		plugin.InstalledAt, plugin.UpdatedAt, plugin.Storage = upgraded(previous, now)
 		plugin.Secrets = domain.KeptSecrets(pkg.Settings, previous.plugin.Secrets)
@@ -595,13 +626,14 @@ func summary(entry installed) Summary {
 		UpdatedAt:     plugin.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		SizeBytes:     entry.sizeBytes,
 		HasScript:     pkg.Script != "",
-		HasCSS:        pkg.CSS != "",
+		HasCSS:        pkg.Stylesheet() != "",
 		HasTheme:      pkg.Theme != nil,
 		HasSettings:   len(pkg.Settings) > 0,
 		Problem:       entry.problem,
 		Secrets:       secretNames(plugin),
 		Hosts:         hosts(pkg.Network),
 		Dev:           devCopy(plugin.Dev),
+		Source:        plugin.Source,
 	}
 }
 
@@ -644,7 +676,7 @@ func detail(entry installed) Detail {
 	if settings == nil {
 		settings = []domain.Setting{}
 	}
-	return Detail{Plugin: summary(entry), Script: pkg.Script, CSS: pkg.CSS, Theme: pkg.Theme, Settings: settings}
+	return Detail{Plugin: summary(entry), Script: pkg.Script, CSS: pkg.Stylesheet(), Theme: pkg.Theme, Settings: settings}
 }
 
 // encodedSize measures value exactly as the stdio server writes it: compact,

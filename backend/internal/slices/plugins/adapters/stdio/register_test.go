@@ -137,14 +137,14 @@ func TestTheWireContract(t *testing.T) {
 	fields := slices.Sorted(maps.Keys(installed.Plugin))
 	want := []string{
 		"author", "description", "enabled", "granted", "hasCss", "hasScript", "hasSettings", "hasTheme", "homepage", "hosts", "id",
-		"installedAt", "minAppVersion", "name", "permissions", "problem", "secrets", "sizeBytes", "updatedAt", "version",
+		"installedAt", "minAppVersion", "name", "permissions", "problem", "secrets", "sizeBytes", "source", "updatedAt", "version",
 	}
 	if !slices.Equal(fields, want) {
 		t.Fatalf("summary fields %v, want %v", fields, want)
 	}
 	for field, value := range map[string]string{
 		"granted": `["ui:theme","storage"]`, "author": `""`, "enabled": "true", "homepage": `""`, "minAppVersion": `""`,
-		"hasSettings": "false", "problem": `""`, "hosts": "[]",
+		"hasSettings": "false", "problem": `""`, "hosts": "[]", "source": `""`,
 	} {
 		if string(installed.Plugin[field]) != value {
 			t.Fatalf("summary %s is %s, want %s: %s", field, installed.Plugin[field], value, result.Payload)
@@ -238,8 +238,8 @@ func TestLimitAndSizeRefusals(t *testing.T) {
 	h = newHarness(t, &memory{})
 	// Within every field limit and one request frame, but its answer would not
 	// fit one payload: U+2028 arrives raw in three bytes and is always
-	// answered escaped in six.
-	script := strings.Repeat("\u2028", domain.MaxScriptBytes/3)
+	// answered escaped in six. One visible character keeps it from being blank.
+	script := "x" + strings.Repeat("\u2028", domain.MaxScriptBytes/3)
 	h.refused("plugins.install", `{"package":{"schema":1,"id":"acme.big","name":"Big","version":"1","permissions":["ui:pages"],"script":"`+script+`"}}`, "plugin_too_large")
 	if list := h.ok("plugins.list", ""); string(list) != `{"plugins":[]}` {
 		t.Fatalf("a refused plugin was kept: %s", list)
@@ -258,4 +258,25 @@ func TestStorageFailuresUseTheContractCodes(t *testing.T) {
 	h.refused("plugins.remove", `{"id":"acme.dusk"}`, "plugin_save_failed")
 	h.refused("plugins.storage.set", `{"id":"acme.dusk","key":"k","value":"v"}`, "plugin_save_failed")
 	h.refused("plugins.storage.update", `{"id":"acme.dusk","values":{"k":"v"}}`, "plugin_save_failed")
+}
+
+func TestInstallLinkAndExportOnTheWire(t *testing.T) {
+	h := newHarness(t, &memory{})
+	installed := h.ok("plugins.install", `{"package":`+themePackage+`,"granted":[],"source":"https://example.test/acme/dusk.json"}`)
+	if !bytes.Contains(installed, []byte(`"source":"https://example.test/acme/dusk.json"`)) {
+		t.Fatalf("the install link is not in the summary: %s", installed)
+	}
+	if list := h.ok("plugins.list", ""); !bytes.Contains(list, []byte(`"source":"https://example.test/acme/dusk.json"`)) {
+		t.Fatalf("the install link is not listed: %s", list)
+	}
+	h.refused("plugins.install", `{"package":`+themePackage+`,"granted":[],"source":"http://example.test/dusk.json"}`, "invalid_plugin")
+	h.refused("plugins.install", `{"package":`+themePackage+`,"granted":[],"source":"https://user:fixture@example.test/dusk.json"}`, "invalid_plugin")
+	h.refused("plugins.install", `{"package":`+themePackage+`,"granted":[],"source":1}`, "invalid_plugin")
+
+	if exported := h.ok("plugins.export", `{"id":"acme.dusk"}`); string(exported) != `{"package":`+themePackage+`}` {
+		t.Fatalf("the export is not the installed package: %s", exported)
+	}
+	h.refused("plugins.export", `{"id":"acme.none"}`, "plugin_not_found")
+	h.refused("plugins.export", `{"id":"acme.dusk","extra":1}`, "invalid_plugin")
+	h.refused("plugins.export", `{"id":"Bad Id"}`, "invalid_plugin")
 }

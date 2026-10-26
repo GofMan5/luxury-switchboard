@@ -274,6 +274,7 @@ func (service *Service) Before(ctx context.Context, request domain.Request) doma
 	if len(hooks) == 0 || grants == nil {
 		return result
 	}
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	for _, entry := range hooks {
@@ -285,7 +286,7 @@ func (service *Service) Before(ctx context.Context, request domain.Request) doma
 		if !entry.hook.Matches(request.Model, request.Endpoint) || !grants.Granted(entry.hook.PluginID, domain.PermissionRelayContent) {
 			continue
 		}
-		decision, ok := service.call(ctx, entry, request)
+		decision, ok := service.call(ctx, parent, entry, request)
 		if !ok {
 			continue
 		}
@@ -308,8 +309,10 @@ func (service *Service) Before(ctx context.Context, request domain.Request) doma
 	return result
 }
 
-// call asks one hook and waits for its answer, its timeout or ctx.
-func (service *Service) call(ctx context.Context, entry *registration, request domain.Request) (domain.Decision, bool) {
+// call asks one hook and waits for its answer, its timeout or ctx. When ctx
+// ends while parent, the client's own context, is alive, the shared budget ran
+// out and the hook did not answer in time: that counts as its timeout.
+func (service *Service) call(ctx, parent context.Context, entry *registration, request domain.Request) (domain.Decision, bool) {
 	callID, err := newCallID()
 	if err != nil {
 		return domain.Decision{}, false
@@ -344,6 +347,9 @@ func (service *Service) call(ctx context.Context, entry *registration, request d
 		result = <-answer
 	case <-ctx.Done():
 		if service.forget(callID) {
+			if parent.Err() == nil {
+				service.timedOut(entry)
+			}
 			return domain.Decision{}, false
 		}
 		result = <-answer

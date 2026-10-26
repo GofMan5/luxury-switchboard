@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	activityapp "github.com/luxuryprivate/switchboard/backend/internal/slices/activity/application"
+	relayactivity "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/adapters/activity"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 	relayhooksrelay "github.com/luxuryprivate/switchboard/backend/internal/slices/relayhooks/adapters/relay"
 	relayhooksapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relayhooks/application"
@@ -587,5 +589,34 @@ func TestASilentHookTimesOutAndTheRequestContinues(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("the hook timeout was not honoured: %v", elapsed)
+	}
+}
+
+// The request hook, the response observer and the history row all name one
+// request by the same ID, whether it is served or a hook blocks it.
+func TestHooksAndHistoryShareTheActivityID(t *testing.T) {
+	upstream := newScriptedUpstream(func(_ int, writer http.ResponseWriter, _ *http.Request) { answerOK(writer) })
+	defer upstream.Close()
+	for name, action := range map[string]string{"served": relayhooksdomain.ActionContinue, "blocked": relayhooksdomain.ActionBlock} {
+		t.Run(name, func(t *testing.T) {
+			hooks, host := hooksFor(t, 2000, func(relayhooksdomain.Invocation) relayhooksdomain.Decision {
+				decision := relayhooksdomain.Decision{Action: action}
+				if action == relayhooksdomain.ActionBlock {
+					decision.Block = &relayhooksdomain.Block{Status: 403, Message: "No"}
+				}
+				return decision
+			})
+			history := activityapp.NewService(10)
+			server := rulesServer(fixedRoute{route: upstream.route("echo")}, &credentialSource{values: []string{"k1"}}, nil, hooks, relayactivity.NewRecorder(history), nil)
+			postRequest(server, `{"model":"gpt-test","input":"hi"}`, nil)
+			observation := host.observation(t)
+			rows := history.List(10)
+			host.mu.Lock()
+			requestID := host.invocations[0].Request.ActivityID
+			host.mu.Unlock()
+			if len(rows) != 1 || requestID == "" || requestID != observation.Request.ActivityID || requestID != rows[0].ID {
+				t.Fatalf("request hook %q, observer %q, history %+v", requestID, observation.Request.ActivityID, rows)
+			}
+		})
 	}
 }

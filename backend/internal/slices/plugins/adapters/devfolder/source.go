@@ -5,7 +5,6 @@
 package devfolder
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,8 @@ import (
 	"io/fs"
 	"os"
 	"unicode/utf8"
+
+	"github.com/luxuryprivate/switchboard/backend/internal/slices/plugins/domain"
 )
 
 const (
@@ -23,8 +24,6 @@ const (
 	// The script and css budgets are package rules checked afterwards.
 	maxSourceBytes = 262_144
 )
-
-var bom = []byte{0xef, 0xbb, 0xbf}
 
 type Source struct{}
 
@@ -59,36 +58,24 @@ func (Source) Pack(path string) (json.RawMessage, []string) {
 	if manifest == nil {
 		return nil, problems
 	}
-	var value map[string]json.RawMessage
-	if err := json.Unmarshal(manifest, &value); err != nil {
-		if json.Valid(manifest) {
-			return nil, append(problems, "plugin.json must hold a JSON object.")
-		}
-		return nil, append(problems, "plugin.json is not valid JSON: "+err.Error())
-	}
-	if _, found := value["script"]; found {
-		problems = append(problems, `plugin.json may not carry "script"; the script is main.js.`)
-	}
-	if _, found := value["css"]; found {
-		problems = append(problems, `plugin.json may not carry "css"; the stylesheet is style.css.`)
-	}
-	if _, found := value["$schema"]; found {
-		problems = append(problems, `plugin.json may not carry "$schema" (packages refuse unknown fields); point your editor at docs/plugins/plugin.schema.json instead.`)
-	}
-	delete(value, "script")
-	delete(value, "css")
-	delete(value, "$schema")
+	files := domain.SourceFiles{Manifest: manifest}
 	if !scriptMissing {
-		value["script"], _ = json.Marshal(string(script))
+		files.Script = nonNil(script)
 	}
 	if !cssMissing {
-		value["css"], _ = json.Marshal(string(css))
+		files.CSS = nonNil(css)
 	}
-	packed, err := json.Marshal(value)
-	if err != nil {
-		return nil, append(problems, "The package could not be assembled.")
+	packed, assembled := domain.AssembleSource(files)
+	return packed, append(problems, assembled...)
+}
+
+// nonNil keeps an unreadable but present file present, so its problem is
+// reported beside the package's own rather than the file looking absent.
+func nonNil(text []byte) []byte {
+	if text == nil {
+		return []byte{}
 	}
-	return packed, problems
+	return text
 }
 
 // readSource reads one regular file of the folder as strict UTF-8 with one
@@ -122,5 +109,5 @@ func readSource(root *os.Root, name string) (text []byte, missing bool, problem 
 	case !utf8.Valid(text):
 		return nil, false, name + " is not valid UTF-8."
 	}
-	return bytes.TrimPrefix(text, bom), false, ""
+	return domain.TrimBOM(text), false, ""
 }

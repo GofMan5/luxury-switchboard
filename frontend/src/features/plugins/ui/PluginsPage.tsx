@@ -1,5 +1,5 @@
 import { useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
-import { ChevronDown, ClipboardPaste, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2Off, Puzzle, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
+import { ChevronDown, ClipboardPaste, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2, Link2Off, Puzzle, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
 import { EmptyState, Panel, Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { formatBytes } from '../../../shared/format/metrics'
@@ -10,7 +10,7 @@ import { EXAMPLE_PLUGINS } from '../domain/examples'
 import { PLUGIN_LIMIT, parsePackage, type PluginPackage } from '../domain/manifest'
 import { isPluginPermission, permissionSpec } from '../domain/permissions'
 import { knownTime, type LogEntry, type PluginRuntime, type PluginSummary, type RuntimeState } from '../domain/plugin'
-import { DevLinkDialog, InstallReviewDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
+import { DevLinkDialog, InstallReviewDialog, LinkDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
 import { PluginReference } from './PluginReference'
 import { PluginSettingsDialog } from './PluginSettingsDialog'
 import { usePlugins } from './usePlugins'
@@ -19,7 +19,8 @@ import styles from './PluginsPage.module.css'
 type Dialog =
   | { readonly kind: 'paste' }
   | { readonly kind: 'dev'; readonly error: string }
-  | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string }
+  | { readonly kind: 'link'; readonly error: string; readonly problems: readonly string[] }
+  | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string; readonly source?: string }
   | { readonly kind: 'problems'; readonly title: string; readonly problems: readonly string[] }
   | { readonly kind: 'permissions'; readonly id: string }
   | { readonly kind: 'settings'; readonly id: string }
@@ -30,7 +31,7 @@ const FILE_LIMIT = 512 * 1024
 
 export default function PluginsPage() {
   const { model, state } = usePlugins()
-  const { appVersion, extensions } = useAppServices()
+  const { appVersion, capabilities, extensions } = useAppServices()
   const layout = useSyncExternalStore(extensions.subscribe, extensions.snapshot).layout
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [notice, setNotice] = useState('')
@@ -39,10 +40,10 @@ export default function PluginsPage() {
   const busy = state.pending !== ''
   const full = state.plugins.length >= PLUGIN_LIMIT
 
-  const review = (pkg: PluginPackage) => {
+  const review = (pkg: PluginPackage, source?: string) => {
     model.clearError()
     setNotice('')
-    setDialog({ kind: 'review', pkg, error: '' })
+    setDialog({ kind: 'review', pkg, error: '', source })
   }
 
   const pick = (event: ChangeEvent<HTMLInputElement>) => {
@@ -60,14 +61,20 @@ export default function PluginsPage() {
     }, () => setDialog({ kind: 'problems', title: 'The file could not be read', problems: ['The file could not be read from disk.'] }))
   }
 
-  const install = async (pkg: PluginPackage, granted: readonly string[]) => {
+  const download = async (url: string) => {
+    const result = await model.download(url)
+    if (result.ok) review(result.pkg, result.source)
+    else setDialog({ kind: 'link', error: result.message, problems: result.problems ?? [] })
+  }
+
+  const install = async (pkg: PluginPackage, granted: readonly string[], source?: string) => {
     const upgrade = state.plugins.some((plugin) => plugin.id === pkg.id)
     const result = await model.install(pkg, granted)
     if (result.ok) {
       setDialog(null)
       setNotice(`${result.plugin.name} ${result.plugin.version} ${upgrade ? 'updated' : 'installed'}.`)
     } else {
-      setDialog({ kind: 'review', pkg, error: result.message })
+      setDialog({ kind: 'review', pkg, error: result.message, source })
     }
   }
 
@@ -96,6 +103,11 @@ export default function PluginsPage() {
           <Button onClick={() => fileInput.current?.click()} disabled={busy || state.phase !== 'ready'}>
             <Upload size={14} aria-hidden="true" />Install from file
           </Button>
+          {capabilities.includes('plugins.download') ? (
+            <Button onClick={() => { model.clearError(); setNotice(''); setDialog({ kind: 'link', error: '', problems: [] }) }} disabled={busy || state.phase !== 'ready'}>
+              <Link2 size={14} aria-hidden="true" />Install from link…
+            </Button>
+          ) : null}
           <Button onClick={() => { setNotice(''); setDialog({ kind: 'paste' }) }} disabled={busy || state.phase !== 'ready'}>
             <ClipboardPaste size={14} aria-hidden="true" />Paste JSON
           </Button>
@@ -192,6 +204,7 @@ export default function PluginsPage() {
       </div>
 
       {dialog?.kind === 'dev' ? <DevLinkDialog pending={state.pending === 'install'} error={dialog.error} onCancel={() => setDialog(null)} onLink={(path) => void link(path)} /> : null}
+      {dialog?.kind === 'link' ? <LinkDialog pending={state.pending === 'install'} error={dialog.error} problems={dialog.problems} onCancel={() => setDialog(null)} onDownload={(url) => void download(url)} /> : null}
       {dialog?.kind === 'paste' ? <PasteDialog onCancel={() => setDialog(null)} onReview={review} /> : null}
       {dialog?.kind === 'problems' ? <ProblemsDialog title={dialog.title} problems={dialog.problems} onClose={() => setDialog(null)} /> : null}
       {dialog?.kind === 'review' ? (
@@ -199,10 +212,11 @@ export default function PluginsPage() {
           pkg={dialog.pkg}
           existing={state.plugins.find((plugin) => plugin.id === dialog.pkg.id)}
           appVersion={appVersion}
+          source={dialog.source}
           pending={state.pending === 'install'}
           error={dialog.error || (!state.plugins.some((plugin) => plugin.id === dialog.pkg.id) && full ? `At most ${PLUGIN_LIMIT} plugins can be installed; remove one first.` : '')}
           onCancel={() => setDialog(null)}
-          onInstall={(granted) => void install(dialog.pkg, granted)}
+          onInstall={(granted) => void install(dialog.pkg, granted, dialog.source)}
         />
       ) : null}
       {dialog?.kind === 'permissions' && current ? (

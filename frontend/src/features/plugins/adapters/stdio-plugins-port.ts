@@ -51,6 +51,11 @@ export class StdioPluginsPort implements PluginsPort {
     return summaryOf(await this.#session.call('plugins.dev.unlink', { id }))
   }
 
+  async download(url: string): Promise<{ readonly package: unknown; readonly source: string }> {
+    const answer = await this.#session.call<{ package?: unknown; source?: unknown }>('plugins.download', { url })
+    return { package: answer?.package, source: typeof answer?.source === 'string' ? answer.source : '' }
+  }
+
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {
     return this.#session.subscribe('plugins.changed', (event) => {
       try {

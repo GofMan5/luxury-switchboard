@@ -277,7 +277,7 @@ export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = appVersion
   /** The fixture advertises the Codex preset flow, its usage probes and the
    * fleet wake, like a current control plane. */
-  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'rules.manage']
+  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'plugins.download', 'rules.manage']
   readonly #listeners = new Map<string, Set<EventListener>>()
   readonly #rules = new FixtureRules((topic, payload) => this.#emit(topic, payload))
   // The appearance store survives a dev reload in browser storage, like the
@@ -604,6 +604,18 @@ export class FixtureSession implements ControlPlaneSession {
         this.#pluginFind(body.id)
         // Nothing leaves a dev browser: every request gets the same canned answer.
         return { status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fixture: true, method: body.method ?? 'GET', url: body.url }), redirected: false }
+      }
+      case 'plugins.download': {
+        // Nothing leaves a dev browser: a link ending in an example's file
+        // name (…/dusk-theme.json) answers that example.
+        // Loaded on demand: the examples bundle docs folders through Vite, which
+        // the headless plugin runner (plain Node) cannot do.
+        const url = typeof body.url === 'string' ? body.url.trim() : ''
+        return import('../features/plugins/domain/examples').then(({ EXAMPLE_PLUGINS }) => {
+          const example = EXAMPLE_PLUGINS.find((entry) => url.endsWith(`/${entry.file}`))
+          if (!example) throw new ControlPlaneError('download_failed', 'Nothing was found at that link.')
+          return { package: example.package, source: url }
+        })
       }
       case 'plugins.dev.link': throw new ControlPlaneError('plugin_dev_problem', 'Loading a plugin from a folder needs the desktop app.')
       case 'plugins.dev.unlink': throw new ControlPlaneError('plugin_not_linked', 'Plugin is not loaded from a folder')

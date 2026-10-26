@@ -7,8 +7,9 @@ shape how the relay routes, limits and retries requests, talk to web services,
 keep its own documents, add widgets, tabs and buttons to the built-in screens,
 and draw on a canvas at full frame rate: enough to build anything, Tetris
 included. It is installed from **Plugins** in the sidebar (*Install from
-file*, *Paste JSON*, or *Load from folder…* while you develop), reviewed on
-one screen, and runs with exactly the permissions you tick there.
+file*, *Install from link…* — a GitHub repository works —, *Paste JSON*, or
+*Load from folder…* while you develop), reviewed on one screen, and runs with
+exactly the permissions you tick there.
 
 This guide is the complete reference. The **Developer reference** panel on the
 Plugins page shows the same tables, generated from the code that enforces
@@ -19,7 +20,7 @@ them, so it never drifts from the build you are running.
 | [`docs/plugins/switchboard.d.ts`](plugins/switchboard.d.ts) | Types for every call, node and package field, for `// @ts-check` in your editor. |
 | [`docs/plugins/plugin.schema.json`](plugins/plugin.schema.json) | JSON Schema for `plugin.json` (completion and checks in the editor). |
 | [`.agents/skills/switchboard-plugin/`](../.agents/skills/switchboard-plugin/SKILL.md) | The skill AI agents load to write plugins; [`REFERENCE.md`](../.agents/skills/switchboard-plugin/REFERENCE.md) lists every limit and message on one page. |
-| [`docs/plugins/examples/`](plugins/examples/) | The built-in examples as installable files, Tetris included. |
+| [`docs/plugins/examples/`](plugins/examples/) | The twelve built-in examples, Tetris included. |
 
 - [What plugins can do](#what-plugins-can-do)
 - [Quick start](#quick-start)
@@ -1291,7 +1292,8 @@ and the plaintext backup is never reachable.
 | `--json` | Prints the report as JSON. |
 
 Events, actions and commands count as gestures, so confirm, dialog, file and
-clipboard calls behave as they would in the window.
+clipboard calls behave as they would in the window — slot events
+(`settings:budget:reset`) included.
 
 The 1.0.66 APIs are stand-ins with the window's checks:
 
@@ -1356,6 +1358,34 @@ Load from folder…** takes the folder's absolute path.
   Only that folder is read, never anything outside it.
 - **Leaving.** Unlinking keeps the last loaded version installed as a normal
   plugin. Installing a package file over a linked plugin also ends the link.
+
+### Install from a link (1.0.67)
+
+**Plugins → Install from link…** takes the address of a package file or of a
+source folder and opens the same review as a file: nothing is installed
+until you confirm, and the review shows where the package came from.
+
+| Link | What is read |
+| --- | --- |
+| `github.com/<owner>/<repo>` | The folder at the root of the default branch. |
+| `github.com/<owner>/<repo>/tree/<ref>/<dir>` | That folder. |
+| `github.com/<owner>/<repo>/blob/<ref>/<file>` or `/raw/…` | That file; a link to `plugin.json` means its folder. |
+| `github.com/<owner>/<repo>/releases/download/<tag>/<asset>` | The release asset, a packed package file. |
+| `raw.githubusercontent.com/…` | That file, or its folder for `plugin.json` / a trailing `/`. |
+| Any other `https://` address | A package file, or a folder when the path ends in `/` or `plugin.json`. |
+
+A folder is `plugin.json` plus `main.js` and `style.css` when present —
+exactly what `pnpm plugin pack` assembles, so a repository laid out like
+[`docs/plugins/examples/snippets`](plugins/examples/snippets) installs as it
+is. `https://` may be left out. A branch whose name contains `/` cannot be
+told apart from a folder in a GitHub page link: use its
+`raw.githubusercontent.com` link instead.
+
+The download runs in the sidecar with the `net.fetch` rules: public HTTPS on
+the standard port only, no user name or password in the link, no private or
+local addresses (redirects included, at most 5), 256 KiB per file and
+30 seconds in all. Nothing is sent but a plain `GET` with the app's user
+agent. Upgrades are not automatic: install the link again to update.
 
 ## Recipes
 
@@ -1590,10 +1620,11 @@ and grant the least that works.
 ## Examples
 
 Every example lives in [`docs/plugins/examples`](plugins/examples), is
-commented, and passes `pnpm plugin validate` and `pnpm plugin run`.
+commented, and passes `pnpm plugin validate` and `pnpm plugin run`. All
+twelve ship with the app (**Plugins → Examples**); installing one opens the
+usual review. Together they use every permission except `control:sensitive`.
 
-**Built in.** These three ship with the app (**Plugins → Examples**). A test
-keeps the files identical to the built-in copies.
+**Package files.** A test keeps them identical to the built-in copies.
 
 | File | Shows |
 | --- | --- |
@@ -1601,12 +1632,16 @@ keeps the files identical to the built-in copies.
 | [`latency-board.json`](plugins/examples/latency-board.json) | A live page: metrics, a table with `duration`/`number` columns, a refresh button, a period switch, a toggle, `show`/`hide` and event-driven refresh with a debounce. Also a sidebar badge counting slow requests, two operator settings (`settings.get`/`onChange`) and a palette command on `Alt+L` that falls back to no shortcut on `conflict`. Read-only. |
 | [`quick-switch.json`](plugins/examples/quick-switch.json) | Palette commands kept in step with the provider list, relay start/stop, and notifications for each outcome. |
 
-**1.0.66 source folders.** Each is a `plugin.json` plus `main.js`. Pack one
-with `pnpm plugin pack`, or link it with **Load from folder…**. Run them with
-`--app-version 1.0.66` until this checkout is 1.0.66.
+**Source folders.** Each is a `plugin.json` plus `main.js`. The app builds
+its copy from these files the way `pnpm plugin pack` does. Link one with
+**Load from folder…** to experiment, or install it from a link to this
+repository's folder.
 
 | Folder | Shows | Try it |
 | --- | --- | --- |
+| [`usage-report`](plugins/examples/usage-report) | The analytics report as a page: `tabs`, a `segmented` period switch, `select` and `slider` controls, bar and line `chart`s, a formatted `table`, `details` with `markdown`, a CSV export through `files.save`, and a **Details** tab in the Activity inspector (`ui:slots`) that looks the request up on `show`. | `--event main:export` |
+| [`daily-budget`](plugins/examples/daily-budget) | Counts finished requests from `activity.changed`, shows `Budget n/limit` in the status bar, notifies at the warning level and at the limit, publishes `budget.alert` on the `bus`, keeps the day in `storage`, and adds a Settings section with a reset behind `ui.confirm`. | `--setting limit=10 --event settings:budget:reset --confirm no` |
+| [`snippets`](plugins/examples/snippets) | A prompt library in a collection: a form to add snippets, one palette command per snippet that copies it (`ui:clipboard`), and JSON import/export through `files.open`/`files.save`. | `--event main:export` |
 | [`tetris`](plugins/examples/tetris) | A playable Tetris on a `canvas`: a frame loop with `dtMs`, arrow keys and space from `onInput`, pause on `blur`, theme-token colours, a line-clear tone, and the high score in a collection. | `--key ArrowLeft --key " "` |
 | [`request-rules`](plugins/examples/request-rules) | A rule pack: a request rule (tag and rate-limit `draft-*` models) and a retry rule (`503`/`529` "overloaded" → next provider), installed and removed with one button. Its page lists recent errors that no rule covers yet. `relay:rules`. | `--event pack:install --event pack:remove` |
 | [`relay-redactor`](plugins/examples/relay-redactor) | A `relay.onRequest` filter that replaces e-mail addresses and phone numbers in prompts with `[email]`/`[phone]` and tags the request, plus a `relay.onResponse` observer that logs only status codes. Local relay only, never the tunnel. **`relay:content` reads your prompts: only install it if you want this.** | (no options) |

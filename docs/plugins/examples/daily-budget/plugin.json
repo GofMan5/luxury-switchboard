@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "example.daily-budget",
+  "name": "Daily budget",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "Counts today's finished requests against a daily limit: a readout in the status bar, a notification at the warning level and at the limit, an alert other plugins can subscribe to and a section in Settings.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "control:read",
+    "ui:status",
+    "ui:notify",
+    "ui:slots",
+    "bus",
+    "storage"
+  ],
+  "settings": [
+    {
+      "key": "limit",
+      "label": "Requests per day",
+      "description": "Finished requests (completed, failed or cancelled) counted since local midnight.",
+      "type": "number",
+      "default": 500,
+      "min": 10,
+      "max": 100000
+    },
+    {
+      "key": "warnAt",
+      "label": "Warn at (% of the limit)",
+      "type": "number",
+      "default": 80,
+      "min": 10,
+      "max": 99
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "example.snippets",
+  "name": "Prompt snippets",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "Keeps reusable prompts on a page and in the command palette. One click copies a snippet; the list exports to and imports from a JSON file.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:pages",
+    "ui:commands",
+    "ui:clipboard",
+    "files",
+    "storage"
+  ]
+}

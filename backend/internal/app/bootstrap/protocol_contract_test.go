@@ -89,7 +89,7 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 			t.Fatalf("the build refused %s: %s", method, answer.Error.Code)
 		}
 	}
-	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage", "codex.login", "codex.quota", "appearance.manage", "plugins.manage", "rules.manage"} {
+	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage", "codex.login", "codex.quota", "appearance.manage", "plugins.manage", "plugins.download", "rules.manage"} {
 		if !slices.Contains(handshake.Payload.Capabilities, capability) {
 			t.Fatalf("the handshake hides a workspace this binary serves: %v", handshake.Payload.Capabilities)
 		}

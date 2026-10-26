@@ -117,6 +117,65 @@ export function DevLinkDialog({ pending, error, onCancel, onLink }: {
   )
 }
 
+/** Downloads a package from a link — a GitHub repository, folder, file or
+ * release asset, or any public HTTPS address — for the usual review. */
+export function LinkDialog({ pending, error, problems = [], onCancel, onDownload }: {
+  readonly pending: boolean
+  readonly error: string
+  readonly problems?: readonly string[]
+  readonly onCancel: () => void
+  readonly onDownload: (url: string) => void
+}) {
+  const ref = useModalFocus<HTMLElement>(onCancel, pending)
+  const [url, setUrl] = useState('')
+  const field = useId()
+  const ready = url.trim() !== '' && !pending
+  return (
+    <div className="ui-scrim">
+      <section ref={ref} className={`ui-modal ${styles.dialog}`} role="dialog" aria-modal="true" aria-labelledby={`${field}-title`}>
+        <header>
+          <div>
+            <h2 id={`${field}-title`}>Install a plugin from a link</h2>
+            <p>The package is downloaded and shown for review first. Nothing is installed until you approve it.</p>
+          </div>
+          <button type="button" aria-label="Close" disabled={pending} onClick={onCancel}><X size={16} /></button>
+        </header>
+        <form className={styles.dialogBody} onSubmit={(event) => { event.preventDefault(); if (ready) onDownload(url) }}>
+          <label className={styles.fieldLabel} htmlFor={field}>Link</label>
+          <input
+            id={field}
+            type="url"
+            inputMode="url"
+            value={url}
+            spellCheck={false}
+            autoComplete="off"
+            data-autofocus
+            disabled={pending}
+            placeholder="https://github.com/owner/repo"
+            aria-invalid={error ? true : undefined}
+            aria-describedby={`${field}-hint${error ? ` ${field}-error` : ''}`}
+            onChange={(event) => setUrl(event.target.value)}
+          />
+          <small id={`${field}-hint`} className={styles.fieldHint}>
+            GitHub repo, folder, file or release · any public HTTPS package or plugin.json folder
+          </small>
+          {error ? (
+            <div id={`${field}-error`} className={styles.dialogError} role="alert">
+              <p>{error}</p>
+              {problems.length ? <ul>{problems.map((problem) => <li key={problem}>{problem}</li>)}</ul> : null}
+            </div>
+          ) : null}
+          <button type="submit" hidden />
+        </form>
+        <footer>
+          <Button onClick={onCancel} disabled={pending}>Cancel</Button>
+          <Button variant="primary" disabled={!ready} onClick={() => onDownload(url)}>{pending ? 'Downloading…' : 'Download'}</Button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
 /** A package file that could not be read. */
 export function ProblemsDialog({ title, problems, onClose }: { readonly title: string; readonly problems: readonly string[]; readonly onClose: () => void }) {
   const ref = useModalFocus<HTMLElement>(onClose)
@@ -152,8 +211,10 @@ function Problems({ id, problems }: { readonly id?: string; readonly problems: r
  * each permission with what granting it means; the operator ticks what the
  * plugin may do. Nothing is installed until Install is pressed.
  */
-export function InstallReviewDialog({ pkg, existing, appVersion = '', pending, error, onCancel, onInstall }: {
+export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '', pending, error, onCancel, onInstall }: {
   readonly pkg: PluginPackage
+  /** Where a downloaded package came from. */
+  readonly source?: string
   readonly existing: PluginSummary | undefined
   /** The running app's version; a package that needs a newer one is refused. */
   readonly appVersion?: string
@@ -201,6 +262,7 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', pending, e
           {pkg.description ? <p className={styles.reviewDescription}>{pkg.description}</p> : null}
           <dl className={styles.facts}>
             <div><dt>Identifier</dt><dd><code>{pkg.id}</code></dd></div>
+            {source ? <div><dt>Downloaded from</dt><dd className={styles.source}>{source}</dd></div> : null}
             {pkg.author ? <div><dt>Author</dt><dd>{pkg.author}</dd></div> : null}
             {pkg.homepage ? (
               <div>

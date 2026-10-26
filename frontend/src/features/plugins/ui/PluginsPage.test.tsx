@@ -125,7 +125,7 @@ describe('PluginTree', () => {
   })
 })
 
-async function page(safeMode = false) {
+async function page(safeMode = false, capabilities: readonly string[] = ['plugins.manage']) {
   const port = new MemoryPluginsPort()
   const workers = new FakeWorkers()
   const { bus: _bus, ...extras } = hostExtras()
@@ -136,7 +136,7 @@ async function page(safeMode = false) {
     app: { version: '1.0.0', capabilities: ['plugins.manage'] },
   })
   await model.connect()
-  render(<ServicesContext value={{ plugins: model, extensions, appVersion: '1.0.66' } as unknown as AppServices}><PluginsPage /></ServicesContext>)
+  render(<ServicesContext value={{ plugins: model, extensions, appVersion: '1.0.66', capabilities } as unknown as AppServices}><PluginsPage /></ServicesContext>)
   return { port, workers, model, extensions }
 }
 
@@ -209,6 +209,40 @@ describe('PluginsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Unlink/u }))
     await waitFor(() => expect(screen.getByText(/no longer loaded from its folder/u)).toBeTruthy())
     expect(screen.queryByText('Dev')).toBeNull()
+    model.dispose()
+  })
+
+  it('hides install-from-link unless the control plane downloads', async () => {
+    const { model } = await page()
+    expect(screen.queryByRole('button', { name: 'Install from link…' })).toBeNull()
+    model.dispose()
+  })
+
+  it('downloads a package from a link into the usual review', async () => {
+    const { model, port } = await page(false, ['plugins.manage', 'plugins.download'])
+    const link = 'https://github.com/acme/tools'
+    port.downloads[link] = pkg
+    port.downloads['https://example.com/bad.json'] = { schema: 1, id: 'acme.bad', extra: true }
+    fireEvent.click(screen.getByRole('button', { name: 'Install from link…' }))
+    const field = screen.getByLabelText('Link')
+    expect((screen.getByRole('button', { name: 'Download' }) as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.change(field, { target: { value: 'https://example.com/none.json' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(screen.getByText('Nothing was found at that link.')).toBeTruthy())
+
+    fireEvent.change(screen.getByLabelText('Link'), { target: { value: 'https://example.com/bad.json' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(screen.getByText('The link does not hold a valid plugin package')).toBeTruthy())
+    expect(screen.getByText('Unknown field "extra".')).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText('Link'), { target: { value: ` ${link} ` } })
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    const review = await screen.findByRole('dialog', { name: 'Install Acme tools?' })
+    expect(within(review).getByText(link)).toBeTruthy()
+    expect(port.plugins).toEqual([])
+    fireEvent.click(within(review).getByRole('button', { name: 'Install' }))
+    await waitFor(() => expect(screen.getByText('Acme tools 2.0.0 installed.')).toBeTruthy())
     model.dispose()
   })
 

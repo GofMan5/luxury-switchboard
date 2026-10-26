@@ -410,6 +410,7 @@ fn allowed_method(method: &str) -> bool {
             | "plugins.collection.stats"
             | "plugins.dev.link"
             | "plugins.dev.unlink"
+            | "plugins.download"
             | "guardrails.status"
             | "guardrails.findings"
             | "guardrails.clear"

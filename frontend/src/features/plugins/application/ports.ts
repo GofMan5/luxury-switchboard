@@ -23,6 +23,9 @@ export interface PluginsPort {
   devLink(path: string): Promise<PluginSummary>
   /** Stops loading a plugin from its folder. */
   devUnlink(id: string): Promise<PluginSummary>
+  /** Fetches a package from a link without installing it; `package` is
+   * unchecked JSON and `source` is where it was read from. */
+  download(url: string): Promise<{ readonly package: unknown; readonly source: string }>
   /** Installs, upgrades, updates and removals — from this window or another. */
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void
 }

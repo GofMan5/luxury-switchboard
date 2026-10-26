@@ -1,13 +1,14 @@
-import type { PluginPackage } from './manifest'
+import { checkPackage, type PluginPackage } from './manifest'
 
 /**
- * The three starter plugins the Developer area installs in one click. They
- * double as the reference examples in docs/plugins/examples — a test keeps
- * the JSON files there identical to these — so each one is written to be
- * read: one feature per plugin, commented, no tricks.
+ * The ready-made plugins the Plugins page offers, each installed through the
+ * same review as any other package.
  *
- * The scripts are plain strings joined line by line so they read like the
- * files a plugin author writes.
+ * The first three are written out here and a test keeps their JSON copies in
+ * docs/plugins/examples identical. The rest are the source folders there
+ * (plugin.json, main.js, optional style.css), assembled exactly as
+ * `pnpm plugin pack` and a link download assemble them, so the docs are the
+ * single copy. Each one is written to be read: commented, no tricks.
  */
 export interface ExamplePlugin {
   readonly file: string
@@ -289,8 +290,42 @@ const quick: PluginPackage = {
   ),
 }
 
+const sources = import.meta.glob('../../../../../docs/plugins/examples/*/{plugin.json,main.js,style.css}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
+
+/** A Windows checkout may turn line endings into CRLF; packages use LF everywhere. */
+const source = (folder: string, name: string): string | undefined =>
+  sources[`../../../../../docs/plugins/examples/${folder}/${name}`]?.replaceAll('\r\n', '\n')
+
+/**
+ * A docs source folder as a package: the manifest plus its script and
+ * stylesheet, checked like any install. A folder that does not check out is
+ * left off the page; the examples test names it.
+ */
+function fromFolder(folder: string, summary: string): ExamplePlugin[] {
+  const manifest = source(folder, 'plugin.json')
+  if (manifest === undefined) return []
+  const script = source(folder, 'main.js')
+  const css = source(folder, 'style.css')
+  const checked = checkPackage({ ...(JSON.parse(manifest) as object), ...(script === undefined ? {} : { script }), ...(css === undefined ? {} : { css }) })
+  return checked.ok ? [{ file: `${folder}/`, summary, package: checked.package }] : []
+}
+
+/** The docs folders shown on the Plugins page, in display order. A test checks this list against the folders. */
+export const EXAMPLE_FOLDERS = [
+  ['usage-report', 'A report page with tabs, charts, a sortable table and a CSV export, plus a Details tab in the Activity inspector.'],
+  ['daily-budget', 'Counts finished requests against a daily limit: a status-bar readout, notifications, a bus alert and a Settings section with a confirmed reset.'],
+  ['snippets', 'Reusable prompts on a page and in the palette, copied to the clipboard in one click, kept in a collection and exported or imported as a file.'],
+  ['overview-actions', 'Pins requests from the Activity inspector into an Overview widget, with a top-bar button that opens a review dialog.'],
+  ['request-rules', 'Installs request and retry rules with one button and lists recent failures no custom retry rule covers yet.'],
+  ['status-widget', 'An Overview widget fed by an outside status API, with a write-only API key sent only in a header.'],
+  ['layout', 'Trims the sidebar to the pages a role uses and picks the start page; a palette command restores the layout.'],
+  ['tetris', 'A playable falling-blocks game: a canvas with keyboard and on-screen controls, a frame loop, sounds and a stored high score.'],
+  ['relay-redactor', 'Replaces e-mail addresses and phone numbers in prompts before they reach a provider. It reads your prompts: install it only if you want that.'],
+] as const
+
 export const EXAMPLE_PLUGINS: readonly ExamplePlugin[] = [
   { file: 'dusk-theme.json', summary: 'A theme plus a stylesheet scoped to it. Shows ui:theme and ui:css; no script.', package: dusk },
   { file: 'latency-board.json', summary: 'A live page with metrics and a formatted table, event-driven refresh, a sidebar badge, an Alt+L shortcut and operator settings.', package: latency },
   { file: 'quick-switch.json', summary: 'Palette commands that switch the active provider and start or stop the relay, with notifications.', package: quick },
+  ...EXAMPLE_FOLDERS.flatMap(([folder, summary]) => fromFolder(folder, summary)),
 ]

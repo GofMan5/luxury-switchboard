@@ -281,6 +281,29 @@ describe('run', () => {
   const example = (name) => validatePackage(loadPackage(join(EXAMPLES, name)), { appVersion: '1.0.66' }).package
   const run66 = (name, options = {}) => runPackage(example(name), { seconds: 0, appVersion: '1.0.66', ...options })
 
+  test('usage report reads the fixture control plane and exports its table as CSV', async () => {
+    const report = await run66('usage-report', { events: ['main:export'] })
+    assert.deepEqual(report.problems, [])
+    assert.deepEqual(report.notes, [])
+    assert.equal(report.files.length, 1)
+    assert.equal(report.files[0].save, 'usage-24h.csv')
+  })
+
+  test('daily budget asks before a reset from its settings section, and honors no', async () => {
+    const report = await run66('daily-budget', { events: ['settings:budget:reset'], confirm: 'no', settings: ['limit=10'] })
+    assert.deepEqual(report.problems, [])
+    assert.equal(report.confirms.length, 1)
+    assert.equal(report.confirms[0].answer, false)
+    assert.match(report.status[0].text, /^Budget \d+\/10$/u)
+  })
+
+  test('snippets seed a collection, register palette commands and export them', async () => {
+    const report = await run66('snippets', { events: ['main:export'] })
+    assert.deepEqual(report.problems, [])
+    assert.ok(report.commands.length > 0 && report.commands.every((command) => command.id.startsWith('copy.')))
+    assert.equal(report.files.length, 1)
+  })
+
   test('tetris draws on its canvas every frame without refused draws', async () => {
     const report = await run66('tetris')
     assert.deepEqual(report.problems, [])

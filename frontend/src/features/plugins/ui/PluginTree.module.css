@@ -116,9 +116,9 @@
 
 /* Tabs: the segmented control's quiet grammar, with an underline for the open tab. */
 .tabs { display: grid; min-width: 0; gap: 12px; }
-.tabList { display: flex; min-width: 0; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border-subtle); scrollbar-width: thin; }
+.tabList { display: flex; min-width: 0; gap: 2px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--border-subtle); scrollbar-width: thin; }
 .tab { position: relative; min-height: var(--control-height); flex: 0 0 auto; border: 0; border-radius: var(--radius-control) var(--radius-control) 0 0; padding: 0 12px; color: var(--text-muted); background: transparent; font: inherit; font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast); }
-.tab::after { position: absolute; right: 8px; bottom: -1px; left: 8px; height: 2px; border-radius: 2px 2px 0 0; background: transparent; content: ''; transition: background var(--motion-fast); }
+.tab::after { position: absolute; right: 8px; bottom: 0; left: 8px; height: 2px; border-radius: 2px 2px 0 0; background: transparent; content: ''; transition: background var(--motion-fast); }
 .tab:hover:not([aria-selected='true']) { color: var(--text-primary); background: var(--bg-hover); }
 .tab:active { background: var(--bg-selected); }
 .tab[aria-selected='true'] { color: var(--text-primary); }

@@ -58,6 +58,14 @@ describe('StdioPluginsPort', () => {
     expect(call).toHaveBeenLastCalledWith('plugins.storage.update', { id: 'acme.tools', values: { a: '2', b: null } })
   })
 
+  it('downloads a package without installing it', async () => {
+    const { session, call } = fakeSession({ 'plugins.download': { package: { id: 'acme.tools' }, source: 'https://raw.githubusercontent.com/acme/tools/HEAD/' } })
+    expect(await new StdioPluginsPort(session).download('github.com/acme/tools')).toEqual({ package: { id: 'acme.tools' }, source: 'https://raw.githubusercontent.com/acme/tools/HEAD/' })
+    expect(call).toHaveBeenLastCalledWith('plugins.download', { url: 'github.com/acme/tools' })
+    const { session: odd } = fakeSession({ 'plugins.download': { source: 7 } })
+    expect(await new StdioPluginsPort(odd).download('x')).toEqual({ package: undefined, source: '' })
+  })
+
   it('refuses an answer without a plugin', async () => {
     const { session } = fakeSession({ 'plugins.install': {} })
     await expect(new StdioPluginsPort(session).install({ schema: 1, id: 'a.b', name: 'x', version: '1', permissions: [] }, [])).rejects.toThrow('without an id')

@@ -209,7 +209,7 @@ export async function runPackage(pkg, options = {}) {
   const notes = []
   const problems = []
   const record = {
-    notifications: [], confirms: [], clipboard: [], navigations: [], refusedTrees: [], saved: [], sounds: [],
+    notifications: [], navigations: [], refusedTrees: [], saved: [], sounds: [],
   }
   if (manifest.needsNewerApp(pkg.minAppVersion, appVersion)) {
     return { ok: false, problems: [`The package needs Luxury Switchboard ${pkg.minAppVersion} or newer; this run is ${appVersion} (pass --app-version).`], notes, state: 'not started' }
@@ -220,7 +220,7 @@ export async function runPackage(pkg, options = {}) {
   const events = (options.events ?? []).map(parseEvent)
   const { seed, secrets } = settingSeed(pkg, options.settings ?? [])
   const storage = memoryStorage(seed)
-  const headless = await createHeadless(pkg, grants, { fetch: options.fetch, dialog: options.dialog, secrets })
+  const headless = await createHeadless(pkg, grants, { fetch: options.fetch, dialog: options.dialog, confirm: options.confirm, secrets })
   notes.push(...headless.notes)
 
   const fixture = await fixtureControl(notes)
@@ -249,12 +249,9 @@ export async function runPackage(pkg, options = {}) {
     storage,
     extensions: points,
     notify: (announcement) => { record.notifications.push(announcement) },
-    confirm: async (request) => {
-      const answer = options.confirm !== 'no'
-      record.confirms.push({ ...request, answer })
-      return answer
-    },
-    clipboard: async (text) => { record.clipboard.push(text) },
+    // The shim answers these (headless.mjs), so the host never asks.
+    confirm: async () => options.confirm !== 'no',
+    clipboard: async () => {},
     navigate: (route) => { record.navigations.push(route) },
     isRoute,
     app: { version: appVersion, capabilities: fixture.capabilities },

@@ -259,6 +259,22 @@ describe('PluginsModel', () => {
   })
 })
 
+describe('PluginsModel.download', () => {
+  it('checks a downloaded package before it reaches the review', async () => {
+    const { model, port } = setup()
+    await model.connect()
+    expect(await model.download('  ')).toEqual({ ok: false, message: 'Paste a link to a plugin' })
+    expect(await model.download('https://example.com/none.json')).toEqual({ ok: false, message: 'Nothing was found at that link.' })
+    port.downloads['https://example.com/bad.json'] = [1]
+    expect(await model.download('https://example.com/bad.json')).toEqual({ ok: false, message: 'The link does not hold a valid plugin package', problems: ['A plugin package is a JSON object.'] })
+    const pkg = { schema: 1, id: 'acme.dusk', name: 'Dusk', version: '1.0.0', permissions: ['ui:css'], css: ':root{}' }
+    port.downloads['https://example.com/dusk.json'] = pkg
+    expect(await model.download(' https://example.com/dusk.json ')).toEqual({ ok: true, pkg, source: 'https://example.com/dusk.json' })
+    expect(port.plugins).toEqual([])
+    expect(model.snapshot().pending).toBe('')
+  })
+})
+
 describe('describe', () => {
   it('turns control-plane codes into sentences', () => {
     expect(describeError(Object.assign(new Error('x'), { code: 'plugin_limit' }))).toBe('At most 24 plugins can be installed; remove one first')

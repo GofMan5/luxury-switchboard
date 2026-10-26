@@ -8,7 +8,7 @@
 // the URL, db lives in memory, canvas draws are validated and counted, the bus
 // is local (no self-delivery), dialogs answer `--dialog`, and relay hooks see
 // one fictional request. Nothing here reaches the network, a disk or a relay.
-import { optional } from './domain.mjs'
+import { optional, protocol } from './domain.mjs'
 
 /** Runs in the plugin's realm; it must not close over this module. */
 export function shim(real, bridge) {
@@ -71,6 +71,7 @@ export function shim(real, bridge) {
       close: () => later('dialog.close', { id: opened.id }),
       result: Promise.resolve(freeze({ action: opened.action, form: freeze({}) })),
     })),
+    confirm: (spec) => later('confirm', spec || {}),
     sound: freeze({ tone: (spec) => { send('tone', spec) } }),
     theme: () => later('theme'),
     onTheme: (value) => listen(themes, value),
@@ -107,6 +108,7 @@ export function shim(real, bridge) {
     }),
     db: freeze({ collection: (name) => { send('db.name', { name: name }); return collection(name) } }),
     files: freeze({ open: (options) => later('files.open', options || {}), save: (file) => later('files.save', file) }),
+    clipboard: freeze({ writeText: (text) => later('clipboard', { text: text }) }),
     bus: freeze({
       publish: (channel, payload) => later('bus.publish', { channel: channel, payload: payload }),
       subscribe: (channel, value) => {
@@ -192,6 +194,7 @@ export async function createHeadless(pkg, grants, options = {}) {
   const record = {
     draws: {}, drawProblems: [], frames: 0, tones: 0, tonesDropped: 0,
     slots: [], surfaces: {}, layout: [], dialogs: [], fetches: [], bus: [], hooks: [], hookDecisions: [], files: [],
+    confirms: [], clipboard: [],
   }
 
   const gesture = () => { if (Date.now() - gestureAt > GESTURE_MS) throw refuse('needs_gesture', 'This needs a click or key press in the last 10 seconds.') }
@@ -328,6 +331,23 @@ export async function createHeadless(pkg, grants, options = {}) {
         case 'stats': return { docs: docs.size, bytes: [...docs.values()].reduce((sum, value) => sum + byteLength(value), 0) }
         default: throw refuse('invalid_argument', `Unknown collection call "${op}".`)
       }
+    },
+    // Asked here, not by the host: slot events reach the worker directly, so
+    // only this side knows the operator just acted. Same checks as the host.
+    confirm(spec) {
+      need('ui:notify')
+      const checked = protocol.confirmSpec(spec)
+      gesture()
+      const answer = options.confirm !== 'no'
+      record.confirms.push({ ...checked, answer })
+      gestureAt = Date.now() // answering is itself an operator action
+      return answer
+    },
+    clipboard(args) {
+      need('ui:clipboard')
+      const text = protocol.clipboardText(args)
+      gesture()
+      record.clipboard.push(text)
     },
     'files.open': () => { need('files'); gesture(); record.files.push({ open: 'cancelled' }); return null },
     'files.save': (file) => {

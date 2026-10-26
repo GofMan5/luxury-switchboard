@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import type { ExtensionPoints, SlotContext } from '../../../shared/contracts/extensions'
 import type { CanvasChannel } from '../domain/canvas'
-import { PLUGIN_LIMIT, packageSizeProblem, type PluginPackage } from '../domain/manifest'
+import { PLUGIN_LIMIT, checkPackage, packageSizeProblem, type PluginPackage } from '../domain/manifest'
 import { effectiveGrants } from '../domain/permissions'
 import { IDLE_RUNTIME, splitPageKey, type PluginRuntime, type PluginSummary } from '../domain/plugin'
 import type { PageEvent } from '../domain/protocol'
@@ -44,6 +44,10 @@ export interface PluginSettingsView {
 export type SaveResult = { readonly ok: true } | { readonly ok: false; readonly message: string }
 
 export type InstallResult = { readonly ok: true; readonly plugin: PluginSummary } | { readonly ok: false; readonly message: string }
+
+export type DownloadResult =
+  | { readonly ok: true; readonly pkg: PluginPackage; readonly source: string }
+  | { readonly ok: false; readonly message: string; readonly problems?: readonly string[] }
 
 export interface PluginsDeps {
   readonly port: PluginsPort
@@ -279,6 +283,24 @@ export class PluginsModel {
       const plugin = await this.#deps.port.devLink(trimmed)
       await this.refresh()
       return { ok: true, plugin }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  /** Fetches a package from a link for review; nothing is installed. */
+  async download(url: string): Promise<DownloadResult> {
+    if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
+    const trimmed = url.trim()
+    if (!trimmed) return { ok: false, message: 'Paste a link to a plugin' }
+    this.#set({ ...this.#state, pending: 'install', error: '' })
+    try {
+      const answer = await this.#deps.port.download(trimmed)
+      const checked = checkPackage(answer.package)
+      if (!checked.ok) return { ok: false, message: 'The link does not hold a valid plugin package', problems: checked.problems }
+      return { ok: true, pkg: checked.package, source: answer.source }
     } catch (error) {
       return { ok: false, message: describe(error) }
     } finally {

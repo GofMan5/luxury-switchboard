@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "example.usage-report",
+  "name": "Usage report",
+  "version": "1.0.0",
+  "author": "Luxury Switchboard examples",
+  "description": "A report page with charts, a sortable model table and a CSV export, plus a Details tab in the Activity inspector for the selected request.",
+  "minAppVersion": "1.0.66",
+  "permissions": [
+    "ui:pages",
+    "ui:slots",
+    "control:read",
+    "files"
+  ]
+}

@@ -715,14 +715,19 @@ func defaultRulesService(history activityapp.History) (*rulesapp.Service, error)
 	return rulesapp.NewService(rulesdpapi.New(path), rulesactivity.New(history))
 }
 
-// wirePluginExtensions serves the plugins' network fetch, document
+// wirePluginExtensions serves the plugins' network fetch, link downloads, document
 // collections and folder links. Collections live beside the plugins file.
 func wirePluginExtensions(protocol *platform.Server, plugins *pluginsapp.Service) (*pluginsapp.DevLinks, error) {
 	path, err := storePath("SWITCHBOARD_PLUGINS_PATH", pluginsdpapi.DefaultPath)
 	if err != nil {
 		return nil, err
 	}
-	fetcher, err := pluginsapp.NewFetcher(plugins, pluginsnetfetch.New())
+	network := pluginsnetfetch.New()
+	fetcher, err := pluginsapp.NewFetcher(plugins, network)
+	if err != nil {
+		return nil, err
+	}
+	downloader, err := pluginsapp.NewDownloader(plugins, network)
 	if err != nil {
 		return nil, err
 	}
@@ -735,6 +740,7 @@ func wirePluginExtensions(protocol *platform.Server, plugins *pluginsapp.Service
 		return nil, err
 	}
 	pluginsstdio.RegisterFetch(protocol, fetcher)
+	pluginsstdio.RegisterDownload(protocol, downloader)
 	pluginsstdio.RegisterCollections(protocol, collections)
 	pluginsstdio.RegisterDevLinks(protocol, devLinks)
 	return devLinks, nil

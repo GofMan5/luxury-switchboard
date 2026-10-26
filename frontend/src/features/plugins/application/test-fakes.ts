@@ -157,6 +157,13 @@ export class MemoryPluginsPort implements PluginsPort {
       return plugin
     })
   }
+  downloads: Record<string, unknown> = {}
+  async download(url: string): Promise<{ readonly package: unknown; readonly source: string }> {
+    return this.#guard(() => {
+      if (!(url in this.downloads)) throw Object.assign(new Error('Nothing was found at that link.'), { code: 'download_failed' })
+      return { package: this.downloads[url], source: url }
+    })
+  }
   async devUnlink(id: string): Promise<PluginSummary> {
     return this.#guard(() => {
       const current = this.plugins.find((entry) => entry.id === id)

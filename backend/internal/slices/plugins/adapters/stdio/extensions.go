@@ -81,6 +81,30 @@ func RegisterFetch(server *platform.Server, fetcher *application.Fetcher) {
 	})
 }
 
+type downloadPayload struct {
+	URL string `json:"url"`
+}
+
+// RegisterDownload serves plugins.download: the owner's link becomes a
+// package to review. Nothing is installed, and plugin workers cannot call it.
+func RegisterDownload(server *platform.Server, downloader *application.Downloader) {
+	server.Handle("plugins.download", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var request downloadPayload
+		if platform.DecodePayload(payload, &request) != nil {
+			return nil, platform.MethodError{Code: "invalid_link", Message: "Plugin download request is malformed"}
+		}
+		result, err := downloader.Download(ctx, request.URL)
+		var refused application.DownloadError
+		if errors.As(err, &refused) {
+			return nil, platform.MethodError{Code: refused.Code, Message: refused.Message}
+		}
+		if err != nil {
+			return nil, failure(err)
+		}
+		return result, nil
+	})
+}
+
 // RegisterCollections serves the plugins.collection.* document store.
 func RegisterCollections(server *platform.Server, collections *application.Collections) {
 	decodeDocument := func(payload json.RawMessage, needsDoc bool) (documentPayload, error) {

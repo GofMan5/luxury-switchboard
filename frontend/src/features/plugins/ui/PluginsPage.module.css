@@ -122,6 +122,9 @@
 .reviewDialog { --dialog-width: 640px; }
 .dialogBody { display: grid; gap: 12px; padding: 14px 18px 16px; }
 .dialogError { border: 1px solid color-mix(in srgb, var(--status-danger) 34%, transparent); border-radius: var(--radius-control); padding: 8px 10px; color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, transparent); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.dialogError p { margin: 0; }
+.dialogError ul { display: grid; gap: 2px; margin: 4px 0 0; padding-left: 18px; color: var(--text-secondary); }
+.source { font-family: var(--font-mono); font-size: var(--fs-xs); }
 .fieldLabel { color: var(--text-secondary); font-size: var(--fs-sm); font-weight: 500; }
 .fieldHint { justify-self: end; margin-top: -6px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); }
 .pasteArea { width: 100%; min-height: 260px; font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5; resize: vertical; white-space: pre; }

@@ -5,7 +5,7 @@
 ## Assets and article sources
 
 - [Cover image, 1280 × 640](media/launch.png): uses the repository's fictional UI data, explicitly labelled as such.
-- [UI walkthrough, 49 s MP4](media/demo.mp4) and its [animated WebP](media/demo.webp): a scripted tour of the same fictional demo data, not a live benchmark.
+- [UI walkthrough, 51 s MP4](media/demo.mp4) and its [animated WebP](media/demo.webp): a scripted tour of the same fictional demo data, not a live benchmark.
 - [Русская техническая статья для собственного блога](articles/habr.ru.md): **не отправлять на Хабр**. Его [правила Песочницы](https://habr.com/ru/sandbox/start/) исключают статьи, написанные с помощью генеративных моделей, даже если мысли авторские.
 - [DEV Community: complete article](articles/dev.to.en.md): copy from the second heading, after the editorial note.
 - [First request / installation](../README.md#make-your-first-request).

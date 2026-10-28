@@ -129,6 +129,9 @@ type Service struct {
 	// persisted hears the previous and the new map after every saved
 	// mutation, under opMu and outside mu. The journal is its only user.
 	persisted func(ctx context.Context, previous, next map[string]installed, at time.Time)
+	// storageWrites bounds how often one plugin may rewrite its storage, each
+	// write being a full encrypted save.
+	storageWrites *limiter
 }
 
 // NewService creates the service. budget bounds the encoded plugins.get and
@@ -144,7 +147,7 @@ func NewService(repository Repository, budget int, appVersion string) (*Service,
 	if !domain.ValidAppVersion(appVersion) {
 		return nil, errors.New("plugin service needs the running app version")
 	}
-	return &Service{repository: repository, budget: budget, appVersion: appVersion, now: time.Now, plugins: map[string]installed{}}, nil
+	return &Service{repository: repository, budget: budget, appVersion: appVersion, now: time.Now, plugins: map[string]installed{}, storageWrites: newLimiter(StorageWritesPerMinute, 0)}, nil
 }
 
 // OnChanged sets the listener told the new list after every install, update
@@ -498,6 +501,11 @@ func (service *Service) writeStorage(ctx context.Context, id string, change func
 	if entry.problem != "" {
 		return Values{}, ErrBroken
 	}
+	release, admitted := service.storageWrites.acquire(id)
+	if !admitted {
+		return Values{}, ErrRateLimited
+	}
+	release()
 	values, err := change(entry.plugin.Storage)
 	if err != nil {
 		return Values{}, err

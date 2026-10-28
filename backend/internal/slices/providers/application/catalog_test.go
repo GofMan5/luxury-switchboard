@@ -65,3 +65,29 @@ func TestReplacePublishesOnlyActiveRelayChanges(t *testing.T) {
 		t.Fatalf("active relay edit did not cancel old requests: %d", changes)
 	}
 }
+
+// A model alias can route to a standby provider, so editing its upstream,
+// disabling it or removing it must end the requests still talking to it.
+func TestReplaceCancelsWhenAnyProviderRelayChanges(t *testing.T) {
+	local := provider(t, "local", true)
+	echo := provider(t, "echo", true)
+	movedEcho, _ := domain.New(domain.Params{
+		ID: "echo", Name: "echo", BaseURL: "http://127.0.0.1:8801",
+		AuthMode: domain.AuthPassthrough, Enabled: true,
+	})
+	for name, standby := range map[string][]domain.Provider{
+		"edited":   {local, movedEcho},
+		"disabled": {local, provider(t, "echo", false)},
+		"removed":  {local},
+	} {
+		catalog, _ := NewCatalog([]domain.Provider{local, echo}, "local")
+		changes := 0
+		catalog.OnActivated(func(string) { changes++ })
+		if err := catalog.Replace(standby, "local"); err != nil {
+			t.Fatal(err)
+		}
+		if changes != 1 {
+			t.Fatalf("%s standby kept its in-flight requests: %d", name, changes)
+		}
+	}
+}

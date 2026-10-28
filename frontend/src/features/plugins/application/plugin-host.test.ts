@@ -454,6 +454,15 @@ describe('PluginHost', () => {
     expect(await worker.call('storage.set', { key: 'k', value: 'later' })).toMatchObject({ ok: true })
   })
 
+  it('does not spend the write budget on writes that failed', async () => {
+    const { worker, storage } = await running(['storage'])
+    for (let index = 0; index < RUNTIME_LIMITS.storageWritesPerMinute; index += 1) {
+      storage.failNext = new Error('Storage is unavailable')
+      expect(await worker.call('storage.set', { key: 'k', value: String(index) })).toMatchObject({ ok: false })
+    }
+    expect(await worker.call('storage.set', { key: 'k', value: 'landed' })).toMatchObject({ ok: true })
+  })
+
   it('boots with the operator settings and tells the script when they change', async () => {
     const settings = [
       { key: 'limit', label: 'Limit', description: '', type: 'number' as const, default: 10, placeholder: '' },

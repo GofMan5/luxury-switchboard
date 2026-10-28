@@ -2445,6 +2445,7 @@ func (server *Server) configSnapshot() Config {
 func (server *Server) Reconfigure(config Config) {
 	config = normalizeConfig(config)
 	server.mu.Lock()
+	previous := server.transport
 	transport := newTransport(config)
 	server.client = &http.Client{Transport: transport, CheckRedirect: rejectRedirect}
 	server.transport = transport
@@ -2454,6 +2455,11 @@ func (server *Server) Reconfigure(config Config) {
 	}
 	server.config = config
 	server.mu.Unlock()
+	// The retired pool would otherwise keep up to MaxIdleConns sockets open
+	// for IdleConnTimeout; in-flight requests are untouched by this call.
+	if previous != nil {
+		previous.CloseIdleConnections()
+	}
 }
 
 // SetAddress moves the listener target; it binds on the next Start. A running

@@ -127,6 +127,11 @@ export interface PluginsDeps {
 /** What a canvas of a plugin that is not running talks to. */
 const IDLE_CANVAS: CanvasChannel = { subscribe: () => () => undefined, input: () => undefined, visible: () => undefined }
 
+/** Crash recovery: three automatic restarts inside five minutes, then the
+ * operator decides. The ladder gives a transient fault time to clear. */
+const RESTART_BACKOFF_MS = [2_000, 10_000, 60_000]
+const CRASH_WINDOW_MS = 5 * 60_000
+
 const ERRORS: Readonly<Record<string, string>> = {
   invalid_plugin: 'The control plane refused this package',
   plugin_not_found: 'That plugin is no longer installed',
@@ -162,6 +167,10 @@ export class PluginsModel {
   #questions: { readonly question: PluginQuestion; readonly settle: (answer: boolean) => void }[] = []
   #nextQuestion = 1
   readonly #bus = new PluginBus()
+  /** When each plugin last crashed, inside the retry window. */
+  #crashes = new Map<string, number[]>()
+  #seenCrash = new WeakSet<PluginHost>()
+  #retries = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor(deps: PluginsDeps) {
     this.#deps = deps
@@ -312,14 +321,27 @@ export class PluginsModel {
   async clearData(id: string): Promise<DataResult> {
     if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
     this.#set({ ...this.#state, pending: id, error: '' })
+    let result: DataResult = { ok: false, message: 'The plugin page closed before its data was cleared' }
     try {
-      const current = await this.#deps.port.storageGet(id)
-      const changes = Object.fromEntries(Object.keys(current).filter((key) => !isSettingStorageKey(key)).map((key) => [key, null]))
-      const storage = Object.keys(changes).length ? await this.#deps.port.storageUpdate(id, changes) : current
-      await this.#deps.port.collectionClearAll(id)
-      const collections = await this.#deps.port.collectionStats(id)
-      if (this.#hosts.has(id)) await this.restart(id)
-      return { ok: true, usage: dataUsage(storage, collections) }
+      // One queued step: the script is stopped and its in-flight writes land
+      // before the clear, so nothing it was doing can refill the store.
+      await this.#enqueue(async () => {
+        const host = this.#hosts.get(id)
+        host?.stop()
+        this.#hosts.delete(id)
+        try {
+          await host?.settled()
+          const current = await this.#deps.port.storageGet(id)
+          const changes = Object.fromEntries(Object.keys(current).filter((key) => !isSettingStorageKey(key)).map((key) => [key, null]))
+          const storage = Object.keys(changes).length ? await this.#deps.port.storageUpdate(id, changes) : current
+          await this.#deps.port.collectionClearAll(id)
+          const collections = await this.#deps.port.collectionStats(id)
+          result = { ok: true, usage: dataUsage(storage, collections) }
+        } finally {
+          if (host) await this.#sync(this.#state.plugins)
+        }
+      })
+      return result
     } catch (error) {
       return { ok: false, message: describe(error) }
     } finally {
@@ -327,8 +349,10 @@ export class PluginsModel {
     }
   }
 
-  /** Starts a crashed or stopped plugin again from its stored code. */
   restart(id: string): Promise<void> {
+    clearTimeout(this.#retries.get(id))
+    this.#retries.delete(id)
+    this.#crashes.delete(id)
     return this.#enqueue(async () => {
       this.#hosts.get(id)?.stop()
       this.#hosts.delete(id)
@@ -584,6 +608,8 @@ export class PluginsModel {
     this.#unsubscribe = null
     for (const host of this.#hosts.values()) host.stop()
     this.#hosts.clear()
+    for (const timer of this.#retries.values()) clearTimeout(timer)
+    this.#retries.clear()
     for (const entry of this.#questions.splice(0)) entry.settle(false)
     this.#listeners.clear()
   }
@@ -726,7 +752,7 @@ export class PluginsModel {
     for (const plugin of this.#state.plugins) {
       const host = this.#hosts.get(plugin.id)
       if (host) {
-        runtimes[plugin.id] = host.runtime()
+        runtimes[plugin.id] = this.#recover(plugin.id, host)
         for (const page of host.pages()) pages[page.key] = page
         for (const surface of host.surfaces()) surfaces[surface.key] = surface
         const dialog = host.dialog()
@@ -741,6 +767,39 @@ export class PluginsModel {
       }
     }
     this.#set({ ...this.#state, runtimes: reuse(this.#state.runtimes, runtimes), pages: reuse(this.#state.pages, pages), surfaces: reuse(this.#state.surfaces, surfaces), dialogs: reuse(this.#state.dialogs, dialogs) })
+  }
+
+  /** A crashed host is restarted on a backoff ladder; a plugin that keeps
+   * crashing inside the window stays down until the operator restarts it.
+   * Load failures never reach here: retrying a broken package cannot help. */
+  #recover(id: string, host: PluginHost): PluginRuntime {
+    const runtime = host.runtime()
+    if (runtime.state !== 'crashed') return runtime
+    if (!this.#seenCrash.has(host)) {
+      this.#seenCrash.add(host)
+      const now = Date.now()
+      const recent = (this.#crashes.get(id) ?? []).filter((at) => now - at < CRASH_WINDOW_MS)
+      recent.push(now)
+      this.#crashes.set(id, recent)
+      const delay = RESTART_BACKOFF_MS[recent.length - 1]
+      if (delay !== undefined) {
+        this.#retries.set(id, setTimeout(() => {
+          this.#retries.delete(id)
+          void this.#enqueue(async () => {
+            // Disabled, removed or restarted by hand meanwhile: nothing to do.
+            if (this.#hosts.get(id) !== host) return
+            host.stop()
+            this.#hosts.delete(id)
+            await this.#sync(this.#state.plugins)
+          })
+        }, delay))
+      }
+    }
+    const attempts = this.#crashes.get(id)?.length ?? 0
+    const note = this.#retries.has(id)
+      ? 'Restarting automatically.'
+      : `It crashed ${attempts} times in a few minutes, so it stays stopped until you restart it.`
+    return { ...runtime, reason: runtime.reason ? `${runtime.reason} ${note}` : note }
   }
 
   #set(state: PluginsState): void {

@@ -233,6 +233,29 @@ func TestUpdateAndRemove(t *testing.T) {
 	}
 }
 
+// Every storage write is a full encrypted save, so a runaway plugin is
+// refused past the cap instead of grinding the disk; the window slides.
+func TestStorageWritesAreRateLimited(t *testing.T) {
+	service, _, _ := newService(t, &memory{}, 1<<20)
+	ctx := context.Background()
+	_, _ = service.Install(ctx, pkg("acme.a", "A", domain.PermissionStorage), nil, "")
+	now := time.Unix(0, 0)
+	service.storageWrites.now = func() time.Time { return now }
+	for index := range StorageWritesPerMinute {
+		value := fmt.Sprint(index)
+		if _, err := service.StorageSet(ctx, "acme.a", "k", &value); err != nil {
+			t.Fatalf("write %d: %v", index, err)
+		}
+	}
+	if _, err := service.StorageUpdate(ctx, "acme.a", map[string]*string{"k": nil}, false); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("write %d: %v", StorageWritesPerMinute+1, err)
+	}
+	now = now.Add(time.Minute)
+	if _, err := service.StorageSet(ctx, "acme.a", "k", nil); err != nil {
+		t.Fatalf("after a minute: %v", err)
+	}
+}
+
 func TestStorageReadsAndWritesQuietly(t *testing.T) {
 	store := &memory{}
 	service, _, notifications := newService(t, store, 1<<20)

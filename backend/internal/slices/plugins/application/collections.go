@@ -16,8 +16,11 @@ import (
 
 const (
 	CollectionWritesPerMinute = 300
-	DefaultCollectionList     = 50
-	MaxCollectionList         = 200
+	// StorageWritesPerMinute is an absolute cap above the interface's own
+	// write budget: operator settings saves share the same path.
+	StorageWritesPerMinute = 300
+	DefaultCollectionList  = 50
+	MaxCollectionList      = 200
 )
 
 // ErrRateLimited refuses a plugin that wrote too often within a minute.

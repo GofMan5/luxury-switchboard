@@ -46,6 +46,7 @@ export default function PluginsPage() {
   const fileInput = useRef<HTMLInputElement>(null)
   const busy = state.pending !== ''
   const full = state.plugins.length >= PLUGIN_LIMIT
+  const empty = state.phase === 'ready' && state.plugins.length === 0
 
   const review = (pkg: PluginPackage, source?: string, expectedId?: string) => {
     model.clearError()
@@ -153,7 +154,7 @@ export default function PluginsPage() {
           <p>Themes, stylesheets, pages, commands and automations from packages you install. Each runs isolated, with only the permissions you grant.</p>
         </div>
         <div className={styles.headerActions}>
-          <Button onClick={() => fileInput.current?.click()} disabled={busy || state.phase !== 'ready'}>
+          <Button variant="primary" onClick={() => fileInput.current?.click()} disabled={busy || state.phase !== 'ready'}>
             <Upload size={14} aria-hidden="true" />Install from file
           </Button>
           {capabilities.includes('plugins.download') ? (
@@ -171,10 +172,10 @@ export default function PluginsPage() {
               <Download size={14} aria-hidden="true" />{state.pending === 'update-all' ? 'Updating…' : `Update all (${offers})`}
             </Button>
           ) : null}
-          <Button onClick={() => { setNotice(''); setDialog({ kind: 'paste' }) }} disabled={busy || state.phase !== 'ready'}>
+          <Button variant="ghost" onClick={() => { setNotice(''); setDialog({ kind: 'paste' }) }} disabled={busy || state.phase !== 'ready'}>
             <ClipboardPaste size={14} aria-hidden="true" />Paste JSON
           </Button>
-          <Button onClick={() => { model.clearError(); setNotice(''); setDialog({ kind: 'dev', error: '' }) }} disabled={busy || state.phase !== 'ready'}>
+          <Button variant="ghost" onClick={() => { model.clearError(); setNotice(''); setDialog({ kind: 'dev', error: '' }) }} disabled={busy || state.phase !== 'ready'}>
             <FolderOpen size={14} aria-hidden="true" />Load from folder…
           </Button>
           <input ref={fileInput} type="file" accept=".json,application/json" className="sr-only" aria-label="Plugin package file" tabIndex={-1} onChange={pick} />
@@ -248,7 +249,9 @@ export default function PluginsPage() {
           ) : null}
         </Panel>
 
-        <Panel title="Examples" subtitle="Ready-made packages. Installing one opens the same review as any other.">
+        {capabilities.includes('plugins.journal') ? <PluginJournal model={model} plugins={state.plugins} /> : null}
+
+        <Disclosure title="Examples" subtitle="Ready-made packages. Installing one opens the same review as any other." open={empty}>
           <ul className={styles.examples}>
             {EXAMPLE_PLUGINS.map((example) => {
               const installed = state.plugins.find((plugin) => plugin.id === example.package.id)
@@ -268,13 +271,11 @@ export default function PluginsPage() {
               )
             })}
           </ul>
-        </Panel>
+        </Disclosure>
 
-        {capabilities.includes('plugins.journal') ? <PluginJournal model={model} plugins={state.plugins} /> : null}
-
-        <Panel title="Developer reference" subtitle="Everything a package can contain and do.">
+        <Disclosure title="Developer reference" subtitle="Everything a package can contain and do." open={empty}>
           <PluginReference />
-        </Panel>
+        </Disclosure>
       </div>
 
       {dialog?.kind === 'dev' ? <DevLinkDialog pending={state.pending === 'install'} error={dialog.error} onCancel={() => setDialog(null)} onLink={(path) => void link(path)} /> : null}
@@ -458,34 +459,20 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
             <p className={styles.reason} data-tone={state === 'crashed' ? 'danger' : undefined}>{runtime?.reason}</p>
           ) : null}
         </div>
-        <div className={styles.pluginMeta}>
-          <span>{formatBytes(plugin.sizeBytes)}</span>
-          <span>{contents.join(' · ') || 'empty'}</span>
-        </div>
         <div className={styles.pluginActions}>
-          {canRestart ? (
+          {canRestart && state === 'crashed' ? (
             <Button variant="ghost" disabled={busy} onClick={onRestart} title="Restart the script from its stored code">
               <RotateCcw size={13} aria-hidden="true" />Restart
+            </Button>
+          ) : null}
+          {onUpdate && (update?.state === 'newer' || update?.state === 'changed') ? (
+            <Button variant="ghost" disabled={busy} onClick={onUpdate} title="Download the package again from the link it was installed from and review it">
+              <RefreshCw size={13} aria-hidden="true" />{update.state === 'newer' ? `Update to ${update.pkg.version}` : 'Review changed code'}
             </Button>
           ) : null}
           {plugin.hasSettings && !blocked ? (
             <Button variant="ghost" disabled={busy} onClick={onSettings} aria-label={`${plugin.name} settings`}>
               <SlidersHorizontal size={13} aria-hidden="true" />Settings
-            </Button>
-          ) : null}
-          {plugin.dev ? (
-            <Button variant="ghost" disabled={busy} onClick={onUnlink} title="Stop reloading from the folder; keep the last loaded version">
-              <Link2Off size={13} aria-hidden="true" />Unlink
-            </Button>
-          ) : null}
-          {onUpdate ? (
-            <Button variant="ghost" disabled={busy} onClick={onUpdate} title="Download the package again from the link it was installed from and review it">
-              <RefreshCw size={13} aria-hidden="true" />{update?.state === 'newer' ? `Update to ${update.pkg.version}` : update?.state === 'changed' ? 'Review changed code' : 'Update from link'}
-            </Button>
-          ) : null}
-          {onSave && !blocked ? (
-            <Button variant="ghost" disabled={busy} aria-busy={saving || undefined} onClick={onSave} aria-label={`Save ${plugin.name} package`} title="Save the installed package as a file, without settings values or stored data">
-              <Download size={13} aria-hidden="true" />{saving ? 'Saving…' : 'Save package'}
             </Button>
           ) : null}
           <Button variant="ghost" disabled={busy} onClick={onPermissions}>
@@ -500,7 +487,31 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
         </div>
       </div>
       {expanded ? (
-        <PluginDetails id={details} plugin={plugin} runtime={runtime} onCopyLog={onCopyLog} onSaveLog={onSaveLog}>
+        <PluginDetails id={details} plugin={plugin} runtime={runtime} contents={contents} onCopyLog={onCopyLog} onSaveLog={onSaveLog}>
+          {(canRestart && state !== 'crashed') || onUpdate || (onSave && !blocked) || plugin.dev ? (
+            <div className={styles.detailActions} aria-label="Actions" role="group">
+              {canRestart && state !== 'crashed' ? (
+                <Button disabled={busy} onClick={onRestart} title="Restart the script from its stored code">
+                  <RotateCcw size={13} aria-hidden="true" />Restart
+                </Button>
+              ) : null}
+              {onUpdate && update?.state !== 'newer' && update?.state !== 'changed' ? (
+                <Button disabled={busy} onClick={onUpdate} title="Download the package again from the link it was installed from and review it">
+                  <RefreshCw size={13} aria-hidden="true" />Update from link
+                </Button>
+              ) : null}
+              {onSave && !blocked ? (
+                <Button disabled={busy} aria-busy={saving || undefined} onClick={onSave} aria-label={`Save ${plugin.name} package`} title="Save the installed package as a file, without settings values or stored data">
+                  <Download size={13} aria-hidden="true" />{saving ? 'Saving…' : 'Save package'}
+                </Button>
+              ) : null}
+              {plugin.dev ? (
+                <Button disabled={busy} onClick={onUnlink} title="Stop reloading from the folder; keep the last loaded version">
+                  <Link2Off size={13} aria-hidden="true" />Unlink
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
           <StoredData load={loadData} revision={dataRevision} disabled={busy} onClear={onClearData} />
         </PluginDetails>
       ) : null}
@@ -508,10 +519,11 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
   )
 }
 
-function PluginDetails({ id, plugin, runtime, children, onCopyLog, onSaveLog }: {
+function PluginDetails({ id, plugin, runtime, contents, children, onCopyLog, onSaveLog }: {
   readonly id: string
   readonly plugin: PluginSummary
   readonly runtime: PluginRuntime | undefined
+  readonly contents: readonly string[]
   readonly children: ReactNode
   readonly onCopyLog: (entries: readonly LogEntry[]) => Promise<boolean>
   readonly onSaveLog: (entries: readonly LogEntry[]) => Promise<boolean>
@@ -541,6 +553,8 @@ function PluginDetails({ id, plugin, runtime, children, onCopyLog, onSaveLog }: 
           </div>
         ) : null}
         {plugin.minAppVersion ? <div><dt>Needs app</dt><dd>{plugin.minAppVersion} or later</dd></div> : null}
+        <div><dt>Size</dt><dd>{formatBytes(plugin.sizeBytes)}</dd></div>
+        <div><dt>Contains</dt><dd>{contents.join(', ') || 'Nothing'}</dd></div>
         <div><dt>Installed</dt><dd>{formatDate(plugin.installedAt)}</dd></div>
         <div><dt>Updated</dt><dd>{formatDate(plugin.updatedAt)}</dd></div>
         {runtime ? (
@@ -565,6 +579,31 @@ function PluginDetails({ id, plugin, runtime, children, onCopyLog, onSaveLog }: 
       ) : null}
       <LogSection logs={runtime?.logs ?? []} hasScript={plugin.hasScript} onCopy={onCopyLog} onSave={onSaveLog} />
     </div>
+  )
+}
+
+/** A panel that folds away once it stops being the main thing on the page. */
+function Disclosure({ title, subtitle, open, children }: {
+  readonly title: string
+  readonly subtitle: string
+  readonly open: boolean
+  readonly children: ReactNode
+}) {
+  const [shown, setShown] = useState(open)
+  const [previous, setPrevious] = useState(open)
+  if (previous !== open) {
+    setPrevious(open)
+    // Opens when the list empties; never folds away under the user right after an install.
+    if (open) setShown(true)
+  }
+  return (
+    <details className={styles.disclosure} open={shown} onToggle={(event) => setShown(event.currentTarget.open)}>
+      <summary>
+        <ChevronDown size={14} aria-hidden="true" className={styles.chevron} data-open={shown || undefined} />
+        <span className={styles.disclosureTitle}><strong>{title}</strong><span>{subtitle}</span></span>
+      </summary>
+      {shown ? children : null}
+    </details>
   )
 }
 

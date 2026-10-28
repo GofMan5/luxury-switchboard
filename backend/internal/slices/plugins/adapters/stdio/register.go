@@ -181,6 +181,8 @@ func failure(err error) error {
 		return platform.MethodError{Code: "plugin_limit", Message: fmt.Sprintf("At most %d plugins can be installed", domain.MaxPlugins)}
 	case errors.Is(err, application.ErrTooLarge):
 		return platform.MethodError{Code: "plugin_too_large", Message: "Plugin is too large to install"}
+	case errors.Is(err, application.ErrRateLimited):
+		return platform.MethodError{Code: "rate_limited", Message: fmt.Sprintf("Plugin wrote its storage more than %d times in a minute; wait and retry", application.StorageWritesPerMinute)}
 	case errors.Is(err, application.ErrStorageFull):
 		return platform.MethodError{Code: "plugin_storage_full", Message: "Plugin storage is full"}
 	case errors.Is(err, application.ErrStoreUnavailable) || errors.Is(err, secretstore.ErrUnavailable):

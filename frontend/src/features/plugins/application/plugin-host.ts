@@ -378,6 +378,12 @@ export class PluginHost {
     this.#update({ state, reason })
   }
 
+  /** Resolves once every storage write already handed to the host has
+   * landed, so a caller can clear data without a late write undoing it. */
+  settled(): Promise<void> {
+    return this.#storageQueue.then(() => undefined)
+  }
+
   /** Sends what the operator did on one of the plugin's pages, slot surfaces
    * (`widget:<id>`, …) or its dialog (`dialog:<id>`). */
   dispatch(pageId: string, event: PageEvent): void {
@@ -1165,7 +1171,14 @@ export class PluginHost {
     }
     this.#writes.push(now)
     const run = async (): Promise<null> => {
-      this.#storage = await this.#deps.storage.storageUpdate(this.id, changes)
+      try {
+        this.#storage = await this.#deps.storage.storageUpdate(this.id, changes)
+      } catch (error) {
+        // A write that never landed does not spend the plugin's budget.
+        const spent = this.#writes.indexOf(now)
+        if (spent >= 0) this.#writes.splice(spent, 1)
+        throw error
+      }
       return null
     }
     return queue ? this.#serial(run) : run()

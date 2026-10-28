@@ -96,7 +96,13 @@ func (service *Service) Check(ctx context.Context) CheckResult {
 	result := service.fetch(ctx)
 
 	service.mu.Lock()
-	service.result = result
+	// A cancelled ask learned nothing about the feed: keep the last real
+	// verdict instead of overwriting it with "unreachable" for everyone.
+	if ctx.Err() == nil {
+		service.result = result
+	} else {
+		result = service.result
+	}
 	service.inFlight = nil
 	service.mu.Unlock()
 	close(done)

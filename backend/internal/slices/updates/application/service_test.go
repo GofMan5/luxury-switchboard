@@ -211,3 +211,42 @@ func TestTheStatusSurvivesRefetch(t *testing.T) {
 		t.Fatalf("the status did not follow the fetch: %+v", stale)
 	}
 }
+
+// cancellingReleases answers once, then parks until the caller gives up and
+// reports the cancellation, as a real HTTP feed does.
+type cancellingReleases struct {
+	fakeReleases
+	parked chan struct{}
+}
+
+func (releases *cancellingReleases) LatestRelease(ctx context.Context) (domain.Latest, error) {
+	if releases.callCount() == 0 {
+		return releases.fakeReleases.LatestRelease(ctx)
+	}
+	releases.mu.Lock()
+	releases.calls++
+	releases.mu.Unlock()
+	close(releases.parked)
+	<-ctx.Done()
+	return domain.Latest{}, ctx.Err()
+}
+
+// A leader whose caller gave up learned nothing about the feed; it must not
+// publish "unreachable" to joiners, the refresher or Status readers.
+func TestACancelledLeaderKeepsTheLastVerdict(t *testing.T) {
+	releases := &cancellingReleases{fakeReleases: fakeReleases{latest: domain.Latest{Version: "v1.0.39"}}, parked: make(chan struct{})}
+	service := NewService("1.0.38", releases)
+	service.Check(context.Background())
+
+	leaderCtx, cancel := context.WithCancel(context.Background())
+	leader := make(chan CheckResult, 1)
+	go func() { leader <- service.Check(leaderCtx) }()
+	<-releases.parked
+	cancel()
+	if got := <-leader; !got.Reachable || got.Latest != "v1.0.39" {
+		t.Fatalf("the cancelled leader reported %+v", got)
+	}
+	if got := service.Status(); !got.Reachable || got.Latest != "v1.0.39" {
+		t.Fatalf("the cancelled leader overwrote the status: %+v", got)
+	}
+}

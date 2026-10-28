@@ -12,7 +12,6 @@ import (
 func Register(server *platform.Server, service *application.Service) {
 	server.Handle("tunnel.get", func(_ context.Context, _ json.RawMessage) (any, error) { return service.Snapshot(), nil })
 	server.Handle("tunnel.configure", func(ctx context.Context, payload json.RawMessage) (any, error) {
-		current := service.Config()
 		var command struct {
 			Port            int    `json:"port"`
 			RPMPerIP        int    `json:"rpmPerIp"`
@@ -22,11 +21,13 @@ func Register(server *platform.Server, service *application.Service) {
 		if platform.DecodePayload(payload, &command) != nil {
 			return nil, invalid()
 		}
-		current.Port = command.Port
-		current.RPMPerIP = command.RPMPerIP
-		current.ContextLimitKiB = command.ContextLimitKiB
-		current.BrandResponse = command.BrandResponse
-		if err := service.Configure(ctx, current); err != nil {
+		_, err := service.Update(ctx, func(current *domain.Config) {
+			current.Port = command.Port
+			current.RPMPerIP = command.RPMPerIP
+			current.ContextLimitKiB = command.ContextLimitKiB
+			current.BrandResponse = command.BrandResponse
+		})
+		if err != nil {
 			return nil, failed()
 		}
 		return service.Snapshot(), nil

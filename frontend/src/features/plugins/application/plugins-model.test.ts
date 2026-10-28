@@ -122,6 +122,93 @@ describe('PluginsModel', () => {
     expect(workers.created).toHaveLength(2)
   })
 
+  it('restarts a crashed plugin on a backoff ladder, then gives up', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    // vi.waitFor advances fake timers on every poll, which would skip the
+    // backoff under test; this only drains pending microtasks.
+    const settle = async (check: () => void) => {
+      for (let turn = 0; ; turn++) {
+        try {
+          return check()
+        } catch (error) {
+          if (turn > 100) throw error
+          await vi.advanceTimersByTimeAsync(0)
+        }
+      }
+    }
+    try {
+      const { model, workers } = setup()
+      await model.connect()
+      await model.install(pkg, ['ui:pages'])
+      for (const [attempt, delay] of [[2, 2_000], [3, 10_000], [4, 60_000]] as const) {
+        workers.last.send({ type: 'not-a-message' })
+        await settle(() => expect(model.snapshot().runtimes['acme.tools'].reason).toContain('Restarting automatically'))
+        await vi.advanceTimersByTimeAsync(delay - 1)
+        expect(workers.created).toHaveLength(attempt - 1)
+        await vi.advanceTimersByTimeAsync(1)
+        await settle(() => expect(workers.created).toHaveLength(attempt))
+      }
+      workers.last.send({ type: 'not-a-message' })
+      await settle(() => expect(model.snapshot().runtimes['acme.tools'].reason).toContain('stays stopped'))
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(workers.created).toHaveLength(4)
+      await model.restart('acme.tools')
+      expect(workers.created).toHaveLength(5)
+      workers.last.send({ type: 'not-a-message' })
+      await settle(() => expect(model.snapshot().runtimes['acme.tools'].reason).toContain('Restarting automatically'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not auto-restart a plugin the operator disabled after it crashed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    // vi.waitFor advances fake timers on every poll, which would skip the
+    // backoff under test; this only drains pending microtasks.
+    const settle = async (check: () => void) => {
+      for (let turn = 0; ; turn++) {
+        try {
+          return check()
+        } catch (error) {
+          if (turn > 100) throw error
+          await vi.advanceTimersByTimeAsync(0)
+        }
+      }
+    }
+    try {
+      const { model, workers } = setup()
+      await model.connect()
+      await model.install(pkg, ['ui:pages'])
+      workers.last.send({ type: 'not-a-message' })
+      await settle(() => expect(model.snapshot().runtimes['acme.tools'].state).toBe('crashed'))
+      await model.setEnabled('acme.tools', false)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(workers.created).toHaveLength(1)
+      expect(model.snapshot().runtimes['acme.tools'].state).toBe('disabled')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves a host started by a grant change alone when the old crash timer fires', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      const { model, workers } = setup()
+      await model.connect()
+      await model.install(pkg, ['ui:pages'])
+      workers.last.send({ type: 'not-a-message' })
+      await vi.waitFor(() => expect(model.snapshot().runtimes['acme.tools'].state).toBe('crashed'))
+      await model.setGrants('acme.tools', ['ui:pages', 'control:read'])
+      expect(workers.created).toHaveLength(2)
+      workers.last.send({ type: 'ready' })
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(workers.created).toHaveLength(2)
+      expect(model.snapshot().runtimes['acme.tools'].state).not.toBe('crashed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('restarts only the crashed plugin the operator picked', async () => {
     const { model, workers } = setup()
     await model.connect()
@@ -516,6 +603,24 @@ describe('PluginsModel stored data', () => {
     expect(first.terminated).toBe(true)
     expect(workers.created).toHaveLength(2)
     expect(model.snapshot().pending).toBe('')
+  })
+
+  it('lets a write the plugin already made land before clearing', async () => {
+    const { model, port, workers } = setup()
+    await model.connect()
+    await model.install({ ...withSettings, permissions: [...withSettings.permissions, 'storage'] }, ['ui:commands', 'storage'])
+    let release = (): void => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const original = port.storageUpdate.bind(port)
+    const update = vi.spyOn(port, 'storageUpdate').mockImplementationOnce(async (id, changes) => { await gate; return original(id, changes) })
+    workers.last.send({ type: 'call', id: 1, op: 'storage.set', args: { key: 'late', value: 'x' } })
+    await vi.waitFor(() => expect(update).toHaveBeenCalled())
+
+    const clearing = model.clearData('acme.tools')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    release()
+    expect(await clearing).toMatchObject({ ok: true })
+    expect(port.values.get('acme.tools') ?? {}).toEqual({})
   })
 
   it('skips the storage write when only settings are stored', async () => {

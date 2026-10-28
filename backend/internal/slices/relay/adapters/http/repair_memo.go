@@ -44,6 +44,9 @@ type providerAdjustments struct {
 type repairMemo struct {
 	mu          sync.Mutex
 	adjustments map[string]providerAdjustments
+	// persistMu serializes snapshot+write so an older snapshot can never
+	// overwrite a newer one on disk. Lock order: persistMu, then mu.
+	persistMu sync.Mutex
 }
 
 func newRepairMemo() *repairMemo {
@@ -109,6 +112,8 @@ func loadRepairMemo(path string) *repairMemo {
 // persist writes the memo atomically. Rare by construction — once per
 // provider — so the whole snapshot per write costs nothing.
 func (memo *repairMemo) persist(path string) error {
+	memo.persistMu.Lock()
+	defer memo.persistMu.Unlock()
 	payload, err := json.MarshalIndent(memo.snapshot(), "", "  ")
 	if err != nil {
 		return err

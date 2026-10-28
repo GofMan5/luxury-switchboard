@@ -44,6 +44,9 @@ type Service struct {
 	runtimeAddress string
 	runtimeMessage string
 	listeners      []func(domain.Snapshot)
+	// startCancel aborts an in-flight Start so Stop never waits behind a
+	// connector that is still coming up; guarded by mu.
+	startCancel context.CancelFunc
 }
 
 func NewService(repository Repository, runtime Runtime, routes Routes, privacyAuditor PrivacyAuditor) (*Service, error) {
@@ -98,6 +101,26 @@ func (service *Service) Snapshot() domain.Snapshot {
 func (service *Service) Configure(ctx context.Context, config domain.Config) error {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	return service.configureLocked(ctx, config)
+}
+
+// Update applies mutate to the current settings and saves them as one step,
+// so concurrent partial edits (a token rotation and a port change) cannot
+// overwrite each other with stale copies.
+func (service *Service) Update(ctx context.Context, mutate func(*domain.Config)) (domain.Config, error) {
+	service.opMu.Lock()
+	defer service.opMu.Unlock()
+	service.mu.RLock()
+	config := service.config
+	service.mu.RUnlock()
+	mutate(&config)
+	if err := service.configureLocked(ctx, config); err != nil {
+		return domain.Config{}, err
+	}
+	return config, nil
+}
+
+func (service *Service) configureLocked(ctx context.Context, config domain.Config) error {
 	if err := config.Validate(); err != nil {
 		return err
 	}
@@ -121,7 +144,15 @@ func (service *Service) Configure(ctx context.Context, config domain.Config) err
 func (service *Service) Start(ctx context.Context) error {
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	service.mu.Lock()
+	service.startCancel = cancel
+	defer func() {
+		service.mu.Lock()
+		service.startCancel = nil
+		service.mu.Unlock()
+	}()
 	if !configurable(service.snapshot) {
 		service.mu.Unlock()
 		return ErrRunning
@@ -151,6 +182,11 @@ func (service *Service) Start(ctx context.Context) error {
 	return err
 }
 func (service *Service) Stop(ctx context.Context) error {
+	service.mu.Lock()
+	if service.startCancel != nil {
+		service.startCancel()
+	}
+	service.mu.Unlock()
 	service.opMu.Lock()
 	defer service.opMu.Unlock()
 	err := service.runtime.Stop(ctx)
@@ -166,19 +202,11 @@ func (service *Service) Stop(ctx context.Context) error {
 	return err
 }
 func (service *Service) RotateToken(ctx context.Context) (string, error) {
-	service.mu.RLock()
-	if !configurable(service.snapshot) {
-		service.mu.RUnlock()
-		return "", ErrRunning
-	}
-	config := service.config
-	service.mu.RUnlock()
 	token, err := newToken()
 	if err != nil {
 		return "", err
 	}
-	config.Token = token
-	if err := service.Configure(ctx, config); err != nil {
+	if _, err := service.Update(ctx, func(config *domain.Config) { config.Token = token }); err != nil {
 		return "", err
 	}
 	return token, nil

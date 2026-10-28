@@ -107,8 +107,16 @@ func (catalog *Catalog) Replace(providers []domain.Provider, activeID string) er
 		return ErrProviderUnavailable
 	}
 	catalog.mu.Lock()
-	previous, hadPrevious := catalog.providers[catalog.activeID]
-	routeChanged := catalog.activeID != activeID || !hadPrevious || !sameRelayProvider(previous, active)
+	// Model routing sends requests to standby providers too, so a relay edit,
+	// a disable or a removal of any provider must end its in-flight requests,
+	// not only a change of the active one.
+	routeChanged := catalog.activeID != activeID
+	for id, previous := range catalog.providers {
+		if current, kept := next[id]; !kept || !sameRelayProvider(previous, current) {
+			routeChanged = true
+			break
+		}
+	}
 	catalog.providers = next
 	catalog.order = order
 	catalog.activeID = activeID

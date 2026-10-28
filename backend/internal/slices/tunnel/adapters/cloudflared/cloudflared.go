@@ -85,6 +85,9 @@ func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string
 		return "", err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
+	// The run outlives the caller's context, but until it is handed to the
+	// supervisor a cancelled Start (an operator's Stop) must end it.
+	stopLink := context.AfterFunc(ctx, cancel)
 	runtime.mu.Lock()
 	runtime.runCancel = cancel
 	runtime.mu.Unlock()
@@ -105,6 +108,12 @@ func (runtime *Runtime) Start(ctx context.Context, config domain.Config) (string
 		runtime.teardownConnector()
 		_ = runtime.gateway.Stop(context.Background())
 		return "", err
+	}
+	if !stopLink() {
+		cancel()
+		runtime.teardownConnector()
+		_ = runtime.gateway.Stop(context.Background())
+		return "", ctx.Err()
 	}
 	go runtime.supervise(runCtx, binary, local)
 	return address, nil

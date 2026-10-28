@@ -143,22 +143,33 @@ func (runtime *blockingTunnelRuntime) Start(ctx context.Context, _ domain.Config
 }
 func (runtime *blockingTunnelRuntime) Stop(context.Context) error { close(runtime.stopped); return nil }
 
-func TestTunnelStopWaitsForConcurrentStartAndWins(t *testing.T) {
+// Stop is the operator's way out of a connector that never comes up: it aborts
+// the in-flight Start instead of queueing behind it, yet still reaches the
+// runtime only after that Start has let go.
+func TestTunnelStopAbortsAConcurrentStartAndWins(t *testing.T) {
 	runtime := &blockingTunnelRuntime{started: make(chan struct{}), release: make(chan struct{}), stopped: make(chan struct{})}
 	service, _ := NewService(&memoryRepo{}, runtime, routeCount(1), &fakePrivacyAuditor{})
-	startDone := make(chan struct{})
-	go func() { _ = service.Start(context.Background()); close(startDone) }()
+	startDone := make(chan error, 1)
+	go func() { startDone <- service.Start(context.Background()) }()
 	<-runtime.started
-	stopDone := make(chan struct{})
-	go func() { _ = service.Stop(context.Background()); close(stopDone) }()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- service.Stop(context.Background()) }()
+	select {
+	case err := <-startDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("start was not aborted by stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop waited behind the start it should abort")
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-runtime.stopped:
-		t.Fatal("stop raced ahead of the in-flight start")
-	case <-time.After(20 * time.Millisecond):
+	default:
+		t.Fatal("stop never reached the runtime")
 	}
-	close(runtime.release)
-	<-startDone
-	<-stopDone
 	if service.Snapshot().State != domain.StateStopped {
 		t.Fatalf("unexpected final tunnel state: %+v", service.Snapshot())
 	}
@@ -228,5 +239,54 @@ func TestPrivacyAuditUsesTheRunningAddressWithoutReturningTheToken(t *testing.T)
 	}
 	if auditor.address != service.Snapshot().Address || auditor.token != service.RevealToken() {
 		t.Fatal("privacy auditor did not receive the active owner-only credentials")
+	}
+}
+
+// gatedRepo parks the first Save until released, so a second writer can line
+// up behind a save that is still in flight.
+type gatedRepo struct {
+	memoryRepo
+	entered chan struct{}
+	release chan struct{}
+	saves   int
+}
+
+func (repo *gatedRepo) Save(ctx context.Context, config domain.Config) error {
+	repo.saves++
+	if repo.saves == 1 {
+		close(repo.entered)
+		<-repo.release
+	}
+	return repo.memoryRepo.Save(ctx, config)
+}
+
+// A token rotation that arrives while a port change is being saved must
+// build on the saved port, not on the copy it read before waiting.
+func TestRotationDoesNotUndoAConcurrentSettingsChange(t *testing.T) {
+	repo := &gatedRepo{entered: make(chan struct{}), release: make(chan struct{})}
+	service, _ := NewService(repo, &fakeRuntime{}, routeCount(1), &fakePrivacyAuditor{})
+	updated := make(chan error, 1)
+	go func() {
+		_, err := service.Update(context.Background(), func(config *domain.Config) { config.Port = 18999 })
+		updated <- err
+	}()
+	<-repo.entered
+	rotated := make(chan error, 1)
+	var token string
+	go func() {
+		var err error
+		token, err = service.RotateToken(context.Background())
+		rotated <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(repo.release)
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-rotated; err != nil {
+		t.Fatal(err)
+	}
+	if repo.config.Port != 18999 || repo.config.Token != token {
+		t.Fatalf("one edit was lost: port %d, token rotated %v", repo.config.Port, repo.config.Token == token)
 	}
 }

@@ -1,12 +1,14 @@
 package relayhttp
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,5 +248,29 @@ func TestTheLearnedShapeSurvivesARestart(t *testing.T) {
 	}
 	if requests.Load() != 3 {
 		t.Fatalf("attempts=%d, want probe+answer then answer alone", requests.Load())
+	}
+}
+
+// Concurrent learners each persist after merging. Without serializing the
+// snapshot with the write, an older snapshot can land last and erase a
+// provider the disk had already recorded.
+func TestConcurrentPersistsNeverLoseALearnedProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "repairs.json")
+	memo := newRepairMemo()
+	const learners = 32
+	var wg sync.WaitGroup
+	for i := range learners {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			memo.merge(fmt.Sprintf("provider-%02d", i), providerAdjustments{maxTokens: true})
+			if err := memo.persist(path); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := len(loadRepairMemo(path).snapshot()); got != learners {
+		t.Fatalf("persisted %d providers, want %d", got, learners)
 	}
 }

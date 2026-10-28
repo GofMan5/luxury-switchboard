@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { History, TriangleAlert } from 'lucide-react'
 import { EmptyState, Panel } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
@@ -42,10 +42,13 @@ export function PluginJournal({ model, plugins }: {
   const [older, setOlder] = useState<'idle' | 'loading' | string>('idle')
   const [clearing, setClearing] = useState<'closed' | 'open' | 'pending' | { readonly error: string }>('closed')
   const [reload, setReload] = useState(0)
+  // A page that answers after the first page was read again belongs to the old list.
+  const generation = useRef(0)
 
   // Every plugin change may have added an entry, so the first page is read again.
   useEffect(() => {
     let live = true
+    generation.current += 1
     setOlder('idle')
     void model.loadJournal(pluginId ? { pluginId } : {}).then((result) => {
       if (!live) return
@@ -56,7 +59,9 @@ export function PluginJournal({ model, plugins }: {
 
   const showOlder = (before: number) => {
     setOlder('loading')
+    const asked = generation.current
     void model.loadJournal(pluginId ? { pluginId, before } : { before }).then((result) => {
+      if (asked !== generation.current) return
       if (!result.ok) { setOlder(result.message); return }
       setOlder('idle')
       setView((current) => current.phase === 'ready'
@@ -137,7 +142,7 @@ function JournalRow({ entry }: { readonly entry: JournalEntry }) {
   const version = entry.fromVersion ? `${entry.fromVersion} → ${entry.version}` : entry.version
   return (
     <li className={styles.journalRow} data-kind={entry.kind}>
-      <time dateTime={entry.at}>{at === null ? 'Unknown' : new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</time>
+      <time dateTime={entry.at} title={at === null ? undefined : new Date(at).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' })}>{at === null ? 'Unknown' : new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
       <div className={styles.journalText}>
         <span>
           <strong>{KIND_LABELS[entry.kind]}</strong> {entry.name}

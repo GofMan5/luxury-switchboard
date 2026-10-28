@@ -5,4 +5,4 @@
 3. Add every provider key explicitly in **API Keys**. Secrets are encrypted for the current Windows user and cannot be transferred from another account. Codex is the exception: **Add Provider → Codex** signs in with your ChatGPT account — browser, device code, or an import of the sign-in JSON your Codex CLI already saved — no API key involved.
 4. Publishing is one click now: **Tunnel → Start** downloads the tunnel connector once (verified against its pinned checksum) and gives you an HTTPS address plus a stable access key. Share the current address and the key. The address is re-rolled every time the tunnel starts; the key is not.
 
-This build is not Authenticode-signed, so Windows may show a SmartScreen warning. Verify the installer against `SHA256SUMS.txt` before running it.
+Check the installer under **Properties → Digital Signatures**: a signed build names *SignPath Foundation*. An unsigned build (every release before signing was approved) may show a SmartScreen warning, and even a signed one can while its certificate builds reputation. Either way, verify the installer against `SHA256SUMS.txt` before running it.

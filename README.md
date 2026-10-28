@@ -43,7 +43,7 @@ Download the installer from the [latest release](https://github.com/GofMan5/luxu
 3. **Model Routes → Local relay → Add route**: choose the provider and an upstream model it actually supports. Set the public model name to `my-chat` and leave the route enabled.
 4. Point your client at `http://127.0.0.1:8798/v1` and select `my-chat`. If you changed the listener port, use the address shown in the app instead.
 
-Windows installers are not Authenticode-signed, so Windows may show a SmartScreen warning. Before running the installer, verify it against the `SHA256SUMS.txt` **release asset**. On Windows, `Get-FileHash -Algorithm SHA256 .\YourDownloadedInstaller.exe` prints the digest (the filename here is only an example). A checksum detects a mismatch with the published release. It does not independently verify the publisher's identity.
+Windows release installers are signed with Authenticode once the project's free [SignPath Foundation](https://signpath.org) signing is approved; see [Code signing policy](#code-signing-policy). Until then, and for every release before it, the installer is unsigned and Windows may show a SmartScreen warning. A signed installer shows *SignPath Foundation* under **Properties → Digital Signatures**, though SmartScreen can still warn while a new certificate builds reputation. Either way, before running the installer, verify it against the `SHA256SUMS.txt` **release asset**. On Windows, `Get-FileHash -Algorithm SHA256 .\YourDownloadedInstaller.exe` prints the digest (the filename here is only an example). A checksum detects a mismatch with the published release. It does not independently verify the publisher's identity.
 
 Updates arrive in the app on every platform. The app downloads the installer for your OS and CPU and checks it against the release's own checksum. Windows then restarts into the setup, Linux replaces the running AppImage in place, and macOS replaces the app bundle from the dmg and relaunches. Where there is no self-update path, such as a deb install or a platform without its installer, the dialog says so and links to the release page.
 
@@ -213,7 +213,7 @@ Ctrl+K opens a command palette for every page and action, and Alt+1…9 switches
 **Leaves this machine**, only to these destinations:
 
 - Your requests and the matching provider credential go to the upstream you configured. Catalog discovery and model tests contact the same providers.
-- Update checks and installer downloads go to GitHub.
+- Update checks and installer downloads go to GitHub. The app checks for updates every minute by default; **Settings** sets the interval or turns it off. Plugin update checks, once per launch, go to the hosts the plugins were installed from and can be turned off too.
 - If you connect a Codex account, sign-in goes to OpenAI's sign-in and token endpoints.
 - If you start the tunnel, the app downloads its connector when needed, and public tunnel traffic goes through Cloudflare.
 - If you install a plugin from a link, the app fetches it from that address. Requests from plugins you granted `net:fetch` go to the HTTPS hosts you approved.
@@ -252,6 +252,17 @@ pnpm build    # the native installer for this host
 Linux build hosts also need `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2`. `pnpm build` produces the installer for the host it runs on. Windows and Linux hosts build their own installers, macOS bundles build only on a Mac, and each CPU architecture needs its own host. CI builds all six installers on native runners.
 
 The engineering contract lives in [AGENTS.md](AGENTS.md). It covers the hexagonal slices, the fail-closed boundary, and the privacy and honesty rules, and it is written for both people and coding agents.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [GofMan5](https://github.com/GofMan5)
+- Approvers: [GofMan5](https://github.com/GofMan5)
+
+Only release tags built by this repository's GitHub Actions workflow are submitted for signing, and every signing request is approved manually. The signature covers the downloaded NSIS setup program, which is what Windows SmartScreen checks; the app files it installs are not individually signed. Setup steps for maintainers are in [docs/CODE-SIGNING.md](docs/CODE-SIGNING.md).
+
+Privacy: apart from the update checks to GitHub and to plugin sources, which are on by default and can be turned off in **Settings**, this program does not transfer any information to other networked systems unless the user or the person operating it configures or requests it. The destinations are listed in [What stays local and what leaves](#what-stays-local-and-what-leaves).
 
 ## License
 

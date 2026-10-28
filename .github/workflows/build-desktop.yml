@@ -24,6 +24,17 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # SignPath downloads the unsigned installer artifact through the Actions
+    # API, which needs actions: read on top of the workflow's contents: read.
+    permissions:
+      actions: read
+      contents: read
+    env:
+      # Only release tags of the Windows installers are signed, and only once
+      # the owner configured SignPath (docs/CODE-SIGNING.md). Every signing
+      # request waits for a manual approval, so a manual dispatch stays
+      # unsigned instead of blocking on one.
+      SIGN_WITH_SIGNPATH: ${{ startsWith(matrix.artifact, 'switchboard-windows-') && github.ref_type == 'tag' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
     strategy:
       # Every installer is built on a native runner: scripts/build-sidecar.mjs
       # compiles the Go sidecar for the Rust host triple, so each architecture
@@ -122,6 +133,59 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: pnpm build
+      # Authenticode signing changes the installer bytes, so it happens here,
+      # before the final upload: collect computes SHA256SUMS.txt from exactly
+      # the files this job uploads, and the updater verifies against it.
+      - name: Read the release version
+        id: version
+        if: env.SIGN_WITH_SIGNPATH == 'true'
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Upload the unsigned installer for SignPath
+        id: unsigned
+        if: env.SIGN_WITH_SIGNPATH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          # Not switchboard-*: collect downloads that pattern and must never
+          # merge an unsigned copy over the signed installer.
+          name: unsigned-${{ matrix.artifact }}
+          path: artifacts/release/*.exe
+          if-no-files-found: error
+          retention-days: 1
+      - name: Sign the installer with SignPath
+        if: env.SIGN_WITH_SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+          # The release signing policy waits for a manual approval.
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: artifacts/signed
+      - name: Verify and install the signed installer
+        if: env.SIGN_WITH_SIGNPATH == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem -LiteralPath artifacts/release -Filter *.exe)
+          if ($installers.Count -eq 0) { throw 'no installer to replace' }
+          foreach ($installer in $installers) {
+            $signed = Join-Path artifacts/signed $installer.Name
+            if (-not (Test-Path -LiteralPath $signed)) { throw "SignPath returned no $($installer.Name)" }
+            $signature = Get-AuthenticodeSignature -LiteralPath $signed
+            if ($signature.Status -ne 'Valid') { throw "$($installer.Name): signature is $($signature.Status)" }
+            Move-Item -LiteralPath $signed -Destination $installer.FullName -Force
+            Write-Output "$($installer.Name) signed by $($signature.SignerCertificate.Subject)"
+          }
+      - name: Warn about an unsigned Windows installer
+        if: runner.os == 'Windows' && env.SIGN_WITH_SIGNPATH != 'true' && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+        shell: bash
+        run: echo "::warning::The Windows installer is not Authenticode-signed; SmartScreen will warn. See docs/CODE-SIGNING.md."
       - uses: actions/upload-artifact@v4
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         with:

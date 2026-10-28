@@ -126,6 +126,9 @@ type Service struct {
 	// removed hears each plugin id that stopped being installed, after the
 	// removal was saved. It runs under opMu, outside mu.
 	removed []func(id string)
+	// persisted hears the previous and the new map after every saved
+	// mutation, under opMu and outside mu. The journal is its only user.
+	persisted func(ctx context.Context, previous, next map[string]installed, at time.Time)
 }
 
 // NewService creates the service. budget bounds the encoded plugins.get and
@@ -573,8 +576,12 @@ func (service *Service) persist(ctx context.Context, next map[string]installed, 
 		return fmt.Errorf("plugins could not be saved: %w", err)
 	}
 	service.mu.Lock()
+	previous := service.plugins
 	service.plugins = next
 	service.mu.Unlock()
+	if service.persisted != nil {
+		service.persisted(ctx, previous, next, service.timestamp())
+	}
 	return nil
 }
 

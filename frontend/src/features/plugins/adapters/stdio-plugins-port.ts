@@ -1,7 +1,8 @@
 import type { ControlPlaneSession } from '../../../platform/stdio/session'
 import type { ControlPort, PluginsPort } from '../application/ports'
+import { normalizeJournalPage, type JournalPage, type JournalQuery } from '../domain/journal'
 import type { PluginPackage } from '../domain/manifest'
-import { normalizeDetail, normalizeList, normalizeSummary, normalizeValues, strings, type PluginDetail, type PluginSummary } from '../domain/plugin'
+import { normalizeCollectionUsage, normalizeDetail, normalizeList, normalizeSummary, normalizeValues, strings, type CollectionUsage, type PluginDetail, type PluginSummary } from '../domain/plugin'
 
 export class StdioPluginsPort implements PluginsPort {
   readonly #session: ControlPlaneSession
@@ -38,6 +39,16 @@ export class StdioPluginsPort implements PluginsPort {
     return normalizeValues(await this.#session.call('plugins.storage.update', { id, values }))
   }
 
+  async collectionStats(id: string): Promise<CollectionUsage> {
+    return normalizeCollectionUsage(await this.#session.call('plugins.collection.stats', { id }))
+  }
+
+  async collectionClearAll(id: string): Promise<number> {
+    // An empty collection name clears all of them in one write.
+    const answer = await this.#session.call<{ cleared?: unknown }>('plugins.collection.clear', { id, collection: '' })
+    return typeof answer?.cleared === 'number' ? answer.cleared : 0
+  }
+
   async secretSet(id: string, key: string, value: string | null): Promise<string[]> {
     const answer = await this.#session.call<{ secrets?: unknown }>('plugins.secret.set', { id, key, value })
     return strings(answer?.secrets)
@@ -59,6 +70,14 @@ export class StdioPluginsPort implements PluginsPort {
   async export(id: string): Promise<unknown> {
     const answer = await this.#session.call<{ package?: unknown }>('plugins.export', { id })
     return answer?.package
+  }
+
+  async listJournal(query: JournalQuery, signal?: AbortSignal): Promise<JournalPage> {
+    return normalizeJournalPage(await this.#session.call('plugins.journal.list', query, signal))
+  }
+
+  async clearJournal(): Promise<void> {
+    await this.#session.call('plugins.journal.clear', {})
   }
 
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void {

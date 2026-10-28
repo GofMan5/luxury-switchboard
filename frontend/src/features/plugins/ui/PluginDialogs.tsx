@@ -5,8 +5,8 @@ import { Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { useModalFocus } from '../../../shared/ui/useModalFocus'
 import { openExternal } from '../../../platform/lifecycle/open-external'
-import { byteLength, needsNewerApp, packageBytes, packageSizeProblem, parsePackage, type PluginPackage } from '../domain/manifest'
-import { DANGEROUS_PERMISSIONS, initialGrants, isPluginPermission, reviewedBefore, permissionSpec, type PermissionRisk, type PluginPermission } from '../domain/permissions'
+import { byteLength, compareVersions, needsNewerApp, packageBytes, packageSizeProblem, parsePackage, type PluginPackage } from '../domain/manifest'
+import { DANGEROUS_PERMISSIONS, initialGrants, isPluginPermission, reviewedBefore, permissionSpec, upgradeChanges, type PermissionRisk, type PluginPermission } from '../domain/permissions'
 import type { PluginSummary } from '../domain/plugin'
 import { useStyleHold } from './useStyleHold'
 import styles from './PluginsPage.module.css'
@@ -213,8 +213,11 @@ function Problems({ id, problems }: { readonly id?: string; readonly problems: r
  * each permission with what granting it means; the operator ticks what the
  * plugin may do. Nothing is installed until Install is pressed.
  */
-export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '', pending, error, onCancel, onInstall }: {
+export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '', expectedId, pending, error, onCancel, onInstall }: {
   readonly pkg: PluginPackage
+  /** The plugin an update was asked for; a package with another id is refused
+   * so a link cannot silently swap one plugin for another. */
+  readonly expectedId?: string
   /** Where a downloaded package came from. */
   readonly source?: string
   readonly existing: PluginSummary | undefined
@@ -234,6 +237,9 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '
   const previous = existing ? reviewedBefore(existing, pkg.network?.hosts ?? []) : new Set<string>()
   useStyleHold()
   const upgrade = existing !== undefined
+  const wrongId = expectedId !== undefined && expectedId !== pkg.id
+  const direction = existing ? compareVersions(pkg.version, existing.version) : null
+  const changes = existing ? upgradeChanges(existing, { permissions: pkg.permissions, hosts: pkg.network?.hosts ?? [] }) : null
   const contents = [
     pkg.theme ? `Theme “${pkg.theme.name}” (${Object.keys(pkg.theme.tokens).length} tokens)` : '',
     pkg.settings?.length ? `${pkg.settings.length} ${pkg.settings.length === 1 ? 'setting' : 'settings'} you can change` : '',
@@ -254,7 +260,7 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '
             <h2 id={`${id}-title`}>{upgrade ? `Update ${pkg.name}?` : `Install ${pkg.name}?`}</h2>
             <p id={`${id}-summary`}>
               {upgrade
-                ? `${existing.version} → ${pkg.version}. Its stored data is kept and it is turned on.`
+                ? `${direction === 0 ? `Reinstalls ${pkg.version}` : `${existing.version} → ${pkg.version}`}. Its stored data is kept and it is turned on.`
                 : `Version ${pkg.version}${pkg.author ? ` by ${pkg.author}` : ''}. Only install plugins from people you trust.`}
             </p>
           </div>
@@ -278,6 +284,9 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '
             ) : null}
             {pkg.minAppVersion ? <div><dt>Needs app</dt><dd>{pkg.minAppVersion} or later{appVersion ? ` (this is ${appVersion})` : ''}</dd></div> : null}
             {pkg.network?.hosts.length ? <div><dt>Network</dt><dd>{pkg.network.hosts.join(', ')}</dd></div> : null}
+            {changes?.addedHosts.length ? <div><dt>New hosts</dt><dd>{changes.addedHosts.join(', ')}</dd></div> : null}
+            {changes?.droppedHosts.length ? <div><dt>Hosts removed</dt><dd>{changes.droppedHosts.join(', ')}</dd></div> : null}
+            {changes?.droppedPermissions.length ? <div><dt>No longer asks</dt><dd><code>{changes.droppedPermissions.join(', ')}</code></dd></div> : null}
             <div><dt>Contains</dt><dd>{contents.length ? contents.join(' · ') : 'Nothing but its name'}</dd></div>
             <div><dt>Size</dt><dd>{formatBytes(packageBytes(pkg))}</dd></div>
           </dl>
@@ -311,13 +320,20 @@ export function InstallReviewDialog({ pkg, existing, appVersion = '', source = '
               You ticked {ordered.filter((permission) => DANGEROUS_PERMISSIONS.has(permission)).map((permission) => permissionSpec(permission).title).join(', ')}. These let the plugin reach credentials, the internet or your prompts. Grant them only to plugins you wrote or fully trust.
             </p>
           ) : null}
+          {direction === -1 && existing ? (
+            <p className={styles.problemNote} role="status">
+              <AlertTriangle size={13} aria-hidden="true" />
+              <span>This is older than the installed {existing.version}. Roll back only on purpose; its stored data may not match the older version.</span>
+            </p>
+          ) : null}
+          {wrongId ? <p className={styles.dialogError} role="alert">This package is <code>{pkg.id}</code>, not <code>{expectedId}</code>. The link now serves a different plugin, so it was not offered as an update.</p> : null}
           {tooNew ? <p className={styles.dialogError} role="alert">This plugin needs Luxury Switchboard {pkg.minAppVersion} or later; this is {appVersion}. Update the app first.</p> : null}
           {sizeProblem ? <p className={styles.dialogError} role="alert">{sizeProblem}</p> : null}
           {error ? <p className={styles.dialogError} role="alert">{error}</p> : null}
         </div>
         <footer>
           <Button disabled={pending} onClick={onCancel}>Cancel</Button>
-          <Button variant="primary" data-autofocus disabled={pending || sizeProblem !== '' || tooNew} aria-busy={pending || undefined} onClick={() => onInstall(ordered)}>
+          <Button variant="primary" data-autofocus disabled={pending || sizeProblem !== '' || tooNew || wrongId} aria-busy={pending || undefined} onClick={() => onInstall(ordered)}>
             {pending ? (upgrade ? 'Updating…' : 'Installing…') : upgrade ? 'Update' : 'Install'}
           </Button>
         </footer>
@@ -392,6 +408,35 @@ export function PermissionsDialog({ plugin, pending, error, onCancel, onSave }: 
           <Button variant="primary" disabled={pending || !changed} aria-busy={pending || undefined} onClick={() => onSave(ordered)}>
             {pending ? 'Saving…' : 'Save'}
           </Button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
+export function ClearDataDialog({ plugin, pending, error, onCancel, onConfirm }: {
+  readonly plugin: PluginSummary
+  readonly pending: boolean
+  readonly error: string
+  readonly onCancel: () => void
+  readonly onConfirm: () => void
+}) {
+  const ref = useModalFocus<HTMLElement>(onCancel, pending)
+  const id = useId()
+  useStyleHold()
+  return (
+    <div className="ui-scrim">
+      <section ref={ref} className={`ui-modal ${styles.dialog}`} role="alertdialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-body`}>
+        <header>
+          <div>
+            <h2 id={`${id}-title`}>Clear data for {plugin.name}?</h2>
+            <p id={`${id}-body`}>The values and collections it stored on this machine are deleted, and it restarts empty. Your settings and secrets for it are kept. This cannot be undone.</p>
+          </div>
+        </header>
+        {error ? <div className={styles.dialogBody}><p className={styles.dialogError} role="alert">{error}</p></div> : null}
+        <footer>
+          <Button disabled={pending} data-autofocus onClick={onCancel}>Cancel</Button>
+          <Button variant="danger" disabled={pending} aria-busy={pending || undefined} onClick={onConfirm}>{pending ? 'Clearing…' : 'Clear data'}</Button>
         </footer>
       </section>
     </div>

@@ -346,6 +346,42 @@ function versionParts(version: string): [number, number, number] | null {
   return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null
 }
 
+/** Orders two package versions semver-style: numeric dot parts (missing
+ * parts count as 0), a `-prerelease` before its release, `+build` ignored.
+ * Null when either is not numbered (`nightly`), so no direction is claimed. */
+export function compareVersions(a: string, b: string): -1 | 0 | 1 | null {
+  const left = versionShape(a)
+  const right = versionShape(b)
+  if (!left || !right) return null
+  for (let index = 0; index < Math.max(left.core.length, right.core.length); index += 1) {
+    const order = sign((left.core[index] ?? 0) - (right.core[index] ?? 0))
+    if (order) return order
+  }
+  if (!left.pre.length || !right.pre.length) return sign(right.pre.length - left.pre.length)
+  for (let index = 0; index < Math.max(left.pre.length, right.pre.length); index += 1) {
+    const x = left.pre[index]
+    const y = right.pre[index]
+    if (x === undefined || y === undefined) return x === undefined ? -1 : 1
+    const xNumber = /^\d+$/u.test(x)
+    const yNumber = /^\d+$/u.test(y)
+    const order = xNumber && yNumber ? sign(Number(x) - Number(y)) : xNumber !== yNumber ? (xNumber ? -1 : 1) : x < y ? -1 : x > y ? 1 : 0
+    if (order) return order
+  }
+  return 0
+}
+
+function versionShape(version: string): { core: number[]; pre: string[] } | null {
+  const [main = ''] = version.split('+', 1)
+  const dash = main.indexOf('-')
+  const core = dash < 0 ? main : main.slice(0, dash)
+  if (!/^\d+(\.\d+)*$/u.test(core)) return null
+  const pre = dash < 0 ? [] : main.slice(dash + 1).split('.')
+  if (pre.some((part) => part === '')) return null
+  return { core: core.split('.').map(Number), pre }
+}
+
+const sign = (value: number): -1 | 0 | 1 => (value < 0 ? -1 : value > 0 ? 1 : 0)
+
 /** The byte size the control plane will report for the stored package. */
 export function packageBytes(pkg: PluginPackage): number {
   return byteLength(JSON.stringify(pkg))

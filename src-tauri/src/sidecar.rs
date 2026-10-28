@@ -412,6 +412,8 @@ fn allowed_method(method: &str) -> bool {
             | "plugins.dev.link"
             | "plugins.dev.unlink"
             | "plugins.download"
+            | "plugins.journal.list"
+            | "plugins.journal.clear"
             | "guardrails.status"
             | "guardrails.findings"
             | "guardrails.clear"
@@ -506,6 +508,10 @@ mod tests {
             validate_outgoing(r#"{"v":1,"id":"x","type":"command","method":"keys.addMany"}"#)
                 .is_ok()
         );
+        for method in ["plugins.journal.list", "plugins.journal.clear"] {
+            let frame = format!(r#"{{"v":1,"id":"x","type":"command","method":"{method}"}}"#);
+            assert!(validate_outgoing(&frame).is_ok(), "{method}");
+        }
     }
 
     #[test]

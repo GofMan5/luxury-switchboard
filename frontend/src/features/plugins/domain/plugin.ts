@@ -98,6 +98,23 @@ export interface PluginRuntime {
 
 export const LOG_LIMIT = 200
 
+export type LogLevel = LogEntry['level']
+
+/** Levels from least to most severe; a filter keeps its level and above. */
+export const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error']
+
+export function filterLog(entries: readonly LogEntry[], least: LogLevel): readonly LogEntry[] {
+  const floor = LOG_LEVELS.indexOf(least)
+  return floor <= 0 ? entries : entries.filter((entry) => LOG_LEVELS.indexOf(entry.level) >= floor)
+}
+
+/** Plain text for copying or saving: one `ISO-time LEVEL text` line each.
+ * Continuation lines of a multi-line entry are indented so they stay with it. */
+export function formatLog(entries: readonly LogEntry[]): string {
+  const lines = entries.map((entry) => `${new Date(entry.at).toISOString()} ${entry.level.toUpperCase().padEnd(5)} ${entry.text.replace(/\r?\n/g, '\n    ')}`)
+  return lines.length ? `${lines.join('\n')}\n` : ''
+}
+
 export const IDLE_RUNTIME: PluginRuntime = { state: 'stopped', reason: '', faults: 0, logs: [], pages: [], commands: 0, status: 0 }
 
 /** The owner key a plugin's contributions live under. */
@@ -175,6 +192,28 @@ export function normalizeValues(raw: unknown): Record<string, string> {
   const values: Record<string, string> = {}
   for (const [key, value] of Object.entries(record(record(raw).values))) if (typeof value === 'string') values[key] = value
   return values
+}
+
+/** The key-value storage bounds the control plane enforces per plugin. */
+export const STORAGE_LIMITS = { keys: 64, bytes: 64 * 1024 } as const
+
+/** What a plugin keeps in its collections, against their shared limit. */
+export interface CollectionUsage {
+  readonly collections: readonly { readonly name: string; readonly count: number; readonly bytes: number }[]
+  readonly bytes: number
+  readonly limitBytes: number
+}
+
+export function normalizeCollectionUsage(raw: unknown): CollectionUsage {
+  const answer = record(raw)
+  const collections = (Array.isArray(answer.collections) ? answer.collections : []).map(record)
+    .filter((entry) => typeof entry.name === 'string' && entry.name !== '')
+    .map((entry) => ({ name: str(entry.name), count: count(entry.count), bytes: count(entry.bytes) }))
+  return { collections, bytes: count(answer.bytes), limitBytes: count(answer.limitBytes) }
+}
+
+function count(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
 }
 
 function record(value: unknown): Record<string, unknown> {

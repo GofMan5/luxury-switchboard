@@ -1,6 +1,7 @@
 import type { ThemeToken } from '../domain/canvas'
 import type { PluginPackage } from '../domain/manifest'
-import type { PluginDetail, PluginSummary } from '../domain/plugin'
+import type { JournalPage, JournalQuery } from '../domain/journal'
+import type { CollectionUsage, PluginDetail, PluginSummary } from '../domain/plugin'
 import type { HostMessage } from '../domain/protocol'
 import type { SettingValue } from '../domain/settings'
 import type { OpenSpec, SaveSpec } from '../domain/specs'
@@ -18,6 +19,9 @@ export interface PluginsPort {
   /** Applies every change (`null` deletes) in one encrypted write, or none of
    * them. Answers with every value the plugin now has. */
   storageUpdate(id: string, values: Readonly<Record<string, string | null>>): Promise<Record<string, string>>
+  collectionStats(id: string): Promise<CollectionUsage>
+  /** Deletes every document in every collection; answers how many went. */
+  collectionClearAll(id: string): Promise<number>
   /** Sets (`value`) or clears (`null`) one secret setting. Answers with the
    * keys that now have a value; a value is never read back. */
   secretSet(id: string, key: string, value: string | null): Promise<string[]>
@@ -31,6 +35,10 @@ export interface PluginsPort {
   /** The installed package as stored, without settings values or storage;
    * unchecked JSON. */
   export(id: string): Promise<unknown>
+  /** What happened to plugins, newest first; one plugin when `pluginId` is set. */
+  listJournal(query: JournalQuery, signal?: AbortSignal): Promise<JournalPage>
+  /** Deletes the whole journal; the only way out of an unreadable one. */
+  clearJournal(): Promise<void>
   /** Installs, upgrades, updates and removals — from this window or another. */
   subscribe(listener: (plugins: PluginSummary[]) => void): () => void
 }

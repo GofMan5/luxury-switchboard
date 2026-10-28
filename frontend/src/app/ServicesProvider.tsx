@@ -190,6 +190,9 @@ export function ServicesProvider({ children }: PropsWithChildren) {
         unsubscribeReconnect = session.subscribe('system.reconnected', () => { void connectServices().catch(() => undefined) })
         await connectServices()
         if (disposed) { shutdown(); return }
+        // Once per window, not on reconnect: safe mode keeps plugins out of
+        // the picture entirely, and the setting keeps the hosts uncontacted.
+        if (!safeMode && services.settings.snapshot().settings?.pluginUpdateCheckEnabled !== false) void plugins.announceUpdates().catch(() => undefined)
       } catch {
         if (!disposed) {
           shutdown()

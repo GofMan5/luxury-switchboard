@@ -126,3 +126,27 @@ export function initialGrants(
   const fresh = new Set(defaultGrants(declared))
   return declared.filter((permission) => (before.has(permission) ? granted.has(permission) : fresh.has(permission)))
 }
+
+/** What an upgrade takes away or widens, beyond the permissions it adds:
+ * the review shows these so a quieter package is visible as such too. */
+export function upgradeChanges(
+  previous: { readonly permissions: readonly string[]; readonly hosts: readonly string[] },
+  next: { readonly permissions: readonly string[]; readonly hosts: readonly string[] },
+): { readonly droppedPermissions: string[]; readonly addedHosts: string[]; readonly droppedHosts: string[] } {
+  return {
+    droppedPermissions: previous.permissions.filter((permission) => isPluginPermission(permission) && !next.permissions.includes(permission)),
+    addedHosts: next.hosts.filter((host) => !previous.hosts.includes(host)),
+    droppedHosts: previous.hosts.filter((host) => !next.hosts.includes(host)),
+  }
+}
+
+/** Whether an upgrade asks for anything the operator has not decided on yet:
+ * a permission the previous version did not declare, or `net:fetch` reaching
+ * a new host. One that does not can reuse the previous grants unreviewed. */
+export function upgradeAsksMore(
+  previous: { readonly permissions: readonly string[]; readonly hosts: readonly string[] },
+  next: { readonly permissions: readonly string[]; readonly hosts: readonly string[] },
+): boolean {
+  const before = reviewedBefore(previous, next.hosts)
+  return next.permissions.some((permission) => isPluginPermission(permission) && !before.has(permission))
+}

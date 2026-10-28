@@ -30,7 +30,7 @@ const tabFields: Record<Exclude<SettingsTab, 'backup' | 'plugins'>, readonly (ke
   reliability: ['headerTimeoutSeconds', 'streamIdleSeconds', 'heartbeatSeconds', 'retryBaseMilliseconds', 'retryMaxSeconds', 'permanentAttempts'],
   data: ['activityCapacity', 'historyRetentionDays', 'tunnelRetentionHours', 'guardrailFindings'],
   routing: ['failoverEnabled', 'chainMode'],
-  interface: ['notificationsEnabled', 'providerHealthEnabled', 'animationsEnabled'],
+  interface: ['notificationsEnabled', 'providerHealthEnabled', 'animationsEnabled', 'pluginUpdateCheckEnabled'],
   updates: ['updateCheckInterval'],
 }
 
@@ -260,6 +260,10 @@ export function SettingsForm({ initial, pending, error, tab: controlledTab, onTa
               <ToggleField
                 label="Animations" {...field('animationsEnabled')}
                 note="Motion in the interface. The operating system's reduced-motion setting always wins over this switch."
+              />
+              <ToggleField
+                label="Plugin update check" {...field('pluginUpdateCheckEnabled')}
+                note="At launch, asks the links plugins were installed from whether they serve a newer version, and tells you if one does. Nothing is installed without your review."
               />
             </div>
           ) : null}

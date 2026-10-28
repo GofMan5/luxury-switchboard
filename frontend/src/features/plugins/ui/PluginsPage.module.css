@@ -1,5 +1,5 @@
 .page { min-width: 0; }
-.headerActions { display: flex; min-width: 0; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.headerActions { display: flex; min-width: 0; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 
 .banner { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--gutter); color: var(--text-danger); background: color-mix(in srgb, var(--status-danger) 7%, var(--bg-canvas)); font-size: var(--fs-sm); }
 .banner[data-tone='warning'] { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 7%, var(--bg-canvas)); }
@@ -60,7 +60,13 @@
 .pageLinks { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--fs-sm); }
 .pageLinks a { color: var(--text-secondary); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
 .pageLinks a:hover { color: var(--text-primary); text-decoration-color: currentColor; }
-.logHeader { display: flex; align-items: baseline; gap: 10px; }
+.dataRow { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }
+.dataText { display: grid; min-width: 0; gap: 4px; }
+.dataText h3 { color: var(--text-primary); font-size: var(--fs-sm); font-weight: 600; }
+.dataFacts { display: grid; gap: 2px; margin: 0; padding: 0; color: var(--text-secondary); font-size: var(--fs-sm); list-style: none; font-variant-numeric: tabular-nums; }
+.logHeader { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.logTools { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.logFilter { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: var(--fs-sm); }
 .logHeader h3 { color: var(--text-primary); font-size: var(--fs-sm); font-weight: 600; }
 .log { overflow: auto; max-height: 260px; margin: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 6px 0; background: var(--bg-raised); font-family: var(--font-mono); font-size: var(--fs-xs); list-style: none; }
 .log li { display: grid; grid-template-columns: auto 44px minmax(0, 1fr); gap: 10px; padding: 1px 10px; line-height: 1.6; }
@@ -79,6 +85,13 @@
 
 /* Examples */
 .examples { display: grid; margin: 0; padding: 0; list-style: none; }
+.journal { overflow: auto; max-height: 320px; margin: 0; padding: 0; list-style: none; }
+.journalRow { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; border-bottom: 1px solid var(--border-subtle); padding: 8px var(--pad); font-size: var(--fs-sm); }
+.journalRow:last-child { border-bottom: 0; }
+.journalRow time { color: var(--text-muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; line-height: 20px; }
+.journalText { display: grid; min-width: 0; gap: 4px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.journalText strong { color: var(--text-primary); font-weight: 600; }
+.journalMore { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--border-subtle); padding: 10px var(--pad); }
 .examples li { display: flex; min-width: 0; align-items: center; gap: 16px; border-bottom: 1px solid var(--border-subtle); padding: 10px var(--pad); }
 .examples li:last-child { border-bottom: 0; }
 .examples li > div { display: grid; min-width: 0; flex: 1; gap: 4px; }

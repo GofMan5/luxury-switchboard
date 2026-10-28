@@ -633,13 +633,17 @@ await switchboard.storage.setMany({ lastRun: String(Date.now()), cache: JSON.str
 ```
 
 Storage survives restarts and upgrades and is deleted with the plugin.
+The operator sees how much a plugin stores under **Details → Stored data**
+and can **Clear data** there: every stored key and every collection is
+deleted, the operator's settings and secrets stay, and a running plugin
+restarts so it starts empty. Treat a missing value as a normal first run.
 
 ### Anywhere
 
 | Member | Description |
 | --- | --- |
 | `navigate(route)` | Opens a page of this window: `overview`, `activity`, `insights`, `providers`, `keys`, `routes`, `rules`, `tests`, `guardrails`, `tunnel`, `clients`, `appearance`, `plugins`, `settings`, or `plugin/<id>/<page>`. `#/x`, `/x` and `x` are the same route. A route the window does not show rejects with `not_found`. No permission needed. |
-| `log.debug/info/warn/error(…)`, `console.*` | Written to the plugin's log (**Plugins → Details**, last 200 lines), up to 100 lines per 5 seconds, each cut at 2000 characters. Uncaught errors in handlers are counted as *faults* and logged with their stack; the plugin keeps running. Refused calls (`permission_denied`, `not_allowed`) are logged as warnings. |
+| `log.debug/info/warn/error(…)`, `console.*` | Written to the plugin's log (**Plugins → Details**, last 200 lines; filter it by level, copy it or save it as `<id>-log.txt`), up to 100 lines per 5 seconds, each cut at 2000 characters. Uncaught errors in handlers are counted as *faults* and logged with their stack; the plugin keeps running. Refused calls (`permission_denied`, `not_allowed`) are logged as warnings. |
 
 ## Pages and nodes
 
@@ -1405,12 +1409,55 @@ local addresses (redirects included, at most 5), 256 KiB per file and
 agent.
 
 **Updating.** The plugin remembers the link it came from (shown as
-*Installed from* in Details). **Update from link** on its row fills that link
-in and opens the same review: nothing changes until you confirm, and new
-permissions arrive ungranted. Upgrades are never automatic. Installing from a
-file or linking a dev folder forgets the link, and so does a link with a
-query or fragment (`?token=…`), which may carry a credential: such a plugin
+*Installed from* in Details). **Update from link** on its row downloads that
+link again and opens the same review: nothing changes until you confirm, and
+new permissions arrive ungranted. Upgrades are never automatic. Installing
+from a file or linking a dev folder forgets the link, and so does a link with
+a query or fragment (`?token=…`), which may carry a credential: such a plugin
 has no **Update from link**.
+
+**Check for updates** in the page header (shown once a plugin has a link)
+downloads every linked plugin's package, one after another, and compares
+versions. It installs nothing: a newer version shows *Update X available* on
+the row and its button becomes **Update to X**, which opens the review with
+the package already downloaded. A link that fails, no longer holds a valid
+package or serves a different plugin shows the reason on the row instead.
+Versions compare by their numbers (`1.10.0` is newer than `1.9.0`; a
+pre-release such as `2.0.0-beta.1` is older than `2.0.0`; `+build` metadata is
+ignored). Versions without numbers, such as `nightly`, only match themselves.
+
+When the link serves the **same version** as the installed one, the check
+also compares the packages themselves (ignoring key order and the version
+string, so `+build` metadata alone is no change). If the code, stylesheet,
+theme, settings or permissions differ, the row shows *Code changed without a
+new version* and its button becomes **Review changed code**, which opens the
+review (*Reinstalls 1.2.0*). Such a package is never part of **Update all**
+and the notice counts it separately: an author who ships new code under an
+old number has to be looked at by a person. Reinstalling clears the flag.
+
+After a check, **Update all (N)** installs, one after another, every update
+that asks for nothing the operator has not already decided: the plugin is
+on, the app is new enough, and the new version adds no permission and no
+host. It keeps the previous grants (a permission the new version drops loses
+its grant). Every other update — new permissions or hosts, a newer app, or a
+plugin that is switched off (installing would switch it on) — is left on its
+row for **Update to X**, and the notice says how many wait. N counts only the
+updates it will install; the button disappears when none are left.
+
+The window also runs this check once at launch (not on reconnect, and never
+in safe mode) and, when a linked plugin serves a newer version, shows a
+notification pointing to Plugins. It only announces: nothing is downloaded
+into the store or installed. **Settings → Interface → Plugin update check**
+turns it off, so the hosts plugins were installed from are not contacted
+until you press **Check for updates** yourself. It is on by default, and
+configurations saved before the setting existed read it as on.
+
+The update review always shows the direction — *Reinstalls 1.2.0* or
+*1.2.0 → 1.3.0* — and warns when the package is **older** than the installed
+one. It lists the hosts the new version adds or no longer contacts and the
+permissions it no longer asks for (their grants are dropped). An update must
+keep the plugin's `id`: if the link now serves a different plugin, the review
+says so and refuses to install it as an update.
 
 ### Save package
 
@@ -1558,8 +1605,37 @@ When **installing**, the control plane answers `invalid_plugin` (including
   rules from the control plane.
 - **Backups** include packages, grants, settings and storage, but **never
   secrets**: re-enter them after a restore.
-- There is no auto-update and no remote install: plugins arrive only as files
-  the operator chooses.
+- Nothing installs or upgrades without the operator: a package arrives from
+  a file, pasted JSON, a dev folder or a link the operator enters, and
+  *Check for updates* only reports newer versions and changed code. Every
+  install and upgrade goes through the review, except that *Update all*,
+  which the operator presses, installs updates that ask for nothing new with
+  the grants already given.
+
+### Activity journal (1.0.71)
+
+The **Activity** panel on the Plugins page is a dated history of every plugin
+on this machine: installs and upgrades with their versions and origin (file,
+link or folder), permissions granted and revoked, switching on and off,
+linking and unlinking a dev folder, and removal. Pick a plugin to see only
+its entries; removed plugins stay in the list while they have entries.
+
+- The journal is the operator's, not a plugin's: scripts cannot read or
+  write it, and it is shown only when the control plane advertises the
+  `plugins.journal` capability.
+- It records names, versions and permission names — never storage, settings
+  or secret values, and never the link a package came from.
+- It is encrypted like the rest of the plugin store and keeps the newest
+  500 entries. If an entry cannot be saved the panel says so instead of
+  showing a shorter history, and an unreadable journal is shown as
+  unavailable, not empty.
+- **Clear…** deletes every entry after confirmation; it does not touch the
+  plugins themselves. Backups do not include the journal.
+
+| Command | Payload | Result |
+| --- | --- | --- |
+| `plugins.journal.list` | `{ pluginId?, before?, limit? }` — `limit` 1–200, default 50 | `{ entries, next?, incomplete }`, newest first; pass `next` as `before` for older entries |
+| `plugins.journal.clear` | `{}` | `{ ok: true }` |
 
 ## Safe mode
 

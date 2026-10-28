@@ -33,6 +33,7 @@ const initial: Settings = {
   notificationsEnabled: true,
   providerHealthEnabled: true,
   animationsEnabled: true,
+  pluginUpdateCheckEnabled: true,
   failoverEnabled: true,
   chainMode: 'balance',
   updateCheckInterval: '1m',

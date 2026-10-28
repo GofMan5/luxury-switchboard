@@ -6,6 +6,7 @@ import { ExtensionPoints } from '../../../shared/contracts/extensions'
 import { PluginsModel } from '../application/plugins-model'
 import { FakeControl, FakeWorkers, MemoryPluginsPort, summary, hostExtras } from '../application/test-fakes'
 import { EXAMPLE_PLUGINS } from '../domain/examples'
+import type { JournalEntry } from '../domain/journal'
 import type { PluginPackage } from '../domain/manifest'
 import { checkTree } from '../domain/ui-tree'
 import type { PageEvent } from '../domain/protocol'
@@ -126,7 +127,10 @@ describe('PluginTree', () => {
 })
 
 async function page(safeMode = false, capabilities: readonly string[] = ['plugins.manage']) {
-  const port = new MemoryPluginsPort()
+  return pageWith(new MemoryPluginsPort(), capabilities, safeMode)
+}
+
+async function pageWith(port: MemoryPluginsPort, capabilities: readonly string[], safeMode = false) {
   const workers = new FakeWorkers()
   const { bus: _bus, ...extras } = hostExtras()
   const extensions = new ExtensionPoints()
@@ -170,6 +174,62 @@ describe('PluginsPage', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }))
     await waitFor(() => expect(screen.getByText('Acme tools removed.')).toBeTruthy())
     expect(port.plugins).toEqual([])
+    model.dispose()
+  })
+
+  it('shows what a plugin stores and clears it after confirmation', async () => {
+    const { port, model } = await page()
+    await act(() => model.install(pkg, ['ui:pages']))
+    port.values.set('acme.tools', { cache: 'abc' })
+    port.collections.set('acme.tools', { notes: { count: 2, bytes: 40 } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }))
+    await waitFor(() => expect(screen.getByText(/^1 value,/u)).toBeTruthy())
+    expect(screen.getByText(/^2 documents in 1 collection,/u)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear data…' }))
+    const dialog = screen.getByRole('alertdialog', { name: 'Clear data for Acme tools?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear data' }))
+    await waitFor(() => expect(screen.getByText('Stored data for Acme tools cleared.')).toBeTruthy())
+    expect(port.values.get('acme.tools')).toEqual({})
+    expect(port.collections.has('acme.tools')).toBe(false)
+    // The open details read again and there is nothing left to clear.
+    await waitFor(() => expect(screen.getByText(/^No values,/u)).toBeTruthy())
+    expect((screen.getByRole('button', { name: 'Clear data…' }) as HTMLButtonElement).disabled).toBe(true)
+    model.dispose()
+  })
+
+  it('filters the log by level, then copies and saves the lines shown', async () => {
+    const { workers, model, files } = await page()
+    const clipboard = vi.spyOn(model, 'copyLog')
+    await act(() => model.install(pkg, ['ui:pages']))
+    act(() => {
+      workers.last.send({ type: 'ready' })
+      workers.last.send({ type: 'log', level: 'debug', text: 'cache warm' })
+      workers.last.send({ type: 'log', level: 'warn', text: 'slow answer' })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }))
+    const log = await screen.findByRole('list', { name: 'Plugin log' })
+    expect(within(log).getByText('cache warm')).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText('Level'), { target: { value: 'warn' } })
+    expect(within(log).queryByText('cache warm')).toBeNull()
+    expect(within(log).getByText('slow answer')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    await waitFor(() => expect(screen.getByText('Copied 1 line.')).toBeTruthy())
+    expect(clipboard.mock.calls[0]?.[0].map((entry) => entry.text)).toEqual(['slow answer'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save…' }))
+    await waitFor(() => expect(screen.getByText('Saved 1 line.')).toBeTruthy())
+    expect(files.saved).toHaveLength(1)
+    expect(files.saved[0]?.name).toBe('acme.tools-log.txt')
+    expect(files.saved[0]?.text).toMatch(/WARN {2}slow answer\n$/u)
+    expect(files.saved[0]?.text).not.toContain('cache warm')
+
+    fireEvent.change(screen.getByLabelText('Level'), { target: { value: 'error' } })
+    expect(screen.getByText('No lines at this level.')).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Copy' }) as HTMLButtonElement).disabled).toBe(true)
     model.dispose()
   })
 
@@ -259,8 +319,6 @@ describe('PluginsPage', () => {
     expect(within(row).getByText('Installed from')).toBeTruthy()
     expect(within(row).getByText(link)).toBeTruthy()
     fireEvent.click(within(row).getByRole('button', { name: 'Update from link' }))
-    expect((screen.getByLabelText('Link') as HTMLInputElement).value).toBe(link)
-    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     const review = await screen.findByRole('dialog', { name: 'Update Acme tools?' })
     expect(port.plugins.find((plugin) => plugin.id === 'acme.tools')?.version).toBe('1.0.0')
     fireEvent.click(within(review).getByRole('button', { name: 'Update' }))
@@ -269,11 +327,111 @@ describe('PluginsPage', () => {
     model.dispose()
   })
 
+  it('refuses an update when the link now serves a different plugin', async () => {
+    const { model, port } = await page(false, ['plugins.manage', 'plugins.download'])
+    const link = 'https://example.test/acme/tools.json'
+    await model.install({ ...pkg, version: '1.0.0' }, ['ui:pages'], link)
+    port.downloads[link] = { ...pkg, id: 'acme.other', name: 'Acme other' }
+    const row = (await screen.findByText('Acme tools')).closest('li') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Update from link' }))
+    const review = await screen.findByRole('dialog', { name: 'Install Acme other?' })
+    expect(within(review).getByRole('alert').textContent).toContain('The link now serves a different plugin')
+    expect((within(review).getByRole('button', { name: 'Install' }) as HTMLButtonElement).disabled).toBe(true)
+    model.dispose()
+  })
+
+  it('reopens the link dialog with the error when an update download fails', async () => {
+    const { model } = await page(false, ['plugins.manage', 'plugins.download'])
+    const link = 'https://example.test/acme/gone.json'
+    await model.install({ ...pkg, version: '1.0.0' }, ['ui:pages'], link)
+    const row = (await screen.findByText('Acme tools')).closest('li') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Update from link' }))
+    await waitFor(() => expect(screen.getByText('Nothing was found at that link.')).toBeTruthy())
+    expect((screen.getByLabelText('Link') as HTMLInputElement).value).toBe(link)
+    model.dispose()
+  })
+
+  it('checks linked plugins for updates and offers only newer versions', async () => {
+    const { model, port } = await page(false, ['plugins.manage', 'plugins.download'])
+    const newer = 'https://example.test/acme/tools.json'
+    const gone = 'https://example.test/acme/gone.json'
+    await model.install({ ...pkg, version: '1.0.0' }, ['ui:pages'], newer)
+    await model.install({ ...pkg, id: 'acme.gone', name: 'Acme gone', version: '1.0.0' }, [], gone)
+    port.downloads[newer] = pkg
+    const check = await screen.findByRole('button', { name: 'Check for updates' })
+    const before = port.plugins.map((plugin) => `${plugin.id}@${plugin.version}`)
+
+    fireEvent.click(check)
+    await waitFor(() => expect(screen.getByText('1 update available. 1 could not be checked.')).toBeTruthy())
+    expect(port.plugins.map((plugin) => `${plugin.id}@${plugin.version}`)).toEqual(before)
+    const row = screen.getByText('Acme tools').closest('li') as HTMLElement
+    expect(within(row).getByText('Update 2.0.0 available')).toBeTruthy()
+    const goneRow = screen.getByText('Acme gone').closest('li') as HTMLElement
+    expect(within(goneRow).getByText(/The update check failed: Nothing was found at that link\./u)).toBeTruthy()
+
+    delete port.downloads[newer]
+    fireEvent.click(within(row).getByRole('button', { name: 'Update to 2.0.0' }))
+    const review = await screen.findByRole('dialog', { name: 'Update Acme tools?' })
+    fireEvent.click(within(review).getByRole('button', { name: 'Update' }))
+    await waitFor(() => expect(screen.getByText('Acme tools 2.0.0 updated.')).toBeTruthy())
+    expect(within(row).queryByText('Update 2.0.0 available')).toBeNull()
+    model.dispose()
+  })
+
+  it('flags changed code under the same version and sends it to review', async () => {
+    const { model, port } = await page(false, ['plugins.manage', 'plugins.download'])
+    const link = 'https://example.test/acme/tools.json'
+    await model.install(pkg, ['ui:pages'], link)
+    port.downloads[link] = { ...pkg, script: `${pkg.script ?? ''}\n// patched` }
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Check for updates' }))
+    await waitFor(() => expect(screen.getByText('No updates found. 1 link serves changed code under the installed version; review before reinstalling.')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: /Update all/u })).toBeNull()
+    const row = screen.getByText('Acme tools').closest('li') as HTMLElement
+    expect(within(row).getByText('Code changed without a new version')).toBeTruthy()
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Review changed code' }))
+    const review = await screen.findByRole('dialog', { name: 'Update Acme tools?' })
+    expect(within(review).getByText(/Reinstalls 2\.0\.0\./u)).toBeTruthy()
+    fireEvent.click(within(review).getByRole('button', { name: 'Update' }))
+    await waitFor(() => expect(within(row).queryByText('Code changed without a new version')).toBeNull())
+    expect((port.packages.get('acme.tools') as PluginPackage).script).toMatch(/patched$/u)
+    model.dispose()
+  })
+
+  it('updates every quiet plugin at once and leaves the rest for review', async () => {
+    const { model, port } = await page(false, ['plugins.manage', 'plugins.download'])
+    const quiet = 'https://example.test/acme/tools.json'
+    const more = 'https://example.test/acme/more.json'
+    await model.install({ ...pkg, version: '1.0.0' }, ['ui:pages'], quiet)
+    await model.install({ ...pkg, id: 'acme.more', name: 'Acme more', version: '1.0.0', permissions: ['ui:pages'] }, ['ui:pages'], more)
+    port.downloads[quiet] = pkg
+    port.downloads[more] = { ...pkg, id: 'acme.more', name: 'Acme more' }
+    expect(screen.queryByRole('button', { name: /Update all/u })).toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Check for updates' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Update all (1)' }))
+    await waitFor(() => expect(screen.getByText(/^Updated Acme tools to 2\.0\.0\. 1 plugin needs your review/u)).toBeTruthy())
+    expect(port.plugins.find((plugin) => plugin.id === 'acme.tools')).toMatchObject({ version: '2.0.0', granted: ['ui:pages'] })
+    expect(port.plugins.find((plugin) => plugin.id === 'acme.more')?.version).toBe('1.0.0')
+    expect(screen.queryByRole('button', { name: /Update all/u })).toBeNull()
+    model.dispose()
+  })
+
+  it('shows no update check without a linked plugin', async () => {
+    const { model } = await page(false, ['plugins.manage', 'plugins.download'])
+    await model.install(pkg, [])
+    await screen.findByText('Acme tools')
+    expect(screen.queryByRole('button', { name: 'Check for updates' })).toBeNull()
+    model.dispose()
+  })
+
   it('offers no update from a link without download support or for a folder plugin', async () => {
     const { model } = await page()
     await model.install(pkg, [], 'https://example.test/acme/tools.json')
     await waitFor(() => expect(screen.getByText('Acme tools')).toBeTruthy())
     expect(screen.queryByRole('button', { name: 'Update from link' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Check for updates' })).toBeNull()
     model.dispose()
   })
 
@@ -310,6 +468,106 @@ describe('PluginsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reset layout' }))
     expect(reset).toHaveBeenCalledOnce()
     expect(screen.queryByText(/Layout customised by/u)).toBeNull()
+    model.dispose()
+  })
+})
+
+function entry(seq: number, kind: JournalEntry['kind'], pluginId = 'acme.tools', extra: Partial<JournalEntry> = {}): JournalEntry {
+  return { seq, at: `2026-10-${String(seq % 28 + 1).padStart(2, '0')}T10:00:00.000Z`, kind, pluginId, name: pluginId === 'acme.tools' ? 'Acme tools' : 'Gone plugin', version: '2.0.0', fromVersion: '', granted: [], revoked: [], origin: '', ...extra }
+}
+
+describe('plugin activity', () => {
+  const journal = ['plugins.manage', 'plugins.journal']
+
+  it('is hidden unless the control plane keeps a journal', async () => {
+    const { port, model } = await page()
+    expect(screen.queryByRole('heading', { name: 'Activity' })).toBeNull()
+    expect(port.journalQueries).toEqual([])
+    model.dispose()
+  })
+
+  it('lists entries newest first, filters by plugin, including removed ones, and reads older pages', async () => {
+    const port = new MemoryPluginsPort()
+    port.journal = [
+      entry(70, 'removed', 'acme.gone'),
+      entry(69, 'permissions', 'acme.tools', { granted: ['storage'], revoked: ['ui:pages'] }),
+      entry(68, 'updated', 'acme.tools', { fromVersion: '1.0.0', origin: 'file' }),
+      ...Array.from({ length: 60 }, (_, index) => entry(67 - index, 'enabled')),
+    ]
+    const { model } = await pageWith(port, journal)
+    const list = await screen.findByRole('list', { name: 'Plugin activity' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(50)
+    expect(within(list).getAllByRole('listitem')[0].textContent).toContain('Removed Gone plugin')
+    expect(screen.getByText('1.0.0 → 2.0.0')).toBeTruthy()
+    expect(screen.getByText('from a file')).toBeTruthy()
+    expect(screen.getByTitle('Granted storage').textContent).toMatch(/^\+ /u)
+    expect(screen.getByTitle('Revoked ui:pages').textContent).toMatch(/^− /u)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show older' }))
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(63))
+    expect(port.journalQueries.at(-1)).toEqual({ before: 21 })
+    expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull()
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Plugin' }), { target: { value: 'acme.gone' } })
+    await waitFor(() => expect(screen.getAllByRole('listitem').filter((item) => item.closest('ol[aria-label="Plugin activity"]'))).toHaveLength(1))
+    expect(port.journalQueries.at(-1)).toEqual({ pluginId: 'acme.gone' })
+    model.dispose()
+  })
+
+  it('reports a failed older page without losing what is shown', async () => {
+    const port = new MemoryPluginsPort()
+    port.journal = Array.from({ length: 55 }, (_, index) => entry(55 - index, 'enabled'))
+    const { model } = await pageWith(port, journal)
+    await screen.findByRole('list', { name: 'Plugin activity' })
+    port.failNext = Object.assign(new Error('locked'), { code: 'secure_storage_unavailable' })
+    fireEvent.click(screen.getByRole('button', { name: 'Show older' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('Secure storage is unavailable')
+    expect(screen.getAllByRole('listitem').filter((item) => item.closest('ol[aria-label="Plugin activity"]'))).toHaveLength(50)
+    model.dispose()
+  })
+
+  it('clears every entry only after confirmation and records again afterwards', async () => {
+    const port = new MemoryPluginsPort()
+    port.journal = [entry(2, 'disabled'), entry(1, 'installed', 'acme.tools', { origin: 'link', granted: ['ui:pages'] })]
+    const { model } = await pageWith(port, journal)
+    await screen.findByRole('list', { name: 'Plugin activity' })
+    fireEvent.click(screen.getByRole('button', { name: 'Clear…' }))
+    let dialog = screen.getByRole('alertdialog', { name: 'Clear plugin activity?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(port.journal).toHaveLength(2)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear…' }))
+    dialog = screen.getByRole('alertdialog', { name: 'Clear plugin activity?' })
+    port.failNext = Object.assign(new Error('disk'), { code: 'plugin_journal_clear_failed' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear' }))
+    expect(await within(dialog).findByRole('alert')).toBeTruthy()
+    expect(port.journal).toHaveLength(2)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear' }))
+    await waitFor(() => expect(screen.getByText('Nothing recorded yet')).toBeTruthy())
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(port.journal).toEqual([])
+    expect((screen.getByRole('button', { name: 'Clear…' }) as HTMLButtonElement).disabled).toBe(true)
+    model.dispose()
+  })
+
+  it('shows an unreadable journal as unavailable, not empty, and still offers clear', async () => {
+    const port = new MemoryPluginsPort()
+    port.failNext = Object.assign(new Error('locked'), { code: 'secure_storage_unavailable' })
+    vi.spyOn(port, 'list').mockImplementationOnce(async () => [])
+    const { model } = await pageWith(port, journal)
+    expect((await screen.findByText(/^Unavailable:/u)).textContent).toContain('Secure storage is unavailable')
+    expect(screen.queryByText('Nothing recorded yet')).toBeNull()
+    expect((screen.getByRole('button', { name: 'Clear…' }) as HTMLButtonElement).disabled).toBe(false)
+    model.dispose()
+  })
+
+  it('warns when the newest entries could not be saved', async () => {
+    const port = new MemoryPluginsPort()
+    port.journal = [entry(1, 'installed')]
+    vi.spyOn(port, 'listJournal').mockResolvedValue({ entries: port.journal, next: 0, incomplete: true })
+    const { model } = await pageWith(port, journal)
+    expect(await screen.findByText(/could not be saved and will be lost/u)).toBeTruthy()
     model.dispose()
   })
 })

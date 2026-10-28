@@ -58,6 +58,25 @@ describe('StdioPluginsPort', () => {
     expect(call).toHaveBeenLastCalledWith('plugins.storage.update', { id: 'acme.tools', values: { a: '2', b: null } })
   })
 
+  it('reads collection usage defensively and clears every collection at once', async () => {
+    const { session, call } = fakeSession({
+      'plugins.collection.stats': {
+        collections: [{ name: 'notes', count: 3, bytes: 120 }, { name: '', count: 1, bytes: 1 }, { name: 'bad', count: -2, bytes: 1.5 }, 'junk'],
+        bytes: 121, limitBytes: 2097152,
+      },
+      'plugins.collection.clear': { cleared: 4 },
+    })
+    const port = new StdioPluginsPort(session)
+
+    expect(await port.collectionStats('acme.tools')).toEqual({
+      collections: [{ name: 'notes', count: 3, bytes: 120 }, { name: 'bad', count: 0, bytes: 0 }],
+      bytes: 121, limitBytes: 2097152,
+    })
+    expect(call).toHaveBeenLastCalledWith('plugins.collection.stats', { id: 'acme.tools' })
+    expect(await port.collectionClearAll('acme.tools')).toBe(4)
+    expect(call).toHaveBeenLastCalledWith('plugins.collection.clear', { id: 'acme.tools', collection: '' })
+  })
+
   it('sends the link a package came from and exports the stored package', async () => {
     const pkg = { schema: 1 as const, id: 'acme.tools', name: 'Acme tools', version: '1.0.0', permissions: [] }
     const { session, call } = fakeSession({ 'plugins.install': { plugin: PLUGIN }, 'plugins.export': { package: pkg } })
@@ -68,6 +87,29 @@ describe('StdioPluginsPort', () => {
     expect(call).toHaveBeenLastCalledWith('plugins.export', { id: 'acme.tools' })
     const { session: plain } = fakeSession({ 'plugins.list': { plugins: [{ ...PLUGIN, source: 'http://example.test/x.json' }] } })
     expect((await new StdioPluginsPort(plain).list())[0]?.source).toBe('')
+  })
+
+  it('reads and clears the activity journal, dropping entries it does not understand', async () => {
+    const good = { seq: 9, at: '2026-02-01T10:00:00.000Z', kind: 'updated', pluginId: 'acme.tools', name: 'Acme tools', version: '1.1.0', fromVersion: '1.0.0', revoked: ['net:fetch'], origin: 'link' }
+    const { session, call } = fakeSession({
+      'plugins.journal.list': {
+        entries: [good, { ...good, seq: 8, kind: 'exploded' }, { ...good, seq: 7, at: 'yesterday' }, { ...good, seq: -1 }, { ...good, seq: 6, pluginId: '' }, { ...good, seq: 5, origin: 'ftp', granted: [1, 'ui:pages'] }],
+        next: 5, incomplete: true,
+      },
+      'plugins.journal.clear': { ok: true },
+    })
+    const port = new StdioPluginsPort(session)
+    const signal = new AbortController().signal
+    const page = await port.listJournal({ pluginId: 'acme.tools', before: 10, limit: 20 }, signal)
+    expect(call).toHaveBeenLastCalledWith('plugins.journal.list', { pluginId: 'acme.tools', before: 10, limit: 20 }, signal)
+    expect(page.entries.map((entry) => entry.seq)).toEqual([9, 5])
+    expect(page.entries[0]).toEqual({ ...good, granted: [] })
+    expect(page.entries[1]).toMatchObject({ origin: '', granted: ['ui:pages'] })
+    expect(page).toMatchObject({ next: 5, incomplete: true })
+    await port.clearJournal()
+    expect(call).toHaveBeenLastCalledWith('plugins.journal.clear', {})
+    const { session: odd } = fakeSession({ 'plugins.journal.list': { entries: 'none', next: 1.5 } })
+    expect(await new StdioPluginsPort(odd).listJournal({})).toEqual({ entries: [], next: 0, incomplete: false })
   })
 
   it('downloads a package without installing it', async () => {

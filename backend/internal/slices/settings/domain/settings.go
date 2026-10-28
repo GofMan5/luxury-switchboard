@@ -50,6 +50,10 @@ type Settings struct {
 	// system's reduced-motion preference still wins over it: a system-level
 	// request is a stronger statement than an app toggle.
 	AnimationsEnabled bool `json:"animationsEnabled"`
+	// PluginUpdateCheckEnabled lets the window check, once per launch, whether
+	// the links plugins were installed from carry a newer version. It contacts
+	// those hosts and only announces what it finds; nothing installs on its own.
+	PluginUpdateCheckEnabled bool `json:"pluginUpdateCheckEnabled"`
 	// FailoverEnabled turns the route chains on or off. Off means terminal
 	// verdicts end the request where they happened — strict routing for
 	// someone who wants to know exactly which provider served them.
@@ -87,16 +91,17 @@ func Defaults() Settings {
 		RetryBaseMilliseconds: 500, RetryMaxSeconds: 30,
 		PermanentAttempts: 2, MaxQueued: 10_000,
 		ActivityCapacity: 2_000, HistoryRetentionDays: 30,
-		TunnelRetentionHours:   72,
-		GuardrailMode:          DefaultGuardrailMode,
-		GuardrailProviderModes: map[string]string{},
-		GuardrailFindings:      500,
-		NotificationsEnabled:   true,
-		ProviderHealthEnabled:  true,
-		AnimationsEnabled:      true,
-		FailoverEnabled:        true,
-		ChainMode:              DefaultChainMode,
-		UpdateCheckInterval:    DefaultUpdateCheckInterval,
+		TunnelRetentionHours:     72,
+		GuardrailMode:            DefaultGuardrailMode,
+		GuardrailProviderModes:   map[string]string{},
+		GuardrailFindings:        500,
+		NotificationsEnabled:     true,
+		ProviderHealthEnabled:    true,
+		AnimationsEnabled:        true,
+		PluginUpdateCheckEnabled: true,
+		FailoverEnabled:          true,
+		ChainMode:                DefaultChainMode,
+		UpdateCheckInterval:      DefaultUpdateCheckInterval,
 	}
 }
 

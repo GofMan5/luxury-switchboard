@@ -46,13 +46,14 @@ type storedSettings struct {
 	// GuardrailProviderModes rides the same document; an absent field (a file
 	// from before the overrides existed) restores as no overrides, which is
 	// the same behavior the domain's Normalized would give it.
-	GuardrailProviderModes map[string]string `json:"guardrailProviderModes"`
-	GuardrailFindings      int               `json:"guardrailFindings"`
-	NotificationsEnabled   *bool             `json:"notificationsEnabled"`
-	ProviderHealthEnabled  *bool             `json:"providerHealthEnabled"`
-	AnimationsEnabled      *bool             `json:"animationsEnabled"`
-	FailoverEnabled        *bool             `json:"failoverEnabled"`
-	ChainMode              string            `json:"chainMode"`
+	GuardrailProviderModes   map[string]string `json:"guardrailProviderModes"`
+	GuardrailFindings        int               `json:"guardrailFindings"`
+	NotificationsEnabled     *bool             `json:"notificationsEnabled"`
+	ProviderHealthEnabled    *bool             `json:"providerHealthEnabled"`
+	AnimationsEnabled        *bool             `json:"animationsEnabled"`
+	PluginUpdateCheckEnabled *bool             `json:"pluginUpdateCheckEnabled"`
+	FailoverEnabled          *bool             `json:"failoverEnabled"`
+	ChainMode                string            `json:"chainMode"`
 	// UpdateCheckInterval rides the same document. An absent value (a file
 	// from before update checks existed) restores as empty, which the
 	// domain's Normalized reads as the default cadence — the same policy
@@ -113,6 +114,7 @@ func (stored storedSettings) restore() domain.Settings {
 	settings.NotificationsEnabled = stored.NotificationsEnabled == nil || *stored.NotificationsEnabled
 	settings.ProviderHealthEnabled = stored.ProviderHealthEnabled == nil || *stored.ProviderHealthEnabled
 	settings.AnimationsEnabled = stored.AnimationsEnabled == nil || *stored.AnimationsEnabled
+	settings.PluginUpdateCheckEnabled = stored.PluginUpdateCheckEnabled == nil || *stored.PluginUpdateCheckEnabled
 	settings.FailoverEnabled = stored.FailoverEnabled == nil || *stored.FailoverEnabled
 	// ChainMode normalizes empty (a pre-chain file) to the default in the
 	// domain; the switch itself carries the user's explicit choice.

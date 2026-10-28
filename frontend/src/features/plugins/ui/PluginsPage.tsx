@@ -1,5 +1,5 @@
-import { useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
-import { ChevronDown, ClipboardPaste, Download, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2, Link2Off, Puzzle, RefreshCw, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type ReactNode } from 'react'
+import { ChevronDown, ClipboardPaste, Copy, Download, ExternalLink, FolderOpen, LayoutGrid, LifeBuoy, Link2, Link2Off, Puzzle, RefreshCw, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
 import { EmptyState, Panel, Pill, type PillTone } from '../../../shared/ui/chrome'
 import { Button } from '../../../shared/ui/Button'
 import { formatBytes } from '../../../shared/format/metrics'
@@ -9,22 +9,25 @@ import { useAppServices } from '../../../app/services'
 import { EXAMPLE_PLUGINS } from '../domain/examples'
 import { PLUGIN_LIMIT, parsePackage, type PluginPackage } from '../domain/manifest'
 import { isPluginPermission, permissionSpec } from '../domain/permissions'
-import { knownTime, type LogEntry, type PluginRuntime, type PluginSummary, type RuntimeState } from '../domain/plugin'
-import { DevLinkDialog, InstallReviewDialog, LinkDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
+import { filterLog, knownTime, type LogEntry, type LogLevel, type PluginRuntime, type PluginSummary, type RuntimeState } from '../domain/plugin'
+import { ClearDataDialog, DevLinkDialog, InstallReviewDialog, LinkDialog, PasteDialog, PermissionsDialog, ProblemsDialog, RemoveDialog } from './PluginDialogs'
+import { PluginJournal } from './PluginJournal'
 import { PluginReference } from './PluginReference'
 import { PluginSettingsDialog } from './PluginSettingsDialog'
+import { sortUpdates, type DataResult, type PluginDataUsage, type UpdateCheck } from '../application/plugins-model'
 import { usePlugins } from './usePlugins'
 import styles from './PluginsPage.module.css'
 
 type Dialog =
   | { readonly kind: 'paste' }
   | { readonly kind: 'dev'; readonly error: string }
-  | { readonly kind: 'link'; readonly error: string; readonly problems: readonly string[]; readonly url?: string }
-  | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string; readonly source?: string }
+  | { readonly kind: 'link'; readonly error: string; readonly problems: readonly string[]; readonly url?: string; readonly expectedId?: string }
+  | { readonly kind: 'review'; readonly pkg: PluginPackage; readonly error: string; readonly source?: string; readonly expectedId?: string }
   | { readonly kind: 'problems'; readonly title: string; readonly problems: readonly string[] }
   | { readonly kind: 'permissions'; readonly id: string }
   | { readonly kind: 'settings'; readonly id: string }
   | { readonly kind: 'remove'; readonly id: string }
+  | { readonly kind: 'clear'; readonly id: string }
 
 /** Files larger than this cannot be a valid package (one command frame). */
 const FILE_LIMIT = 512 * 1024
@@ -35,16 +38,19 @@ export default function PluginsPage() {
   const layout = useSyncExternalStore(extensions.subscribe, extensions.snapshot).layout
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [notice, setNotice] = useState('')
+  // Bumped after a clear so the open details read the emptied storage again.
+  const [dataRevision, setDataRevision] = useState(0)
+  const [clearError, setClearError] = useState('')
   const [expanded, setExpanded] = useState<string>('')
   const [saving, setSaving] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
   const busy = state.pending !== ''
   const full = state.plugins.length >= PLUGIN_LIMIT
 
-  const review = (pkg: PluginPackage, source?: string) => {
+  const review = (pkg: PluginPackage, source?: string, expectedId?: string) => {
     model.clearError()
     setNotice('')
-    setDialog({ kind: 'review', pkg, error: '', source })
+    setDialog({ kind: 'review', pkg, error: '', source, expectedId })
   }
 
   const pick = (event: ChangeEvent<HTMLInputElement>) => {
@@ -62,20 +68,55 @@ export default function PluginsPage() {
     }, () => setDialog({ kind: 'problems', title: 'The file could not be read', problems: ['The file could not be read from disk.'] }))
   }
 
-  const download = async (url: string) => {
+  // An update names the plugin it is for, so the review refuses a link that
+  // now serves a different package.
+  const download = async (url: string, expectedId?: string) => {
     const result = await model.download(url)
-    if (result.ok) review(result.pkg, result.source)
-    else setDialog({ kind: 'link', error: result.message, problems: result.problems ?? [] })
+    if (result.ok) review(result.pkg, result.source, expectedId)
+    else setDialog({ kind: 'link', error: result.message, problems: result.problems ?? [], url, expectedId })
   }
 
-  const install = async (pkg: PluginPackage, granted: readonly string[], source?: string) => {
+  const update = (plugin: PluginSummary) => {
+    model.clearError()
+    setNotice('')
+    const offer = state.updates[plugin.id]
+    if (offer?.state === 'newer' || offer?.state === 'changed') review(offer.pkg, offer.source, plugin.id)
+    else void download(plugin.source, plugin.id)
+  }
+
+  const checkUpdates = async () => {
+    model.clearError()
+    setNotice('')
+    const { newer, changed, failed, checked } = await model.checkUpdates()
+    if (checked === 0) return
+    const found = newer > 0 ? `${newer} ${newer === 1 ? 'update' : 'updates'} available.` : failed === 0 && changed === 0 ? 'All linked plugins are up to date.' : 'No updates found.'
+    const parts = [found]
+    if (changed > 0) parts.push(`${changed} ${changed === 1 ? 'link serves' : 'links serve'} changed code under the installed version; review before reinstalling.`)
+    if (failed > 0) parts.push(`${failed} could not be checked.`)
+    setNotice(parts.join(' '))
+  }
+
+  const updateAll = async () => {
+    model.clearError()
+    setNotice('')
+    const { updated, review, failed } = await model.updateAll(appVersion)
+    const plural = (count: number) => `${count} ${count === 1 ? 'plugin' : 'plugins'}`
+    const parts = [
+      updated.length ? `Updated ${updated.length === 1 ? `${updated[0]?.name} to ${updated[0]?.version}` : plural(updated.length)}.` : '',
+      review.length ? `${plural(review.length)} ${review.length === 1 ? 'needs' : 'need'} your review: use Update on ${review.length === 1 ? 'its row' : 'their rows'}.` : '',
+      failed.length === 1 ? `${failed[0]?.id} could not be updated: ${failed[0]?.message}` : failed.length ? `${plural(failed.length)} could not be updated.` : '',
+    ]
+    setNotice(parts.filter(Boolean).join(' '))
+  }
+
+  const install = async (pkg: PluginPackage, granted: readonly string[], source?: string, expectedId?: string) => {
     const upgrade = state.plugins.some((plugin) => plugin.id === pkg.id)
     const result = await model.install(pkg, granted, source)
     if (result.ok) {
       setDialog(null)
       setNotice(`${result.plugin.name} ${result.plugin.version} ${upgrade ? 'updated' : 'installed'}.`)
     } else {
-      setDialog({ kind: 'review', pkg, error: result.message, source })
+      setDialog({ kind: 'review', pkg, error: result.message, source, expectedId })
     }
   }
 
@@ -97,7 +138,10 @@ export default function PluginsPage() {
     }
   }
 
-  const current = dialog && (dialog.kind === 'permissions' || dialog.kind === 'settings' || dialog.kind === 'remove')
+  const linked = capabilities.includes('plugins.download') && state.plugins.some((plugin) => plugin.source !== '' && !plugin.dev)
+  const offers = linked ? sortUpdates(state.plugins, state.updates, appVersion).quiet.length : 0
+
+  const current = dialog && (dialog.kind === 'permissions' || dialog.kind === 'settings' || dialog.kind === 'remove' || dialog.kind === 'clear')
     ? state.plugins.find((plugin) => plugin.id === dialog.id)
     : undefined
 
@@ -115,6 +159,16 @@ export default function PluginsPage() {
           {capabilities.includes('plugins.download') ? (
             <Button onClick={() => { model.clearError(); setNotice(''); setDialog({ kind: 'link', error: '', problems: [] }) }} disabled={busy || state.phase !== 'ready'}>
               <Link2 size={14} aria-hidden="true" />Install from link…
+            </Button>
+          ) : null}
+          {linked ? (
+            <Button onClick={() => void checkUpdates()} disabled={busy || state.checking || state.phase !== 'ready'} aria-busy={state.checking || undefined} title="Download each linked plugin's package and compare its version; nothing is installed">
+              <RefreshCw size={14} aria-hidden="true" />{state.checking ? 'Checking…' : 'Check for updates'}
+            </Button>
+          ) : null}
+          {offers > 0 || state.pending === 'update-all' ? (
+            <Button onClick={() => void updateAll()} disabled={busy || state.checking || state.phase !== 'ready'} aria-busy={state.pending === 'update-all' || undefined} title="Install every update that asks for nothing new; one that asks for new permissions or hosts, needs a newer app or belongs to a turned-off plugin waits for your review">
+              <Download size={14} aria-hidden="true" />{state.pending === 'update-all' ? 'Updating…' : `Update all (${offers})`}
             </Button>
           ) : null}
           <Button onClick={() => { setNotice(''); setDialog({ kind: 'paste' }) }} disabled={busy || state.phase !== 'ready'}>
@@ -178,9 +232,13 @@ export default function PluginsPage() {
                   onSettings={() => { model.clearError(); setNotice(''); setDialog({ kind: 'settings', id: plugin.id }) }}
                   onRestart={() => void model.restart(plugin.id)}
                   onRemove={() => { model.clearError(); setDialog({ kind: 'remove', id: plugin.id }) }}
-                  onUpdate={plugin.source && !plugin.dev && capabilities.includes('plugins.download')
-                    ? () => { model.clearError(); setNotice(''); setDialog({ kind: 'link', error: '', problems: [], url: plugin.source }) }
-                    : undefined}
+                  loadData={() => model.loadData(plugin.id)}
+                  dataRevision={dataRevision}
+                  onCopyLog={(entries) => model.copyLog(entries)}
+                  onSaveLog={(entries) => model.saveLog(plugin.id, entries)}
+                  onClearData={() => { setClearError(''); setNotice(''); setDialog({ kind: 'clear', id: plugin.id }) }}
+                  onUpdate={plugin.source && !plugin.dev && capabilities.includes('plugins.download') ? () => update(plugin) : undefined}
+                  update={state.updates[plugin.id]}
                   saving={saving === plugin.id}
                   onSave={capabilities.includes('plugins.export') ? () => void savePackage(plugin) : undefined}
                   onUnlink={() => { setNotice(''); void model.devUnlink(plugin.id).then((ok) => { if (ok) setNotice(`${plugin.name} is no longer loaded from its folder; the last loaded version stays installed.`) }) }}
@@ -212,13 +270,15 @@ export default function PluginsPage() {
           </ul>
         </Panel>
 
+        {capabilities.includes('plugins.journal') ? <PluginJournal model={model} plugins={state.plugins} /> : null}
+
         <Panel title="Developer reference" subtitle="Everything a package can contain and do.">
           <PluginReference />
         </Panel>
       </div>
 
       {dialog?.kind === 'dev' ? <DevLinkDialog pending={state.pending === 'install'} error={dialog.error} onCancel={() => setDialog(null)} onLink={(path) => void link(path)} /> : null}
-      {dialog?.kind === 'link' ? <LinkDialog pending={state.pending === 'install'} error={dialog.error} problems={dialog.problems} initialUrl={dialog.url} onCancel={() => setDialog(null)} onDownload={(url) => void download(url)} /> : null}
+      {dialog?.kind === 'link' ? <LinkDialog pending={state.pending === 'install'} error={dialog.error} problems={dialog.problems} initialUrl={dialog.url} onCancel={() => setDialog(null)} onDownload={(url) => void download(url, dialog.expectedId)} /> : null}
       {dialog?.kind === 'paste' ? <PasteDialog onCancel={() => setDialog(null)} onReview={review} /> : null}
       {dialog?.kind === 'problems' ? <ProblemsDialog title={dialog.title} problems={dialog.problems} onClose={() => setDialog(null)} /> : null}
       {dialog?.kind === 'review' ? (
@@ -227,10 +287,11 @@ export default function PluginsPage() {
           existing={state.plugins.find((plugin) => plugin.id === dialog.pkg.id)}
           appVersion={appVersion}
           source={dialog.source}
+          expectedId={dialog.expectedId}
           pending={state.pending === 'install'}
           error={dialog.error || (!state.plugins.some((plugin) => plugin.id === dialog.pkg.id) && full ? `At most ${PLUGIN_LIMIT} plugins can be installed; remove one first.` : '')}
           onCancel={() => setDialog(null)}
-          onInstall={(granted) => void install(dialog.pkg, granted, dialog.source)}
+          onInstall={(granted) => void install(dialog.pkg, granted, dialog.source, dialog.expectedId)}
         />
       ) : null}
       {dialog?.kind === 'permissions' && current ? (
@@ -256,6 +317,20 @@ export default function PluginsPage() {
             setDialog(null)
             setNotice(`Settings for ${current.name} saved.`)
           }}
+        />
+      ) : null}
+      {dialog?.kind === 'clear' && current ? (
+        <ClearDataDialog
+          plugin={current}
+          pending={state.pending === current.id}
+          error={clearError}
+          onCancel={() => setDialog(null)}
+          onConfirm={() => void model.clearData(current.id).then((result) => {
+            setDataRevision((value) => value + 1)
+            if (!result.ok) { setClearError(result.message); return }
+            setDialog(null)
+            setNotice(`Stored data for ${current.name} cleared.`)
+          })}
         />
       ) : null}
       {dialog?.kind === 'remove' && current ? (
@@ -284,7 +359,7 @@ const STATE: Readonly<Record<RuntimeState, { readonly label: string; readonly to
   stopped: { label: 'Not running', tone: 'neutral' },
 }
 
-function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove, onUnlink, onUpdate, onSave }: {
+function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving, onExpand, onToggle, onPermissions, onSettings, onRestart, onRemove, onUnlink, onUpdate, update, onSave, loadData, dataRevision, onClearData, onCopyLog, onSaveLog }: {
   readonly plugin: PluginSummary
   readonly runtime: PluginRuntime | undefined
   readonly pending: boolean
@@ -298,9 +373,16 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
   readonly onRestart: () => void
   readonly onRemove: () => void
   readonly onUnlink: () => void
+  readonly loadData: () => Promise<DataResult>
+  readonly dataRevision: number
+  readonly onClearData: () => void
+  readonly onCopyLog: (entries: readonly LogEntry[]) => Promise<boolean>
+  readonly onSaveLog: (entries: readonly LogEntry[]) => Promise<boolean>
   readonly saving: boolean
   /** Reinstalls from the link the plugin came from; absent without one. */
   readonly onUpdate?: () => void
+  /** The last check of that link, if one ran. */
+  readonly update?: UpdateCheck
   /** Saves the installed package as a file; absent when unsupported. */
   readonly onSave?: () => void
 }) {
@@ -336,12 +418,20 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
             {plugin.author ? <span className={styles.author}>by {plugin.author}</span> : null}
             <Pill tone={display.tone}>{pending ? 'Saving…' : display.label}</Pill>
             {plugin.dev ? <Pill tone="info">Dev</Pill> : null}
+            {update?.state === 'newer' ? <Pill tone="info">Update {update.pkg.version} available</Pill> : null}
+            {update?.state === 'changed' ? <Pill tone="warning">Code changed without a new version</Pill> : null}
           </div>
           {plugin.dev ? <p className={styles.devPath} title={plugin.dev.path}>Loaded from <code>{plugin.dev.path}</code></p> : null}
           {plugin.dev?.problem ? (
             <p className={styles.problemNote} role="status">
               <TriangleAlert size={13} aria-hidden="true" />
               <span>The folder's latest change was not loaded: {plugin.dev.problem}</span>
+            </p>
+          ) : null}
+          {update?.state === 'error' ? (
+            <p className={styles.problemNote} role="status">
+              <TriangleAlert size={13} aria-hidden="true" />
+              <span>The update check failed: {update.message}</span>
             </p>
           ) : null}
           {plugin.description ? <p className={styles.description}>{plugin.description}</p> : null}
@@ -390,7 +480,7 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
           ) : null}
           {onUpdate ? (
             <Button variant="ghost" disabled={busy} onClick={onUpdate} title="Download the package again from the link it was installed from and review it">
-              <RefreshCw size={13} aria-hidden="true" />Update from link
+              <RefreshCw size={13} aria-hidden="true" />{update?.state === 'newer' ? `Update to ${update.pkg.version}` : update?.state === 'changed' ? 'Review changed code' : 'Update from link'}
             </Button>
           ) : null}
           {onSave && !blocked ? (
@@ -409,13 +499,23 @@ function PluginRow({ plugin, runtime, pending, busy, safeMode, expanded, saving,
           </Button>
         </div>
       </div>
-      {expanded ? <PluginDetails id={details} plugin={plugin} runtime={runtime} /> : null}
+      {expanded ? (
+        <PluginDetails id={details} plugin={plugin} runtime={runtime} onCopyLog={onCopyLog} onSaveLog={onSaveLog}>
+          <StoredData load={loadData} revision={dataRevision} disabled={busy} onClear={onClearData} />
+        </PluginDetails>
+      ) : null}
     </li>
   )
 }
 
-function PluginDetails({ id, plugin, runtime }: { readonly id: string; readonly plugin: PluginSummary; readonly runtime: PluginRuntime | undefined }) {
-  const logs = runtime?.logs ?? []
+function PluginDetails({ id, plugin, runtime, children, onCopyLog, onSaveLog }: {
+  readonly id: string
+  readonly plugin: PluginSummary
+  readonly runtime: PluginRuntime | undefined
+  readonly children: ReactNode
+  readonly onCopyLog: (entries: readonly LogEntry[]) => Promise<boolean>
+  readonly onSaveLog: (entries: readonly LogEntry[]) => Promise<boolean>
+}) {
   return (
     <div id={id} className={styles.details}>
       <dl className={styles.facts}>
@@ -457,17 +557,117 @@ function PluginDetails({ id, plugin, runtime }: { readonly id: string; readonly 
         ) : null}
         {runtime?.faults ? <div><dt>Handler errors</dt><dd>{runtime.faults}</dd></div> : null}
       </dl>
+      {children}
       {runtime?.pages.length ? (
         <div className={styles.pageLinks}>
           {runtime.pages.map((page) => <a key={page.key} href={`#plugin/${page.key}`}>{page.title}</a>)}
         </div>
       ) : null}
+      <LogSection logs={runtime?.logs ?? []} hasScript={plugin.hasScript} onCopy={onCopyLog} onSave={onSaveLog} />
+    </div>
+  )
+}
+
+/** What the plugin keeps on this machine, with a way to start it afresh. */
+function StoredData({ load, revision, disabled, onClear }: {
+  readonly load: () => Promise<DataResult>
+  readonly revision: number
+  readonly disabled: boolean
+  readonly onClear: () => void
+}) {
+  const [result, setResult] = useState<DataResult | null>(null)
+  const loadRef = useRef(load)
+  loadRef.current = load
+  useEffect(() => {
+    let live = true
+    void loadRef.current().then((answer) => { if (live) setResult(answer) })
+    return () => { live = false }
+  }, [revision])
+  const usage = result?.ok ? result.usage : null
+  return (
+    <div className={styles.dataRow}>
+      <div className={styles.dataText}>
+        <h3>Stored data</h3>
+        {result === null ? <p className={styles.muted}>Reading…</p>
+          : result.ok ? <DataSummary usage={result.usage} />
+            : <p className={styles.muted} role="status">Unavailable: {result.message}</p>}
+      </div>
+      <Button disabled={disabled || !usage || isEmpty(usage)} onClick={onClear}>Clear data…</Button>
+    </div>
+  )
+}
+
+function DataSummary({ usage }: { readonly usage: PluginDataUsage }) {
+  const { storage, collections } = usage
+  const documents = collections.collections.reduce((sum, entry) => sum + entry.count, 0)
+  const sets = collections.collections.length
+  // formatBytes shows a dash for zero, which reads as unknown here.
+  const size = (bytes: number) => bytes > 0 ? formatBytes(bytes) : '0 B'
+  return (
+    <ul className={styles.dataFacts}>
+      <li>{storage.values === 0 ? 'No values' : `${storage.values} ${storage.values === 1 ? 'value' : 'values'}`}, {size(storage.bytes)} of {formatBytes(storage.limitBytes)} including settings</li>
+      <li>{documents === 0 ? 'No documents' : `${documents} ${documents === 1 ? 'document' : 'documents'} in ${sets} ${sets === 1 ? 'collection' : 'collections'}`}, {size(collections.bytes)} of {formatBytes(collections.limitBytes)}</li>
+    </ul>
+  )
+}
+
+function isEmpty(usage: PluginDataUsage): boolean {
+  return usage.storage.values === 0 && usage.collections.collections.length === 0
+}
+
+const LEVEL_CHOICES: readonly { readonly value: LogLevel; readonly label: string }[] = [
+  { value: 'debug', label: 'All levels' },
+  { value: 'info', label: 'Info and above' },
+  { value: 'warn', label: 'Warnings and errors' },
+  { value: 'error', label: 'Errors only' },
+]
+
+/** The session log with a level filter; copy and save take the lines shown. */
+function LogSection({ logs, hasScript, onCopy, onSave }: {
+  readonly logs: readonly LogEntry[]
+  readonly hasScript: boolean
+  readonly onCopy: (entries: readonly LogEntry[]) => Promise<boolean>
+  readonly onSave: (entries: readonly LogEntry[]) => Promise<boolean>
+}) {
+  const [least, setLeast] = useState<LogLevel>('debug')
+  const [done, setDone] = useState('')
+  const [working, setWorking] = useState(false)
+  const shown = filterLog(logs, least)
+  const lines = (count: number) => `${count} ${count === 1 ? 'line' : 'lines'}`
+  const run = (action: typeof onCopy, message: string) => {
+    setDone('')
+    setWorking(true)
+    void action(shown).then((ok) => { if (ok) setDone(message) }).finally(() => setWorking(false))
+  }
+  const summary = logs.length === 0 ? ''
+    : shown.length === logs.length ? `Last ${lines(logs.length)}, this session only`
+      : `${shown.length} of ${lines(logs.length)} shown, this session only`
+  return (
+    <>
       <div className={styles.logHeader}>
         <h3>Log</h3>
-        <span className={styles.muted}>{logs.length ? `Last ${logs.length} lines, this session only` : ''}</span>
+        <span className={styles.muted} role="status">{done || summary}</span>
+        {logs.length ? (
+          <div className={styles.logTools}>
+            <label className={styles.logFilter}>
+              <span>Level</span>
+              <select value={least} onChange={(event) => { setDone(''); setLeast(event.currentTarget.value as LogLevel) }}>
+                {LEVEL_CHOICES.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+              </select>
+            </label>
+            <Button disabled={working || shown.length === 0} onClick={() => run(onCopy, `Copied ${lines(shown.length)}.`)}>
+              <Copy size={14} aria-hidden="true" />Copy
+            </Button>
+            <Button disabled={working || shown.length === 0} onClick={() => run(onSave, `Saved ${lines(shown.length)}.`)}>
+              <Download size={14} aria-hidden="true" />Save…
+            </Button>
+          </div>
+        ) : null}
       </div>
-      {logs.length === 0 ? <p className={styles.muted}>{plugin.hasScript ? 'Nothing logged yet.' : 'This plugin has no script, so it never logs.'}</p> : <LogView logs={logs} />}
-    </div>
+      {logs.length === 0 ? <p className={styles.muted}>{hasScript ? 'Nothing logged yet.' : 'This plugin has no script, so it never logs.'}</p>
+        : shown.length === 0 ? <p className={styles.muted}>No lines at this level.</p>
+          : <LogView logs={shown} />}
+    </>
   )
 }
 

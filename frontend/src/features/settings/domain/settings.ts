@@ -41,6 +41,9 @@ export interface Settings {
   readonly providerHealthEnabled: boolean
   /** Motion switch for the interface. Reduced-motion at the OS level still wins. */
   readonly animationsEnabled: boolean
+  /** Once per launch, looks for newer versions at the links plugins were
+   * installed from and announces them. Never installs anything. */
+  readonly pluginUpdateCheckEnabled: boolean
   /** Route chains: on moves a request to the next provider after a verdict no
    * retry could change; off keeps routing strict. */
   readonly failoverEnabled: boolean
@@ -87,6 +90,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   notificationsEnabled: true,
   providerHealthEnabled: true,
   animationsEnabled: true,
+  pluginUpdateCheckEnabled: true,
   failoverEnabled: true,
   chainMode: 'balance',
   updateCheckInterval: '1m',

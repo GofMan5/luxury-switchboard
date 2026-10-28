@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
-import type { PluginDetail, PluginSummary } from '../domain/plugin'
+import type { JournalEntry, JournalPage, JournalQuery } from '../domain/journal'
+import type { CollectionUsage, PluginDetail, PluginSummary } from '../domain/plugin'
 import type { HostMessage } from '../domain/protocol'
 import type { OpenSpec } from '../domain/specs'
 import { PluginBus } from './plugin-bus'
@@ -105,7 +106,7 @@ export class MemoryPluginsPort implements PluginsPort {
       this.packages.set(pkg.id, structuredClone(pkg))
       const plugin = summary({
         id: pkg.id, name: pkg.name, version: pkg.version, permissions: pkg.permissions, granted: [...granted],
-        homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '', source,
+        homepage: pkg.homepage ?? '', minAppVersion: pkg.minAppVersion ?? '', source, hosts: pkg.network?.hosts ?? [],
         updatedAt: `2026-01-01T00:00:${String(this.#installs).padStart(2, '0')}Z`,
         hasScript: Boolean(pkg.script), hasCss: Boolean(pkg.css), hasTheme: Boolean(pkg.theme), hasSettings: Boolean(pkg.settings?.length),
       })
@@ -139,6 +140,21 @@ export class MemoryPluginsPort implements PluginsPort {
       this.writes.push({ ...changes })
       this.values.set(id, values)
       return { ...values }
+    })
+  }
+  /** Documents per collection, per plugin. */
+  readonly collections = new Map<string, Record<string, { count: number; bytes: number }>>()
+  async collectionStats(id: string): Promise<CollectionUsage> {
+    return this.#guard(() => {
+      const entries = Object.entries(this.collections.get(id) ?? {}).map(([name, stats]) => ({ name, ...stats }))
+      return { collections: entries, bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0), limitBytes: 2 * 1024 * 1024 }
+    })
+  }
+  async collectionClearAll(id: string): Promise<number> {
+    return this.#guard(() => {
+      const cleared = Object.values(this.collections.get(id) ?? {}).reduce((sum, entry) => sum + entry.count, 0)
+      this.collections.delete(id)
+      return cleared
     })
   }
   readonly secretWrites: { id: string; key: string; set: boolean }[] = []
@@ -188,6 +204,19 @@ export class MemoryPluginsPort implements PluginsPort {
   /** Another window changed the store. */
   emit(): void { for (const listener of this.listeners) listener([...this.plugins]) }
 
+  /** Newest first, as the control plane answers. */
+  journal: JournalEntry[] = []
+  readonly journalQueries: JournalQuery[] = []
+  async listJournal(query: JournalQuery): Promise<JournalPage> {
+    return this.#guard(() => {
+      this.journalQueries.push(query)
+      const matching = this.journal.filter((entry) => (!query.pluginId || entry.pluginId === query.pluginId) && (!query.before || entry.seq < query.before))
+      const limit = query.limit ?? 50
+      const entries = matching.slice(0, limit)
+      return { entries, next: matching.length > limit ? entries[entries.length - 1].seq : 0, incomplete: false }
+    })
+  }
+  async clearJournal(): Promise<void> { this.#guard(() => { this.journal = [] }) }
   #guard<T>(run: () => T): T {
     const failure = this.failNext
     this.failNext = null

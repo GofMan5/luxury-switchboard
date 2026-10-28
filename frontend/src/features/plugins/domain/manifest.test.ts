@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { EXAMPLE_PLUGINS } from './examples'
-import { CSS_BYTES, PACKAGE_SCHEMA, SCRIPT_BYTES, byteLength, checkPackage, packageBytes, packageSizeProblem, parsePackage } from './manifest'
-import { PERMISSION_SPECS, defaultGrants, effectiveGrants, initialGrants } from './permissions'
+import { CSS_BYTES, PACKAGE_SCHEMA, SCRIPT_BYTES, byteLength, checkPackage, compareVersions, packageBytes, packageSizeProblem, parsePackage } from './manifest'
+import { PERMISSION_SPECS, defaultGrants, effectiveGrants, initialGrants, upgradeAsksMore, upgradeChanges } from './permissions'
 
 const base = { schema: PACKAGE_SCHEMA, id: 'acme.tools', name: 'Acme tools', version: '1.0.0', permissions: [] as string[] }
 
@@ -138,5 +138,58 @@ describe('grants', () => {
     const previous = { permissions: ['net:fetch', 'storage'], granted: ['net:fetch', 'storage'], hosts: ['api.example.com'] }
     expect(initialGrants(['net:fetch', 'storage'], previous, ['api.example.com'])).toEqual(['net:fetch', 'storage'])
     expect(initialGrants(['net:fetch', 'storage'], previous, ['api.example.com', 'collect.example.net'])).toEqual(['storage'])
+  })
+})
+
+describe('compareVersions', () => {
+  it('orders numeric parts, padding missing ones', () => {
+    expect(compareVersions('1.2.0', '1.10.0')).toBe(-1)
+    expect(compareVersions('2.0', '1.9.9')).toBe(1)
+    expect(compareVersions('1.0', '1.0.0')).toBe(0)
+  })
+
+  it('puts a prerelease before its release and orders prereleases', () => {
+    expect(compareVersions('1.0.0-beta', '1.0.0')).toBe(-1)
+    expect(compareVersions('1.0.0', '1.0.0-rc.1')).toBe(1)
+    expect(compareVersions('1.0.0-alpha', '1.0.0-alpha.1')).toBe(-1)
+    expect(compareVersions('1.0.0-beta.2', '1.0.0-beta.11')).toBe(-1)
+    expect(compareVersions('1.0.0-1', '1.0.0-alpha')).toBe(-1)
+    expect(compareVersions('1.0.0-rc', '1.0.0-beta')).toBe(1)
+  })
+
+  it('ignores build metadata', () => {
+    expect(compareVersions('1.0.0+abc', '1.0.0+def')).toBe(0)
+    expect(compareVersions('1.0.1+1', '1.0.0+9')).toBe(1)
+  })
+
+  it('claims no order for unnumbered versions', () => {
+    expect(compareVersions('nightly', '1.0.0')).toBeNull()
+    expect(compareVersions('1.0.0', 'v1.0.0')).toBeNull()
+    expect(compareVersions('1..0', '1.0.0')).toBeNull()
+    expect(compareVersions('1.0.0-', '1.0.0')).toBeNull()
+  })
+})
+
+describe('upgradeChanges', () => {
+  it('lists dropped permissions and host changes', () => {
+    expect(upgradeChanges(
+      { permissions: ['ui:pages', 'net:fetch', 'unknown:thing'], hosts: ['a.example', 'b.example'] },
+      { permissions: ['ui:pages', 'net:fetch'], hosts: ['b.example', 'c.example'] },
+    )).toEqual({ droppedPermissions: [], addedHosts: ['c.example'], droppedHosts: ['a.example'] })
+    expect(upgradeChanges({ permissions: ['ui:pages', 'net:fetch'], hosts: ['a.example'] }, { permissions: ['ui:pages'], hosts: [] }))
+      .toEqual({ droppedPermissions: ['net:fetch'], addedHosts: [], droppedHosts: ['a.example'] })
+  })
+})
+
+describe('upgradeAsksMore', () => {
+  const previous = { permissions: ['ui:pages', 'net:fetch'], hosts: ['a.example'] }
+  it('is quiet for the same or fewer permissions and hosts', () => {
+    expect(upgradeAsksMore(previous, previous)).toBe(false)
+    expect(upgradeAsksMore(previous, { permissions: ['ui:pages'], hosts: [] })).toBe(false)
+    expect(upgradeAsksMore(previous, { permissions: ['ui:pages', 'net:fetch', 'unknown:thing'], hosts: ['a.example'] })).toBe(false)
+  })
+  it('asks for a new permission or a new host', () => {
+    expect(upgradeAsksMore(previous, { permissions: ['ui:pages', 'net:fetch', 'ui:css'], hosts: ['a.example'] })).toBe(true)
+    expect(upgradeAsksMore(previous, { permissions: ['ui:pages', 'net:fetch'], hosts: ['a.example', 'b.example'] })).toBe(true)
   })
 })

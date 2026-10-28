@@ -236,3 +236,37 @@ func devFailure(err error) error {
 	}
 	return failure(err)
 }
+
+type journalPayload struct {
+	PluginID string `json:"pluginId"`
+	Before   int64  `json:"before"`
+	Limit    int    `json:"limit"`
+}
+
+// RegisterJournal serves plugins.journal.list and plugins.journal.clear: the
+// owner's history of plugin changes. Plugin workers cannot call them.
+func RegisterJournal(server *platform.Server, journal *application.Journal) {
+	server.Handle("plugins.journal.list", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		var request journalPayload
+		if platform.DecodePayload(payload, &request) != nil {
+			return nil, invalid("Plugin journal request is malformed")
+		}
+		page, err := journal.List(ctx, request.PluginID, request.Before, request.Limit)
+		if errors.Is(err, application.ErrTooLarge) {
+			return nil, platform.MethodError{Code: "plugin_journal_too_large", Message: "Plugin journal entry is too large to show"}
+		}
+		if err != nil {
+			return nil, failure(err)
+		}
+		return page, nil
+	})
+	server.Handle("plugins.journal.clear", func(ctx context.Context, payload json.RawMessage) (any, error) {
+		if err := platform.DecodePayload(payload, &struct{}{}); err != nil {
+			return nil, invalid("Plugin journal clear is malformed")
+		}
+		if err := journal.Clear(ctx); err != nil {
+			return nil, platform.MethodError{Code: "plugin_journal_clear_failed", Message: "Plugin journal could not be cleared"}
+		}
+		return map[string]bool{"ok": true}, nil
+	})
+}

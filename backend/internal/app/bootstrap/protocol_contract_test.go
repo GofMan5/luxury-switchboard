@@ -84,12 +84,12 @@ func TestEditionAnswersOnlyItsOwnCommands(t *testing.T) {
 
 	// One build serves everything: the publishing stack is part of the product,
 	// and the handshake's capability list must admit what the binary answers.
-	for _, method := range []string{"tunnel.get", "clients.list", "relay.status", "guardrails.status", "codex.status", "codex.quota", "appearance.get", "plugins.list", "rules.list"} {
+	for _, method := range []string{"tunnel.get", "clients.list", "relay.status", "guardrails.status", "codex.status", "codex.quota", "appearance.get", "plugins.list", "plugins.journal.list", "rules.list"} {
 		if answer := call(t, toApp, answers, method); !answer.OK {
 			t.Fatalf("the build refused %s: %s", method, answer.Error.Code)
 		}
 	}
-	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage", "codex.login", "codex.quota", "appearance.manage", "plugins.manage", "plugins.download", "plugins.export", "rules.manage"} {
+	for _, capability := range []string{"tunnel.manage", "clients.manage", "guardrails.manage", "codex.login", "codex.quota", "appearance.manage", "plugins.manage", "plugins.download", "plugins.export", "plugins.journal", "rules.manage"} {
 		if !slices.Contains(handshake.Payload.Capabilities, capability) {
 			t.Fatalf("the handshake hides a workspace this binary serves: %v", handshake.Payload.Capabilities)
 		}

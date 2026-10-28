@@ -1,12 +1,13 @@
 import type { ReactNode } from 'react'
 import type { ExtensionPoints, SlotContext } from '../../../shared/contracts/extensions'
 import type { CanvasChannel } from '../domain/canvas'
-import { PLUGIN_LIMIT, checkPackage, packageSizeProblem, type PluginPackage } from '../domain/manifest'
-import { effectiveGrants } from '../domain/permissions'
-import { IDLE_RUNTIME, splitPageKey, type PluginRuntime, type PluginSummary } from '../domain/plugin'
+import { PLUGIN_LIMIT, checkPackage, compareVersions, needsNewerApp, packageSizeProblem, type PluginPackage } from '../domain/manifest'
+import { effectiveGrants, initialGrants, upgradeAsksMore } from '../domain/permissions'
+import { IDLE_RUNTIME, STORAGE_LIMITS, formatLog, splitPageKey, type CollectionUsage, type LogEntry, type PluginRuntime, type PluginSummary } from '../domain/plugin'
 import { isRecord, type PageEvent } from '../domain/protocol'
-import { acceptValue, isSecretSetting, secretProblem, settingStorageKey, settingValues, valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
+import { acceptValue, isSecretSetting, isSettingStorageKey, secretProblem, settingStorageKey, settingValues, valueProblem, type PluginSetting, type SettingValue } from '../domain/settings'
 import type { ToneSpec } from '../domain/specs'
+import type { JournalPage, JournalQuery } from '../domain/journal'
 import { PluginBus } from './plugin-bus'
 import { PluginHost, revisionOf, type PluginDialog, type PluginPage, type PluginSurface } from './plugin-host'
 import type { Announcement, BootContext, ConfirmRequest, ControlPort, FilesPort, PluginsPort, ThemePort, WorkerFactory } from './ports'
@@ -29,7 +30,22 @@ export interface PluginsState {
   /** The question a plugin is asking the operator right now, if any; others
    * wait their turn. */
   readonly asking: PluginQuestion | null
+  /** True while installed plugins' links are being checked for updates. */
+  readonly checking: boolean
+  /** The latest update check of each plugin installed from a link, by id. */
+  readonly updates: Readonly<Record<string, UpdateCheck>>
 }
+
+/** What a plugin's link serves compared with the installed version. A link
+ * that now holds another plugin, or a version that cannot be ordered, is an
+ * error rather than an offer. `changed` is the same version with different
+ * contents — new code under an old number — and always waits for a review;
+ * `updatedAt` is the installed revision it was compared with. */
+export type UpdateCheck =
+  | { readonly state: 'newer'; readonly pkg: PluginPackage; readonly source: string }
+  | { readonly state: 'changed'; readonly pkg: PluginPackage; readonly source: string; readonly updatedAt: string }
+  | { readonly state: 'current' }
+  | { readonly state: 'error'; readonly message: string }
 
 export interface PluginQuestion extends ConfirmRequest {
   readonly id: number
@@ -41,13 +57,55 @@ export interface PluginSettingsView {
   readonly values: Readonly<Record<string, SettingValue>>
 }
 
+/** What a plugin stores on this machine. `values` leaves out the operator's
+ * settings, which live in the same storage and count against its limit. */
+export interface PluginDataUsage {
+  readonly storage: { readonly values: number; readonly bytes: number; readonly limitBytes: number; readonly limitKeys: number }
+  readonly collections: CollectionUsage
+}
+
+export type DataResult = { readonly ok: true; readonly usage: PluginDataUsage } | { readonly ok: false; readonly message: string }
+
 export type SaveResult = { readonly ok: true } | { readonly ok: false; readonly message: string }
+
+/** What `updateAll` did: who was updated, who was left for the usual review
+ * (the update asks for more, needs a newer app, or the plugin is switched
+ * off), and who failed (by id). */
+/** Splits the offered updates: `quiet` ones ask for nothing the operator has
+ * not already decided, so Update all installs them with the previous grants;
+ * the rest (new permissions or hosts, a newer app, a switched-off plugin, which
+ * installing would switch on) wait for a review on their own row. */
+export function sortUpdates(plugins: readonly PluginSummary[], updates: Readonly<Record<string, UpdateCheck>>, appVersion: string): {
+  quiet: { plugin: PluginSummary; check: Extract<UpdateCheck, { state: 'newer' }> }[]
+  review: string[]
+} {
+  const quiet: { plugin: PluginSummary; check: Extract<UpdateCheck, { state: 'newer' }> }[] = []
+  const review: string[] = []
+  for (const plugin of plugins) {
+    const check = updates[plugin.id]
+    if (check?.state === 'changed') { review.push(plugin.id); continue }
+    if (check?.state !== 'newer') continue
+    const asks = !plugin.enabled || needsNewerApp(check.pkg.minAppVersion, appVersion)
+      || upgradeAsksMore(plugin, { permissions: check.pkg.permissions, hosts: check.pkg.network?.hosts ?? [] })
+    if (asks) review.push(plugin.id)
+    else quiet.push({ plugin, check })
+  }
+  return { quiet, review }
+}
+
+export interface UpdateAllResult {
+  readonly updated: readonly PluginSummary[]
+  readonly review: readonly string[]
+  readonly failed: readonly { readonly id: string; readonly message: string }[]
+}
 
 export type InstallResult = { readonly ok: true; readonly plugin: PluginSummary } | { readonly ok: false; readonly message: string }
 
 export type DownloadResult =
   | { readonly ok: true; readonly pkg: PluginPackage; readonly source: string }
   | { readonly ok: false; readonly message: string; readonly problems?: readonly string[] }
+
+export type JournalResult = { readonly ok: true; readonly page: JournalPage } | { readonly ok: false; readonly message: string }
 
 export interface PluginsDeps {
   readonly port: PluginsPort
@@ -107,7 +165,7 @@ export class PluginsModel {
 
   constructor(deps: PluginsDeps) {
     this.#deps = deps
-    this.#state = { phase: 'loading', plugins: [], runtimes: {}, pages: {}, surfaces: {}, dialogs: {}, pending: '', error: '', safeMode: deps.safeMode, asking: null }
+    this.#state = { phase: 'loading', plugins: [], runtimes: {}, pages: {}, surfaces: {}, dialogs: {}, pending: '', error: '', safeMode: deps.safeMode, asking: null, checking: false, updates: {} }
   }
 
   snapshot = (): PluginsState => this.#state
@@ -140,21 +198,55 @@ export class PluginsModel {
    * makes the control plane forget the previous link. */
   async install(pkg: PluginPackage, granted: readonly string[], source?: string): Promise<InstallResult> {
     if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
+    this.#set({ ...this.#state, pending: 'install', error: '' })
+    try {
+      return await this.#install(pkg, granted, source)
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  async #install(pkg: PluginPackage, granted: readonly string[], source?: string): Promise<InstallResult> {
     const grants = effectiveGrants(pkg.permissions, granted)
     const upgrade = this.#state.plugins.some((plugin) => plugin.id === pkg.id)
     if (!upgrade && this.#state.plugins.length >= PLUGIN_LIMIT) return { ok: false, message: ERRORS.plugin_limit }
     const sizeProblem = packageSizeProblem(pkg, grants)
     if (sizeProblem) return { ok: false, message: sizeProblem }
-    this.#set({ ...this.#state, pending: 'install', error: '' })
     try {
       const plugin = await this.#deps.port.install(pkg, grants, source || undefined)
+      // An earlier check described the package this one replaced.
+      const { [pkg.id]: _replaced, ...updates } = this.#state.updates
+      this.#set({ ...this.#state, updates })
       await this.refresh()
       return { ok: true, plugin }
     } catch (error) {
       return { ok: false, message: describe(error) }
-    } finally {
-      this.#set({ ...this.#state, pending: '' })
     }
+  }
+
+  /** Installs every update the latest check offered, one at a time, keeping
+   * each plugin's previous decisions. An update that asks for a permission or
+   * host the operator has not decided on, needs a newer app, or belongs to a
+   * switched-off plugin is left for the usual review: nothing is ever granted
+   * unasked. */
+  async updateAll(appVersion: string): Promise<UpdateAllResult> {
+    const updated: PluginSummary[] = []
+    const failed: { readonly id: string; readonly message: string }[] = []
+    if (this.#state.pending) return { updated, review: [], failed }
+    const { quiet, review } = sortUpdates(this.#state.plugins, this.#state.updates, appVersion)
+    if (!quiet.length && !review.length) return { updated, review, failed }
+    this.#set({ ...this.#state, pending: 'update-all', error: '' })
+    try {
+      for (const { plugin, check } of quiet) {
+        if (this.#disposed) break
+        const result = await this.#install(check.pkg, initialGrants(check.pkg.permissions, plugin, check.pkg.network?.hosts ?? []), check.source)
+        if (result.ok) updated.push(result.plugin)
+        else failed.push({ id: plugin.id, message: result.message })
+      }
+    } finally {
+      if (!this.#disposed) this.#set({ ...this.#state, pending: '' })
+    }
+    return { updated, review, failed }
   }
 
   setEnabled(id: string, enabled: boolean): Promise<boolean> {
@@ -178,6 +270,58 @@ export class PluginsModel {
     } catch (error) {
       this.#set({ ...this.#state, error: describe(error) })
       return false
+    } finally {
+      this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  /** How much the plugin keeps in its storage and collections. */
+  async loadData(id: string): Promise<DataResult> {
+    try {
+      const [storage, collections] = await Promise.all([this.#deps.port.storageGet(id), this.#deps.port.collectionStats(id)])
+      return { ok: true, usage: dataUsage(storage, collections) }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    }
+  }
+
+  /** One page of the activity journal; a failure is unavailable history, never an empty one. */
+  async loadJournal(query: JournalQuery): Promise<JournalResult> {
+    try {
+      return { ok: true, page: await this.#deps.port.listJournal(query) }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    }
+  }
+
+  /** Deletes the whole activity journal, readable or not. */
+  async clearJournal(): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }> {
+    try {
+      await this.#deps.port.clearJournal()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
+    }
+  }
+
+  /**
+   * Deletes what the plugin stored — its own storage values and every
+   * collection — but keeps the operator's settings and secrets. A running
+   * plugin restarts so it does not keep working from what it had read.
+   */
+  async clearData(id: string): Promise<DataResult> {
+    if (this.#state.pending) return { ok: false, message: 'Another plugin change is still running' }
+    this.#set({ ...this.#state, pending: id, error: '' })
+    try {
+      const current = await this.#deps.port.storageGet(id)
+      const changes = Object.fromEntries(Object.keys(current).filter((key) => !isSettingStorageKey(key)).map((key) => [key, null]))
+      const storage = Object.keys(changes).length ? await this.#deps.port.storageUpdate(id, changes) : current
+      await this.#deps.port.collectionClearAll(id)
+      const collections = await this.#deps.port.collectionStats(id)
+      if (this.#hosts.has(id)) await this.restart(id)
+      return { ok: true, usage: dataUsage(storage, collections) }
+    } catch (error) {
+      return { ok: false, message: describe(error) }
     } finally {
       this.#set({ ...this.#state, pending: '' })
     }
@@ -311,6 +455,69 @@ export class PluginsModel {
     }
   }
 
+  /** Downloads the link of every plugin installed from one (dev-linked ones
+   * reload from their folder) and records what each serves. One at a time:
+   * a slow host delays the rest rather than many downloads competing.
+   * Nothing is installed; an offer opens the usual review. */
+  async checkUpdates(): Promise<{ readonly newer: number; readonly changed: number; readonly failed: number; readonly checked: number }> {
+    const targets = this.#state.plugins.filter((plugin) => plugin.source && !plugin.dev)
+    if (this.#state.checking || !targets.length) return { newer: 0, changed: 0, failed: 0, checked: 0 }
+    this.#set({ ...this.#state, checking: true })
+    const results: Record<string, UpdateCheck> = {}
+    try {
+      for (const plugin of targets) {
+        if (this.#disposed) break
+        results[plugin.id] = await this.#checkOne(plugin)
+      }
+    } finally {
+      if (!this.#disposed) {
+        this.#set({ ...this.#state, checking: false, updates: liveUpdates({ ...this.#state.updates, ...results }, this.#state.plugins) })
+      }
+    }
+    const values = Object.values(results)
+    const count = (state: UpdateCheck['state']) => values.filter((check) => check.state === state).length
+    return { newer: count('newer'), changed: count('changed'), failed: count('error'), checked: values.length }
+  }
+
+  /** The launch check: looks for updates once and announces what it found.
+   * It never installs — every offer still goes through the usual review — and
+   * stays quiet when nothing is newer or the check could not run. */
+  async announceUpdates(): Promise<void> {
+    const { newer, changed } = await this.checkUpdates()
+    const total = newer + changed
+    if (!total || this.#disposed) return
+    this.#deps.notify({
+      kind: 'plugin', severity: 'info',
+      title: total === 1 ? 'A plugin update is available' : `${total} plugin updates are available`,
+      body: changed
+        ? 'Open Plugins to review the changes before updating. Some links serve changed code under the installed version number.'
+        : 'Open Plugins to review the changes before updating.',
+    })
+  }
+
+  async #checkOne(plugin: PluginSummary): Promise<UpdateCheck> {
+    try {
+      const answer = await this.#deps.port.download(plugin.source)
+      const checked = checkPackage(answer.package)
+      if (!checked.ok) return { state: 'error', message: 'The link no longer holds a valid plugin package' }
+      if (checked.package.id !== plugin.id) return { state: 'error', message: `The link now serves a different plugin (${checked.package.id})` }
+      const order = compareVersions(checked.package.version, plugin.version)
+      if (order === null && checked.package.version !== plugin.version) return { state: 'error', message: `Version ${checked.package.version} cannot be compared with ${plugin.version}` }
+      if (order !== null && order > 0) return { state: 'newer', pkg: checked.package, source: answer.source }
+      if (order !== null && order < 0) return { state: 'current' }
+      // The same version number: only the contents can tell whether the
+      // author changed the code without saying so. The version string itself
+      // is left out, so build metadata alone (`1.0.0+build.2`) is no change.
+      const installed = checkPackage(await this.#deps.port.export(plugin.id))
+      if (!installed.ok) return { state: 'error', message: 'The installed package could not be read to compare it with the link' }
+      return canonicalJson({ ...installed.package, version: '' }) === canonicalJson({ ...checked.package, version: '' })
+        ? { state: 'current' }
+        : { state: 'changed', pkg: checked.package, source: answer.source, updatedAt: plugin.updatedAt }
+    } catch (error) {
+      return { state: 'error', message: describe(error) }
+    }
+  }
+
   /** Saves an installed plugin as a package file in the `plugin pack` format,
    * so the file installs again as the same package. Settings values and
    * storage are never part of it. False when it failed or was cancelled. */
@@ -327,6 +534,27 @@ export class PluginsModel {
       return false
     } finally {
       this.#set({ ...this.#state, pending: '' })
+    }
+  }
+
+  /** Copies log lines as plain text. False when the clipboard refused. */
+  async copyLog(entries: readonly LogEntry[]): Promise<boolean> {
+    try {
+      await this.#deps.clipboard(formatLog(entries))
+      return true
+    } catch (error) {
+      this.#set({ ...this.#state, error: `Could not copy the log: ${describe(error)}` })
+      return false
+    }
+  }
+
+  /** Saves log lines as a text file. False when it failed or was cancelled. */
+  async saveLog(id: string, entries: readonly LogEntry[]): Promise<boolean> {
+    try {
+      return await this.#deps.files.save({ name: `${id}-log.txt`, text: formatLog(entries), mime: 'text/plain' })
+    } catch (error) {
+      this.#set({ ...this.#state, error: `Could not save the log: ${describe(error)}` })
+      return false
     }
   }
 
@@ -401,7 +629,7 @@ export class PluginsModel {
         this.#hosts.delete(id)
       }
     }
-    this.#set({ ...this.#state, phase: 'ready', plugins: [...plugins], error: this.#state.phase === 'error' ? '' : this.#state.error })
+    this.#set({ ...this.#state, phase: 'ready', plugins: [...plugins], updates: liveUpdates(this.#state.updates, plugins), error: this.#state.phase === 'error' ? '' : this.#state.error })
     for (const plugin of plugins) {
       if (this.#disposed) return
       const host = this.#hosts.get(plugin.id)
@@ -531,6 +759,14 @@ function reuse<T>(previous: Readonly<Record<string, T>>, next: Record<string, T>
 
 /** The checked fields in package order with their values as written, two-space
  * indented with a final newline: what `scripts/plugin/package.mjs` packs. */
+/** JSON with every object's keys sorted, so two packages compare by content
+ * rather than by the order their fields were written in. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => isRecord(item)
+    ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]]))
+    : item)
+}
+
 function packedText(pkg: PluginPackage, raw: Record<string, unknown>): string {
   return `${JSON.stringify(Object.fromEntries(Object.keys(pkg).map((key) => [key, raw[key]])), null, 2)}\n`
 }
@@ -544,3 +780,26 @@ export function describe(error: unknown): string {
   return error instanceof Error && error.message ? error.message : 'The plugin change failed'
 }
 
+/** Keeps the checks that still describe an installed plugin: a removed,
+ * dev-linked or no-longer-linked plugin, or one already at the offered version,
+ * keeps no stale offer. */
+function liveUpdates(updates: Readonly<Record<string, UpdateCheck>>, plugins: readonly PluginSummary[]): Record<string, UpdateCheck> {
+  const live: Record<string, UpdateCheck> = {}
+  for (const plugin of plugins) {
+    const check = updates[plugin.id]
+    if (!check || !plugin.source || plugin.dev) continue
+    if (check.state === 'newer' && compareVersions(check.pkg.version, plugin.version) !== 1) continue
+    // Any reinstall since the comparison makes it stale, whatever it installed.
+    if (check.state === 'changed' && check.updatedAt !== plugin.updatedAt) continue
+    live[plugin.id] = check
+  }
+  return live
+}
+
+function dataUsage(storage: Readonly<Record<string, string>>, collections: CollectionUsage): PluginDataUsage {
+  const encoder = new TextEncoder()
+  let bytes = 0
+  for (const [key, value] of Object.entries(storage)) bytes += encoder.encode(key).length + encoder.encode(value).length
+  const values = Object.keys(storage).filter((key) => !isSettingStorageKey(key)).length
+  return { storage: { values, bytes, limitBytes: STORAGE_LIMITS.bytes, limitKeys: STORAGE_LIMITS.keys }, collections }
+}

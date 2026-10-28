@@ -42,13 +42,13 @@ func TestSettingsRepositoryRoundTripIsEncrypted(t *testing.T) {
 func TestPreSwitchSettingsLoadWithSwitchesOn(t *testing.T) {
 	absent := storedSettings{GuardrailMode: domain.DefaultGuardrailMode}
 	loaded := absent.restore()
-	if !loaded.NotificationsEnabled || !loaded.ProviderHealthEnabled || !loaded.AnimationsEnabled {
+	if !loaded.NotificationsEnabled || !loaded.ProviderHealthEnabled || !loaded.AnimationsEnabled || !loaded.PluginUpdateCheckEnabled {
 		t.Fatalf("an older settings file lost the switch defaults: %+v", loaded)
 	}
 	off := false
-	explicit := storedSettings{GuardrailMode: domain.DefaultGuardrailMode, NotificationsEnabled: &off, ProviderHealthEnabled: &off, AnimationsEnabled: &off}
+	explicit := storedSettings{GuardrailMode: domain.DefaultGuardrailMode, NotificationsEnabled: &off, ProviderHealthEnabled: &off, AnimationsEnabled: &off, PluginUpdateCheckEnabled: &off}
 	loaded = explicit.restore()
-	if loaded.NotificationsEnabled || loaded.ProviderHealthEnabled || loaded.AnimationsEnabled {
+	if loaded.NotificationsEnabled || loaded.ProviderHealthEnabled || loaded.AnimationsEnabled || loaded.PluginUpdateCheckEnabled {
 		t.Fatalf("the user's explicit off was overridden: %+v", loaded)
 	}
 }

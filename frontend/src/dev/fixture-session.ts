@@ -163,6 +163,7 @@ const settings: Settings = {
   notificationsEnabled: true,
   providerHealthEnabled: true,
   animationsEnabled: true,
+  pluginUpdateCheckEnabled: true,
   failoverEnabled: true,
   chainMode: 'balance',
   updateCheckInterval: '1m',
@@ -284,7 +285,7 @@ export class FixtureSession implements ControlPlaneSession {
   readonly appVersion = appVersion
   /** The fixture advertises the Codex preset flow, its usage probes and the
    * fleet wake, like a current control plane. */
-  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'plugins.download', 'plugins.export', 'rules.manage']
+  readonly capabilities = ['codex.login', 'codex.quota', 'codex.quota.all', 'codex.wake', 'appearance.manage', 'plugins.manage', 'plugins.download', 'plugins.export', 'plugins.journal', 'rules.manage']
   readonly #listeners = new Map<string, Set<EventListener>>()
   readonly #rules = new FixtureRules((topic, payload) => this.#emit(topic, payload))
   // The appearance store survives a dev reload in browser storage, like the
@@ -448,6 +449,17 @@ export class FixtureSession implements ControlPlaneSession {
   // storage, like the encrypted records survive a control-plane restart. The
   // checks mirror the Go slice: same id rule, limits and error codes.
   #plugins: Map<string, FixturePlugin> = loadFixturePlugins()
+  // Fictional demo history, newest first; this session adds to it as plugins change.
+  #journal: Record<string, unknown>[] = [
+    { seq: 3, at: '2026-10-27T16:20:00.000Z', kind: 'permissions', pluginId: 'demo.focus', name: 'Focus timer', version: '1.2.0', granted: ['ui:notify'], revoked: ['storage'] },
+    { seq: 2, at: '2026-10-26T09:05:00.000Z', kind: 'updated', pluginId: 'demo.focus', name: 'Focus timer', version: '1.2.0', fromVersion: '1.1.0', origin: 'file' },
+    { seq: 1, at: '2026-10-20T12:00:00.000Z', kind: 'installed', pluginId: 'demo.focus', name: 'Focus timer', version: '1.1.0', granted: ['storage'], origin: 'link' },
+  ]
+
+  #note(kind: string, pkg: PluginPackage, extra: Record<string, unknown> = {}): void {
+    const seq = Math.max(0, ...this.#journal.map((entry) => entry.seq as number)) + 1
+    this.#journal.unshift({ seq, at: new Date().toISOString(), kind, pluginId: pkg.id, name: pkg.name, version: pkg.version, ...extra })
+  }
   #activeProvider = 'north-relay'
 
   #pluginSave(): void {
@@ -487,6 +499,12 @@ export class FixtureSession implements ControlPlaneSession {
       const all = [...(this.#collections.get(this.#pluginFind(body.id).package.id) ?? new Map<string, Map<string, unknown>>())]
       const collections = all.filter(([, docs]) => docs.size > 0).map(([name, docs]) => ({ name, count: docs.size, bytes: new TextEncoder().encode(JSON.stringify([...docs])).length }))
       return { collections, bytes: collections.reduce((sum, item) => sum + item.bytes, 0), limitBytes: 2 * 1024 * 1024 }
+    }
+    if (method === 'plugins.collection.clear' && body.collection === '') {
+      const id = this.#pluginFind(body.id).package.id
+      const cleared = [...(this.#collections.get(id)?.values() ?? [])].reduce((sum, docs) => sum + docs.size, 0)
+      this.#collections.delete(id)
+      return { cleared }
     }
     const docs = this.#collection(body)
     const docId = typeof body.docId === 'string' ? body.docId : ''
@@ -565,19 +583,35 @@ export class FixtureSession implements ControlPlaneSession {
         if (existing && Date.parse(stamp) <= Date.parse(existing.updatedAt)) stamp = new Date(Date.parse(existing.updatedAt) + 1).toISOString()
         const record: FixturePlugin = { package: pkg, granted, enabled: true, installedAt: existing?.installedAt ?? stamp, updatedAt: stamp, storage: existing?.storage ?? {}, ...(typeof body.source === 'string' && body.source ? { source: body.source } : {}) }
         this.#plugins.set(pkg.id, record)
+        this.#note(existing ? 'updated' : 'installed', pkg, existing ? { fromVersion: existing.package.version } : { granted })
         this.#pluginChanged()
         return { plugin: this.#pluginSummary(record) }
       }
       case 'plugins.export': return { package: this.#pluginFind(body.id).package }
       case 'plugins.update': {
         const record = this.#pluginFind(body.id)
+        if (typeof body.enabled === 'boolean' && body.enabled !== record.enabled) this.#note(body.enabled ? 'enabled' : 'disabled', record.package)
         if (typeof body.enabled === 'boolean') record.enabled = body.enabled
-        if (Array.isArray(body.granted)) record.granted = body.granted.filter((permission): permission is string => typeof permission === 'string' && record.package.permissions.includes(permission as never))
+        if (Array.isArray(body.granted)) {
+          const before = record.granted
+          record.granted = body.granted.filter((permission): permission is string => typeof permission === 'string' && record.package.permissions.includes(permission as never))
+          const granted = record.granted.filter((permission) => !before.includes(permission))
+          const revoked = before.filter((permission) => !record.granted.includes(permission))
+          if (granted.length || revoked.length) this.#note('permissions', record.package, { granted, revoked })
+        }
         this.#pluginChanged()
         return { plugin: this.#pluginSummary(record) }
       }
+      case 'plugins.journal.list': {
+        const before = typeof body.before === 'number' && body.before > 0 ? body.before : Infinity
+        const limit = typeof body.limit === 'number' ? body.limit : 50
+        const matching = this.#journal.filter((entry) => (entry.seq as number) < before && (!body.pluginId || entry.pluginId === body.pluginId))
+        const entries = matching.slice(0, limit)
+        return { entries, ...(matching.length > limit ? { next: entries[entries.length - 1]?.seq } : {}), incomplete: false }
+      }
+      case 'plugins.journal.clear': this.#journal = []; return {}
       case 'plugins.remove': {
-        this.#pluginFind(body.id)
+        this.#note('removed', this.#pluginFind(body.id).package)
         this.#plugins.delete(body.id as string)
         this.#collections.delete(body.id as string)
         this.#pluginChanged()

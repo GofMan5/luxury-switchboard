@@ -1352,7 +1352,7 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			return false, nil, nil
 		}
 		answerStatus := status
-		if answerStatus == 0 {
+		if answerStatus < 400 {
 			answerStatus = http.StatusBadGateway
 		}
 		delay := decision.Delay
@@ -1457,6 +1457,21 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 		removeUsageHeaders(response.Header)
 		response.Header.Del("X-Switchboard-Terminal")
 		status := response.StatusCode
+		applyBufferedRetryRule := func(terminal string, buffered []byte, usage relayapp.TokenUsage) (bool, *http.Response, error) {
+			if server.rules == nil || (terminal != "response.failed" && terminal != "response.incomplete") || policyRefused(terminalErrorDetailUnbounded(buffered, nil)) {
+				return false, nil, nil
+			}
+			var payload map[string]any
+			if json.Unmarshal(buffered, &payload) == nil && policyRefused(refusalText(payload)) {
+				return false, nil, nil
+			}
+			code, detail := terminalActivityDetail(terminal, buffered, sensitiveCredentialMarkers(credential), body)
+			handled, result, ruleErr := applyRetryRule(lease, response, status, code, retryErrorText(buffered, detail))
+			if handled {
+				addDiscardedUsage(&discarded, usage)
+			}
+			return handled, result, ruleErr
+		}
 		if status >= 200 && status < 400 {
 			if status >= 300 {
 				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
@@ -1516,6 +1531,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					return response, nil
 				}
 				generatedDuration += time.Since(attemptStarted)
+				if bufferErr == nil || errors.Is(bufferErr, errRetryableSSEFailure) {
+					if handled, result, ruleErr := applyBufferedRetryRule(terminal, buffered, streamUsage); handled {
+						if result != nil || ruleErr != nil {
+							return result, ruleErr
+						}
+						continue
+					}
+				}
 				if bufferErr != nil {
 					addDiscardedUsage(&discarded, streamUsage)
 					outcome := relayapp.AttemptOutcome{Kind: relayapp.AttemptTransport}
@@ -1631,6 +1654,12 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					continue
 				}
 				terminal := jsonTerminal(buffered)
+				if handled, result, ruleErr := applyBufferedRetryRule(terminal, buffered, usageFromJSON(buffered)); handled {
+					if result != nil || ruleErr != nil {
+						return result, ruleErr
+					}
+					continue
+				}
 				var fallbackSSE []byte
 				fallbackTerminal := ""
 				if fallbackActive {
@@ -1716,7 +1745,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			}
 			noteUpstreamDetail(upstreamDetail, errorBody)
 			if !policyRefused(string(errorBody)) {
-				if handled, result, ruleErr := applyRetryRule(lease, response, status, "upstream_status", normalizeErrorText(errorBody)); handled {
+				detail := upstreamErrorDetail(string(errorBody), sensitiveCredentialMarkers(credential), body)
+				if detail == "" {
+					// History reads the neutral response when the upstream gives no reason.
+					fallback := genericErrorResponse(status)
+					detail = filedErrorDetail(fallback, "", sensitiveCredentialMarkers(credential), body)
+					fallback.Body.Close()
+				}
+				if handled, result, ruleErr := applyRetryRule(lease, response, status, "upstream_status", retryErrorText(errorBody, detail)); handled {
 					if result != nil || ruleErr != nil {
 						return result, ruleErr
 					}

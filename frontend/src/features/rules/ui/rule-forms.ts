@@ -1,4 +1,4 @@
-import type { RetryRuleDraftSource } from '../../../shared/contracts/rules-link'
+import { cleanDraft, type RetryRuleDraftSource } from '../../../shared/contracts/rules-link'
 import {
   BLOCK_STATUSES, ruleIdFromName,
   type BlockStatus, type BudgetPeriod, type Endpoint, type RequestRule, type RetryAction, type RetryRule, type RuleEffects,
@@ -179,13 +179,12 @@ export function retryRuleForm(rule: RetryRule | null, draft?: RetryRuleDraftSour
       delayMs: String(rule.delayMs),
     }
   }
-  const status = draft?.status
-  const code = draft?.errorCode
+  const { status, errorCode: code, detail } = cleanDraft(draft ?? {})
   return {
     id: '', enabled: true, owner: '',
     name: draft ? `Handle ${[status, code].filter((part) => part !== undefined).join(' ') || 'this error'}` : '',
     statuses: status !== undefined ? String(status) : '',
-    contains: draft?.detail ?? '',
+    contains: detail ?? '',
     errorCodes: code ?? '',
     providers: [],
     models: '',

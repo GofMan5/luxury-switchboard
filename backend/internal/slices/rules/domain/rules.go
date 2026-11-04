@@ -535,7 +535,9 @@ func (match RequestMatch) Matches(model, endpoint string) bool {
 
 // Matches reports whether a failed attempt matches.
 func (match RetryMatch) Matches(failure Failure) bool {
-	if len(match.Statuses) > 0 && !slices.Contains(match.Statuses, failure.Status) {
+	// Older history drafts saved the relay's 502 for transport failures.
+	legacyTransport := failure.Status == 0 && failure.ErrorCode == "transport" && slices.Contains(match.ErrorCodes, "transport") && slices.Contains(match.Statuses, 502)
+	if len(match.Statuses) > 0 && !slices.Contains(match.Statuses, failure.Status) && !legacyTransport {
 		return false
 	}
 	if len(match.ErrorCodes) > 0 && !slices.Contains(match.ErrorCodes, failure.ErrorCode) && !(httpStatusCode(failure.ErrorCode) && slices.ContainsFunc(match.ErrorCodes, httpStatusCode)) {

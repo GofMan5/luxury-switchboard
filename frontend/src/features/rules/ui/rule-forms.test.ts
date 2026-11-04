@@ -80,6 +80,16 @@ describe('retry-rule form', () => {
     expect(retryRuleForm(null).name).toBe('')
   })
 
+  it('saves a transport draft without its displayed HTTP status', () => {
+    const form = retryRuleForm(null, { status: 502, errorCode: 'transport', detail: 'Connection reset' })
+    expect(form).toMatchObject({ name: 'Handle transport', statuses: '', errorCodes: 'transport', contains: 'Connection reset', delayMs: '1000' })
+    expect(retryRuleFromForm(form).match).toMatchObject({ statuses: [], errorCodes: ['transport'], contains: ['Connection reset'] })
+  })
+
+  it.each([0, 200, 600, 502.5, Number.NaN])('drops invalid status %s from a direct draft', (status) => {
+    expect(retryRuleForm(null, { status, errorCode: 'upstream_status' })).toMatchObject({ name: 'Handle upstream_status', statuses: '', errorCodes: 'upstream_status' })
+  })
+
   it('sends a failing rule one attempt without delay, whatever was typed', () => {
     const form = { ...retryRuleForm(retry), action: 'fail' as const, maxAttempts: 'many', delayMs: '' }
     expect(retryRuleFromForm(form)).toMatchObject({ action: 'fail', maxAttempts: 1, delayMs: 0 })

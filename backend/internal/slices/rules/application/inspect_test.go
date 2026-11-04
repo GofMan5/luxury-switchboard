@@ -113,6 +113,94 @@ func TestRecentErrorsGroupsByStatusCodeAndNormalizedDetail(t *testing.T) {
 	}
 }
 
+func TestRecentErrorsCoverageUsesDisplayedLatestRecord(t *testing.T) {
+	base := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	covered := FailureRecord{At: base, Status: 503, ErrorCode: "upstream_status", Detail: "specific overload request 123", ProviderID: "fixture-a", ProviderName: "Fixture A", Model: "model-a"}
+	uncovered := []FailureRecord{
+		{At: base.Add(time.Minute), Status: 503, ErrorCode: "upstream_status", Detail: covered.Detail, ProviderID: "fixture-b", ProviderName: "Fixture B", Model: "model-a"},
+		{At: base.Add(time.Minute), Status: 503, ErrorCode: "upstream_status", Detail: covered.Detail, ProviderID: "fixture-a", ProviderName: "Fixture A", Model: "model-b"},
+		{At: base.Add(time.Minute), Status: 503, ErrorCode: "upstream_status", Detail: "specific overload request 456", ProviderID: "fixture-a", ProviderName: "Fixture A", Model: "model-a"},
+	}
+	cases := []struct {
+		name  string
+		other FailureRecord
+	}{
+		{name: "provider restriction", other: uncovered[0]},
+		{name: "model restriction", other: uncovered[1]},
+		{name: "detail restriction", other: uncovered[2]},
+	}
+	for _, tc := range cases {
+		for _, reverse := range []bool{false, true} {
+			for _, latestCovered := range []bool{false, true} {
+				name := tc.name + "/latest-covered-" + strconv.FormatBool(latestCovered) + "/reverse-" + strconv.FormatBool(reverse)
+				t.Run(name, func(t *testing.T) {
+					latest, earlier := tc.other, covered
+					if latestCovered {
+						latest, earlier = covered, tc.other
+					}
+					latest.At = base.Add(time.Minute)
+					earlier.At = base
+					records := []FailureRecord{latest, earlier}
+					if reverse {
+						records[0], records[1] = records[1], records[0]
+					}
+					service, err := NewService(&memory{}, failures{records: records})
+					if err != nil {
+						t.Fatal(err)
+					}
+					_ = service.Load(context.Background())
+					mustSaveRetry(t, service, retryRule("restricted", domain.RetryMatch{
+						Statuses: []int{503}, Contains: []string{"request 123"},
+						Providers: []string{"fixture-a"}, Models: []string{"model-a"},
+					}, domain.RetryRetry), "")
+					recent, err := service.RecentErrors(context.Background(), 10)
+					if err != nil || len(recent) != 1 {
+						t.Fatalf("RecentErrors() = %v, %v", recent, err)
+					}
+					want := ""
+					if latestCovered {
+						want = "restricted"
+					}
+					if recent[0].CoveredBy != want || recent[0].ProviderName != latest.ProviderName || recent[0].Model != latest.Model {
+						t.Fatalf("latest record %+v, got group %+v, want coveredBy %q", latest, recent[0], want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRecentErrorsCoverageCollapsesLatestDetailWhitespace(t *testing.T) {
+	base := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	latest := FailureRecord{At: base.Add(time.Minute), Status: 503, ErrorCode: "upstream_status", Detail: "Specific   overload\nrequest 123"}
+	earlier := FailureRecord{At: base, Status: 503, ErrorCode: "upstream_status", Detail: "specific overload request 456"}
+	for _, reverse := range []bool{false, true} {
+		t.Run("reverse-"+strconv.FormatBool(reverse), func(t *testing.T) {
+			records := []FailureRecord{latest, earlier}
+			if reverse {
+				records[0], records[1] = records[1], records[0]
+			}
+			service, err := NewService(&memory{}, failures{records: records})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			mustSaveRetry(t, service, retryRule("normalized", domain.RetryMatch{
+				Statuses: []int{503}, Contains: []string{"specific overload request 123"},
+			}, domain.RetryRetry), "")
+			recent, err := service.RecentErrors(context.Background(), 10)
+			if err != nil || len(recent) != 1 {
+				t.Fatalf("RecentErrors() = %v, %v", recent, err)
+			}
+			if group := recent[0]; group.Count != 2 || group.Detail != latest.Detail || !group.LastAt.Equal(latest.At) || group.CoveredBy != "normalized" {
+				t.Fatalf("latest detail %q must be covered by normalized rule, got %+v", latest.Detail, group)
+			}
+		})
+	}
+}
+
 func TestRecentErrorsWithoutHistoryIsAnError(t *testing.T) {
 	service, _ := newService(t, &memory{})
 	if _, err := service.RecentErrors(context.Background(), 10); !errors.Is(err, ErrHistoryUnavailable) {

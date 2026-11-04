@@ -127,6 +127,7 @@ func (service *Service) RecentErrors(ctx context.Context, limit int) ([]RecentEr
 				ProviderName: record.ProviderName,
 				Model:        record.Model,
 				LastAt:       record.At.UTC(),
+				CoveredBy:    service.coveredBy(record),
 			}
 			groups[key] = group
 			order = append(order, group)
@@ -136,8 +137,6 @@ func (service *Service) RecentErrors(ctx context.Context, limit int) ([]RecentEr
 			group.LastAt = record.At.UTC()
 			group.Detail = truncateRunes(record.Detail, maxRecentDetail)
 			group.ProviderName, group.Model = record.ProviderName, record.Model
-		}
-		if group.CoveredBy == "" {
 			group.CoveredBy = service.coveredBy(record)
 		}
 	}
@@ -157,12 +156,18 @@ func (service *Service) RecentErrors(ctx context.Context, limit int) ([]RecentEr
 // coveredBy names the enabled retry rule a record's failure would hit now.
 // A transport failure is matched with status zero, as the relay asks.
 func (service *Service) coveredBy(record FailureRecord) string {
+	detail := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '\uFEFF' {
+			return ' '
+		}
+		return r
+	}, record.Detail)
 	failure := domain.Failure{
 		ProviderID: record.ProviderID,
 		Model:      record.Model,
 		Status:     record.Status,
 		ErrorCode:  record.ErrorCode,
-		ErrorText:  domain.NormalizeErrorText(record.Detail),
+		ErrorText:  domain.NormalizeErrorText(record.Detail) + "\n" + domain.NormalizeErrorText(strings.Join(strings.Fields(detail), " ")),
 	}
 	if record.ErrorCode == transportCode {
 		failure.Status = 0

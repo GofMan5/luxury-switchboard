@@ -6,7 +6,9 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
@@ -15,6 +17,21 @@ import (
 // hookBodyLimit is the largest request body a hook sees and the largest
 // rewrite the relay accepts back.
 const hookBodyLimit = 192 * 1024
+
+// Keep handwritten raw matches and the single-line reason used by history drafts.
+func retryErrorText(raw []byte, detail string) string {
+	// History removes these controls before the draft collapses whitespace.
+	detail = strings.Map(func(character rune) rune {
+		if (character < 32 && character != '\n' && character != '\r' && character != '\t') || character == 127 {
+			return -1
+		}
+		if unicode.IsControl(character) || character == '\uFEFF' {
+			return ' '
+		}
+		return character
+	}, strings.TrimSpace(detail))
+	return normalizeErrorText(raw) + "\n" + normalizeErrorText([]byte(strings.Join(strings.Fields(detail), " ")))
+}
 
 // runRequestHooks asks the plugin request hooks about the client's body. It
 // returns the body to forward (rewritten or not), the hooks' tags, and the

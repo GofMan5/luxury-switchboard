@@ -46,8 +46,9 @@ function cleanText(value: unknown): string | undefined {
 /** Keeps only what a new retry rule can use: a 4xx/5xx status, a valid error
  * code and 2–120 characters of single-line text. */
 export function cleanDraft(source: { status?: unknown; errorCode?: unknown; detail?: unknown }): RetryRuleDraftSource {
-  const status = cleanStatus(source.status)
   const errorCode = cleanCode(source.errorCode)
+  // Transport rules match without an HTTP status; the displayed 502 is synthetic.
+  const status = errorCode === 'transport' ? undefined : cleanStatus(source.status)
   const detail = cleanText(source.detail)
   return { ...(status !== undefined ? { status } : {}), ...(errorCode ? { errorCode } : {}), ...(detail ? { detail } : {}) }
 }

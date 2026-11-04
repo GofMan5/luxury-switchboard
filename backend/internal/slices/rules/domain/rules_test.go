@@ -129,6 +129,27 @@ func TestNormalizedTrimsAndNeverLeavesNilLists(t *testing.T) {
 	}
 }
 
+func TestSavedTransportStatusCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		statuses []int
+		codes    []string
+		status   int
+		code     string
+		want     bool
+	}{
+		{[]int{502}, []string{"transport"}, 0, "transport", true},
+		{[]int{502}, nil, 0, "transport", false},
+		{[]int{503}, []string{"transport"}, 0, "transport", false},
+		{[]int{502}, []string{"transport"}, 400, "transport", false},
+		{[]int{502}, []string{"upstream_status"}, 0, "transport", false},
+	} {
+		match := RetryMatch{Statuses: test.statuses, ErrorCodes: test.codes}
+		if got := match.Matches(Failure{Status: test.status, ErrorCode: test.code}); got != test.want {
+			t.Errorf("%+v: match=%v want=%v", test, got, test.want)
+		}
+	}
+}
+
 func TestNullEffectsDecodeAsAbsent(t *testing.T) {
 	var rule RequestRule
 	if err := json.Unmarshal([]byte(`{"id":"a","name":"A","enabled":true,"match":{"models":null,"endpoints":null},"effects":{"block":null,"headers":null,"tags":null,"provider":null}}`), &rule); err != nil {

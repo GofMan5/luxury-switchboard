@@ -1,12 +1,14 @@
 package relayhttp
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,38 @@ import (
 	guardraildomain "github.com/luxuryprivate/switchboard/backend/internal/slices/guardrails/domain"
 	relayapp "github.com/luxuryprivate/switchboard/backend/internal/slices/relay/application"
 )
+
+// A provider that nests its list inside a JSON envelope — the shape a memo
+// was found carrying in the field — split into the envelope's own words, and
+// the memo believed the provider accepted efforts it never named. An ask for
+// one of those then left the request untouched and collected a 400 on every
+// request for as long as the memo lived. The memo keeps only the rankable
+// words the repair itself ranked by.
+func TestTheMemoKeepsOnlyTheEffortsTheRepairRankedBy(t *testing.T) {
+	const complaint = `{"error":{"message":"'reasoning_effort' must be one of: 'low', 'high'","type":"invalid_request_error"},"id":"chatcmpl-0ca7"}`
+	body := []byte(`{"model":"m","reasoning_effort":"medium","input":"hi"}`)
+	repaired, changed := repairReasoningEffort(body, []byte(complaint))
+	if !changed {
+		t.Fatal("the repair did not map the effort")
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(repaired, &sent)
+	if sent["reasoning_effort"] != "low" {
+		t.Fatalf("the repair mapped to %v, want the nearest accepted below the ask", sent["reasoning_effort"])
+	}
+	learned := rankableEfforts(quotedValues(strings.ToLower(complaint)))
+	if !reflect.DeepEqual(learned, []string{"low", "high"}) {
+		t.Fatalf("the memo would learn %v", learned)
+	}
+	// An ask the provider never named is now mapped, not passed through.
+	memo := newRepairMemo()
+	memo.merge("p", providerAdjustments{efforts: learned})
+	var passed map[string]any
+	_ = json.Unmarshal(memo.apply("p", []byte(`{"model":"m","reasoning_effort":"xhigh","input":"hi"}`)), &passed)
+	if passed["reasoning_effort"] != "high" {
+		t.Fatalf("an effort the provider never accepted was sent untouched: %v", passed["reasoning_effort"])
+	}
+}
 
 // The Codex-on-GLM pattern, measured in the field: every request paid one
 // probe 400 before its 200 — Codex asks for reasoning_effort "medium", GLM's

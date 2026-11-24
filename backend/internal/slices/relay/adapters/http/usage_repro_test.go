@@ -207,7 +207,12 @@ func TestANativeChatStreamGivenJSONIsNotDeliveredUninspected(t *testing.T) {
 			server.ServeHTTP(response, request)
 
 			body := response.Body.String()
-			if strings.Contains(body, "finish_reason") {
+			// The provider's own chunk is the evidence of a splice: its object
+			// type, its text. The relay's own failure tail also carries a
+			// finish_reason (a terminal choice, so a client watching for one
+			// does not re-request a stream that already ended in an error), so
+			// the word alone would convict the honest failure too.
+			if strings.Contains(body, `"object":"chat.completion"`) || strings.Contains(body, "All tests pass.") {
 				t.Fatalf("a JSON answer was spliced into a committed event stream as raw bytes:\n%s", body)
 			}
 			if strings.Contains(body, "example.invalid/p.sh") {

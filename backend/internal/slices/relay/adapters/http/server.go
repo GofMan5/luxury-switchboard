@@ -1932,8 +1932,13 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 			if repaired, changed := repairReasoningEffort(body, errorBody); changed {
 				// The provider's accepted levels, verbatim from its own
 				// complaint: the memo maps each later request's ask onto
-				// this list exactly the way the repair just did.
-				learned.efforts = quotedValues(strings.ToLower(string(errorBody)))
+				// this list exactly the way the repair just did. Only the
+				// rankable words are kept: a complaint that nests its list
+				// inside a JSON envelope splits into the envelope's own
+				// words too, and a memo that believed those would let an
+				// effort the provider never accepted through untouched —
+				// a 400 on every request, for as long as the memo lived.
+				learned.efforts = rankableEfforts(quotedValues(strings.ToLower(string(errorBody))))
 				finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
 				body = repaired
 				server.observeRetry(activityID, attempt, status, 0)
@@ -3429,6 +3434,21 @@ func writeStreamFailure(writer http.ResponseWriter, path, model string) {
 		return
 	}
 	if chatDialectPath(path) || completionsDialectPath(path) {
+		// The error object alone is not a terminal: a client that decides
+		// "did this stream finish?" from the finish_reason of its last choice
+		// reads an error-only tail as a stream that died mid-answer, and
+		// re-requests it on its own retry loop ("stream ended without
+		// finish_reason", measured on a chat stream the provider broke after
+		// content had reached the client). The terminal choice says what
+		// happened in the dialect's own grammar — the answer is over, it
+		// ended in an error — and the error object keeps the reason for the
+		// clients that read it. The relay's inspector does not read its own
+		// failure event, so this cannot make a broken stream look completed.
+		terminal, _ := json.Marshal(map[string]any{
+			"id": "chatcmpl-switchboard-failed", "object": "chat.completion.chunk",
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "error"}},
+		})
+		_, _ = writer.Write(append(append([]byte("data: "), terminal...), []byte("\n\n")...))
 		body, _ := json.Marshal(map[string]any{"error": map[string]string{"code": "upstream_unavailable", "message": "The request could not be completed"}})
 		_, _ = writer.Write(append(append([]byte("data: "), body...), []byte("\n\ndata: [DONE]\n\n")...))
 		return

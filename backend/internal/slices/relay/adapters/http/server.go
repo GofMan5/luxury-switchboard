@@ -1947,6 +1947,21 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					continue
 				}
 			}
+			if keys := unimplementedSchemaKeys(errorBody); len(keys) > 0 {
+				if repaired, changed := repairUnimplementedSchemaKeys(body, keys); changed {
+					// The keys the provider named are the ones the memo will drop
+					// before the first attempt next time.
+					for _, key := range keys {
+						if !containsString(learned.schemaKeys, key) {
+							learned.schemaKeys = append(learned.schemaKeys, key)
+						}
+					}
+					finishLease(lease, relayapp.AttemptOutcome{Kind: relayapp.AttemptRequestError})
+					body = repaired
+					server.observeRetry(activityID, attempt, status, 0)
+					continue
+				}
+			}
 			// Last resort, and deliberately not gated on what the provider said: a
 			// refusal of a turn that replays sealed reasoning is almost always about
 			// the seal, and providers phrase it every way imaginable. Retrying without

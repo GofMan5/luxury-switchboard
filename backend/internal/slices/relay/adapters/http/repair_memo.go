@@ -28,6 +28,9 @@ type providerAdjustments struct {
 	// efforts is the provider's accepted reasoning-effort list, verbatim from
 	// its own complaint; empty means the effort was never refused.
 	efforts []string
+	// schemaKeys lists JSON Schema keywords the provider refused as
+	// unimplemented, verbatim from its own complaint.
+	schemaKeys []string
 }
 
 // repairMemo remembers, per provider, which request repairs a successful
@@ -61,6 +64,7 @@ type RepairProfile struct {
 	MaxTokens     bool     `json:"maxTokens"`
 	DropFields    []string `json:"dropFields,omitempty"`
 	Efforts       []string `json:"efforts,omitempty"`
+	SchemaKeys    []string `json:"schemaKeys,omitempty"`
 }
 
 // snapshot copies the memo into its persisted form.
@@ -74,6 +78,7 @@ func (memo *repairMemo) snapshot() map[string]RepairProfile {
 			MaxTokens:     adjustments.maxTokens,
 			DropFields:    append([]string(nil), adjustments.dropFields...),
 			Efforts:       append([]string(nil), adjustments.efforts...),
+			SchemaKeys:    append([]string(nil), adjustments.schemaKeys...),
 		}
 	}
 	return profiles
@@ -89,6 +94,7 @@ func (memo *repairMemo) restore(profiles map[string]RepairProfile) {
 			maxTokens:     profile.MaxTokens,
 			dropFields:    append([]string(nil), profile.DropFields...),
 			efforts:       append([]string(nil), profile.Efforts...),
+			schemaKeys:    append([]string(nil), profile.SchemaKeys...),
 		}
 	}
 }
@@ -127,7 +133,7 @@ func (memo *repairMemo) persist(path string) error {
 // parameters "repaired" out of the next request. It reports whether the
 // record changed, so the caller persists only when there is something new.
 func (memo *repairMemo) merge(providerID string, learned providerAdjustments) bool {
-	if !learned.developerRole && !learned.maxTokens && len(learned.dropFields) == 0 && len(learned.efforts) == 0 {
+	if !learned.developerRole && !learned.maxTokens && len(learned.dropFields) == 0 && len(learned.efforts) == 0 && len(learned.schemaKeys) == 0 {
 		return false
 	}
 	memo.mu.Lock()
@@ -137,6 +143,7 @@ func (memo *repairMemo) merge(providerID string, learned providerAdjustments) bo
 		DeveloperRole: known.developerRole, MaxTokens: known.maxTokens,
 		DropFields: append([]string(nil), known.dropFields...),
 		Efforts:    append([]string(nil), known.efforts...),
+		SchemaKeys: append([]string(nil), known.schemaKeys...),
 	}
 	if learned.developerRole {
 		known.developerRole = true
@@ -152,14 +159,21 @@ func (memo *repairMemo) merge(providerID string, learned providerAdjustments) bo
 	if len(learned.efforts) > 0 {
 		known.efforts = learned.efforts
 	}
+	for _, key := range learned.schemaKeys {
+		if !containsString(known.schemaKeys, key) {
+			known.schemaKeys = append(known.schemaKeys, key)
+		}
+	}
 	memo.adjustments[providerID] = known
 	after := RepairProfile{
 		DeveloperRole: known.developerRole, MaxTokens: known.maxTokens,
 		DropFields: append([]string(nil), known.dropFields...),
 		Efforts:    append([]string(nil), known.efforts...),
+		SchemaKeys: append([]string(nil), known.schemaKeys...),
 	}
 	return after.DeveloperRole != before.DeveloperRole || after.MaxTokens != before.MaxTokens ||
-		len(after.DropFields) != len(before.DropFields) || len(after.Efforts) != len(before.Efforts)
+		len(after.DropFields) != len(before.DropFields) || len(after.Efforts) != len(before.Efforts) ||
+		len(after.SchemaKeys) != len(before.SchemaKeys)
 }
 
 // apply rewrites a request body into the shape this provider already
@@ -170,7 +184,7 @@ func (memo *repairMemo) apply(providerID string, body []byte) []byte {
 	memo.mu.Lock()
 	known := memo.adjustments[providerID]
 	memo.mu.Unlock()
-	if !known.developerRole && !known.maxTokens && len(known.dropFields) == 0 && len(known.efforts) == 0 {
+	if !known.developerRole && !known.maxTokens && len(known.dropFields) == 0 && len(known.efforts) == 0 && len(known.schemaKeys) == 0 {
 		return body
 	}
 	var payload map[string]any
@@ -198,6 +212,11 @@ func (memo *repairMemo) apply(providerID string, body []byte) []byte {
 	}
 	if len(known.efforts) > 0 {
 		changed = alignReasoningEffort(payload, known.efforts) || changed
+	}
+	if len(known.schemaKeys) > 0 {
+		for _, key := range known.schemaKeys {
+			changed = removeSchemaKey(payload, key, 0) || changed
+		}
 	}
 	if !changed {
 		return body

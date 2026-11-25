@@ -461,6 +461,20 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				}
 			}
 			if errors.Is(readErr, io.EOF) {
+				// An empty chat completion is a break too: the provider ended
+				// the stream without delivering an answer (a role delta and
+				// [DONE] over zero tokens), and serving it as success hands
+				// the client an empty answer it can only re-request on its
+				// own. A provider that SAID it failed is not this case: its
+				// failure event is the honest record and reaches the client.
+				// A completed chat stream that carried no answer ends as a break too: the
+				// re-request replaces what would have been an empty completion. A break
+				// with no terminal at all is reported by the line below, as it always was.
+				if live.terminal() != "" && liveRetryable(live) {
+					errorCode = "stream_incomplete"
+					errorDetail = "the provider's stream ended without an answer"
+					return true
+				}
 				return live.terminal() == ""
 			}
 			if readErr != nil {
@@ -813,7 +827,12 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			// already waiting, the key's own budget paces the re-request,
 			// and half a second of artificial backoff on every invisible
 			// break was half a second of pure TTFT.
-			if live.delivered == 0 && canRetry(attempt, 0) && errorCode != "client_disconnected" && !cancelled {
+			// "Nothing delivered" means nothing the client could use: an empty
+			// chat completion still streams a role chunk and [DONE], and
+			// counting those as delivery would make an answer-less stream
+			// un-retryable exactly when the retry was the point. The bytes were
+			// framing, not content, so the re-request remains invisible.
+			if liveRetryable(live) && canRetry(attempt, 0) && errorCode != "client_disconnected" && !cancelled {
 				_ = live.Close()
 				server.observeRetry(activityID, attempt, http.StatusOK, 0)
 				continue
@@ -1514,10 +1533,14 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					liveBody.started = attemptStarted
 					liveBody.release = func() {
 						kind := relayapp.AttemptSuccess
-						switch liveBody.terminal() {
-						case "":
+						switch {
+						case liveBody.terminal() == "":
 							kind = relayapp.AttemptTransport
-						case "response.failed", "response.incomplete", "response.invalid", terminalRefused:
+						case liveBody.terminal() == "response.failed" || liveBody.terminal() == "response.incomplete" || liveBody.terminal() == "response.invalid" || liveBody.terminal() == terminalRefused:
+							kind = relayapp.AttemptRequestError
+						case chatDialectPath(liveBody.inspector.path) && liveBody.inspector.opened && !liveBody.inspector.output:
+							// An answer-less completion is a request error on the key too, so
+							// the row and the budget describe what happened instead of a success.
 							kind = relayapp.AttemptRequestError
 						}
 						finishLease(lease, relayapp.AttemptOutcome{Kind: kind})
@@ -1571,6 +1594,18 @@ func (server *Server) requestWithRetry(ctx context.Context, incoming *http.Reque
 					if errors.Is(bufferErr, errRetryableSSEFailure) {
 						requestFailures++
 						if requestFailures >= server.configSnapshot().PermanentAttempts || !canRetry(attempt, attemptLimit) {
+							// A provider that SAID it failed is handed to the
+							// client in its own words: the failure event it
+							// sent is the honest record. A stream that merely
+							// ended without an answer is different — its
+							// buffer is a role chunk and [DONE] over zero
+							// tokens, and serving that stamps an empty answer
+							// as a clean completion. It leaves as an error so
+							// the handler ends the stream in the dialect's
+							// failure grammar instead.
+							if !streamCarriedOutput(buffered, fallbackPath) {
+								return nil, bufferErr
+							}
 							response.Body = io.NopCloser(bytes.NewReader(buffered))
 							response.ContentLength = -1
 							response.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -2664,6 +2699,44 @@ func readRequestBody(request *http.Request, maxRequestBytes int64) ([]byte, erro
 	return body, nil
 }
 
+// streamCarriedOutput re-reads a finished stream and reports whether it
+// carries something the client should be given as the provider's answer. It
+// is asked only when the ladder has run out of attempts and is about to hand
+// the last buffer over: a buffer with content, or with the provider's own
+// failure event, is the honest record and is worth handing over; a buffer
+// that merely ended — a role chunk and [DONE] over nothing — is not an
+// answer and leaves as an error instead.
+func streamCarriedOutput(buffered []byte, path string) bool {
+	inspector := &sseInspector{path: canonicalPath(path), limit: int64(len(buffered)) + 1}
+	inspector.Feed(buffered)
+	inspector.Finish()
+	if inspector.refused {
+		return true
+	}
+	switch inspector.terminal {
+	case "response.failed", "response.incomplete", "response.invalid":
+		return true
+	}
+	return inspector.output
+}
+
+// liveRetryable reports whether a live stream that just ended should be
+// re-requested invisibly: the client received nothing it could use, and the
+// end was not an answer it was meant to keep. That is a stream that broke
+// before its terminal event, or a chat completion that showed the provider
+// answering and delivered nothing (a role delta, or a usage report over a
+// real prompt, and [DONE]). Framing alone — keep-alives, a bare
+// finish_reason — is neither, and a provider's own failure event is kept.
+func liveRetryable(live *liveStreamBody) bool {
+	if live.inspector.output {
+		return false
+	}
+	if live.terminal() == "" {
+		return true
+	}
+	return chatDialectPath(live.inspector.path) && live.inspector.opened
+}
+
 func requiresStreamTerminal(request *http.Request, body []byte) bool {
 	if request.Method != http.MethodPost {
 		return false
@@ -3102,6 +3175,7 @@ type sseInspector struct {
 	terminal  string
 	finished  bool
 	output    bool
+	opened    bool
 	refused   bool
 	usage     relayapp.TokenUsage
 	limit     int64
@@ -3276,6 +3350,15 @@ func (inspector *sseInspector) finishEvent() {
 		if choices, ok := payload["choices"].([]any); ok {
 			for _, choice := range choices {
 				item, _ := choice.(map[string]any)
+				if item == nil {
+					continue
+				}
+				if chatDeltaCarriesOutput(item) {
+					inspector.output = true
+				}
+				if chatDeltaOpenedAnswer(item) {
+					inspector.opened = true
+				}
 				if reason, ok := item["finish_reason"].(string); ok && reason != "" {
 					inspector.finished = true
 					break
@@ -3285,17 +3368,88 @@ func (inspector *sseInspector) finishEvent() {
 	}
 }
 
+// chatDeltaOpenedAnswer reports whether a chat choice shows the provider
+// began answering: a delta naming the assistant's role, or a usage report
+// with no completion tokens. The framing-only streams that test the relay's
+// plumbing (a lone finish_reason) carry neither, and are not mistaken for an
+// answer the provider failed to give.
+func chatDeltaOpenedAnswer(choice map[string]any) bool {
+	delta, _ := choice["delta"].(map[string]any)
+	if delta == nil {
+		return false
+	}
+	if role, _ := delta["role"].(string); role != "" {
+		return true
+	}
+	if text, _ := delta["content"].(string); text != "" {
+		return true
+	}
+	return false
+}
+
+// chatDeltaCarriesOutput reports whether a chat choice delivered anything the
+// caller could use: text, a refusal, a reasoning delta, or a tool call. A
+// stream that ends with finish_reason "stop" and none of these is not an
+// answer — measured in the field: a provider closed a 12-second stream with
+// [DONE] and zero tokens on a request it could not serve, and the client read
+// the empty completion as a stream that died ("stream ended without
+// finish_reason") and re-requested it five times on its own. The role-only
+// first chunk and the usage-only last chunk carry nothing by design.
+func chatDeltaCarriesOutput(choice map[string]any) bool {
+	if text, _ := choice["content"].(string); text != "" {
+		return true
+	}
+	delta, _ := choice["delta"].(map[string]any)
+	if delta == nil {
+		// A buffered completion carries the same fields under "message".
+		delta, _ = choice["message"].(map[string]any)
+	}
+	if delta == nil {
+		return false
+	}
+	for _, field := range []string{"content", "refusal", "reasoning_content", "reasoning", "thinking"} {
+		if text, _ := delta[field].(string); text != "" {
+			return true
+		}
+	}
+	if calls, _ := delta["tool_calls"].([]any); len(calls) > 0 {
+		return true
+	}
+	if calls, _ := delta["function_call"].(map[string]any); calls != nil {
+		return true
+	}
+	return false
+}
+
 func (inspector *sseInspector) retryableFailure() bool {
-	if inspector.terminal != "response.failed" || inspector.refused {
+	if inspector.refused {
 		return false
 	}
 	if responsesDialectPath(inspector.path) {
-		return !inspector.output
+		return inspector.terminal == "response.failed" && !inspector.output
 	}
-	// A chat-family failure carries no lifecycle events, so there is no
-	// point after which a retry would see a different answer: retry only
-	// while nothing has been delivered.
-	return chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) || messagesDialectPath(inspector.path)
+	// A chat-family stream that ended without delivering anything the caller
+	// could use is not an answer, whatever finish_reason said: the provider
+	// gave up on this request, and a retry — the same one a loud failure
+	// earns — is the only thing that can still produce one. Nothing was
+	// delivered, so the retry is invisible to the client. Once text, a
+	// refusal, reasoning or a tool call has gone out, a retry could only
+	// duplicate it, and the stream stands as delivered.
+	//
+	// The provider has to have shown it was answering — a role delta, or a
+	// usage report over a real prompt — for an empty end to mean a failed
+	// answer. A stream that is only framing (a lone finish_reason) is not
+	// read as one.
+	if chatDialectPath(inspector.path) || completionsDialectPath(inspector.path) {
+		return inspector.terminal == "response.failed" || (inspector.terminal != "" && inspector.opened && !inspector.output)
+	}
+	// The Anthropic dialect reports its content in typed content_block events
+	// the inspector does not read for output, so it keeps the rule it had:
+	// only an explicit failed response retries.
+	if messagesDialectPath(inspector.path) {
+		return inspector.terminal == "response.failed"
+	}
+	return false
 }
 
 // typelessEventType names typeless stream data from its `event:` line, but only
@@ -3382,6 +3536,13 @@ func (inspector *sseInspector) mergeUsage(payload map[string]any) {
 		inspector.usage.ContextTokens = max(inspector.usage.ContextTokens, inspector.usage.InputTokens)
 		reported := positiveInt(usage["total_tokens"])
 		inspector.usage.TotalTokens = max(inspector.usage.TotalTokens, reported, inspector.usage.ContextTokens+inspector.usage.OutputTokens)
+		// A usage report over a real prompt and zero completion tokens is the
+		// provider's own account of a request it processed and answered with
+		// nothing: the strongest evidence that an empty stream is an answer
+		// that failed to arrive, not framing.
+		if inputTotal > 0 && output == 0 {
+			inspector.opened = true
+		}
 	}
 }
 

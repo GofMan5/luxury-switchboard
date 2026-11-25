@@ -3331,7 +3331,7 @@ dependencies = [
 
 [[package]]
 name = "switchboard-desktop"
-version = "1.0.75"
+version = "1.0.76"
 dependencies = [
  "rfd",
  "serde",
